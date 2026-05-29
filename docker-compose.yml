@@ -1,0 +1,25 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile.api
+    env_file:
+      - .env.example
+    ports:
+      - "8000:8000"
+
+  agent-studio:
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile.streamlit
+    command: streamlit run apps/agent-studio/streamlit_app.py --server.address 0.0.0.0
+    ports:
+      - "8501:8501"
+
+  analytics:
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile.streamlit
+    command: streamlit run apps/analytics/dashboard.py --server.address 0.0.0.0
+    ports:
+      - "8502:8501"
