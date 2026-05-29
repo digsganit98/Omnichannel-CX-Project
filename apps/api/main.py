@@ -22,6 +22,29 @@ app.include_router(synthetic_router)
 app.include_router(integrations_router)
 
 
+@app.get("/")
+def root() -> dict:
+    return {
+        "name": "GenAI Omnichannel CX Accelerator",
+        "status": "running",
+        "docs": "/docs",
+        "health": "/health",
+        "apps": {
+            "agent_studio": "http://localhost:8501",
+            "analytics": "http://localhost:8502",
+        },
+        "api_routes": {
+            "whatsapp_demo": "POST /webhooks/whatsapp",
+            "email_demo": "POST /webhooks/email",
+            "uploaded_records": "GET /synthetic/uploaded-records",
+            "uploaded_summary": "GET /synthetic/uploaded-summary",
+            "whatsapp_cloud": "GET/POST /integrations/whatsapp/webhook",
+            "outlook": "POST /integrations/outlook/pull or GET/POST /integrations/outlook/webhook",
+            "gmail": "POST /integrations/gmail/pull or POST /integrations/gmail/webhook",
+        },
+    }
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok", "service": "omnichannel-cx-api"}

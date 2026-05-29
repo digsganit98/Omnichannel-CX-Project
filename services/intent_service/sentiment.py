@@ -1,4 +1,16 @@
-NEGATIVE = {"angry", "bad", "terrible", "frustrated", "late", "failed", "problem", "damaged"}
+NEGATIVE = {
+    "angry",
+    "bad",
+    "terrible",
+    "frustrated",
+    "late",
+    "failed",
+    "problem",
+    "damaged",
+    "not received",
+    "not credited",
+    "charged twice",
+}
 POSITIVE = {"thanks", "great", "good", "helpful", "resolved"}
 
 
