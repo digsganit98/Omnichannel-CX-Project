@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class ChannelResponse(BaseModel):
@@ -12,3 +12,7 @@ class ChannelResponse(BaseModel):
     confidence: float
     ticket_id: str | None = None
     next_best_action: str | None = None
+    analysis_source: str | None = None
+    rag_contexts: list[dict] = Field(default_factory=list)
+    llm_model: str | None = None
+    llm_used: bool = False

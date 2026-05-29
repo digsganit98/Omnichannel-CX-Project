@@ -6,6 +6,7 @@ from shared.utils.in_memory_store import store
 
 from .routes.conversations import router as conversations_router
 from .routes.integrations import router as integrations_router
+from .routes.rag import router as rag_router
 from .routes.synthetic import router as synthetic_router
 from .routes.tickets import router as tickets_router
 from .routes.webhooks import handle_email_message, handle_whatsapp_message
@@ -20,6 +21,7 @@ app.include_router(conversations_router)
 app.include_router(tickets_router)
 app.include_router(synthetic_router)
 app.include_router(integrations_router)
+app.include_router(rag_router)
 
 
 @app.get("/")
@@ -41,6 +43,9 @@ def root() -> dict:
             "whatsapp_cloud": "GET/POST /integrations/whatsapp/webhook",
             "outlook": "POST /integrations/outlook/pull or GET/POST /integrations/outlook/webhook",
             "gmail": "POST /integrations/gmail/pull or POST /integrations/gmail/webhook",
+            "rag_index": "POST /rag/index?recreate=true",
+            "rag_query": "POST /rag/query",
+            "rag_health": "GET /rag/health",
         },
     }
 

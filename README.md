@@ -48,10 +48,46 @@ streamlit run apps/analytics/dashboard.py
 1. Email or WhatsApp webhook receives a raw message.
 2. Channel adapter converts it into a common `InboundMessage`.
 3. Conversation manager loads the unified customer context.
-4. Orchestrator runs intent, sentiment, urgency, retrieval, and routing.
-5. If a confident answer is found, the API returns a response.
+4. Agentic orchestration uses a local LLM for intent, sentiment, and urgency when available.
+5. RAG retrieves knowledge chunks from OpenSearch and generates an answer through Ollama.
 6. If confidence is low or urgency is high, a ticket is created.
 7. Analytics records message, resolution, channel, ticket, and escalation metrics.
+
+## Open-Source GenAI RAG
+
+This project uses a local, cost-effective GenAI stack:
+
+- OpenSearch as the knowledge base and vector index
+- LangChain core abstractions for documents, prompts, embeddings, and text splitting
+- Ollama as the local LLM runtime
+- A local hashing embedding implementation by default for lightweight demos
+
+Start the full stack:
+
+```powershell
+docker compose up -d
+docker compose --profile setup up ollama-pull
+```
+
+Build the RAG index:
+
+```powershell
+Invoke-RestMethod -Method Post "http://localhost:8000/rag/index?recreate=true"
+```
+
+Query the RAG pipeline:
+
+```powershell
+Invoke-RestMethod -Method Post http://localhost:8000/rag/query `
+  -ContentType "application/json" `
+  -Body '{"query":"My refund has not been credited for my returned shoes"}'
+```
+
+OpenSearch Dashboards:
+
+```text
+http://localhost:5601
+```
 
 ## Example Requests
 

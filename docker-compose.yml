@@ -7,6 +7,9 @@ services:
       - .env
     ports:
       - "8000:8000"
+    depends_on:
+      - opensearch
+      - ollama
 
   agent-studio:
     build:
@@ -15,6 +18,8 @@ services:
     command: streamlit run apps/agent-studio/streamlit_app.py --server.address 0.0.0.0
     ports:
       - "8501:8501"
+    depends_on:
+      - api
 
   analytics:
     build:
@@ -23,3 +28,58 @@ services:
     command: streamlit run apps/analytics/dashboard.py --server.address 0.0.0.0
     ports:
       - "8502:8501"
+    depends_on:
+      - api
+
+  opensearch:
+    image: opensearchproject/opensearch:2.17.1
+    environment:
+      - discovery.type=single-node
+      - DISABLE_SECURITY_PLUGIN=true
+      - OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m
+      - bootstrap.memory_lock=true
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    ports:
+      - "9200:9200"
+      - "9600:9600"
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+
+  opensearch-dashboards:
+    image: opensearchproject/opensearch-dashboards:2.17.1
+    environment:
+      - OPENSEARCH_HOSTS=["http://opensearch:9200"]
+      - DISABLE_SECURITY_DASHBOARDS_PLUGIN=true
+    ports:
+      - "5601:5601"
+    depends_on:
+      - opensearch
+
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+
+  ollama-pull:
+    image: ollama/ollama:latest
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:0.5b}
+    entrypoint: ["/bin/sh"]
+    command: ["-c", "sleep 8 && ollama pull qwen2.5:0.5b"]
+    depends_on:
+      - ollama
+    profiles:
+      - setup
+
+volumes:
+  opensearch-data:
+  ollama-data:
