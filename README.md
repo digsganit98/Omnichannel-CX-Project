@@ -2,6 +2,35 @@
 
 Production-oriented WhatsApp and email customer support backend with durable conversations, typed intent classification, cited RAG answers, ticket fallback, outbound replies, audit events, and local Docker deployment.
 
+## Project Progress
+
+This README is the living implementation guide for the accelerator. Update this section as each phase is completed.
+
+### Phase 1: WhatsApp And Email CX Backend
+
+Status: implemented.
+
+Phase 1 delivers a production-oriented customer support backend focused on WhatsApp and email. The system:
+
+- accepts authenticated WhatsApp Cloud and email webhook messages
+- normalizes both channels into one common inbound message schema
+- deduplicates repeated provider messages using external message IDs
+- resolves customers across email addresses and WhatsApp phone numbers
+- persists customers, channel identities, conversations, turns, tickets, audit events, and retrieval evidence
+- classifies typed intents including order tracking, refunds, returns, product questions, billing issues, technical support, complaints, general inquiries, and human escalation
+- retrieves relevant knowledge from OpenSearch and returns answers with citations
+- creates support tickets when confidence is low, urgency is high, a human is requested, or manual review is required
+- sends replies through WhatsApp Cloud or SMTP email
+- stores structured audit events for workflow decisions and outbound delivery
+- preserves conversation context after API container restarts
+- protects internal admin APIs and validates inbound webhook secrets
+- runs locally with Docker Compose, SQLite, OpenSearch, Mailpit, and optional Ollama generation
+- includes automated tests for the main workflow, security, deduplication, citations, delivery, and restart persistence
+
+### Later Phases
+
+Planned additions may include website chat, voice, social channels, advanced analytics, agent-assist UI, PostgreSQL for horizontal scaling, durable queue workers, external ticket-system synchronization, and production identity integrations.
+
 ## Architecture
 
 ```text
@@ -55,6 +84,14 @@ docker compose up --build -d
 docker compose --profile setup up ollama-pull
 ```
 
+Open the local services:
+
+```text
+API documentation: http://localhost:8000/docs
+API health check:  http://localhost:8000/health
+Mailpit inbox:     http://localhost:8025
+```
+
 The API runs migrations automatically. To apply them manually outside Docker:
 
 ```powershell
@@ -84,6 +121,49 @@ Invoke-RestMethod -Method Post -Headers $headers -ContentType "application/json"
 ```
 
 Expected output includes a canonical `customer_id`, `conversation_id`, typed `intent`, citations, and `outbound_status`.
+
+## Browser Walkthrough
+
+Use FastAPI Swagger to test the complete local email workflow without installing a separate SQL server.
+
+1. Open `http://localhost:8000/docs`.
+2. Expand `POST /admin/rag/index`, click **Try it out**, set `recreate=true`, enter your `.env` `ADMIN_API_KEY` value in `x-admin-key`, and click **Execute**.
+3. Expand `POST /integrations/email/webhook`, click **Try it out**, and enter your `.env` `EMAIL_WEBHOOK_SECRET` value in `x-email-webhook-secret`.
+4. Submit an order-tracking payload:
+
+```json
+{
+  "from_email": "e2e-customer@example.com",
+  "subject": "Order status",
+  "body": "Where is my order delivery?",
+  "message_id": "browser-email-001",
+  "metadata": {
+    "thread_id": "browser-thread-001",
+    "linked_phone": "919999999999"
+  }
+}
+```
+
+5. Confirm the response includes `intent: order_tracking`, `resolved: true`, citations, and `outbound_status: sent`.
+6. Open `http://localhost:8025` and confirm that Mailpit received the generated reply.
+7. Submit a complaint using a fresh `message_id`:
+
+```json
+{
+  "from_email": "e2e-customer@example.com",
+  "subject": "Complaint",
+  "body": "This is unacceptable. I want a human representative.",
+  "message_id": "browser-email-002",
+  "metadata": {
+    "thread_id": "browser-thread-001"
+  }
+}
+```
+
+8. Confirm the complaint response includes `resolved: false`, a `ticket_id`, and `outbound_status: sent`.
+9. Use the protected admin routes in Swagger to inspect tickets, conversations, and audit events.
+
+Always use a fresh `message_id` when testing a new message. Duplicate IDs are intentionally deduplicated.
 
 ## Trigger WhatsApp Flow
 
