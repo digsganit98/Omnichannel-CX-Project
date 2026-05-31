@@ -8,8 +8,6 @@ from pydantic import BaseModel, Field
 class Channel(StrEnum):
     EMAIL = "email"
     WHATSAPP = "whatsapp"
-    WEBCHAT = "webchat"
-    VOICE = "voice"
 
 
 class MessageDirection(StrEnum):
@@ -37,10 +35,13 @@ class EmailWebhookPayload(BaseModel):
 
 class InboundMessage(BaseModel):
     channel: Channel
-    customer_id: str
+    channel_identifier: str
     text: str
+    provider: str
     subject: str | None = None
     display_name: str | None = None
     external_message_id: str | None = None
+    correlation_id: str
     received_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     metadata: dict[str, Any] = Field(default_factory=dict)
+    profile_metadata: dict[str, Any] = Field(default_factory=dict)

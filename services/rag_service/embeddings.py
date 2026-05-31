@@ -1,5 +1,6 @@
 import hashlib
 import math
+import os
 import re
 
 from langchain_core.embeddings import Embeddings
@@ -32,3 +33,29 @@ class HashingEmbeddings(Embeddings):
             vector[index] += sign
         norm = math.sqrt(sum(value * value for value in vector)) or 1.0
         return [round(value / norm, 6) for value in vector]
+
+
+class SemanticEmbeddings(Embeddings):
+    """Use sentence-transformers in deployed environments and hash vectors in lightweight tests."""
+
+    def __init__(self, dimension: int = 384) -> None:
+        self.dimension = dimension
+        self.fallback = HashingEmbeddings(dimension)
+        self.model = None
+        if os.getenv("EMBEDDING_BACKEND", "hashing") == "sentence_transformers":
+            try:
+                from sentence_transformers import SentenceTransformer
+
+                self.model = SentenceTransformer(os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2"))
+            except ImportError:
+                self.model = None
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        if self.model:
+            return self.model.encode(texts, normalize_embeddings=True).tolist()
+        return self.fallback.embed_documents(texts)
+
+    def embed_query(self, text: str) -> list[float]:
+        if self.model:
+            return self.model.encode([text], normalize_embeddings=True)[0].tolist()
+        return self.fallback.embed_query(text)

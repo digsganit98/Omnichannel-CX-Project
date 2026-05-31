@@ -1,9 +1,10 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from apps.api.dependencies.security import require_admin_key
 from services.rag_service.rag_pipeline import RAGPipeline
 
-router = APIRouter(prefix="/rag", tags=["rag"])
+router = APIRouter(prefix="/admin/rag", tags=["admin"], dependencies=[Depends(require_admin_key)])
 
 
 class RAGQuery(BaseModel):
@@ -29,7 +30,4 @@ def build_rag_index(recreate: bool = False) -> dict:
 
 @router.post("/query")
 def query_rag(payload: RAGQuery) -> dict:
-    try:
-        return RAGPipeline().answer(payload.query, top_k=payload.top_k)
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return RAGPipeline().answer(payload.query, top_k=payload.top_k)

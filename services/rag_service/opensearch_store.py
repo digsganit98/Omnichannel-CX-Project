@@ -3,7 +3,7 @@ from opensearchpy import OpenSearch, helpers
 from langchain_core.documents import Document
 
 from services.rag_service.config import embedding_dimension, opensearch_index, opensearch_url
-from services.rag_service.embeddings import HashingEmbeddings
+from services.rag_service.embeddings import SemanticEmbeddings
 
 
 class OpenSearchVectorStore:
@@ -16,7 +16,7 @@ class OpenSearchVectorStore:
         )
         self.index_name = opensearch_index()
         self.dimension = embedding_dimension()
-        self.embeddings = HashingEmbeddings(self.dimension)
+        self.embeddings = SemanticEmbeddings(self.dimension)
 
     def health(self) -> dict:
         return {

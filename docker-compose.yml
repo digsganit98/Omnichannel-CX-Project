@@ -5,31 +5,30 @@ services:
       dockerfile: infra/docker/Dockerfile.api
     env_file:
       - .env
+    environment:
+      DATABASE_PATH: /app/data/cx_phase1.db
+      SMTP_HOST: mailpit
+      OPENSEARCH_URL: http://opensearch:9200
+      OLLAMA_BASE_URL: http://ollama:11434
+      ADMIN_API_KEY: ${ADMIN_API_KEY:-}
+      EMAIL_WEBHOOK_SECRET: ${EMAIL_WEBHOOK_SECRET:-}
+      WHATSAPP_VERIFY_TOKEN: ${WHATSAPP_VERIFY_TOKEN:-}
+      WHATSAPP_APP_SECRET: ${WHATSAPP_APP_SECRET:-}
+      WHATSAPP_ACCESS_TOKEN: ${WHATSAPP_ACCESS_TOKEN:-}
+      WHATSAPP_PHONE_NUMBER_ID: ${WHATSAPP_PHONE_NUMBER_ID:-}
+      OUTBOUND_DELIVERY_MODE: ${OUTBOUND_DELIVERY_MODE:-log}
+    command: >
+      sh -c "python -m services.persistence_service.migrate &&
+             uvicorn apps.api.main:app --host 0.0.0.0 --port 8000"
     ports:
       - "8000:8000"
+    volumes:
+      - cx-data:/app/data
     depends_on:
-      - opensearch
-      - ollama
-
-  agent-studio:
-    build:
-      context: .
-      dockerfile: infra/docker/Dockerfile.streamlit
-    command: streamlit run apps/agent-studio/streamlit_app.py --server.address 0.0.0.0
-    ports:
-      - "8501:8501"
-    depends_on:
-      - api
-
-  analytics:
-    build:
-      context: .
-      dockerfile: infra/docker/Dockerfile.streamlit
-    command: streamlit run apps/analytics/dashboard.py --server.address 0.0.0.0
-    ports:
-      - "8502:8501"
-    depends_on:
-      - api
+      opensearch:
+        condition: service_healthy
+      mailpit:
+        condition: service_started
 
   opensearch:
     image: opensearchproject/opensearch:2.17.1
@@ -37,29 +36,15 @@ services:
       - discovery.type=single-node
       - DISABLE_SECURITY_PLUGIN=true
       - OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m
-      - bootstrap.memory_lock=true
-    ulimits:
-      memlock:
-        soft: -1
-        hard: -1
-      nofile:
-        soft: 65536
-        hard: 65536
     ports:
       - "9200:9200"
-      - "9600:9600"
     volumes:
       - opensearch-data:/usr/share/opensearch/data
-
-  opensearch-dashboards:
-    image: opensearchproject/opensearch-dashboards:2.17.1
-    environment:
-      - OPENSEARCH_HOSTS=["http://opensearch:9200"]
-      - DISABLE_SECURITY_DASHBOARDS_PLUGIN=true
-    ports:
-      - "5601:5601"
-    depends_on:
-      - opensearch
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
 
   ollama:
     image: ollama/ollama:latest
@@ -72,14 +57,20 @@ services:
     image: ollama/ollama:latest
     environment:
       - OLLAMA_HOST=http://ollama:11434
-      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:0.5b}
     entrypoint: ["/bin/sh"]
-    command: ["-c", "sleep 8 && ollama pull qwen2.5:0.5b"]
+    command: ["-c", "sleep 8 && ollama pull ${OLLAMA_MODEL:-qwen2.5:0.5b}"]
     depends_on:
       - ollama
     profiles:
       - setup
 
+  mailpit:
+    image: axllent/mailpit:v1.20
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+
 volumes:
+  cx-data:
   opensearch-data:
   ollama-data:

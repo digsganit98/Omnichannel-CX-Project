@@ -1,0 +1,176 @@
+import hashlib
+import hmac
+
+import pytest
+from fastapi import HTTPException
+
+from apps.api.dependencies.security import validate_email_secret, validate_whatsapp_signature
+from services.agent_service.cx_agent import CXAgent
+from services.channel_service.adapters.email_adapter import EmailAdapter
+from services.channel_service.adapters.whatsapp_adapter import WhatsAppAdapter
+from services.channel_service.delivery import OutboundDeliveryService
+from services.intent_service.classifier import classify_intent
+from services.orchestration_service.graph import OrchestrationGraph
+from services.persistence_service.repository import SQLiteCXRepository
+from shared.schemas.intents import Intent
+from shared.schemas.messages import EmailWebhookPayload, WhatsAppWebhookPayload
+
+
+class NoLLM:
+    model = "test"
+
+    def classify_message(self, message, context):
+        return None
+
+
+class FakeRAG:
+    def answer(self, query, context):
+        if "unknown" in query.lower():
+            return {"answer": "manual review", "confidence": 0.0, "contexts": [], "citations": [], "llm": {}}
+        context_item = {
+            "text": "Customers can track orders after dispatch.",
+            "score": 0.91,
+            "metadata": {"source": "orders.md", "document_version": "test-v1"},
+        }
+        return {
+            "answer": "Customers can track orders after dispatch. Source: [1] orders.md",
+            "confidence": 0.91,
+            "contexts": [context_item],
+            "citations": [{"index": 1, "source": "orders.md", "score": 0.91}],
+            "llm": {"llm_used": False},
+        }
+
+
+class Recorder:
+    def __init__(self):
+        self.sent = []
+
+    def send_text(self, *args):
+        self.sent.append(args)
+        return {"id": "provider-message-id"}
+
+
+def graph(repository, whatsapp=None, email=None):
+    return OrchestrationGraph(
+        repository,
+        agent=CXAgent(NoLLM()),
+        rag=FakeRAG(),
+        delivery=OutboundDeliveryService(whatsapp=whatsapp, email=email),
+    )
+
+
+def whatsapp_message(message_id="wamid-1", text="Where is my order?", metadata=None):
+    return WhatsAppAdapter().normalize(
+        WhatsAppWebhookPayload(
+            from_="+919999999999",
+            text=text,
+            message_id=message_id,
+            metadata={"provider": "whatsapp_cloud", **(metadata or {})},
+        )
+    )
+
+
+def email_message(message_id="email-1", body="Where is my order?", metadata=None):
+    return EmailAdapter().normalize(
+        EmailWebhookPayload(
+            from_email="customer@example.com",
+            subject="Customer request",
+            body=body,
+            message_id=message_id,
+            metadata={"provider": "email_webhook", **(metadata or {})},
+        )
+    )
+
+
+def test_whatsapp_order_query_resolves_with_citation_and_sends_reply():
+    repo = SQLiteCXRepository(":memory:")
+    sender = Recorder()
+    response = graph(repo, whatsapp=sender).run(whatsapp_message())
+    assert response.resolved is True
+    assert response.intent == "order_tracking"
+    assert response.citations[0]["source"] == "orders.md"
+    assert response.outbound_status == "sent"
+    assert sender.sent
+    evidence = repo.list_retrieval_evidence()
+    assert evidence[0]["source"] == "orders.md"
+
+
+def test_email_complaint_escalates_and_sends_reply():
+    repo = SQLiteCXRepository(":memory:")
+    sender = Recorder()
+    response = graph(repo, email=sender).run(email_message(body="This is an unacceptable complaint. I need a human."))
+    assert response.resolved is False
+    assert response.intent in {"complaint", "human_escalation"}
+    assert response.ticket_id
+    assert response.outbound_status == "sent"
+    assert sender.sent
+
+
+def test_duplicate_message_returns_original_response_without_second_send():
+    repo = SQLiteCXRepository(":memory:")
+    sender = Recorder()
+    workflow = graph(repo, whatsapp=sender)
+    first = workflow.run(whatsapp_message())
+    second = workflow.run(whatsapp_message())
+    assert second.duplicate is True
+    assert first.conversation_id == second.conversation_id
+    assert len(sender.sent) == 1
+
+
+def test_customer_identity_resolution_links_email_and_whatsapp():
+    repo = SQLiteCXRepository(":memory:")
+    workflow = graph(repo)
+    first = workflow.run(whatsapp_message(metadata={"linked_email": "customer@example.com"}))
+    second = workflow.run(email_message())
+    assert first.customer_id == second.customer_id
+    assert first.conversation_id == second.conversation_id
+
+
+def test_multi_turn_context_is_persisted():
+    repo = SQLiteCXRepository(":memory:")
+    workflow = graph(repo)
+    response = workflow.run(whatsapp_message())
+    workflow.run(whatsapp_message(message_id="wamid-2", text="Can you check that order again?"))
+    conversation = repo.get_conversation(response.conversation_id)
+    assert len(conversation["turns"]) == 4
+    assert "check that order again" in conversation["summary"]
+
+
+def test_restart_persistence(tmp_path):
+    database = str(tmp_path / "phase1.db")
+    first_repo = SQLiteCXRepository(database)
+    response = graph(first_repo).run(whatsapp_message())
+    second_repo = SQLiteCXRepository(database)
+    conversation = second_repo.get_conversation(response.conversation_id)
+    assert conversation
+    assert len(conversation["turns"]) == 2
+    assert second_repo.list_audit_events(response.correlation_id)
+
+
+def test_intent_classifier_supports_phase1_intents():
+    assert classify_intent("Please refund my payment").intent == Intent.REFUND_REQUEST
+    assert classify_intent("Is this product available in blue?").intent == Intent.PRODUCT_INFORMATION
+    assert classify_intent("I want a human representative").intent == Intent.HUMAN_ESCALATION
+
+
+def test_low_confidence_retrieval_creates_ticket():
+    repo = SQLiteCXRepository(":memory:")
+    response = graph(repo).run(whatsapp_message(text="unknown question"))
+    assert response.ticket_id
+    assert repo.get_ticket(response.ticket_id)
+
+
+def test_email_authentication_failure(monkeypatch):
+    monkeypatch.setenv("EMAIL_WEBHOOK_SECRET", "expected")
+    with pytest.raises(HTTPException) as exc:
+        validate_email_secret("wrong")
+    assert exc.value.status_code == 401
+
+
+def test_whatsapp_signature_validation(monkeypatch):
+    monkeypatch.setenv("WHATSAPP_APP_SECRET", "secret")
+    body = b'{"entry":[]}'
+    signature = "sha256=" + hmac.new(b"secret", body, hashlib.sha256).hexdigest()
+    validate_whatsapp_signature(body, signature)
+    with pytest.raises(HTTPException):
+        validate_whatsapp_signature(body, "sha256=wrong")

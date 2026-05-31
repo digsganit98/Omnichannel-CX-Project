@@ -1,183 +1,126 @@
-# GenAI Omnichannel CX Accelerator
+# Omnichannel CX Accelerator: Phase 1
 
-A modular starter repository for a GenAI-powered omnichannel customer support accelerator. It focuses on resolving customer queries from email and WhatsApp while preserving one customer context across channels.
+Production-oriented WhatsApp and email customer support backend with durable conversations, typed intent classification, cited RAG answers, ticket fallback, outbound replies, audit events, and local Docker deployment.
 
-The design follows the proposal in `GenAI_Omnichannel_CX_Accelerator.docx`:
+## Architecture
 
-- unify interactions across channels
-- normalize messages through channel adapters
-- classify intent, sentiment, and urgency
-- answer common questions from a knowledge base
-- create and track tickets when automation cannot resolve the query
-- expose agent assist and analytics foundations
-
-## Quick Start
-
-Use Python 3.11 or 3.12 for the local environment. Python 3.14 can force packages such as `pydantic-core` to compile native Rust/C++ extensions on Windows, which requires Visual Studio Build Tools.
-
-```powershell
-cd genai-cx-accelerator
-py -3.12 -m venv .venv
-.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip setuptools wheel
-pip install -r requirements.txt
-uvicorn apps.api.main:app --reload
+```text
+WhatsApp Cloud webhook / authenticated email webhook
+        |
+        v
+Channel adapter -> normalized InboundMessage
+        |
+        v
+Explicit orchestration workflow
+  1. reserve provider message ID for deduplication
+  2. resolve canonical customer and channel identity
+  3. persist inbound turn and load recent context
+  4. classify typed intent with Ollama or validated rules
+  5. retrieve versioned KB chunks from OpenSearch or local fallback
+  6. answer with citations or create/update a ticket
+  7. send reply through WhatsApp Cloud or SMTP email
+  8. persist outbound turn, retrieval evidence, summary, and audit events
+        |
+        v
+SQLite durable volume | OpenSearch | Ollama | Mailpit for local SMTP
 ```
 
-If `py -3.12` is not available, install Python 3.12 from python.org, then recreate the virtual environment:
+The default repository is durable SQLite behind `CXRepository`. Tests use the same implementation with `:memory:`. For a multi-instance deployment, implement the same interface with PostgreSQL and use a shared queue for delivery retries.
+
+The container includes semantic embedding support through `sentence-transformers`. Set `EMBEDDING_BACKEND=sentence_transformers` to enable it. The deterministic hashing backend remains available for lightweight runs.
+
+## Configure
 
 ```powershell
-Remove-Item -Recurse -Force .venv
-py -3.12 -m venv .venv
-.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip setuptools wheel
-pip install -r requirements.txt
+Copy-Item .env.example .env
 ```
 
-API docs will be available at `http://127.0.0.1:8000/docs`.
+Set strong values for:
 
-Optional apps:
-
-```powershell
-streamlit run apps/agent-studio/streamlit_app.py
-streamlit run apps/analytics/dashboard.py
+```text
+ADMIN_API_KEY
+EMAIL_WEBHOOK_SECRET
+WHATSAPP_VERIFY_TOKEN
+WHATSAPP_APP_SECRET
 ```
 
-## Main Flow
+For live WhatsApp delivery, also set `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, and `OUTBOUND_DELIVERY_MODE=live`.
 
-1. Email or WhatsApp webhook receives a raw message.
-2. Channel adapter converts it into a common `InboundMessage`.
-3. Conversation manager loads the unified customer context.
-4. Agentic orchestration uses a local LLM for intent, sentiment, and urgency when available.
-5. RAG retrieves knowledge chunks from OpenSearch and generates an answer through Ollama.
-6. If confidence is low or urgency is high, a ticket is created.
-7. Analytics records message, resolution, channel, ticket, and escalation metrics.
+For local email delivery through Mailpit, set `OUTBOUND_DELIVERY_MODE=live`. Open `http://localhost:8025` to inspect sent emails.
 
-## Open-Source GenAI RAG
-
-This project uses a local, cost-effective GenAI stack:
-
-- OpenSearch as the knowledge base and vector index
-- LangChain core abstractions for documents, prompts, embeddings, and text splitting
-- Ollama as the local LLM runtime
-- A local hashing embedding implementation by default for lightweight demos
-
-Start the full stack:
+## Run Locally
 
 ```powershell
-docker compose up -d
+docker compose up --build -d
 docker compose --profile setup up ollama-pull
 ```
 
-Build the RAG index:
+The API runs migrations automatically. To apply them manually outside Docker:
 
 ```powershell
-Invoke-RestMethod -Method Post "http://localhost:8000/rag/index?recreate=true"
+python -m services.persistence_service.migrate
 ```
 
-Query the RAG pipeline:
+Index the knowledge base:
 
 ```powershell
-Invoke-RestMethod -Method Post http://localhost:8000/rag/query `
-  -ContentType "application/json" `
-  -Body '{"query":"My refund has not been credited for my returned shoes"}'
+$headers = @{ "x-admin-key" = "replace-with-a-long-random-value" }
+Invoke-RestMethod -Method Post -Headers $headers "http://localhost:8000/admin/rag/index?recreate=true"
 ```
 
-OpenSearch Dashboards:
-
-```text
-http://localhost:5601
-```
-
-## Example Requests
-
-### WhatsApp
-
-```bash
-curl -X POST http://127.0.0.1:8000/webhooks/whatsapp \
-  -H "Content-Type: application/json" \
-  -d "{\"from\":\"919999999999\",\"text\":\"Where is my order?\",\"profile_name\":\"Asha\"}"
-```
-
-## Synthetic E-commerce Data
-
-Generate consolidated omnichannel records from sample WhatsApp and Email messages:
+## Trigger Email Flow
 
 ```powershell
-python infra\scripts\consolidate_synthetic_tickets.py
+$headers = @{ "x-email-webhook-secret" = "replace-with-a-long-random-value" }
+$body = @{
+  from_email = "customer@example.com"
+  subject = "Delivery update"
+  body = "Where is my order?"
+  message_id = "email-demo-001"
+  metadata = @{ linked_phone = "919999999999"; thread_id = "thread-001" }
+} | ConvertTo-Json
+Invoke-RestMethod -Method Post -Headers $headers -ContentType "application/json" `
+  -Body $body http://localhost:8000/integrations/email/webhook
 ```
 
-The script reads `data/synthetic/ecommerce_channel_messages.json` and writes:
+Expected output includes a canonical `customer_id`, `conversation_id`, typed `intent`, citations, and `outbound_status`.
+
+## Trigger WhatsApp Flow
+
+Meta sends `POST /integrations/whatsapp/webhook`. The route verifies `x-hub-signature-256` with `WHATSAPP_APP_SECRET`, normalizes supported WhatsApp text interactions, deduplicates `messages[].id`, and sends the final reply through WhatsApp Cloud.
+
+Webhook verification uses:
 
 ```text
-data/exports/consolidated_omnichannel_records.json
+GET /integrations/whatsapp/webhook
 ```
 
-The consolidated output follows `shared/schemas/omnichannel_response_schema.json` and includes customer details, channel metadata, parsed entities, intent, sentiment, urgency, retrieval confidence, resolution status, ticket details, and agent-assist fields.
+## Admin APIs
 
-To use the uploaded Excel workbook as the retrieval/ingestion example:
+All internal APIs require `x-admin-key`:
+
+```text
+POST /admin/rag/index?recreate=true
+POST /admin/rag/query
+GET  /admin/rag/health
+GET  /admin/tickets
+GET  /admin/conversations
+GET  /admin/audit-events
+```
+
+## Tests
 
 ```powershell
-python infra\scripts\import_uploaded_ecommerce_tickets.py
+python -m pip install -r requirements.txt
+python -m pytest -q
+python -m compileall -q apps services shared tests
+docker compose config --quiet
 ```
 
-This parses `data/uploaded_docs/ecommerce_tickets_synthetic (1).xlsx`, filters Email and WhatsApp tickets, preserves the workbook-style `Customer`, `Account`, and `Ticket` sections, and appends accelerator fields under `AI_Enrichment`. It writes:
+The tests cover WhatsApp and email ingestion paths, duplicate handling, canonical identity linking, multi-turn persistence, intent classification, citations, ticket fallback, outbound sends, signature validation, and restart persistence.
 
-```text
-data/exports/uploaded_ecommerce_omnichannel_records.json
-```
+## Phase 1 Scope
 
-When the API is running, inspect the generated records at:
+Included: WhatsApp, email, durable customer context, typed intent classification, cited RAG, ticket fallback, outbound delivery, structured logs, and persisted audit events.
 
-```text
-GET /synthetic/records
-GET /synthetic/summary
-GET /synthetic/uploaded-records
-GET /synthetic/uploaded-summary
-```
-
-## Real Connectors
-
-The API includes optional connector endpoints for production ingestion:
-
-```text
-GET  /integrations/whatsapp/webhook
-POST /integrations/whatsapp/webhook
-POST /integrations/outlook/pull
-GET  /integrations/outlook/webhook
-POST /integrations/outlook/webhook
-POST /integrations/gmail/pull
-POST /integrations/gmail/webhook
-```
-
-- WhatsApp uses Meta WhatsApp Cloud webhook payloads and normalizes incoming `messages[]`.
-- Outlook uses Microsoft Graph `/me/messages`.
-- Gmail uses Gmail API `users.messages.list` and `users.messages.get?format=raw`.
-
-Set these environment variables before using live connectors:
-
-```text
-WHATSAPP_VERIFY_TOKEN=
-WHATSAPP_ACCESS_TOKEN=
-WHATSAPP_PHONE_NUMBER_ID=
-OUTLOOK_ACCESS_TOKEN=
-GMAIL_ACCESS_TOKEN=
-```
-
-The Outlook and Gmail routes expect OAuth access tokens issued outside this starter app. In production, add an OAuth consent flow, token refresh storage, and webhook subscription renewal jobs.
-
-### Email
-
-```bash
-curl -X POST http://127.0.0.1:8000/webhooks/email \
-  -H "Content-Type: application/json" \
-  -d "{\"from_email\":\"customer@example.com\",\"subject\":\"Refund issue\",\"body\":\"I want a refund for my last order\"}"
-```
-
-## Repository Layout
-
-The repository mirrors the requested accelerator structure and keeps service boundaries explicit. Directories use the proposal naming convention, while Python packages under `shared` provide common schemas and storage used by the runnable demo.
-
-## Notes
-
-This is a local-first accelerator scaffold. The default stores are in-memory so the flow is easy to run during an ideathon demo. Production deployments should replace them with durable stores, authenticated webhooks, vector databases, and real integrations such as WhatsApp Cloud API, SMTP/Graph API, CRM, Jira, or ServiceNow.
+Deferred: website chat, voice, social channels, advanced analytics, agent-assist UI, PostgreSQL repository, distributed queue workers, OAuth consent flows, and external ticket-system synchronization.

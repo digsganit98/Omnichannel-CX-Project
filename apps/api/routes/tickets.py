@@ -1,18 +1,19 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
-from shared.utils.in_memory_store import store
+from apps.api.dependencies.runtime import get_repository
+from apps.api.dependencies.security import require_admin_key
 
-router = APIRouter(prefix="/tickets", tags=["tickets"])
+router = APIRouter(prefix="/admin/tickets", tags=["admin"], dependencies=[Depends(require_admin_key)])
 
 
 @router.get("")
 def list_tickets() -> list[dict]:
-    return [ticket.model_dump() for ticket in store.tickets.values()]
+    return get_repository().list_tickets()
 
 
 @router.get("/{ticket_id}")
 def get_ticket(ticket_id: str) -> dict:
-    ticket = store.tickets.get(ticket_id)
+    ticket = get_repository().get_ticket(ticket_id)
     if ticket is None:
         raise HTTPException(status_code=404, detail="Ticket not found")
-    return ticket.model_dump()
+    return ticket

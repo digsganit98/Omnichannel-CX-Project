@@ -2,6 +2,7 @@ from pydantic import BaseModel, Field
 
 
 class ChannelResponse(BaseModel):
+    correlation_id: str
     conversation_id: str
     customer_id: str
     message: str
@@ -16,3 +17,6 @@ class ChannelResponse(BaseModel):
     rag_contexts: list[dict] = Field(default_factory=list)
     llm_model: str | None = None
     llm_used: bool = False
+    citations: list[dict] = Field(default_factory=list)
+    outbound_status: str = "pending"
+    duplicate: bool = False

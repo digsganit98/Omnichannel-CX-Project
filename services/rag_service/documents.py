@@ -21,7 +21,11 @@ def _load_markdown_kb() -> list[Document]:
         docs.append(
             Document(
                 page_content=path.read_text(encoding="utf-8"),
-                metadata={"source": path.name, "doc_type": "knowledge_base"},
+                metadata={
+                    "source": path.name,
+                    "doc_type": "knowledge_base",
+                    "document_version": str(int(path.stat().st_mtime)),
+                },
             )
         )
     return docs

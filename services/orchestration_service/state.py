@@ -6,7 +6,7 @@ from shared.schemas.messages import InboundMessage
 class OrchestrationState(BaseModel):
     message: InboundMessage
     conversation_id: str
-    intent: str = "general_question"
+    intent: str = "general_inquiry"
     sentiment: str = "neutral"
     urgency: str = "low"
     answer: str | None = None

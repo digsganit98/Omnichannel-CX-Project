@@ -4,8 +4,8 @@ from shared.schemas.responses import ChannelResponse
 
 
 class OmnichannelRouter:
-    def __init__(self) -> None:
-        self.graph = OrchestrationGraph()
+    def __init__(self, graph: OrchestrationGraph) -> None:
+        self.graph = graph
 
     def handle(self, message: InboundMessage) -> ChannelResponse:
         return self.graph.run(message)

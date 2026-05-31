@@ -1,18 +1,19 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
-from shared.utils.in_memory_store import store
+from apps.api.dependencies.runtime import get_repository
+from apps.api.dependencies.security import require_admin_key
 
-router = APIRouter(prefix="/conversations", tags=["conversations"])
+router = APIRouter(prefix="/admin/conversations", tags=["admin"], dependencies=[Depends(require_admin_key)])
 
 
 @router.get("/{conversation_id}")
 def get_conversation(conversation_id: str) -> dict:
-    conversation = store.conversations.get(conversation_id)
+    conversation = get_repository().get_conversation(conversation_id)
     if conversation is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    return conversation.model_dump()
+    return conversation
 
 
 @router.get("")
 def list_conversations() -> list[dict]:
-    return [conversation.model_dump() for conversation in store.conversations.values()]
+    return get_repository().list_conversations()
