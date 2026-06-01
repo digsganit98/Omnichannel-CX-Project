@@ -3,6 +3,7 @@ import time
 
 from services.agent_service.cx_agent import CXAgent
 from services.channel_service.delivery import OutboundDeliveryService
+from services.crm_service.client import CRMClient
 from services.persistence_service.repository import CXRepository
 from services.rag_service.rag_pipeline import RAGPipeline
 from services.ticket_service.ticket_manager import TicketManager
@@ -22,12 +23,14 @@ class OrchestrationGraph:
         agent: CXAgent | None = None,
         rag: RAGPipeline | None = None,
         delivery: OutboundDeliveryService | None = None,
+        crm: CRMClient | None = None,
     ) -> None:
         self.repository = repository
         self.agent = agent or CXAgent()
         self.rag = rag or RAGPipeline()
         self.delivery = delivery or OutboundDeliveryService()
-        self.tickets = TicketManager(repository)
+        self.crm = crm or CRMClient()
+        self.tickets = TicketManager(repository, self.crm)
 
     def run(self, message: InboundMessage) -> ChannelResponse:
         started = time.perf_counter()
@@ -38,6 +41,10 @@ class OrchestrationGraph:
                 return ChannelResponse(**{**cached, "duplicate": True})
             raise RuntimeError("Duplicate message is still being processed")
 
+        crm_profile = self.crm.lookup_customer(message.channel.value, message.channel_identifier)
+        if crm_profile.status == "synced":
+            message.profile_metadata["crm"] = crm_profile.data
+            message.metadata["crm_customer_id"] = crm_profile.data.get("customer_id") or crm_profile.data.get("id")
         customer = self.repository.resolve_customer(message)
         customer_id = customer["customer_id"]
         conversation = self.repository.get_or_create_conversation(customer_id)
@@ -50,6 +57,12 @@ class OrchestrationGraph:
             "channel": message.channel.value,
         }
         self._audit("inbound_received", common, details={"provider": message.provider})
+        if crm_profile.status != "not_configured":
+            self._audit(
+                "crm_profile_lookup_" + crm_profile.status,
+                common,
+                details={"error": crm_profile.error, **crm_profile.data},
+            )
         inbound_turn = self.repository.append_turn(
             conversation_id=conversation_id,
             customer_id=customer_id,
@@ -73,7 +86,13 @@ class OrchestrationGraph:
         ticket = None
         if should_ticket:
             ticket = self.tickets.create_or_get_ticket(
-                conversation_id, customer_id, message, analysis.intent, analysis.urgency
+                conversation_id,
+                customer_id,
+                message,
+                analysis.intent,
+                analysis.urgency,
+                escalation_reason=self._escalation_reason(analysis, rag_result),
+                customer=customer,
             )
             answer = (
                 "I have captured your request and created a support ticket. "
@@ -81,6 +100,17 @@ class OrchestrationGraph:
                 f"Reference: {ticket.ticket_id}."
             )
             self._audit("ticket_created", common, intent=analysis.intent.value, ticket_id=ticket.ticket_id)
+            self._audit(
+                "ticket_crm_sync_" + ticket.crm_sync_status,
+                common,
+                intent=analysis.intent.value,
+                ticket_id=ticket.ticket_id,
+                details={
+                    "external_ticket_id": ticket.external_ticket_id,
+                    "external_ticket_url": ticket.external_ticket_url,
+                    "error": ticket.crm_sync_error,
+                },
+            )
         else:
             answer = rag_result["answer"]
         self._audit("answer_generated", common, intent=analysis.intent.value, ticket_id=ticket.ticket_id if ticket else None)
@@ -152,6 +182,18 @@ class OrchestrationGraph:
     def _summary(self, conversation_id: str) -> str:
         recent = self.repository.list_recent_turns(conversation_id, limit=6)
         return " | ".join(f"{turn['direction']}: {turn['text'][:120]}" for turn in recent)
+
+    @staticmethod
+    def _escalation_reason(analysis: IntentResult, rag_result: dict) -> str:
+        if analysis.intent == Intent.HUMAN_ESCALATION:
+            return "customer_requested_human"
+        if analysis.intent in MANUAL_REVIEW_INTENTS:
+            return f"manual_review_required:{analysis.intent.value}"
+        if analysis.urgency == Urgency.HIGH:
+            return "high_urgency"
+        if not rag_result["contexts"]:
+            return "knowledge_not_found"
+        return "low_confidence"
 
     def _audit(self, event_type: str, common: dict, **values) -> None:
         self.repository.add_audit_event(event_type, **common, **values)

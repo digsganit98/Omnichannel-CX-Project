@@ -19,6 +19,12 @@ services:
       WHATSAPP_ACCESS_TOKEN: ${WHATSAPP_ACCESS_TOKEN:-}
       WHATSAPP_PHONE_NUMBER_ID: ${WHATSAPP_PHONE_NUMBER_ID:-}
       OUTBOUND_DELIVERY_MODE: ${OUTBOUND_DELIVERY_MODE:-log}
+      CRM_PROVIDER: ${CRM_PROVIDER:-disabled}
+      CRM_BASE_URL: ${CRM_BASE_URL:-}
+      CRM_API_TOKEN: ${CRM_API_TOKEN:-}
+      CRM_USER_EMAIL: ${CRM_USER_EMAIL:-}
+      CRM_PROJECT_KEY: ${CRM_PROJECT_KEY:-}
+      CRM_ISSUE_TYPE: ${CRM_ISSUE_TYPE:-Task}
     command: >
       sh -c "python -m services.persistence_service.migrate &&
              uvicorn apps.api.main:app --host 0.0.0.0 --port 8000"

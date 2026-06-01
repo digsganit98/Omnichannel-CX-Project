@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Omnichannel CX Ticket Operations</title>
+    <link rel="stylesheet" href="/admin-ui/assets/style.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">Omnichannel CX Accelerator</p>
+        <h1>Ticket Operations</h1>
+      </div>
+      <div class="credentials">
+        <label>
+          Admin API key
+          <input id="admin-key" type="password" autocomplete="off" placeholder="Enter ADMIN_API_KEY">
+        </label>
+        <button id="save-key" type="button">Connect</button>
+      </div>
+    </header>
+
+    <main>
+      <p id="flash" class="flash" role="status"></p>
+
+      <section class="summary-grid">
+        <article class="card">
+          <p class="eyebrow">CRM connector</p>
+          <h2 id="crm-provider">Not loaded</h2>
+          <p id="crm-detail" class="muted">Enter the admin key to load status.</p>
+        </article>
+        <article class="card">
+          <p class="eyebrow">Ticket queue</p>
+          <h2 id="ticket-total">0 tickets</h2>
+          <p id="ticket-detail" class="muted">No queue data loaded.</p>
+        </article>
+        <article class="card">
+          <p class="eyebrow">Operations</p>
+          <button id="refresh" type="button" class="secondary">Refresh dashboard</button>
+          <p class="muted">Admin calls use the protected same-origin API.</p>
+        </article>
+      </section>
+
+      <section class="workspace">
+        <article class="card wide">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Support queue</p>
+              <h2>Tickets</h2>
+            </div>
+          </div>
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>Ticket</th>
+                  <th>Status</th>
+                  <th>Priority</th>
+                  <th>Intent</th>
+                  <th>SLA due</th>
+                  <th>CRM sync</th>
+                </tr>
+              </thead>
+              <tbody id="tickets-body">
+                <tr><td colspan="6" class="empty">No tickets loaded.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </article>
+
+        <aside class="card detail-card">
+          <p class="eyebrow">Selected ticket</p>
+          <div id="ticket-detail-panel" class="empty">Choose a ticket from the queue.</div>
+        </aside>
+      </section>
+
+      <section class="workspace lower">
+        <article class="card">
+          <p class="eyebrow">Local Phase 1 test mode</p>
+          <h2>Simulate WhatsApp inbound</h2>
+          <form id="simulate-form" class="stack">
+            <label>
+              Test signature
+              <input id="test-signature" type="password" autocomplete="off" placeholder="WHATSAPP_TEST_SIGNATURE">
+            </label>
+            <label>
+              Customer phone
+              <input id="sim-phone" value="919999999999" required>
+            </label>
+            <label>
+              Message
+              <textarea id="sim-message" rows="4" required>Please connect me to a human support agent about my refund.</textarea>
+            </label>
+            <button type="submit">Run simulated inbound flow</button>
+          </form>
+          <pre id="simulate-result" class="result">Simulation output appears here.</pre>
+        </article>
+
+        <article class="card">
+          <p class="eyebrow">Persistent operations trail</p>
+          <h2>Recent audit events</h2>
+          <div id="audit-events" class="timeline">
+            <p class="empty">No audit events loaded.</p>
+          </div>
+        </article>
+      </section>
+    </main>
+
+    <script src="/admin-ui/assets/app.js"></script>
+  </body>
+</html>

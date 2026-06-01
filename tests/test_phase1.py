@@ -14,11 +14,13 @@ from services.agent_service.cx_agent import CXAgent
 from services.channel_service.adapters.email_adapter import EmailAdapter
 from services.channel_service.adapters.whatsapp_adapter import WhatsAppAdapter
 from services.channel_service.delivery import OutboundDeliveryService
+from services.crm_service.client import CRMResult
 from services.intent_service.classifier import classify_intent
 from services.orchestration_service.graph import OrchestrationGraph
 from services.persistence_service.repository import SQLiteCXRepository
 from shared.schemas.intents import Intent
 from shared.schemas.messages import EmailWebhookPayload, WhatsAppWebhookPayload
+from shared.schemas.tickets import TicketStatus
 
 
 class NoLLM:
@@ -55,12 +57,13 @@ class Recorder:
         return {"id": "provider-message-id"}
 
 
-def graph(repository, whatsapp=None, email=None):
+def graph(repository, whatsapp=None, email=None, crm=None):
     return OrchestrationGraph(
         repository,
         agent=CXAgent(NoLLM()),
         rag=FakeRAG(),
         delivery=OutboundDeliveryService(whatsapp=whatsapp, email=email),
+        crm=crm,
     )
 
 
@@ -243,3 +246,58 @@ def test_local_whatsapp_manual_meta_send_uses_cloud_connector(monkeypatch):
     )
     assert result["provider"] == "meta"
     assert result["provider_response"]["messages"][0]["id"] == "wamid-meta-test"
+
+
+class FakeCRM:
+    def lookup_customer(self, channel, identifier):
+        return CRMResult("synced", {"customer_id": "crm-customer-001", "segment": "premium"})
+
+    def create_ticket(self, ticket, customer=None):
+        return CRMResult(
+            "synced",
+            {
+                "external_ticket_id": "CRM-101",
+                "external_ticket_url": "https://crm.example.test/tickets/CRM-101",
+            },
+        )
+
+    def add_comment(self, external_ticket_id, comment):
+        assert external_ticket_id == "CRM-101"
+        return CRMResult("synced", {"comment_id": "comment-1"})
+
+    def update_ticket_status(self, external_ticket_id, status):
+        assert external_ticket_id == "CRM-101"
+        return CRMResult("synced", {"status": status})
+
+
+def test_ticket_crm_sync_profile_enrichment_and_lifecycle():
+    repo = SQLiteCXRepository(":memory:")
+    workflow = graph(repo, crm=FakeCRM())
+    response = workflow.run(email_message(body="This is an unacceptable complaint. I need a human."))
+    ticket = repo.get_ticket(response.ticket_id)
+    assert ticket["external_ticket_id"] == "CRM-101"
+    assert ticket["crm_sync_status"] == "synced"
+    assert ticket["sla_due_at"]
+    assert ticket["escalation_reason"].startswith("manual_review_required")
+
+    manager = workflow.tickets
+    comment = manager.add_comment(response.ticket_id, "Investigating with fulfillment.")
+    assert comment["details"]["crm_sync_status"] == "synced"
+    updated = manager.update_status(response.ticket_id, TicketStatus.IN_PROGRESS)
+    assert updated["status"] == "in_progress"
+    assert [event["event_type"] for event in repo.list_ticket_events(response.ticket_id)] == [
+        "ticket_created",
+        "crm_sync_synced",
+        "comment_added",
+        "status_updated",
+    ]
+
+
+def test_admin_ui_is_served():
+    from fastapi.testclient import TestClient
+
+    from apps.api.main import app
+
+    response = TestClient(app).get("/admin-ui")
+    assert response.status_code == 200
+    assert "Ticket Operations" in response.text

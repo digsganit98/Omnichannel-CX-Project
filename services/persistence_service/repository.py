@@ -32,9 +32,12 @@ class CXRepository(Protocol):
     def append_turn(self, **values) -> dict: ...
     def update_conversation_summary(self, conversation_id: str, summary: str) -> None: ...
     def create_ticket(self, ticket: Ticket) -> Ticket: ...
+    def update_ticket(self, ticket_id: str, **values) -> dict | None: ...
     def find_active_ticket(self, conversation_id: str) -> Ticket | None: ...
     def list_tickets(self) -> list[dict]: ...
     def get_ticket(self, ticket_id: str) -> dict | None: ...
+    def add_ticket_event(self, ticket_id: str, event_type: str, actor: str, details: dict | None = None) -> dict: ...
+    def list_ticket_events(self, ticket_id: str) -> list[dict]: ...
     def add_retrieval_evidence(self, turn_id: str, contexts: list[dict]) -> None: ...
     def list_retrieval_evidence(self, turn_id: str | None = None) -> list[dict]: ...
     def add_audit_event(self, event_type: str, correlation_id: str, **values) -> None: ...
@@ -71,9 +74,23 @@ class SQLiteCXRepository:
                     conn.close()
 
     def migrate(self) -> None:
-        migration = Path(__file__).parent / "migrations" / "001_phase1.sql"
+        migrations = sorted((Path(__file__).parent / "migrations").glob("*.sql"))
         with self.connection() as conn:
-            conn.executescript(migration.read_text(encoding="utf-8"))
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TEXT NOT NULL)"
+            )
+            applied = {
+                row["version"]
+                for row in conn.execute("SELECT version FROM schema_migrations").fetchall()
+            }
+            for migration in migrations:
+                if migration.name in applied:
+                    continue
+                conn.executescript(migration.read_text(encoding="utf-8"))
+                conn.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (migration.name, utc_now()),
+                )
 
     def reserve_message(self, provider: str, external_message_id: str) -> bool:
         try:
@@ -129,9 +146,13 @@ class SQLiteCXRepository:
                     (customer_id, message.display_name, json_text(message.profile_metadata), now, now),
                 )
             else:
+                row = conn.execute("SELECT metadata_json FROM customers WHERE customer_id = ?", (customer_id,)).fetchone()
+                metadata = json.loads(row["metadata_json"] or "{}")
+                metadata.update(message.profile_metadata)
                 conn.execute(
-                    "UPDATE customers SET display_name = COALESCE(?, display_name), updated_at = ? WHERE customer_id = ?",
-                    (message.display_name, now, customer_id),
+                    "UPDATE customers SET display_name = COALESCE(?, display_name), metadata_json = ?, updated_at = ? "
+                    "WHERE customer_id = ?",
+                    (message.display_name, json_text(metadata), now, customer_id),
                 )
             for channel, identifier in identifiers:
                 conn.execute(
@@ -203,14 +224,35 @@ class SQLiteCXRepository:
         with self.connection() as conn:
             conn.execute(
                 "INSERT INTO tickets(ticket_id, conversation_id, customer_id, title, description, intent, priority, "
-                "assigned_team, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "assigned_team, status, external_ticket_id, external_ticket_url, crm_sync_status, crm_sync_error, "
+                "approval_status, escalation_reason, sla_due_at, metadata_json, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     ticket.ticket_id, ticket.conversation_id, ticket.customer_id, ticket.title, ticket.description,
                     ticket.intent, ticket.priority.value, ticket.assigned_team, ticket.status.value,
+                    ticket.external_ticket_id, ticket.external_ticket_url, ticket.crm_sync_status,
+                    ticket.crm_sync_error, ticket.approval_status, ticket.escalation_reason,
+                    ticket.sla_due_at.isoformat() if ticket.sla_due_at else None, json_text(ticket.metadata),
                     ticket.created_at.isoformat(), ticket.updated_at.isoformat(),
                 ),
             )
         return ticket
+
+    def update_ticket(self, ticket_id: str, **values) -> dict | None:
+        allowed = {
+            "status", "external_ticket_id", "external_ticket_url", "crm_sync_status", "crm_sync_error",
+            "approval_status", "escalation_reason", "sla_due_at", "metadata_json",
+        }
+        updates = {key: value for key, value in values.items() if key in allowed}
+        if not updates:
+            return self.get_ticket(ticket_id)
+        updates["updated_at"] = utc_now()
+        with self.connection() as conn:
+            conn.execute(
+                f"UPDATE tickets SET {', '.join(f'{key} = ?' for key in updates)} WHERE ticket_id = ?",
+                (*updates.values(), ticket_id),
+            )
+        return self.get_ticket(ticket_id)
 
     def find_active_ticket(self, conversation_id: str) -> Ticket | None:
         with self.connection() as conn:
@@ -223,12 +265,32 @@ class SQLiteCXRepository:
     def list_tickets(self) -> list[dict]:
         with self.connection() as conn:
             rows = conn.execute("SELECT * FROM tickets ORDER BY created_at DESC").fetchall()
-        return [dict(row) for row in rows]
+        return [self._ticket_dict(row) for row in rows]
 
     def get_ticket(self, ticket_id: str) -> dict | None:
         with self.connection() as conn:
             row = conn.execute("SELECT * FROM tickets WHERE ticket_id = ?", (ticket_id,)).fetchone()
-        return dict(row) if row else None
+        return self._ticket_dict(row) if row else None
+
+    def add_ticket_event(self, ticket_id: str, event_type: str, actor: str, details: dict | None = None) -> dict:
+        ticket_event_id = new_id("tevt")
+        with self.connection() as conn:
+            conn.execute(
+                "INSERT INTO ticket_events(ticket_event_id, ticket_id, event_type, actor, details_json, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (ticket_event_id, ticket_id, event_type, actor, json_text(details), utc_now()),
+            )
+            row = conn.execute(
+                "SELECT * FROM ticket_events WHERE ticket_event_id = ?", (ticket_event_id,)
+            ).fetchone()
+        return self._json_fields(dict(row), "details_json")
+
+    def list_ticket_events(self, ticket_id: str) -> list[dict]:
+        with self.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM ticket_events WHERE ticket_id = ? ORDER BY created_at", (ticket_id,)
+            ).fetchall()
+        return [self._json_fields(dict(row), "details_json") for row in rows]
 
     def add_retrieval_evidence(self, turn_id: str, contexts: list[dict]) -> None:
         with self.connection() as conn:
@@ -303,7 +365,14 @@ class SQLiteCXRepository:
 
     @staticmethod
     def _ticket(row: sqlite3.Row) -> Ticket:
-        value = dict(row)
+        value = SQLiteCXRepository._ticket_dict(row)
         value["priority"] = TicketPriority(value["priority"])
         value["status"] = TicketStatus(value["status"])
         return Ticket(**value)
+
+    @staticmethod
+    def _ticket_dict(row: sqlite3.Row) -> dict:
+        value = dict(row)
+        if "metadata_json" in value:
+            value["metadata"] = json.loads(value.pop("metadata_json") or "{}")
+        return value

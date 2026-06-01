@@ -26,5 +26,13 @@ class Ticket(BaseModel):
     priority: TicketPriority
     assigned_team: str
     status: TicketStatus = TicketStatus.OPEN
+    external_ticket_id: str | None = None
+    external_ticket_url: str | None = None
+    crm_sync_status: str = "not_configured"
+    crm_sync_error: str | None = None
+    approval_status: str = "not_required"
+    escalation_reason: str | None = None
+    sla_due_at: datetime | None = None
+    metadata: dict = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

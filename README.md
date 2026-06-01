@@ -1,6 +1,6 @@
 # Omnichannel CX Accelerator: Phase 1
 
-Production-oriented WhatsApp and email customer support backend with durable conversations, typed intent classification, cited RAG answers, ticket fallback, outbound replies, audit events, and local Docker deployment.
+Production-oriented WhatsApp and email customer support backend with durable conversations, typed intent classification, cited RAG answers, ticket fallback, outbound replies, audit events, CRM orchestration, a ticket-operations UI, and local Docker deployment.
 
 ## Project Progress
 
@@ -29,7 +29,23 @@ Phase 1 delivers a production-oriented customer support backend focused on Whats
 
 ### Later Phases
 
-Planned additions may include website chat, voice, social channels, advanced analytics, agent-assist UI, PostgreSQL for horizontal scaling, durable queue workers, external ticket-system synchronization, and production identity integrations.
+Planned additions may include website chat, voice, social channels, advanced analytics, agent-assist UI, PostgreSQL for horizontal scaling, durable queue workers, CRM-specific inbound webhooks, and production identity integrations.
+
+### AI Orchestration Layer: Ticket Management And CRM Integration
+
+Status: implemented.
+
+The accelerator now includes a durable ticket-management and optional CRM synchronization layer adapted from the supplied InboxIQ and Ticketmate prototypes. The implementation keeps the useful workflow patterns while fitting the existing Phase 1 API, persistence, and audit architecture.
+
+- creates local tickets first so customer support continues even when an external CRM is unavailable
+- assigns teams, priorities, approval state, escalation reasons, and SLA deadlines
+- stores external CRM or Jira ticket IDs, links, synchronization status, and errors
+- enriches customer profile metadata through an optional CRM lookup
+- synchronizes ticket creation to a generic CRM REST API or Jira Cloud
+- supports ticket comments, status changes, manual resynchronization, and lifecycle event history
+- records CRM synchronization and ticket-management actions in the global audit feed
+- uses Jira-compatible Atlassian Document Format descriptions when `CRM_PROVIDER=jira`
+- includes a browser-based ticket-operations UI for queue review, ticket updates, CRM sync, audit review, and local WhatsApp flow simulation
 
 ## Architecture
 
@@ -52,6 +68,7 @@ Explicit orchestration workflow
         |
         v
 SQLite durable volume | OpenSearch | Ollama | Mailpit for local SMTP
+                      | Optional CRM REST API or Jira Cloud
 ```
 
 The default repository is durable SQLite behind `CXRepository`. Tests use the same implementation with `:memory:`. For a multi-instance deployment, implement the same interface with PostgreSQL and use a shared queue for delivery retries.
@@ -89,6 +106,7 @@ Open the local services:
 ```text
 API documentation: http://localhost:8000/docs
 API health check:  http://localhost:8000/health
+Ticket operations:  http://localhost:8000/admin-ui
 Mailpit inbox:     http://localhost:8025
 ```
 
@@ -305,9 +323,74 @@ POST /admin/rag/index?recreate=true
 POST /admin/rag/query
 GET  /admin/rag/health
 GET  /admin/tickets
+GET  /admin/tickets/{ticket_id}
+GET  /admin/tickets/{ticket_id}/events
+POST /admin/tickets/{ticket_id}/sync
+POST /admin/tickets/{ticket_id}/comments
+PATCH /admin/tickets/{ticket_id}/status
 GET  /admin/conversations
 GET  /admin/audit-events
+GET  /admin/crm/status
 ```
+
+## CRM And Ticket-System Integration
+
+CRM synchronization is optional. With the default configuration, tickets remain durable local records and show `crm_sync_status: not_configured`.
+
+### Generic CRM REST API
+
+Set:
+
+```text
+CRM_PROVIDER=generic
+CRM_BASE_URL=https://crm.example.com/api
+CRM_API_TOKEN=<bearer-token>
+```
+
+The accelerator uses:
+
+```text
+GET   /customers/resolve?channel=<channel>&identifier=<identifier>
+POST  /tickets
+POST  /tickets/{external_ticket_id}/comments
+PATCH /tickets/{external_ticket_id}
+```
+
+### Jira Cloud
+
+Set:
+
+```text
+CRM_PROVIDER=jira
+CRM_BASE_URL=https://your-domain.atlassian.net
+CRM_API_TOKEN=<jira-api-token>
+CRM_USER_EMAIL=<jira-account-email>
+CRM_PROJECT_KEY=<jira-project-key>
+CRM_ISSUE_TYPE=Task
+```
+
+Ticket creation uses Jira REST API v3. Comments and status transitions are synchronized when a local ticket has an external Jira issue key.
+
+### Manage Tickets In Swagger
+
+Open `http://localhost:8000/docs`, provide your `.env` `ADMIN_API_KEY` as `x-admin-key`, then use:
+
+```text
+GET   /admin/tickets
+GET   /admin/tickets/{ticket_id}/events
+POST  /admin/tickets/{ticket_id}/sync
+POST  /admin/tickets/{ticket_id}/comments
+PATCH /admin/tickets/{ticket_id}/status
+GET   /admin/crm/status
+```
+
+### Manage Tickets In The Browser UI
+
+Open `http://localhost:8000/admin-ui`, enter the `ADMIN_API_KEY` from your local `.env`, and select **Connect**. The ticket-operations page shows CRM configuration status, the durable support queue, ticket details, lifecycle events, and recent global audit events.
+
+Select a ticket to update its status, add an internal or CRM-synchronized comment, or manually retry CRM synchronization. The page also includes a local WhatsApp simulation form. For that form, enter the `WHATSAPP_TEST_SIGNATURE` from `.env`; local test mode must be enabled with `WHATSAPP_LOCAL_TEST_MODE=true`.
+
+The UI stores both values only in browser `sessionStorage`. For a production deployment, place this internal operations page behind your organization SSO or authenticated reverse proxy.
 
 ## Tests
 
@@ -318,10 +401,10 @@ python -m compileall -q apps services shared tests
 docker compose config --quiet
 ```
 
-The tests cover WhatsApp and email ingestion paths, duplicate handling, canonical identity linking, multi-turn persistence, intent classification, citations, ticket fallback, outbound sends, signature validation, and restart persistence.
+The tests cover WhatsApp and email ingestion paths, duplicate handling, canonical identity linking, multi-turn persistence, intent classification, citations, ticket fallback, outbound sends, signature validation, restart persistence, CRM profile enrichment, ticket synchronization, comments, and status changes.
 
 ## Phase 1 Scope
 
-Included: WhatsApp, email, durable customer context, typed intent classification, cited RAG, ticket fallback, outbound delivery, structured logs, and persisted audit events.
+Included: WhatsApp, email, durable customer context, typed intent classification, cited RAG, ticket fallback, outbound delivery, structured logs, persisted audit events, basic ticket management, optional CRM/Jira orchestration, and a ticket-operations UI.
 
-Deferred: website chat, voice, social channels, advanced analytics, agent-assist UI, PostgreSQL repository, distributed queue workers, OAuth consent flows, and external ticket-system synchronization.
+Deferred: website chat, voice, social channels, advanced analytics, customer-service agent-assist UI, PostgreSQL repository, distributed queue workers, OAuth consent flows, CRM-specific inbound webhooks, and scheduled postmortem reporting.
