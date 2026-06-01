@@ -1,9 +1,12 @@
+import logging
+
 from shared.schemas.messages import WhatsAppWebhookPayload
 
 from .http import post_json
 
 
 GRAPH_BASE_URL = "https://graph.facebook.com/v20.0"
+logger = logging.getLogger(__name__)
 
 
 class WhatsAppCloudConnector:
@@ -23,6 +26,17 @@ class WhatsAppCloudConnector:
                 "text": {"body": text},
             },
         )
+
+
+class LocalWhatsAppTestConnector:
+    def send_text(self, to: str, text: str) -> dict:
+        logger.info("local_whatsapp_test_sent", extra={"channel": "whatsapp", "recipient": to})
+        return {
+            "provider": "whatsapp_local_test",
+            "status": "sent",
+            "to": to,
+            "text": text,
+        }
 
 
 def verify_webhook(mode: str | None, token: str | None, challenge: str | None, expected_token: str) -> str | None:

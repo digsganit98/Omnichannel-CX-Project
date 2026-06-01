@@ -14,6 +14,7 @@ from .routes.conversations import router as conversations_router
 from .routes.integrations import router as integrations_router
 from .routes.rag import router as rag_router
 from .routes.tickets import router as tickets_router
+from .routes.test_whatsapp import router as test_whatsapp_router
 from .routes.webhooks import handle_email_message
 
 configure_structured_logging(os.getenv("LOG_LEVEL", "INFO"))
@@ -25,6 +26,7 @@ app.include_router(tickets_router)
 app.include_router(integrations_router)
 app.include_router(rag_router)
 app.include_router(audit_router)
+app.include_router(test_whatsapp_router)
 
 
 @app.middleware("http")

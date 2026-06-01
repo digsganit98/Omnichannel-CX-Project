@@ -4,7 +4,12 @@ import hmac
 import pytest
 from fastapi import HTTPException
 
-from apps.api.dependencies.security import validate_email_secret, validate_whatsapp_signature
+from apps.api.dependencies.security import (
+    validate_email_secret,
+    validate_local_whatsapp_test_signature,
+    validate_whatsapp_signature,
+)
+from apps.api.routes import test_whatsapp
 from services.agent_service.cx_agent import CXAgent
 from services.channel_service.adapters.email_adapter import EmailAdapter
 from services.channel_service.adapters.whatsapp_adapter import WhatsAppAdapter
@@ -174,3 +179,67 @@ def test_whatsapp_signature_validation(monkeypatch):
     validate_whatsapp_signature(body, signature)
     with pytest.raises(HTTPException):
         validate_whatsapp_signature(body, "sha256=wrong")
+
+
+def test_local_whatsapp_test_signature_is_gated(monkeypatch):
+    monkeypatch.setenv("WHATSAPP_LOCAL_TEST_MODE", "false")
+    monkeypatch.setenv("WHATSAPP_TEST_SIGNATURE", "local-secret")
+    with pytest.raises(HTTPException) as exc:
+        validate_local_whatsapp_test_signature("local-secret")
+    assert exc.value.status_code == 404
+
+    monkeypatch.setenv("WHATSAPP_LOCAL_TEST_MODE", "true")
+    validate_local_whatsapp_test_signature("local-secret")
+    with pytest.raises(HTTPException) as exc:
+        validate_local_whatsapp_test_signature("wrong")
+    assert exc.value.status_code == 401
+
+
+def test_local_whatsapp_inbound_uses_mock_outbound_provider(monkeypatch):
+    monkeypatch.setenv("WHATSAPP_LOCAL_TEST_MODE", "true")
+    repo = SQLiteCXRepository(":memory:")
+    workflow = graph(repo)
+    message = whatsapp_message(metadata={"provider": "whatsapp_local_test"})
+    response = workflow.run(message)
+    events = repo.list_audit_events(response.correlation_id)
+    outbound = next(event for event in events if event["event_type"] == "outbound_sent")
+    assert outbound["details"]["provider_response"]["provider"] == "whatsapp_local_test"
+
+
+def test_local_whatsapp_manual_send_writes_audit_event(monkeypatch):
+    monkeypatch.setenv("WHATSAPP_LOCAL_TEST_MODE", "true")
+    monkeypatch.setenv("WHATSAPP_TEST_SIGNATURE", "local-secret")
+    repo = SQLiteCXRepository(":memory:")
+    monkeypatch.setattr(test_whatsapp, "get_repository", lambda: repo)
+    result = test_whatsapp.simulate_whatsapp_send(
+        test_whatsapp.LocalWhatsAppSend(to="919999999999", text="test reply"),
+        x_test_whatsapp_signature="local-secret",
+    )
+    assert result["provider"] == "local_mock"
+    assert result["status"] == "sent"
+    assert repo.list_audit_events(result["correlation_id"])[0]["event_type"] == "local_whatsapp_test_sent"
+
+
+def test_local_whatsapp_manual_meta_send_uses_cloud_connector(monkeypatch):
+    monkeypatch.setenv("WHATSAPP_LOCAL_TEST_MODE", "true")
+    monkeypatch.setenv("WHATSAPP_TEST_SIGNATURE", "local-secret")
+    monkeypatch.setenv("WHATSAPP_ACCESS_TOKEN", "meta-token")
+    monkeypatch.setenv("WHATSAPP_PHONE_NUMBER_ID", "phone-id")
+    repo = SQLiteCXRepository(":memory:")
+    monkeypatch.setattr(test_whatsapp, "get_repository", lambda: repo)
+
+    class FakeMetaConnector:
+        def __init__(self, access_token, phone_number_id):
+            assert access_token == "meta-token"
+            assert phone_number_id == "phone-id"
+
+        def send_text(self, to, text):
+            return {"messages": [{"id": "wamid-meta-test"}], "to": to, "text": text}
+
+    monkeypatch.setattr(test_whatsapp, "WhatsAppCloudConnector", FakeMetaConnector)
+    result = test_whatsapp.simulate_whatsapp_send(
+        test_whatsapp.LocalWhatsAppSend(to="919999999999", text="real Meta test", provider="meta"),
+        x_test_whatsapp_signature="local-secret",
+    )
+    assert result["provider"] == "meta"
+    assert result["provider_response"]["messages"][0]["id"] == "wamid-meta-test"

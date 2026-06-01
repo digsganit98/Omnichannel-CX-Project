@@ -175,6 +175,127 @@ Webhook verification uses:
 GET /integrations/whatsapp/webhook
 ```
 
+## Local WhatsApp Test Mode
+
+Use local WhatsApp test mode when Meta cannot reach your development machine. It exercises the same adapter, identity resolution, persistence, classification, RAG, ticket fallback, outbound delivery, structured logging, and audit workflow without calling Meta.
+
+Local WhatsApp simulation is disabled by default. Enable it only in your local `.env`:
+
+```text
+WHATSAPP_LOCAL_TEST_MODE=true
+WHATSAPP_TEST_SIGNATURE=<long-random-local-test-value>
+```
+
+Recreate the API container after changing `.env`:
+
+```powershell
+docker compose up -d --force-recreate api
+```
+
+In Swagger at `http://localhost:8000/docs`, expand `POST /test/whatsapp/inbound-simulate`, enter your local `WHATSAPP_TEST_SIGNATURE` value in `x-test-whatsapp-signature`, and submit:
+
+```json
+{
+  "from": "919999999999",
+  "text": "Where is my order delivery?",
+  "profile_name": "Local WhatsApp Tester",
+  "message_id": "local-wa-001",
+  "metadata": {
+    "linked_email": "e2e-customer@example.com"
+  }
+}
+```
+
+The response should include a canonical `customer_id`, `conversation_id`, `intent`, citations, and `outbound_status: sent`.
+
+To simulate a direct outbound provider send, use `POST /test/whatsapp/send` with the same signature header:
+
+```json
+{
+  "to": "919999999999",
+  "text": "Local WhatsApp outbound test",
+  "provider": "local_mock"
+}
+```
+
+To send a real outbound WhatsApp message through Meta without exposing a webhook, configure:
+
+```text
+WHATSAPP_ACCESS_TOKEN=<Meta temporary or permanent access token>
+WHATSAPP_PHONE_NUMBER_ID=<Meta test phone number ID>
+```
+
+Recreate the API container and call `POST /test/whatsapp/send` with:
+
+```json
+{
+  "to": "919999999999",
+  "text": "Real outbound Meta WhatsApp test",
+  "provider": "meta"
+}
+```
+
+Use your verified recipient phone number in international format without `+`. Meta must allow the recipient for the configured test sender.
+
+Inspect the full workflow using:
+
+```text
+GET /admin/audit-events?correlation_id=<response-correlation-id>
+```
+
+Use your `.env` `ADMIN_API_KEY` value as the `x-admin-key` header. Container logs also show the local inbound and outbound events:
+
+```powershell
+docker compose logs --tail 100 api
+```
+
+The local endpoints return `404` unless `WHATSAPP_LOCAL_TEST_MODE=true`. The production Meta webhook remains unchanged.
+
+## Phase 1 Test Plan
+
+### Today
+
+1. Simulated WhatsApp webhook test:
+   Use `POST /test/whatsapp/inbound-simulate`. This verifies the complete backend workflow and mock outbound reply without a public webhook URL.
+
+2. Real WhatsApp outbound test using Meta API:
+   Configure `WHATSAPP_ACCESS_TOKEN` and `WHATSAPP_PHONE_NUMBER_ID`, then use `POST /test/whatsapp/send` with `"provider": "meta"`. This sends a real WhatsApp message to your verified recipient number.
+
+3. Email inbound and outbound test:
+   Use `POST /integrations/email/webhook` to simulate inbound email. Configure SMTP settings for outbound delivery. For Docker Mailpit testing:
+
+```text
+OUTBOUND_DELIVERY_MODE=live
+SMTP_HOST=mailpit
+SMTP_PORT=1025
+SMTP_FROM_EMAIL=support@example.com
+SMTP_USE_TLS=false
+```
+
+For a real SMTP test account, use settings supplied by the email provider. A typical STARTTLS configuration is:
+
+```text
+OUTBOUND_DELIVERY_MODE=live
+SMTP_HOST=<smtp-provider-host>
+SMTP_PORT=587
+SMTP_FROM_EMAIL=<test-account-email>
+SMTP_USERNAME=<test-account-email>
+SMTP_PASSWORD=<test-account-app-password>
+SMTP_USE_TLS=true
+```
+
+Use an app password or dedicated SMTP credential where supported. Do not commit credentials to Git.
+
+### Later
+
+Expose port `8000` through VS Code Port Forwarding or an IT-installed ngrok tunnel, then configure Meta to send production-shaped inbound webhook traffic to:
+
+```text
+https://<public-host>/integrations/whatsapp/webhook
+```
+
+The real Meta route validates `x-hub-signature-256` with `WHATSAPP_APP_SECRET`.
+
 ## Admin APIs
 
 All internal APIs require `x-admin-key`:

@@ -3,7 +3,7 @@ import os
 import time
 
 from services.channel_service.connectors.email_sender import SMTPEmailConnector
-from services.channel_service.connectors.whatsapp_cloud import WhatsAppCloudConnector
+from services.channel_service.connectors.whatsapp_cloud import LocalWhatsAppTestConnector, WhatsAppCloudConnector
 from shared.schemas.messages import Channel, InboundMessage
 
 logger = logging.getLogger(__name__)
@@ -16,10 +16,14 @@ class OutboundDeliveryService:
         self.retries = retries
 
     def send(self, message: InboundMessage, text: str) -> dict:
-        if os.getenv("OUTBOUND_DELIVERY_MODE", "log") == "log" and not (self.whatsapp or self.email):
+        if (
+            os.getenv("OUTBOUND_DELIVERY_MODE", "log") == "log"
+            and message.provider != "whatsapp_local_test"
+            and not (self.whatsapp or self.email)
+        ):
             logger.info("outbound_local_delivery", extra={"channel": message.channel.value, "message_id": message.external_message_id})
             return {"status": "sent", "provider": "local_log"}
-        connector = self._connector(message.channel)
+        connector = self._connector(message)
         for attempt in range(1, self.retries + 1):
             try:
                 if message.channel == Channel.WHATSAPP:
@@ -34,8 +38,10 @@ class OutboundDeliveryService:
                 time.sleep(0.1 * attempt)
         return {"status": "failed", "error": "delivery exhausted"}
 
-    def _connector(self, channel: Channel):
-        if channel == Channel.WHATSAPP:
+    def _connector(self, message: InboundMessage):
+        if message.channel == Channel.WHATSAPP and message.provider == "whatsapp_local_test":
+            return LocalWhatsAppTestConnector()
+        if message.channel == Channel.WHATSAPP:
             return self.whatsapp or WhatsAppCloudConnector(
                 os.environ["WHATSAPP_ACCESS_TOKEN"], os.environ["WHATSAPP_PHONE_NUMBER_ID"]
             )
