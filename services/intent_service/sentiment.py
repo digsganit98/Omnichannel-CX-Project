@@ -10,6 +10,11 @@ NEGATIVE = {
     "not received",
     "not credited",
     "charged twice",
+    "cancel my order",
+    "cancel the order",
+    "connect me to a human",
+    "human agent",
+    "human representative",
 }
 POSITIVE = {"thanks", "great", "good", "helpful", "resolved"}
 

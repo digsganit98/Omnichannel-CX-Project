@@ -24,6 +24,7 @@ class OpenSearchVectorStore:
             "index": self.index_name,
             "cluster": self.client.cluster.health(),
             "index_exists": self.client.indices.exists(index=self.index_name),
+            "embeddings": self.embeddings.status(),
         }
 
     def create_index(self, recreate: bool = False) -> None:
@@ -86,11 +87,16 @@ class OpenSearchVectorStore:
             body={
                 "size": k,
                 "query": {
-                    "knn": {
-                        "embedding": {
-                            "vector": vector,
-                            "k": k,
-                        }
+                    "bool": {
+                        "must": [{
+                            "knn": {
+                                "embedding": {
+                                    "vector": vector,
+                                    "k": k,
+                                }
+                            }
+                        }],
+                        "filter": [{"term": {"metadata.doc_type.keyword": "knowledge_base"}}],
                     }
                 },
             },
@@ -99,7 +105,7 @@ class OpenSearchVectorStore:
         return [
             {
                 "text": hit["_source"]["text"],
-                "metadata": hit["_source"].get("metadata", {}),
+                "metadata": {**hit["_source"].get("metadata", {}), "retrieval": "opensearch_vector"},
                 "score": round(float(hit.get("_score", 0.0)), 4),
             }
             for hit in hits

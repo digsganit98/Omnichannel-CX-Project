@@ -16,6 +16,7 @@ from .routes.audit import router as audit_router
 from .routes.conversations import router as conversations_router
 from .routes.crm import router as crm_router
 from .routes.integrations import router as integrations_router
+from .routes.orchestration import router as orchestration_router
 from .routes.rag import router as rag_router
 from .routes.tickets import router as tickets_router
 from .routes.test_whatsapp import router as test_whatsapp_router
@@ -24,11 +25,12 @@ from .routes.webhooks import handle_email_message
 configure_structured_logging(os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Omnichannel CX Accelerator Phase 1", version="1.0.0")
+app = FastAPI(title="Omnichannel CX Accelerator", version="2.0.0")
 app.include_router(conversations_router)
 app.include_router(crm_router)
 app.include_router(tickets_router)
 app.include_router(integrations_router)
+app.include_router(orchestration_router)
 app.include_router(rag_router)
 app.include_router(audit_router)
 app.include_router(test_whatsapp_router)
@@ -53,7 +55,8 @@ async def request_logging(request, call_next):
 def root() -> dict:
     return {
         "name": "Omnichannel CX Accelerator",
-        "phase": 1,
+        "phase": 2,
+        "implemented_phases": [1, 2],
         "channels": ["whatsapp", "email"],
         "health": "/health",
         "admin_ui": "/admin-ui",

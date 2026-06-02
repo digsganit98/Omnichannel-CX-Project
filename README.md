@@ -1,4 +1,4 @@
-# Omnichannel CX Accelerator: Phase 1
+# Omnichannel CX Accelerator
 
 Production-oriented WhatsApp and email customer support backend with durable conversations, typed intent classification, cited RAG answers, ticket fallback, outbound replies, audit events, CRM orchestration, a ticket-operations UI, and local Docker deployment.
 
@@ -24,18 +24,33 @@ Phase 1 delivers a production-oriented customer support backend focused on Whats
 - stores structured audit events for workflow decisions and outbound delivery
 - preserves conversation context after API container restarts
 - protects internal admin APIs and validates inbound webhook secrets
-- runs locally with Docker Compose, SQLite, OpenSearch, Mailpit, and optional Ollama generation
+- runs locally with Docker Compose, SQLite, OpenSearch, Mailpit, Ollama generation, and sentence-transformer embeddings
 - includes automated tests for the main workflow, security, deduplication, citations, delivery, and restart persistence
 
 ### Later Phases
 
 Planned additions may include website chat, voice, social channels, advanced analytics, agent-assist UI, PostgreSQL for horizontal scaling, durable queue workers, CRM-specific inbound webhooks, and production identity integrations.
 
-### AI Orchestration Layer: Ticket Management And CRM Integration
+### Ticket Management And CRM Integration
 
 Status: implemented.
 
 The accelerator now includes a durable ticket-management and optional CRM synchronization layer adapted from the supplied InboxIQ and Ticketmate prototypes. The implementation keeps the useful workflow patterns while fitting the existing Phase 1 API, persistence, and audit architecture.
+
+### Phase 2: LangGraph AI Orchestration Layer
+
+Status: implemented.
+
+The post-Phase-1 AI orchestration layer uses LangGraph `StateGraph` to coordinate four focused agents:
+
+- `intent_detection_agent`: validates Ollama classification output and falls back to deterministic rules
+- `query_resolution_agent`: retrieves relevant knowledge and generates cited answers
+- `ticket_management_agent`: applies escalation policy, creates durable tickets, and synchronizes optional CRM or Jira records
+- `workflow_automation_agent`: loads context, composes the final action, sends the channel reply, and persists results
+
+LangGraph executes the named workflow nodes and conditionally routes each request after resolution analysis. Requests that need human review pass through durable ticket creation and optional CRM synchronization. Resolved requests bypass ticket creation and continue directly to outbound reply delivery.
+
+The ticket-management foundation:
 
 - creates local tickets first so customer support continues even when an external CRM is unavailable
 - assigns teams, priorities, approval state, escalation reasons, and SLA deadlines
@@ -73,7 +88,7 @@ SQLite durable volume | OpenSearch | Ollama | Mailpit for local SMTP
 
 The default repository is durable SQLite behind `CXRepository`. Tests use the same implementation with `:memory:`. For a multi-instance deployment, implement the same interface with PostgreSQL and use a shared queue for delivery retries.
 
-The container includes semantic embedding support through `sentence-transformers`. Set `EMBEDDING_BACKEND=sentence_transformers` to enable it. The deterministic hashing backend remains available for lightweight runs.
+The default container installs `sentence-transformers` and uses `all-MiniLM-L6-v2` semantic embeddings. Set `EMBEDDING_BACKEND=hashing` only for constrained smoke tests. Intent classification and cited query resolution use Ollama by default; deterministic rules and grounded retrieval text remain available as failure fallbacks. Ticket escalation and workflow routing intentionally remain deterministic business policy.
 
 ## Configure
 
@@ -98,7 +113,7 @@ For local email delivery through Mailpit, set `OUTBOUND_DELIVERY_MODE=live`. Ope
 
 ```powershell
 docker compose up --build -d
-docker compose --profile setup up ollama-pull
+docker compose --profile setup run --rm ollama-pull
 ```
 
 Open the local services:
@@ -331,6 +346,14 @@ PATCH /admin/tickets/{ticket_id}/status
 GET  /admin/conversations
 GET  /admin/audit-events
 GET  /admin/crm/status
+GET  /admin/orchestration/workflow
+```
+
+Customer-facing RAG indexes only approved files under `data/knowledge_base/*.md`. Customer profiles, CRM records, and historical ticket exports are intentionally excluded from answer retrieval and citations. After upgrading an existing checkout, rebuild the vector index once to remove older ticket-history vectors:
+
+```powershell
+$headers = @{ "x-admin-key" = "<ADMIN_API_KEY from .env>" }
+Invoke-RestMethod -Method Post -Headers $headers "http://localhost:8000/admin/rag/index?recreate=true"
 ```
 
 ## CRM And Ticket-System Integration
@@ -388,9 +411,31 @@ GET   /admin/crm/status
 
 Open `http://localhost:8000/admin-ui`, enter the `ADMIN_API_KEY` from your local `.env`, and select **Connect**. The ticket-operations page shows CRM configuration status, the durable support queue, ticket details, lifecycle events, and recent global audit events.
 
-Select a ticket to update its status, add an internal or CRM-synchronized comment, or manually retry CRM synchronization. The page also includes a local WhatsApp simulation form. For that form, enter the `WHATSAPP_TEST_SIGNATURE` from `.env`; local test mode must be enabled with `WHATSAPP_LOCAL_TEST_MODE=true`.
+Select a ticket to update its status, add an internal or CRM-synchronized comment, or manually retry CRM synchronization. The page also includes WhatsApp and Email inbound simulation tabs. For WhatsApp, enter the `WHATSAPP_TEST_SIGNATURE` from `.env`; local test mode must be enabled with `WHATSAPP_LOCAL_TEST_MODE=true`. For Email, enter the `EMAIL_WEBHOOK_SECRET` from `.env`. Email submissions use the authenticated `POST /integrations/email/webhook` ingestion path and send outbound replies through the configured log or SMTP delivery mode.
 
-The UI stores both values only in browser `sessionStorage`. For a production deployment, place this internal operations page behind your organization SSO or authenticated reverse proxy.
+The simulator immediately shows a processing state and elapsed timer while the orchestration request is running, then displays a compact outcome summary above the raw JSON. To test customer-driven ticket closure, first simulate a complaint or human-escalation message, then send `close the ticket as query is resolved, thanks` from the same phone number. The workflow marks the active ticket as resolved, sends a confirmation reply, and records `detect_ticket_action` and `resolve_ticket` in `workflow_trace`.
+
+The UI stores secrets only in browser `sessionStorage`. For a production deployment, place this internal operations page behind your organization SSO or authenticated reverse proxy.
+
+### Inspect The AI Orchestration Workflow
+
+Use the protected workflow-definition route to inspect the configured agents and execution order:
+
+```powershell
+$headers = @{ "x-admin-key" = "<ADMIN_API_KEY from .env>" }
+Invoke-RestMethod -Headers $headers "http://localhost:8000/admin/orchestration/workflow"
+```
+
+Every processed message also returns `workflow_trace` and stores `workflow_step_completed` audit events. The workflow-definition response reports `framework: LangGraph`, the configured agents, and graph edges. This exposes the exact agent and workflow step responsible for each action.
+
+Verify the configured AI runtime and Ollama model availability:
+
+```powershell
+Invoke-RestMethod -Headers $headers "http://localhost:8000/admin/orchestration/ai-runtime"
+Invoke-RestMethod -Headers $headers "http://localhost:8000/admin/rag/health"
+```
+
+The first response should show `llm.enabled: true`, `llm.reachable: true`, and `llm.model_installed: true`. The RAG health response should show `embeddings.active_backend: sentence_transformers`. The first semantic model load downloads and caches `all-MiniLM-L6-v2`.
 
 ## Tests
 

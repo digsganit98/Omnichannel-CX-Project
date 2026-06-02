@@ -18,6 +18,10 @@ from services.crm_service.client import CRMResult
 from services.intent_service.classifier import classify_intent
 from services.orchestration_service.graph import OrchestrationGraph
 from services.persistence_service.repository import SQLiteCXRepository
+from services.rag_service.embeddings import SemanticEmbeddings
+from services.rag_service.documents import load_knowledge_documents
+from services.rag_service.generator import OllamaGenerator
+from services.rag_service.rag_pipeline import RAGPipeline
 from shared.schemas.intents import Intent
 from shared.schemas.messages import EmailWebhookPayload, WhatsAppWebhookPayload
 from shared.schemas.tickets import TicketStatus
@@ -28,6 +32,28 @@ class NoLLM:
 
     def classify_message(self, message, context):
         return None
+
+
+class ValidLLM:
+    def classify_message(self, message, context):
+        return {
+            "intent": "order_tracking",
+            "confidence": 0.9,
+            "urgency": "low",
+            "sentiment": "neutral",
+            "reason": "Customer asked for shipment tracking.",
+        }
+
+
+class UnderstatedLLM:
+    def classify_message(self, message, context):
+        return {
+            "intent": "refund_request",
+            "confidence": 1.0,
+            "urgency": "low",
+            "sentiment": "positive",
+            "reason": "Customer requested a refund.",
+        }
 
 
 class FakeRAG:
@@ -97,8 +123,11 @@ def test_whatsapp_order_query_resolves_with_citation_and_sends_reply():
     assert response.resolved is True
     assert response.intent == "order_tracking"
     assert response.citations[0]["source"] == "orders.md"
+    assert response.retrieval_backend == "unknown"
     assert response.outbound_status == "sent"
     assert sender.sent
+    ticket_step = next(entry for entry in response.workflow_trace if entry["step"] == "create_or_update_ticket")
+    assert ticket_step["details"]["skipped"] is True
     evidence = repo.list_retrieval_evidence()
     assert evidence[0]["source"] == "orders.md"
 
@@ -112,6 +141,8 @@ def test_email_complaint_escalates_and_sends_reply():
     assert response.ticket_id
     assert response.outbound_status == "sent"
     assert sender.sent
+    ticket_step = next(entry for entry in response.workflow_trace if entry["step"] == "create_or_update_ticket")
+    assert "skipped" not in ticket_step["details"]
 
 
 def test_duplicate_message_returns_original_response_without_second_send():
@@ -144,6 +175,37 @@ def test_multi_turn_context_is_persisted():
     assert "check that order again" in conversation["summary"]
 
 
+def test_customer_message_can_resolve_active_ticket_without_rag():
+    repo = SQLiteCXRepository(":memory:")
+    sender = Recorder()
+    workflow = graph(repo, whatsapp=sender)
+    opened = workflow.run(
+        whatsapp_message(message_id="wamid-open", text="This is a complaint. Please connect me to a human.")
+    )
+    closed = workflow.run(
+        whatsapp_message(message_id="wamid-close", text="close the ticket as query is resolved, thanks")
+    )
+
+    assert opened.ticket_id
+    assert closed.ticket_id == opened.ticket_id
+    assert closed.intent == "ticket_resolution"
+    assert closed.resolved is True
+    assert closed.next_best_action == "ticket_closed"
+    assert closed.retrieval_backend == "not_required"
+    assert closed.rag_contexts == []
+    assert repo.get_ticket(opened.ticket_id)["status"] == TicketStatus.RESOLVED.value
+    assert "marked as resolved" in closed.message
+    assert [entry["step"] for entry in closed.workflow_trace] == [
+        "receive_message",
+        "resolve_identity",
+        "load_conversation_context",
+        "detect_ticket_action",
+        "resolve_ticket",
+        "send_outbound_reply",
+        "persist_audit_events",
+    ]
+
+
 def test_restart_persistence(tmp_path):
     database = str(tmp_path / "phase1.db")
     first_repo = SQLiteCXRepository(database)
@@ -161,11 +223,60 @@ def test_intent_classifier_supports_phase1_intents():
     assert classify_intent("I want a human representative").intent == Intent.HUMAN_ESCALATION
 
 
+def test_llm_intent_result_accepts_model_reason():
+    result = CXAgent(ValidLLM()).analyze("Where is my shipment?")
+    assert result.intent == Intent.ORDER_TRACKING
+    assert result.reason == "Customer asked for shipment tracking."
+    assert result.analysis_source == "ollama_llm"
+
+
+def test_llm_intent_guardrails_raise_understated_sentiment_and_urgency():
+    result = CXAgent(UnderstatedLLM()).analyze(
+        "I want refund, and cancel my order. Connect me to an human agent immediately."
+    )
+    assert result.intent == Intent.REFUND_REQUEST
+    assert result.sentiment == "negative"
+    assert result.urgency.value == "high"
+    assert "Deterministic guardrails raised: sentiment, urgency." in result.reason
+
+
 def test_low_confidence_retrieval_creates_ticket():
     repo = SQLiteCXRepository(":memory:")
     response = graph(repo).run(whatsapp_message(text="unknown question"))
     assert response.ticket_id
     assert repo.get_ticket(response.ticket_id)
+
+
+def test_customer_answer_kb_excludes_uploaded_ticket_history():
+    documents = load_knowledge_documents()
+    assert documents
+    assert {document.metadata["doc_type"] for document in documents} == {"knowledge_base"}
+    assert all(document.metadata["source"].endswith(".md") for document in documents)
+
+
+def test_rag_discards_non_kb_contexts_before_generation():
+    class UnsafeStore:
+        def similarity_search(self, query, k):
+            return [
+                {
+                    "text": "Customer: Example Name | Order ID: O123",
+                    "score": 0.99,
+                    "metadata": {"source": "ticket-export.json", "doc_type": "ticket_history"},
+                },
+                {
+                    "text": "Approved refund policy.",
+                    "score": 0.8,
+                    "metadata": {"source": "refunds.md", "doc_type": "knowledge_base"},
+                },
+            ]
+
+    class ContextRecorder:
+        def generate_answer(self, query, contexts, conversation_context):
+            assert [context["metadata"]["source"] for context in contexts] == ["refunds.md"]
+            return {"text": "Approved answer.", "llm_used": True}
+
+    answer = RAGPipeline(store=UnsafeStore(), generator=ContextRecorder()).answer("refund policy")
+    assert [context["metadata"]["source"] for context in answer["contexts"]] == ["refunds.md"]
 
 
 def test_email_authentication_failure(monkeypatch):
@@ -301,3 +412,60 @@ def test_admin_ui_is_served():
     response = TestClient(app).get("/admin-ui")
     assert response.status_code == 200
     assert "Ticket Operations" in response.text
+    assert "email-simulate-form" in response.text
+
+
+def test_orchestration_trace_records_explicit_agent_workflow():
+    repo = SQLiteCXRepository(":memory:")
+    response = graph(repo).run(whatsapp_message())
+    steps = [entry["step"] for entry in response.workflow_trace]
+    assert steps == [
+        "receive_message",
+        "resolve_identity",
+        "load_conversation_context",
+        "detect_ticket_action",
+        "classify_intent",
+        "retrieve_knowledge",
+        "decide_resolution",
+        "create_or_update_ticket",
+        "send_outbound_reply",
+        "persist_audit_events",
+    ]
+    events = repo.list_audit_events(response.correlation_id)
+    agent_actions = [event for event in events if event["event_type"] == "workflow_step_completed"]
+    assert len(agent_actions) == len(steps)
+    assert events[-1]["event_type"] == "workflow_completed"
+
+
+def test_orchestration_workflow_definition_is_admin_protected(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from apps.api.main import app
+
+    monkeypatch.setenv("ADMIN_API_KEY", "workflow-test-admin-key")
+    client = TestClient(app)
+    assert client.get("/admin/orchestration/workflow").status_code == 401
+    response = client.get(
+        "/admin/orchestration/workflow",
+        headers={"x-admin-key": "workflow-test-admin-key"},
+    )
+    assert response.status_code == 200
+    assert response.json()["engine"] == "langgraph_state_graph"
+    assert response.json()["framework"] == "LangGraph"
+    assert len(response.json()["agents"]) == 4
+    assert len(response.json()["edges"]) == 13
+    assert response.json()["agents"][0]["execution"] == "ollama_llm_with_validated_rule_fallback"
+
+
+def test_hashing_embeddings_are_an_explicit_fallback(monkeypatch):
+    monkeypatch.setenv("EMBEDDING_BACKEND", "hashing")
+    embeddings = SemanticEmbeddings()
+    assert embeddings.status()["active_backend"] == "hashing_fallback"
+    assert len(embeddings.embed_query("Track my order")) == 384
+
+
+def test_ollama_can_be_explicitly_disabled(monkeypatch):
+    monkeypatch.setenv("OLLAMA_ENABLED", "false")
+    result = OllamaGenerator().generate_answer("question", [])
+    assert result["llm_used"] is False
+    assert result["error"] == "OLLAMA_ENABLED=false"

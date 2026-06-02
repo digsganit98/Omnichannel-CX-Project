@@ -5,6 +5,9 @@ python-dotenv==1.0.1
 pytest==8.3.4
 langchain-core==0.3.28
 langchain-text-splitters==0.3.4
+langgraph==0.2.76
 opensearch-py==2.8.0
 httpx==0.28.1
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.5.1+cpu
 sentence-transformers==3.3.1

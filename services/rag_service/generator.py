@@ -2,13 +2,15 @@ import json
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
-from services.rag_service.config import ollama_base_url, ollama_model
+from services.rag_service.config import ollama_base_url, ollama_enabled, ollama_model, ollama_timeout_seconds
 
 
 class OllamaGenerator:
     def __init__(self) -> None:
         self.base_url = ollama_base_url().rstrip("/")
         self.model = ollama_model()
+        self.enabled = ollama_enabled()
+        self.timeout = ollama_timeout_seconds()
 
     def generate_answer(self, query: str, contexts: list[dict], conversation_context: dict | None = None) -> dict:
         sources = "\n\n".join(
@@ -28,6 +30,8 @@ class OllamaGenerator:
             "Classify the customer message. Return only JSON with intent, confidence, urgency, sentiment, reason. "
             "Allowed intents: order_tracking, refund_request, return_request, product_information, billing_issue, "
             "technical_support, complaint, general_inquiry, human_escalation. Allowed urgency: low, medium, high. "
+            "Treat words such as immediately, urgent, ASAP, critical, or escalate as high urgency. "
+            "Treat cancellation, refund problems, complaints, and requests for a human during a problem as negative sentiment. "
             f"Context: {json.dumps(context or {}, default=str)} Message: {message}"
         )
         result = self._generate(prompt)
@@ -39,7 +43,33 @@ class OllamaGenerator:
         except (json.JSONDecodeError, ValueError):
             return None
 
+    def status(self, check_connection: bool = False) -> dict:
+        status = {
+            "enabled": self.enabled,
+            "base_url": self.base_url,
+            "model": self.model,
+            "timeout_seconds": self.timeout,
+            "reachable": None,
+            "model_installed": None,
+        }
+        if not check_connection or not self.enabled:
+            return status
+        request = Request(f"{self.base_url}/api/tags", method="GET")
+        try:
+            with urlopen(request, timeout=min(self.timeout, 5)) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            models = [item.get("name", "") for item in payload.get("models", [])]
+            status["reachable"] = True
+            status["model_installed"] = self.model in models
+            status["available_models"] = models
+        except (URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+            status["reachable"] = False
+            status["error"] = str(exc)
+        return status
+
     def _generate(self, prompt: str) -> dict:
+        if not self.enabled:
+            return {"text": "", "model": self.model, "llm_used": False, "error": "OLLAMA_ENABLED=false"}
         request = Request(
             f"{self.base_url}/api/generate",
             method="POST",
@@ -47,7 +77,7 @@ class OllamaGenerator:
             headers={"Content-Type": "application/json"},
         )
         try:
-            with urlopen(request, timeout=30) as response:
+            with urlopen(request, timeout=self.timeout) as response:
                 payload = json.loads(response.read().decode("utf-8"))
                 return {"text": payload.get("response", "").strip(), "model": self.model, "llm_used": True}
         except (URLError, TimeoutError, OSError) as exc:

@@ -18,5 +18,7 @@ class ChannelResponse(BaseModel):
     llm_model: str | None = None
     llm_used: bool = False
     citations: list[dict] = Field(default_factory=list)
+    retrieval_backend: str | None = None
     outbound_status: str = "pending"
     duplicate: bool = False
+    workflow_trace: list[dict] = Field(default_factory=list)

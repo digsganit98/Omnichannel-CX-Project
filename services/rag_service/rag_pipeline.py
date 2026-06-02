@@ -1,8 +1,12 @@
+import logging
+
 from services.rag_service.config import rag_top_k
 from services.rag_service.documents import load_knowledge_documents
 from services.rag_service.generator import OllamaGenerator
 from services.rag_service.opensearch_store import OpenSearchVectorStore
 from services.retrieval_service.hybrid_search import HybridSearch
+
+logger = logging.getLogger(__name__)
 
 
 class RAGPipeline:
@@ -19,10 +23,16 @@ class RAGPipeline:
         return self.store.health()
 
     def answer(self, query: str, conversation_context: dict | None = None, top_k: int | None = None) -> dict:
+        retrieval_backend = "opensearch_vector"
+        retrieval_error = None
         try:
             contexts = self.store.similarity_search(query, k=top_k or rag_top_k())
-        except Exception:
+        except Exception as exc:
+            retrieval_backend = "keyword_fallback"
+            retrieval_error = str(exc)
+            logger.warning("rag_vector_retrieval_failed", extra={"error": retrieval_error})
             contexts = self._local_contexts(query)
+        contexts = self._customer_safe_contexts(contexts)
         generation = self.generator.generate_answer(query, contexts, conversation_context)
         citations = [
             {"index": index, "source": item["metadata"].get("source", "unknown"), "score": item["score"]}
@@ -40,6 +50,8 @@ class RAGPipeline:
             "contexts": contexts,
             "citations": citations,
             "llm": generation,
+            "retrieval_backend": retrieval_backend,
+            "retrieval_error": retrieval_error,
         }
 
     @staticmethod
@@ -50,5 +62,18 @@ class RAGPipeline:
         return [{
             "text": result.answer,
             "score": result.score,
-            "metadata": {"source": result.source, "document_version": "local-v1", "retrieval": "keyword_fallback"},
+            "metadata": {
+                "source": result.source,
+                "doc_type": "knowledge_base",
+                "document_version": "local-v1",
+                "retrieval": "keyword_fallback",
+            },
         }]
+
+    @staticmethod
+    def _customer_safe_contexts(contexts: list[dict]) -> list[dict]:
+        return [
+            context
+            for context in contexts
+            if context.get("metadata", {}).get("doc_type") == "knowledge_base"
+        ]

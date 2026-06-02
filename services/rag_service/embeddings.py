@@ -4,6 +4,7 @@ import os
 import re
 
 from langchain_core.embeddings import Embeddings
+from services.rag_service.config import embedding_backend, embedding_model
 
 
 class HashingEmbeddings(Embeddings):
@@ -36,19 +37,37 @@ class HashingEmbeddings(Embeddings):
 
 
 class SemanticEmbeddings(Embeddings):
-    """Use sentence-transformers in deployed environments and hash vectors in lightweight tests."""
+    """Use sentence-transformers by default and retain an observable smoke-test fallback."""
 
     def __init__(self, dimension: int = 384) -> None:
         self.dimension = dimension
         self.fallback = HashingEmbeddings(dimension)
         self.model = None
-        if os.getenv("EMBEDDING_BACKEND", "hashing") == "sentence_transformers":
+        self.requested_backend = embedding_backend()
+        self.model_name = embedding_model()
+        self.fallback_reason = None
+        if self.requested_backend == "sentence_transformers":
             try:
                 from sentence_transformers import SentenceTransformer
 
-                self.model = SentenceTransformer(os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2"))
-            except ImportError:
+                self.model = SentenceTransformer(self.model_name)
+            except Exception as exc:
                 self.model = None
+                self.fallback_reason = str(exc)
+        else:
+            self.fallback_reason = f"Configured backend: {self.requested_backend}"
+
+    @property
+    def active_backend(self) -> str:
+        return "sentence_transformers" if self.model is not None else "hashing_fallback"
+
+    def status(self) -> dict:
+        return {
+            "requested_backend": self.requested_backend,
+            "active_backend": self.active_backend,
+            "model": self.model_name if self.model is not None else None,
+            "fallback_reason": self.fallback_reason,
+        }
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         if self.model:

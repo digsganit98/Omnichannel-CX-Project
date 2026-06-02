@@ -77,9 +77,13 @@
 
       <section class="workspace lower">
         <article class="card">
-          <p class="eyebrow">Local Phase 1 test mode</p>
-          <h2>Simulate WhatsApp inbound</h2>
-          <form id="simulate-form" class="stack">
+          <p class="eyebrow">Local channel test mode</p>
+          <h2>Simulate inbound customer message</h2>
+          <div class="channel-tabs" role="tablist" aria-label="Inbound simulation channel">
+            <button id="whatsapp-tab" type="button" class="channel-tab active" data-channel="whatsapp">WhatsApp</button>
+            <button id="email-tab" type="button" class="channel-tab" data-channel="email">Email</button>
+          </div>
+          <form id="whatsapp-simulate-form" class="stack channel-form">
             <label>
               Test signature
               <input id="test-signature" type="password" autocomplete="off" placeholder="WHATSAPP_TEST_SIGNATURE">
@@ -92,8 +96,29 @@
               Message
               <textarea id="sim-message" rows="4" required>Please connect me to a human support agent about my refund.</textarea>
             </label>
-            <button type="submit">Run simulated inbound flow</button>
+            <button id="simulate-submit" type="submit">Run simulated inbound flow</button>
           </form>
+          <form id="email-simulate-form" class="stack channel-form hidden">
+            <label>
+              Email webhook secret
+              <input id="email-secret" type="password" autocomplete="off" placeholder="EMAIL_WEBHOOK_SECRET">
+            </label>
+            <label>
+              Customer email
+              <input id="sim-email" type="email" value="customer@example.com" required>
+            </label>
+            <label>
+              Subject
+              <input id="sim-email-subject" value="Customer support request" required>
+            </label>
+            <label>
+              Message
+              <textarea id="sim-email-message" rows="4" required>I need help tracking my order.</textarea>
+            </label>
+            <button id="email-simulate-submit" type="submit">Run simulated inbound flow</button>
+          </form>
+          <div id="simulate-status" class="processing hidden" role="status" aria-live="polite"></div>
+          <div id="simulate-summary" class="simulation-summary hidden"></div>
           <pre id="simulate-result" class="result">Simulation output appears here.</pre>
         </article>
 
