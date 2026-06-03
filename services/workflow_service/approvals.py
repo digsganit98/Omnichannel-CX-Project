@@ -1,2 +1,8 @@
 def requires_approval(intent: str) -> bool:
-    return intent in {"refund_request", "return_request", "billing_issue"}
+    return intent in {
+        "insurance_claim",
+        "loan_application",
+        "fund_transfer",
+        "fraud_report",
+        "loan_default_notice",
+    }

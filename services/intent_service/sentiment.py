@@ -15,8 +15,21 @@ NEGATIVE = {
     "connect me to a human",
     "human agent",
     "human representative",
+    # BFSI-specific negative signals
+    "fraud",
+    "stolen",
+    "unauthorized",
+    "incorrect charge",
+    "overdue notice",
+    "default",
+    "claim rejected",
+    "policy lapsed",
+    "blocked account",
+    "account blocked",
+    "money gone",
+    "wrong transfer",
 }
-POSITIVE = {"thanks", "great", "good", "helpful", "resolved"}
+POSITIVE = {"thanks", "great", "good", "helpful", "resolved", "approved", "credited", "disbursed", "processed"}
 
 
 def detect_sentiment(text: str) -> str:
