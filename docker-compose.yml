@@ -7,7 +7,13 @@ services:
       - .env
     environment:
       DATABASE_PATH: /app/data/cx_phase1.db
-      SMTP_HOST: mailpit
+      SMTP_HOST: ${SMTP_HOST:-mailpit}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+      SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL:-support@example.com}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_USE_TLS: ${SMTP_USE_TLS:-false}
+      SMTP_USE_SSL: ${SMTP_USE_SSL:-false}
       OPENSEARCH_URL: http://opensearch:9200
       OLLAMA_BASE_URL: http://ollama:11434
       OLLAMA_ENABLED: ${OLLAMA_ENABLED:-true}
@@ -42,8 +48,6 @@ services:
         condition: service_started
       opensearch:
         condition: service_healthy
-      mailpit:
-        condition: service_started
 
   opensearch:
     image: opensearchproject/opensearch:2.17.1

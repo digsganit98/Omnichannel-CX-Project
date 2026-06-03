@@ -15,6 +15,7 @@ from shared.schemas.responses import ChannelResponse
 from .routes.audit import router as audit_router
 from .routes.conversations import router as conversations_router
 from .routes.crm import router as crm_router
+from .routes.email import router as email_router
 from .routes.integrations import router as integrations_router
 from .routes.orchestration import router as orchestration_router
 from .routes.rag import router as rag_router
@@ -28,6 +29,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="Omnichannel CX Accelerator", version="2.0.0")
 app.include_router(conversations_router)
 app.include_router(crm_router)
+app.include_router(email_router)
 app.include_router(tickets_router)
 app.include_router(integrations_router)
 app.include_router(orchestration_router)

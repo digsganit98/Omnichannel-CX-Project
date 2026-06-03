@@ -77,7 +77,7 @@ LangGraph workflow
  11. persist turns, evidence, and audit events
         |
         v
-SQLite | OpenSearch | Ollama | Mailpit | Optional CRM/Jira
+SQLite | OpenSearch | Ollama | Gmail SMTP or Mailpit | Optional CRM/Jira
 ```
 
 ## Local Services
@@ -119,16 +119,21 @@ WHATSAPP_VERIFY_TOKEN
 WHATSAPP_APP_SECRET
 ```
 
-For local browser testing, make sure these are set:
+For local browser testing with Gmail outbound, make sure these are set:
 
 ```text
 WHATSAPP_LOCAL_TEST_MODE=true
 OUTBOUND_DELIVERY_MODE=live
-SMTP_HOST=mailpit
-SMTP_PORT=1025
-SMTP_FROM_EMAIL=support@example.com
-SMTP_USE_TLS=false
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_FROM_EMAIL=<your-gmail-address>
+SMTP_USERNAME=<your-gmail-address>
+SMTP_PASSWORD=<gmail-app-password>
+SMTP_USE_TLS=true
+SMTP_USE_SSL=false
 ```
+
+Gmail sending does not work with a plain API key alone. Use a Gmail App Password for this SMTP path, or add a Gmail OAuth refresh-token flow later.
 
 ### 2. Start Docker
 
@@ -227,7 +232,7 @@ Expected result:
 - customer identity is resolved by email
 - RAG returns cited policy knowledge
 - outbound email is sent
-- the generated email appears in Mailpit at `http://localhost:8025`
+- the generated email is sent through Gmail SMTP to the customer email address
 
 ### Test Ticket Creation
 
@@ -332,6 +337,21 @@ Expected:
 - `llm.model_installed: true`
 - `embeddings.active_backend: sentence_transformers`
 
+Check outbound email configuration:
+
+```powershell
+Invoke-RestMethod -Headers $headers "http://localhost:8000/admin/email/status"
+```
+
+For Gmail SMTP, expected fields include:
+
+- `host: smtp.gmail.com`
+- `port: 587`
+- `username_configured: true`
+- `password_configured: true`
+- `use_tls: true`
+- `gmail_ready: true`
+
 ## API Testing
 
 Swagger is available at:
@@ -353,6 +373,8 @@ GET  /admin/tickets
 GET  /admin/audit-events
 GET  /admin/orchestration/workflow
 GET  /admin/orchestration/ai-runtime
+GET  /admin/email/status
+POST /admin/email/test-send
 ```
 
 Admin endpoints require:
@@ -389,6 +411,20 @@ $body = @{
 
 Invoke-RestMethod -Method Post -Headers $headers -ContentType "application/json" `
   -Body $body "http://localhost:8000/integrations/email/webhook"
+```
+
+### Direct Gmail SMTP Test
+
+```powershell
+$headers = @{ "x-admin-key" = "<ADMIN_API_KEY from .env>" }
+$body = @{
+  to = "<recipient-email>"
+  subject = "Omnichannel CX Gmail test"
+  body = "This confirms Gmail SMTP outbound is working."
+} | ConvertTo-Json
+
+Invoke-RestMethod -Method Post -Headers $headers -ContentType "application/json" `
+  -Body $body "http://localhost:8000/admin/email/test-send"
 ```
 
 ### WhatsApp Inbound Simulation
@@ -536,20 +572,25 @@ $headers = @{ "x-admin-key" = "<ADMIN_API_KEY from .env>" }
 Invoke-RestMethod -Method Post -Headers $headers "http://localhost:8000/admin/rag/index?recreate=true"
 ```
 
-### Email Does Not Appear
+### Gmail Email Does Not Send
 
-For local Mailpit testing, verify:
+Verify:
 
 ```text
 OUTBOUND_DELIVERY_MODE=live
-SMTP_HOST=mailpit
-SMTP_PORT=1025
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USERNAME=<your-gmail-address>
+SMTP_PASSWORD=<gmail-app-password>
+SMTP_USE_TLS=true
+SMTP_USE_SSL=false
 ```
 
-Then open:
+Then check:
 
-```text
-http://localhost:8025
+```powershell
+$headers = @{ "x-admin-key" = "<ADMIN_API_KEY from .env>" }
+Invoke-RestMethod -Headers $headers "http://localhost:8000/admin/email/status"
 ```
 
 ### Docker Compose Network Error

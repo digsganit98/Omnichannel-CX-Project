@@ -13,6 +13,7 @@ from apps.api.routes import test_whatsapp
 from services.agent_service.cx_agent import CXAgent
 from services.channel_service.adapters.email_adapter import EmailAdapter
 from services.channel_service.adapters.whatsapp_adapter import WhatsAppAdapter
+from services.channel_service.connectors.email_sender import SMTPEmailConnector
 from services.channel_service.delivery import OutboundDeliveryService
 from services.crm_service.client import CRMResult
 from services.intent_service.classifier import classify_intent
@@ -286,6 +287,57 @@ def test_email_authentication_failure(monkeypatch):
     assert exc.value.status_code == 401
 
 
+def test_gmail_smtp_status_and_send(monkeypatch):
+    sent = {}
+
+    class FakeSMTP:
+        def __init__(self, host, port, timeout):
+            sent["host"] = host
+            sent["port"] = port
+            sent["timeout"] = timeout
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return None
+
+        def ehlo(self):
+            sent["ehlo"] = sent.get("ehlo", 0) + 1
+
+        def starttls(self):
+            sent["starttls"] = True
+
+        def login(self, username, password):
+            sent["username"] = username
+            sent["password"] = password
+
+        def send_message(self, message):
+            sent["to"] = message["To"]
+            sent["subject"] = message["Subject"]
+            return {}
+
+    monkeypatch.setenv("SMTP_HOST", "smtp.gmail.com")
+    monkeypatch.setenv("SMTP_PORT", "587")
+    monkeypatch.setenv("SMTP_FROM_EMAIL", "support@example.com")
+    monkeypatch.setenv("SMTP_USERNAME", "support@example.com")
+    monkeypatch.setenv("SMTP_PASSWORD", "app-password")
+    monkeypatch.setenv("SMTP_USE_TLS", "true")
+    monkeypatch.setenv("SMTP_USE_SSL", "false")
+    monkeypatch.setattr("smtplib.SMTP", FakeSMTP)
+
+    connector = SMTPEmailConnector()
+    assert connector.status()["gmail_ready"] is True
+    result = connector.send_text("customer@example.com", "Test", "Hello")
+
+    assert result["status"] == "sent"
+    assert sent["host"] == "smtp.gmail.com"
+    assert sent["port"] == 587
+    assert sent["starttls"] is True
+    assert sent["username"] == "support@example.com"
+    assert sent["to"] == "customer@example.com"
+
+
 def test_whatsapp_signature_validation(monkeypatch):
     monkeypatch.setenv("WHATSAPP_APP_SECRET", "secret")
     body = b'{"entry":[]}'
@@ -413,6 +465,26 @@ def test_admin_ui_is_served():
     assert response.status_code == 200
     assert "Ticket Operations" in response.text
     assert "email-simulate-form" in response.text
+
+
+def test_email_admin_routes_are_protected(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from apps.api.main import app
+
+    monkeypatch.setenv("ADMIN_API_KEY", "email-admin-key")
+    monkeypatch.setenv("SMTP_HOST", "smtp.gmail.com")
+    monkeypatch.setenv("SMTP_PORT", "587")
+    monkeypatch.setenv("SMTP_USERNAME", "support@example.com")
+    monkeypatch.setenv("SMTP_PASSWORD", "app-password")
+    monkeypatch.setenv("SMTP_USE_TLS", "true")
+    client = TestClient(app)
+
+    assert client.get("/admin/email/status").status_code == 401
+    response = client.get("/admin/email/status", headers={"x-admin-key": "email-admin-key"})
+
+    assert response.status_code == 200
+    assert response.json()["gmail_ready"] is True
 
 
 def test_orchestration_trace_records_explicit_agent_workflow():
