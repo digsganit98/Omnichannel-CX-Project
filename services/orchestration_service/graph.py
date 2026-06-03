@@ -5,10 +5,10 @@ from typing import Literal, TypedDict
 from langgraph.graph import END, START, StateGraph
 from services.agent_service.cx_agent import CXAgent
 from services.agent_service.orchestration_agents import (
-    IntentDetectionAgent,
+    IntentClassificationAgent,
     QueryResolutionAgent,
     TicketAction,
-    TicketManagementAgent,
+    TicketCreationAgent,
     WorkflowAutomationAgent,
 )
 from services.channel_service.delivery import OutboundDeliveryService
@@ -23,18 +23,20 @@ from shared.schemas.responses import ChannelResponse
 logger = logging.getLogger(__name__)
 
 ORCHESTRATION_ENGINE = "langgraph_state_graph"
+
+# Human-readable edge map shown in /admin/orchestration/definition
 WORKFLOW_EDGES = [
     ("__start__", "receive_message"),
     ("receive_message", "resolve_identity"),
     ("resolve_identity", "load_conversation_context"),
     ("load_conversation_context", "detect_ticket_action"),
-    ("detect_ticket_action", "resolve_ticket | classify_intent"),
+    ("detect_ticket_action", "resolve_ticket | classify_intent [Agent 1]"),
     ("resolve_ticket", "send_outbound_reply"),
-    ("classify_intent", "retrieve_knowledge"),
-    ("retrieve_knowledge", "decide_resolution"),
-    ("decide_resolution", "create_or_update_ticket | continue_without_ticket"),
-    ("create_or_update_ticket", "send_outbound_reply"),
-    ("continue_without_ticket", "send_outbound_reply"),
+    ("classify_intent [Agent 1]", "resolve_query [Agent 2]"),
+    ("resolve_query [Agent 2]", "decide_ticket [Agent 3]"),
+    ("decide_ticket [Agent 3]", "create_ticket | skip_ticket"),
+    ("create_ticket", "send_outbound_reply"),
+    ("skip_ticket", "send_outbound_reply"),
     ("send_outbound_reply", "persist_audit_events"),
     ("persist_audit_events", "__end__"),
 ]
@@ -45,7 +47,12 @@ class GraphState(TypedDict):
 
 
 class OrchestrationGraph:
-    """LangGraph workflow coordinating the customer support AI agents."""
+    """LangGraph workflow with 3 BFSI agents:
+
+    Agent 1 – IntentClassificationAgent  (classify intent + Neo4j enrichment)
+    Agent 2 – QueryResolutionAgent       (KB / Neo4j answer)
+    Agent 3 – TicketCreationAgent        (JIRA ticket decision + creation)
+    """
 
     def __init__(
         self,
@@ -54,14 +61,22 @@ class OrchestrationGraph:
         rag: RAGPipeline | None = None,
         delivery: OutboundDeliveryService | None = None,
         crm: CRMClient | None = None,
+        neo4j_client=None,
     ) -> None:
         self.repository = repository
         self.crm = crm or CRMClient()
         self.tickets = TicketManager(repository, self.crm)
-        self.intent_agent = IntentDetectionAgent(agent)
-        self.query_resolution_agent = QueryResolutionAgent(rag)
-        self.ticket_management_agent = TicketManagementAgent(self.tickets)
+
+        self.neo4j_client = neo4j_client or _try_neo4j()
+
+        # 3 named agents
+        self.intent_agent = IntentClassificationAgent(agent, neo4j_client=self.neo4j_client)
+        self.resolution_agent = QueryResolutionAgent(rag, neo4j_client=self.neo4j_client)
+        self.ticket_agent = TicketCreationAgent(self.tickets)
+
+        # Outbound delivery wrapper (not a named agent, infrastructure concern)
         self.workflow_automation_agent = WorkflowAutomationAgent(delivery)
+
         self.workflow = self._build_workflow()
 
     def run(self, message: InboundMessage) -> ChannelResponse:
@@ -92,30 +107,39 @@ class OrchestrationGraph:
             )
             return response
         except Exception as exc:
-            logger.exception(
-                "orchestration_failed",
-                extra={**self._common(state), "error": str(exc)},
-            )
+            logger.exception("orchestration_failed", extra={**self._common(state), "error": str(exc)})
             try:
                 self._audit("workflow_failed", state, details={"error": str(exc)})
             except Exception:
                 logger.exception("workflow_failure_audit_failed", extra=self._common(state))
             raise
 
+    # ── Graph construction ────────────────────────────────────────────────
+
     def _build_workflow(self):
         workflow = StateGraph(GraphState)
+
+        # Infrastructure
         workflow.add_node("receive_message", self._receive_message)
         workflow.add_node("resolve_identity", self._resolve_identity)
         workflow.add_node("load_conversation_context", self._load_context)
         workflow.add_node("detect_ticket_action", self._detect_ticket_action)
         workflow.add_node("resolve_ticket", self._resolve_ticket)
+
+        # Agent 1
         workflow.add_node("classify_intent", self._classify_intent)
-        workflow.add_node("retrieve_knowledge", self._retrieve_knowledge)
-        workflow.add_node("decide_resolution", self._decide_resolution)
-        workflow.add_node("create_or_update_ticket", self._create_or_update_ticket)
-        workflow.add_node("continue_without_ticket", self._continue_without_ticket)
+        # Agent 2
+        workflow.add_node("resolve_query", self._resolve_query)
+        # Agent 3 – two sub-nodes: decide + execute
+        workflow.add_node("decide_ticket", self._decide_ticket)
+        workflow.add_node("create_ticket", self._create_ticket)
+        workflow.add_node("skip_ticket", self._skip_ticket)
+
+        # Infrastructure
         workflow.add_node("send_outbound_reply", self._generate_and_send_reply)
         workflow.add_node("persist_audit_events", self._persist_result)
+
+        # Wiring
         workflow.add_edge(START, "receive_message")
         workflow.add_edge("receive_message", "resolve_identity")
         workflow.add_edge("resolve_identity", "load_conversation_context")
@@ -123,71 +147,28 @@ class OrchestrationGraph:
         workflow.add_conditional_edges(
             "detect_ticket_action",
             self._route_ticket_action,
-            {
-                "resolve_ticket": "resolve_ticket",
-                "classify_intent": "classify_intent",
-            },
+            {"resolve_ticket": "resolve_ticket", "classify_intent": "classify_intent"},
         )
         workflow.add_edge("resolve_ticket", "send_outbound_reply")
-        workflow.add_edge("classify_intent", "retrieve_knowledge")
-        workflow.add_edge("retrieve_knowledge", "decide_resolution")
+        # Agent chain
+        workflow.add_edge("classify_intent", "resolve_query")
+        workflow.add_edge("resolve_query", "decide_ticket")
         workflow.add_conditional_edges(
-            "decide_resolution",
+            "decide_ticket",
             self._route_ticket_decision,
-            {
-                "ticket_required": "create_or_update_ticket",
-                "answer_directly": "continue_without_ticket",
-            },
+            {"ticket_required": "create_ticket", "answer_directly": "skip_ticket"},
         )
-        workflow.add_edge("create_or_update_ticket", "send_outbound_reply")
-        workflow.add_edge("continue_without_ticket", "send_outbound_reply")
+        workflow.add_edge("create_ticket", "send_outbound_reply")
+        workflow.add_edge("skip_ticket", "send_outbound_reply")
         workflow.add_edge("send_outbound_reply", "persist_audit_events")
         workflow.add_edge("persist_audit_events", END)
         return workflow.compile()
 
+    # ── Infrastructure nodes ──────────────────────────────────────────────
+
     def _receive_message(self, graph_state: GraphState) -> dict:
         state = graph_state["runtime"]
         self._complete(state, WorkflowStep.RECEIVE_MESSAGE, "langgraph", provider=state.message.provider)
-        return {"runtime": state}
-
-    def _detect_ticket_action(self, graph_state: GraphState) -> dict:
-        state = graph_state["runtime"]
-        state.ticket_action = self.ticket_management_agent.detect_action(state.message, state.context)
-        self._complete(
-            state,
-            WorkflowStep.DETECT_TICKET_ACTION,
-            self.ticket_management_agent.name,
-            action=state.ticket_action.action.value,
-            reason=state.ticket_action.reason,
-        )
-        return {"runtime": state}
-
-    @staticmethod
-    def _route_ticket_action(graph_state: GraphState) -> Literal["resolve_ticket", "classify_intent"]:
-        action = graph_state["runtime"].ticket_action.action
-        return "resolve_ticket" if action == TicketAction.RESOLVE else "classify_intent"
-
-    def _resolve_ticket(self, graph_state: GraphState) -> dict:
-        state = graph_state["runtime"]
-        active_ticket = state.context["active_ticket"]
-        state.ticket = self.ticket_management_agent.resolve_ticket(active_ticket["ticket_id"])
-        state.answer = (
-            f"Your support ticket {state.ticket.ticket_id} has been marked as resolved. "
-            "Thank you for confirming."
-        )
-        self._audit(
-            "ticket_resolved_by_customer",
-            state,
-            ticket_id=state.ticket.ticket_id,
-            details={"reason": state.ticket_action.reason},
-        )
-        self._complete(
-            state,
-            WorkflowStep.RESOLVE_TICKET,
-            self.ticket_management_agent.name,
-            ticket_id=state.ticket.ticket_id,
-            status=state.ticket.status.value,
-        )
         return {"runtime": state}
 
     def _resolve_identity(self, graph_state: GraphState) -> dict:
@@ -201,11 +182,8 @@ class OrchestrationGraph:
         state.conversation = self.repository.get_or_create_conversation(state.customer_id)
         self._audit("inbound_received", state, details={"provider": message.provider})
         if crm_profile.status != "not_configured":
-            self._audit(
-                "crm_profile_lookup_" + crm_profile.status,
-                state,
-                details={"error": crm_profile.error, **crm_profile.data},
-            )
+            self._audit("crm_profile_lookup_" + crm_profile.status, state,
+                        details={"error": crm_profile.error, **crm_profile.data})
         self.repository.append_turn(
             conversation_id=state.conversation_id,
             customer_id=state.customer_id,
@@ -216,12 +194,8 @@ class OrchestrationGraph:
             subject=message.subject,
             metadata=message.metadata,
         )
-        self._complete(
-            state,
-            WorkflowStep.RESOLVE_IDENTITY,
-            "identity_resolution",
-            crm_profile_status=crm_profile.status,
-        )
+        self._complete(state, WorkflowStep.RESOLVE_IDENTITY, "identity_resolution",
+                       crm_profile_status=crm_profile.status)
         return {"runtime": state}
 
     def _load_context(self, graph_state: GraphState) -> dict:
@@ -233,146 +207,124 @@ class OrchestrationGraph:
             "customer_metadata": state.customer.get("metadata", {}),
             "active_ticket": active_ticket.model_dump(mode="json") if active_ticket else None,
         }
-        self._complete(
-            state,
-            WorkflowStep.LOAD_CONVERSATION_CONTEXT,
-            "workflow_automation_agent",
-            recent_turn_count=len(state.context["recent_turns"]),
-            active_ticket_id=active_ticket.ticket_id if active_ticket else None,
-        )
+        self._complete(state, WorkflowStep.LOAD_CONVERSATION_CONTEXT, "workflow_automation_agent",
+                       recent_turn_count=len(state.context["recent_turns"]),
+                       active_ticket_id=active_ticket.ticket_id if active_ticket else None)
         return {"runtime": state}
+
+    def _detect_ticket_action(self, graph_state: GraphState) -> dict:
+        state = graph_state["runtime"]
+        state.ticket_action = self.ticket_agent.detect_action(state.message, state.context)
+        self._complete(state, WorkflowStep.DETECT_TICKET_ACTION, self.ticket_agent.name,
+                       action=state.ticket_action.action.value, reason=state.ticket_action.reason)
+        return {"runtime": state}
+
+    @staticmethod
+    def _route_ticket_action(graph_state: GraphState) -> Literal["resolve_ticket", "classify_intent"]:
+        return "resolve_ticket" if graph_state["runtime"].ticket_action.action == TicketAction.RESOLVE else "classify_intent"
+
+    def _resolve_ticket(self, graph_state: GraphState) -> dict:
+        state = graph_state["runtime"]
+        active_ticket = state.context["active_ticket"]
+        state.ticket = self.ticket_agent.resolve_ticket(active_ticket["ticket_id"])
+        state.answer = (
+            f"Your support ticket {state.ticket.ticket_id} has been marked as resolved. "
+            "Thank you for confirming."
+        )
+        self._audit("ticket_resolved_by_customer", state, ticket_id=state.ticket.ticket_id,
+                    details={"reason": state.ticket_action.reason})
+        self._complete(state, WorkflowStep.RESOLVE_TICKET, self.ticket_agent.name,
+                       ticket_id=state.ticket.ticket_id, status=state.ticket.status.value)
+        return {"runtime": state}
+
+    # ── Agent 1: Intent Classification ───────────────────────────────────
 
     def _classify_intent(self, graph_state: GraphState) -> dict:
         state = graph_state["runtime"]
         state.analysis = self.intent_agent.run(state.message, state.context)
-        self._audit(
-            "intent_classified",
-            state,
-            intent=state.analysis.intent.value,
-            details=state.analysis.model_dump(),
-        )
-        self._complete(
-            state,
-            WorkflowStep.CLASSIFY_INTENT,
-            self.intent_agent.name,
-            intent=state.analysis.intent.value,
-            confidence=state.analysis.confidence,
-            urgency=state.analysis.urgency.value,
-            source=state.analysis.analysis_source,
-        )
+        self._audit("intent_classified", state, intent=state.analysis.intent.value,
+                    details=state.analysis.model_dump())
+        self._complete(state, WorkflowStep.CLASSIFY_INTENT, self.intent_agent.name,
+                       intent=state.analysis.intent.value, confidence=state.analysis.confidence,
+                       urgency=state.analysis.urgency.value, source=state.analysis.analysis_source)
         return {"runtime": state}
 
-    def _retrieve_knowledge(self, graph_state: GraphState) -> dict:
+    # ── Agent 2: Query / Complaint Resolution ─────────────────────────────
+
+    def _resolve_query(self, graph_state: GraphState) -> dict:
         state = graph_state["runtime"]
-        state.resolution = self.query_resolution_agent.run(state.message, state.context)
-        self._audit(
-            "retrieval_performed",
-            state,
-            intent=state.analysis.intent.value,
-            details={
-                "confidence": state.resolution.confidence,
-                "citations": state.resolution.citations,
-                "retrieval_backend": state.resolution.retrieval_backend,
-                "retrieval_error": state.resolution.retrieval_error,
-            },
-        )
-        self._complete(
-            state,
-            WorkflowStep.RETRIEVE_KNOWLEDGE,
-            self.query_resolution_agent.name,
-            confidence=state.resolution.confidence,
-            citation_count=len(state.resolution.citations),
-            retrieval_backend=state.resolution.retrieval_backend,
-        )
+        intent_str = state.analysis.intent.value if state.analysis else None
+        state.resolution = self.resolution_agent.run(state.message, state.context, intent=intent_str)
+        self._audit("retrieval_performed", state,
+                    intent=intent_str or "unknown",
+                    details={
+                        "confidence": state.resolution.confidence,
+                        "citations": state.resolution.citations,
+                        "retrieval_backend": state.resolution.retrieval_backend,
+                        "retrieval_error": state.resolution.retrieval_error,
+                    })
+        self._complete(state, WorkflowStep.RETRIEVE_KNOWLEDGE, self.resolution_agent.name,
+                       confidence=state.resolution.confidence,
+                       citation_count=len(state.resolution.citations),
+                       retrieval_backend=state.resolution.retrieval_backend)
         return {"runtime": state}
 
-    def _decide_resolution(self, graph_state: GraphState) -> dict:
+    # ── Agent 3: Ticket Decision + Creation ───────────────────────────────
+
+    def _decide_ticket(self, graph_state: GraphState) -> dict:
         state = graph_state["runtime"]
-        state.ticket_decision = self.ticket_management_agent.decide(state.analysis, state.resolution)
-        self._complete(
-            state,
-            WorkflowStep.DECIDE_RESOLUTION,
-            self.ticket_management_agent.name,
-            ticket_required=state.ticket_decision.required,
-            reason=state.ticket_decision.reason,
-        )
+        state.ticket_decision = self.ticket_agent.decide(state.analysis, state.resolution)
+        self._complete(state, WorkflowStep.DECIDE_RESOLUTION, self.ticket_agent.name,
+                       ticket_required=state.ticket_decision.required,
+                       reason=state.ticket_decision.reason)
         return {"runtime": state}
 
     @staticmethod
     def _route_ticket_decision(graph_state: GraphState) -> Literal["ticket_required", "answer_directly"]:
         return "ticket_required" if graph_state["runtime"].ticket_decision.required else "answer_directly"
 
-    def _create_or_update_ticket(self, graph_state: GraphState) -> dict:
+    def _create_ticket(self, graph_state: GraphState) -> dict:
         state = graph_state["runtime"]
-        if state.ticket_decision.required:
-            state.ticket = self.ticket_management_agent.create_or_get(
-                state.conversation_id,
-                state.customer_id,
-                state.message,
-                state.analysis,
-                state.ticket_decision,
-                state.customer,
-            )
-            self._audit(
-                "ticket_created",
-                state,
-                intent=state.analysis.intent.value,
-                ticket_id=state.ticket.ticket_id,
-            )
-            self._audit(
-                "ticket_crm_sync_" + state.ticket.crm_sync_status,
-                state,
-                intent=state.analysis.intent.value,
-                ticket_id=state.ticket.ticket_id,
-                details={
-                    "external_ticket_id": state.ticket.external_ticket_id,
-                    "external_ticket_url": state.ticket.external_ticket_url,
-                    "error": state.ticket.crm_sync_error,
-                },
-            )
-        self._complete(
-            state,
-            WorkflowStep.CREATE_OR_UPDATE_TICKET,
-            self.ticket_management_agent.name,
-            ticket_id=state.ticket.ticket_id if state.ticket else None,
+        state.ticket = self.ticket_agent.create_or_get(
+            state.conversation_id, state.customer_id, state.message,
+            state.analysis, state.ticket_decision, state.customer,
         )
+        self._audit("ticket_created", state, intent=state.analysis.intent.value,
+                    ticket_id=state.ticket.ticket_id)
+        self._audit("ticket_crm_sync_" + state.ticket.crm_sync_status, state,
+                    intent=state.analysis.intent.value, ticket_id=state.ticket.ticket_id,
+                    details={
+                        "external_ticket_id": state.ticket.external_ticket_id,
+                        "external_ticket_url": state.ticket.external_ticket_url,
+                        "error": state.ticket.crm_sync_error,
+                    })
+        self._complete(state, WorkflowStep.CREATE_OR_UPDATE_TICKET, self.ticket_agent.name,
+                       ticket_id=state.ticket.ticket_id)
         return {"runtime": state}
 
-    def _continue_without_ticket(self, graph_state: GraphState) -> dict:
+    def _skip_ticket(self, graph_state: GraphState) -> dict:
         state = graph_state["runtime"]
-        self._complete(
-            state,
-            WorkflowStep.CREATE_OR_UPDATE_TICKET,
-            self.ticket_management_agent.name,
-            skipped=True,
-            reason="ticket_not_required",
-        )
+        self._complete(state, WorkflowStep.CREATE_OR_UPDATE_TICKET, self.ticket_agent.name,
+                       skipped=True, reason="ticket_not_required")
         return {"runtime": state}
+
+    # ── Delivery & persistence ────────────────────────────────────────────
 
     def _generate_and_send_reply(self, graph_state: GraphState) -> dict:
         state = graph_state["runtime"]
         if not state.answer:
             state.answer = self.workflow_automation_agent.compose_answer(state.resolution, state.ticket)
-        self._audit(
-            "answer_generated",
-            state,
-            intent=self._intent(state),
-            ticket_id=state.ticket.ticket_id if state.ticket else None,
-        )
+        self._audit("answer_generated", state, intent=self._intent(state),
+                    ticket_id=state.ticket.ticket_id if state.ticket else None)
         state.delivery = self.workflow_automation_agent.send_reply(state.message, state.answer)
         self._audit(
             "outbound_sent" if state.delivery["status"] == "sent" else "outbound_failed",
-            state,
-            intent=self._intent(state),
+            state, intent=self._intent(state),
             ticket_id=state.ticket.ticket_id if state.ticket else None,
             details=state.delivery,
         )
-        self._complete(
-            state,
-            WorkflowStep.SEND_OUTBOUND_REPLY,
-            self.workflow_automation_agent.name,
-            delivery_status=state.delivery["status"],
-        )
+        self._complete(state, WorkflowStep.SEND_OUTBOUND_REPLY, self.workflow_automation_agent.name,
+                       delivery_status=state.delivery["status"])
         return {"runtime": state}
 
     def _persist_result(self, graph_state: GraphState) -> dict:
@@ -393,20 +345,14 @@ class OrchestrationGraph:
         if state.resolution:
             self.repository.add_retrieval_evidence(outbound_turn["turn_id"], state.resolution.contexts)
         self.repository.update_conversation_summary(state.conversation_id, self._summary(state.conversation_id))
-        self._complete(
-            state,
-            WorkflowStep.PERSIST_AUDIT_EVENTS,
-            "workflow_automation_agent",
-            outbound_turn_id=outbound_turn["turn_id"],
-        )
-        self._audit(
-            "workflow_completed",
-            state,
-            intent=self._intent(state),
-            ticket_id=state.ticket.ticket_id if state.ticket else None,
-            details={"steps": [entry.step.value for entry in state.workflow_trace]},
-        )
+        self._complete(state, WorkflowStep.PERSIST_AUDIT_EVENTS, "workflow_automation_agent",
+                       outbound_turn_id=outbound_turn["turn_id"])
+        self._audit("workflow_completed", state, intent=self._intent(state),
+                    ticket_id=state.ticket.ticket_id if state.ticket else None,
+                    details={"steps": [entry.step.value for entry in state.workflow_trace]})
         return {"runtime": state}
+
+    # ── Helpers ───────────────────────────────────────────────────────────
 
     def _response(self, state: OrchestrationState) -> ChannelResponse:
         return ChannelResponse(
@@ -435,11 +381,7 @@ class OrchestrationGraph:
 
     def _complete(self, state: OrchestrationState, step: WorkflowStep, agent: str, **details) -> None:
         state.complete(step, agent, **details)
-        self._audit(
-            "workflow_step_completed",
-            state,
-            details={"step": step.value, "agent": agent, **details},
-        )
+        self._audit("workflow_step_completed", state, details={"step": step.value, "agent": agent, **details})
 
     def _summary(self, conversation_id: str) -> str:
         recent = self.repository.list_recent_turns(conversation_id, limit=6)
@@ -458,13 +400,25 @@ class OrchestrationGraph:
     def _intent(state: OrchestrationState) -> str:
         if state.ticket_action.action == TicketAction.RESOLVE:
             return "ticket_resolution"
-        return state.analysis.intent.value
+        return state.analysis.intent.value if state.analysis else "unknown"
 
     @staticmethod
     def _resolved(state: OrchestrationState) -> bool:
         if state.ticket_action.action == TicketAction.RESOLVE:
             return True
-        return not state.ticket_decision.required
+        return not (state.ticket_decision and state.ticket_decision.required)
 
     def _audit(self, event_type: str, state: OrchestrationState, **values) -> None:
         self.repository.add_audit_event(event_type, **self._common(state), **values)
+
+
+def _try_neo4j():
+    """Return a Neo4jClient if NEO4J_ENABLED=true and package is installed, else None."""
+    try:
+        import os
+        if os.getenv("NEO4J_ENABLED", "true").lower() != "true":
+            return None
+        from services.neo4j_service.client import Neo4jClient
+        return Neo4jClient()
+    except Exception:
+        return None

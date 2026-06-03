@@ -2,7 +2,7 @@ import logging
 
 from services.rag_service.config import rag_top_k
 from services.rag_service.documents import load_knowledge_documents
-from services.rag_service.generator import OllamaGenerator
+from services.rag_service.groq_generator import GroqGenerator
 from services.rag_service.opensearch_store import OpenSearchVectorStore
 from services.retrieval_service.hybrid_search import HybridSearch
 
@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 class RAGPipeline:
     def __init__(self, store=None, generator=None) -> None:
         self.store = store or OpenSearchVectorStore()
-        self.generator = generator or OllamaGenerator()
+        self.generator = generator or GroqGenerator()
 
     def index(self, recreate: bool = False) -> dict:
         documents = load_knowledge_documents()
