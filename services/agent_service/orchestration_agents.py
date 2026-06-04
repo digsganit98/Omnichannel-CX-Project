@@ -93,6 +93,20 @@ class QueryResolutionAgent:
                             return QueryResolution(
                                 answer=answer,
                                 confidence=0.95,
+                                contexts=[{
+                                    "text": answer,
+                                    "score": 0.95,
+                                    "metadata": {
+                                        "source": "neo4j_customer_graph",
+                                        "doc_type": "customer_graph",
+                                        "retrieval": "neo4j_graph",
+                                    },
+                                }],
+                                citations=[{
+                                    "index": 1,
+                                    "source": "neo4j_customer_graph",
+                                    "score": 0.95,
+                                }],
                                 retrieval_backend="neo4j_graph",
                             )
             except Exception:
@@ -184,11 +198,14 @@ class WorkflowAutomationAgent:
     def compose_answer(resolution: QueryResolution, ticket: Ticket | None) -> str:
         if ticket is None:
             return resolution.answer
-        return (
+        ticket_note = (
             "I have captured your request and created a support ticket. "
             f"Our {ticket.assigned_team.replace('_', ' ')} team will review it. "
             f"Reference: {ticket.ticket_id}."
         )
+        if resolution.contexts and resolution.answer:
+            return f"{resolution.answer}\n\n{ticket_note}"
+        return ticket_note
 
     def send_reply(self, message: InboundMessage, answer: str) -> dict:
         return self.delivery.send(message, answer)

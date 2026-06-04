@@ -176,6 +176,17 @@ def test_email_complaint_escalates_and_sends_reply():
     assert "skipped" not in ticket_step["details"]
 
 
+def test_high_urgency_ticket_reply_keeps_kb_answer():
+    repo = SQLiteCXRepository(":memory:")
+    response = graph(repo).run(
+        whatsapp_message(text="Block my lost credit card immediately. What should I do?")
+    )
+    assert response.ticket_id
+    assert "Source: [1] InboxIQ_BFSI_KB.pdf:p3" in response.message
+    assert "Reference:" in response.message
+    assert response.rag_contexts
+
+
 def test_duplicate_message_returns_original_response_without_second_send():
     repo = SQLiteCXRepository(":memory:")
     sender = Recorder()
@@ -361,7 +372,48 @@ def test_rag_discards_non_kb_contexts_before_generation():
     assert [c["metadata"]["source"] for c in answer["contexts"]] == ["InboxIQ_BFSI_KB.pdf:p5"]
 
 
+def test_rag_uses_pdf_keyword_fallback_when_vector_store_is_empty():
+    class EmptyStore:
+        def similarity_search(self, query, k):
+            return []
+
+    class NoGeneration:
+        def generate_answer(self, query, contexts, conversation_context):
+            return {"text": "", "model": "test", "llm_used": False}
+
+    answer = RAGPipeline(store=EmptyStore(), generator=NoGeneration()).answer("credit card block")
+    assert answer["contexts"]
+    assert answer["retrieval_backend"] == "keyword_fallback"
+    assert answer["citations"][0]["source"].startswith("InboxIQ_BFSI_KB.pdf")
+
+
 # ── Security / auth tests ─────────────────────────────────────────────────────
+
+def test_rag_reranks_stolen_card_pdf_faq_above_weak_vector_hit():
+    class WeakVectorStore:
+        def similarity_search(self, query, k):
+            return [{
+                "text": "BFSI Knowledge Base FAQs Banking Services Q: How can I open a new savings account?",
+                "score": 0.5,
+                "metadata": {"source": "InboxIQ_BFSI_KB.pdf:p1", "doc_type": "knowledge_base"},
+            }]
+
+    class ContextRecorder:
+        def generate_answer(self, query, contexts, conversation_context):
+            assert "lost or stolen" in contexts[0]["text"].lower()
+            assert "block your card" in contexts[0]["text"].lower()
+            return {
+                "text": "Block the card immediately through the hotline, mobile app, or internet banking. [1]",
+                "model": "test",
+                "llm_used": True,
+            }
+
+    answer = RAGPipeline(store=WeakVectorStore(), generator=ContextRecorder()).answer(
+        "what should I do, my card is stolen"
+    )
+    assert answer["retrieval_backend"] == "hybrid_keyword_rerank"
+    assert "lost or stolen" in answer["contexts"][0]["text"].lower()
+
 
 def test_email_authentication_failure(monkeypatch):
     monkeypatch.setenv("EMAIL_WEBHOOK_SECRET", "expected")

@@ -33,6 +33,20 @@ class RAGPipeline:
             logger.warning("rag_vector_retrieval_failed", extra={"error": retrieval_error})
             contexts = self._local_contexts(query)
         contexts = self._customer_safe_contexts(contexts)
+        local_contexts = self._local_contexts(query)
+        if local_contexts:
+            if not contexts:
+                retrieval_backend = "keyword_fallback"
+                retrieval_error = retrieval_error or "opensearch returned no knowledge_base contexts"
+                contexts = local_contexts
+            elif self._should_prefer_local_context(query, contexts[0], local_contexts[0]):
+                retrieval_backend = "hybrid_keyword_rerank"
+                retrieval_error = retrieval_error or "keyword rerank selected a stronger KB FAQ match"
+                contexts = local_contexts + [
+                    context
+                    for context in contexts
+                    if context.get("metadata", {}).get("source") != local_contexts[0]["metadata"]["source"]
+                ]
         generation = self.generator.generate_answer(query, contexts, conversation_context)
         citations = [
             {"index": index, "source": item["metadata"].get("source", "unknown"), "score": item["score"]}
@@ -77,3 +91,9 @@ class RAGPipeline:
             for context in contexts
             if context.get("metadata", {}).get("doc_type") == "knowledge_base"
         ]
+
+    @staticmethod
+    def _should_prefer_local_context(query: str, vector_context: dict, local_context: dict) -> bool:
+        vector_lexical_score = HybridSearch.score_text(query, vector_context.get("text", ""))
+        local_score = float(local_context.get("score", 0.0))
+        return local_score >= 0.35 and local_score >= vector_lexical_score
