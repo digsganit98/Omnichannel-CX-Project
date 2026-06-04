@@ -377,6 +377,7 @@ class OrchestrationGraph:
 
     def _persist_result(self, graph_state: GraphState) -> dict:
         state = graph_state["runtime"]
+        provider_message_id = self._provider_message_id(state.delivery)
         outbound_turn = self.repository.append_turn(
             conversation_id=state.conversation_id,
             customer_id=state.customer_id,
@@ -387,8 +388,13 @@ class OrchestrationGraph:
             urgency=state.analysis.urgency.value if state.analysis else "low",
             resolved=self._resolved(state),
             ticket_id=state.ticket.ticket_id if state.ticket else None,
+            external_message_id=provider_message_id,
             delivery_status=state.delivery["status"],
-            metadata={"citations": state.resolution.citations if state.resolution else []},
+            metadata={
+                "citations": state.resolution.citations if state.resolution else [],
+                "provider_message_id": provider_message_id,
+                "provider_response": state.delivery.get("provider_response"),
+            },
         )
         if state.resolution:
             self.repository.add_retrieval_evidence(outbound_turn["turn_id"], state.resolution.contexts)
@@ -430,8 +436,17 @@ class OrchestrationGraph:
             llm_model=state.resolution.llm.get("model") if state.resolution else None,
             llm_used=state.resolution.llm.get("llm_used", False) if state.resolution else False,
             outbound_status=state.delivery["status"],
+            outbound_error=state.delivery.get("error"),
             workflow_trace=[entry.model_dump(mode="json") for entry in state.workflow_trace],
         )
+
+    @staticmethod
+    def _provider_message_id(delivery: dict) -> str | None:
+        provider_response = delivery.get("provider_response") or {}
+        messages = provider_response.get("messages") or []
+        if messages and isinstance(messages[0], dict):
+            return messages[0].get("id")
+        return None
 
     def _complete(self, state: OrchestrationState, step: WorkflowStep, agent: str, **details) -> None:
         state.complete(step, agent, **details)

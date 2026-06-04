@@ -96,6 +96,13 @@
               Message
               <textarea id="sim-message" rows="4" required>Please connect me to a human support agent about my refund.</textarea>
             </label>
+            <label>
+              Outbound delivery
+              <select id="whatsapp-outbound-provider">
+                <option value="local_mock">Local mock reply</option>
+                <option value="meta">Real Meta WhatsApp reply</option>
+              </select>
+            </label>
             <button id="simulate-submit" type="submit">Run simulated inbound flow</button>
           </form>
           <form id="email-simulate-form" class="stack channel-form hidden">

@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import json
 
 import pytest
 from fastapi import HTTPException
@@ -9,7 +10,7 @@ from apps.api.dependencies.security import (
     validate_local_whatsapp_test_signature,
     validate_whatsapp_signature,
 )
-from apps.api.routes import test_whatsapp
+from apps.api.routes import integrations, test_whatsapp, whatsapp as whatsapp_admin
 from services.agent_service.cx_agent import CXAgent
 from services.channel_service.adapters.email_adapter import EmailAdapter
 from services.channel_service.adapters.whatsapp_adapter import WhatsAppAdapter
@@ -146,6 +147,18 @@ def test_email_complaint_escalates_and_sends_reply():
     assert "skipped" not in ticket_step["details"]
 
 
+def test_outbound_failure_error_is_returned_in_channel_response():
+    class FailingSender:
+        def send_text(self, *args):
+            raise RuntimeError("provider rejected recipient")
+
+    repo = SQLiteCXRepository(":memory:")
+    response = graph(repo, whatsapp=FailingSender()).run(whatsapp_message())
+
+    assert response.outbound_status == "failed"
+    assert response.outbound_error == "provider rejected recipient"
+
+
 def test_duplicate_message_returns_original_response_without_second_send():
     repo = SQLiteCXRepository(":memory:")
     sender = Recorder()
@@ -252,7 +265,7 @@ def test_customer_answer_kb_excludes_uploaded_ticket_history():
     documents = load_knowledge_documents()
     assert documents
     assert {document.metadata["doc_type"] for document in documents} == {"knowledge_base"}
-    assert all(document.metadata["source"].endswith(".md") for document in documents)
+    assert all(document.metadata["source"].endswith(".pdf") for document in documents)
 
 
 def test_rag_discards_non_kb_contexts_before_generation():
@@ -372,6 +385,38 @@ def test_local_whatsapp_inbound_uses_mock_outbound_provider(monkeypatch):
     assert outbound["details"]["provider_response"]["provider"] == "whatsapp_local_test"
 
 
+def test_local_whatsapp_inbound_can_request_meta_outbound_provider(monkeypatch):
+    captured = {}
+
+    def fake_handle_whatsapp_message(payload):
+        captured["provider"] = payload.metadata["provider"]
+        captured["outbound_provider"] = payload.metadata["outbound_provider"]
+
+        class FakeResponse:
+            def model_dump(self, mode=None):
+                return {"ok": True}
+
+        return FakeResponse()
+
+    monkeypatch.setenv("WHATSAPP_LOCAL_TEST_MODE", "true")
+    monkeypatch.setenv("WHATSAPP_TEST_SIGNATURE", "local-secret")
+    monkeypatch.setenv("WHATSAPP_ACCESS_TOKEN", "meta-token")
+    monkeypatch.setenv("WHATSAPP_PHONE_NUMBER_ID", "phone-id")
+    monkeypatch.setattr(test_whatsapp, "handle_whatsapp_message", fake_handle_whatsapp_message)
+
+    result = test_whatsapp.simulate_whatsapp_inbound(
+        test_whatsapp.LocalWhatsAppInbound(
+            from_="919999999999",
+            text="Where is my order?",
+            outbound_provider="meta",
+        ),
+        x_test_whatsapp_signature="local-secret",
+    )
+
+    assert result == {"ok": True}
+    assert captured == {"provider": "whatsapp_cloud", "outbound_provider": "meta"}
+
+
 def test_local_whatsapp_manual_send_writes_audit_event(monkeypatch):
     monkeypatch.setenv("WHATSAPP_LOCAL_TEST_MODE", "true")
     monkeypatch.setenv("WHATSAPP_TEST_SIGNATURE", "local-secret")
@@ -409,6 +454,79 @@ def test_local_whatsapp_manual_meta_send_uses_cloud_connector(monkeypatch):
     )
     assert result["provider"] == "meta"
     assert result["provider_response"]["messages"][0]["id"] == "wamid-meta-test"
+
+
+def test_whatsapp_status_webhook_updates_outbound_turn_and_admin_lookup(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from apps.api.main import app
+
+    repo = SQLiteCXRepository(":memory:")
+
+    class MetaSender:
+        def send_text(self, to, text):
+            return {"messages": [{"id": "wamid-meta-reply"}], "contacts": [{"wa_id": to}]}
+
+    response = graph(repo, whatsapp=MetaSender()).run(whatsapp_message(metadata={"provider": "whatsapp_cloud"}))
+    assert response.outbound_status == "sent"
+
+    monkeypatch.setenv("WHATSAPP_APP_SECRET", "status-secret")
+    monkeypatch.setenv("ADMIN_API_KEY", "status-admin-key")
+    monkeypatch.setattr(integrations, "get_repository", lambda: repo)
+    monkeypatch.setattr(whatsapp_admin, "get_repository", lambda: repo)
+
+    payload = {
+        "entry": [
+            {
+                "changes": [
+                    {
+                        "value": {
+                            "statuses": [
+                                {
+                                    "id": "wamid-meta-reply",
+                                    "status": "delivered",
+                                    "timestamp": "1710000000",
+                                    "recipient_id": "918555870077",
+                                    "conversation": {"id": "conv-meta"},
+                                    "pricing": {"category": "service"},
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        ]
+    }
+    body = json.dumps(payload, separators=(",", ":")).encode()
+    signature = "sha256=" + hmac.new(b"status-secret", body, hashlib.sha256).hexdigest()
+
+    client = TestClient(app)
+    webhook = client.post(
+        "/integrations/whatsapp/webhook",
+        content=body,
+        headers={"x-hub-signature-256": signature, "content-type": "application/json"},
+    )
+
+    assert webhook.status_code == 200
+    assert webhook.json()["statuses_received"] == 1
+    assert webhook.json()["statuses"][0]["status"] == "delivered"
+
+    admin = client.get(
+        "/admin/whatsapp/delivery-statuses",
+        params={"provider_message_id": "wamid-meta-reply"},
+        headers={"x-admin-key": "status-admin-key"},
+    )
+
+    assert admin.status_code == 200
+    assert admin.json()[0]["status"] == "delivered"
+
+    outbound_turn = next(
+        turn
+        for turn in repo.get_conversation(response.conversation_id)["turns"]
+        if turn["direction"] == "outbound"
+    )
+    assert outbound_turn["delivery_status"] == "delivered"
+    assert outbound_turn["metadata"]["provider_message_id"] == "wamid-meta-reply"
 
 
 class FakeCRM:
@@ -485,6 +603,28 @@ def test_email_admin_routes_are_protected(monkeypatch):
 
     assert response.status_code == 200
     assert response.json()["gmail_ready"] is True
+
+
+def test_whatsapp_admin_status_reports_meta_readiness(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from apps.api.main import app
+
+    monkeypatch.setenv("ADMIN_API_KEY", "whatsapp-admin-key")
+    monkeypatch.setenv("WHATSAPP_ACCESS_TOKEN", "meta-token")
+    monkeypatch.setenv("WHATSAPP_PHONE_NUMBER_ID", "phone-id")
+    monkeypatch.setenv("WHATSAPP_BUSINESS_ACCOUNT_ID", "waba-id")
+    monkeypatch.setenv("WHATSAPP_VERIFY_TOKEN", "verify-token")
+    monkeypatch.setenv("WHATSAPP_APP_SECRET", "app-secret")
+    client = TestClient(app)
+
+    assert client.get("/admin/whatsapp/status").status_code == 401
+    response = client.get("/admin/whatsapp/status", headers={"x-admin-key": "whatsapp-admin-key"})
+
+    assert response.status_code == 200
+    assert response.json()["meta_outbound_ready"] is True
+    assert response.json()["meta_webhook_ready"] is True
+    assert response.json()["business_account_id_configured"] is True
 
 
 def test_orchestration_trace_records_explicit_agent_workflow():

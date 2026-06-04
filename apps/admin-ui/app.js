@@ -290,6 +290,7 @@ async function simulateInbound(event) {
       body: JSON.stringify({
         from: $("#sim-phone").value.trim(),
         text: $("#sim-message").value.trim(),
+        outbound_provider: $("#whatsapp-outbound-provider").value,
       }),
     });
     finishSimulation(button, result, "WhatsApp");

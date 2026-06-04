@@ -20,5 +20,6 @@ class ChannelResponse(BaseModel):
     citations: list[dict] = Field(default_factory=list)
     retrieval_backend: str | None = None
     outbound_status: str = "pending"
+    outbound_error: str | None = None
     duplicate: bool = False
     workflow_trace: list[dict] = Field(default_factory=list)

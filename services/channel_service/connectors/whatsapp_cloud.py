@@ -76,6 +76,35 @@ def whatsapp_cloud_webhook_to_payloads(payload: dict) -> list[WhatsAppWebhookPay
     return messages
 
 
+def whatsapp_cloud_webhook_to_statuses(payload: dict) -> list[dict]:
+    status_events: list[dict] = []
+    for entry in payload.get("entry", []):
+        for change in entry.get("changes", []):
+            value = change.get("value", {})
+            for status in value.get("statuses", []):
+                errors = status.get("errors") or []
+                first_error = errors[0] if errors else {}
+                status_events.append(
+                    {
+                        "provider_message_id": status.get("id"),
+                        "status": status.get("status"),
+                        "recipient_id": status.get("recipient_id"),
+                        "timestamp": status.get("timestamp"),
+                        "conversation": status.get("conversation"),
+                        "pricing": status.get("pricing"),
+                        "error_code": str(first_error.get("code")) if first_error.get("code") is not None else None,
+                        "error_title": first_error.get("title"),
+                        "error_details": first_error.get("message") or first_error.get("error_data", {}).get("details"),
+                        "raw": status,
+                    }
+                )
+    return [
+        event
+        for event in status_events
+        if event.get("provider_message_id") and event.get("status")
+    ]
+
+
 def _extract_text(message: dict) -> str | None:
     message_type = message.get("type")
     if message_type == "text":

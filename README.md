@@ -162,11 +162,13 @@ Expected result:
 
 ```json
 {
-  "documents_loaded": 6,
-  "indexed": 6,
+  "documents_loaded": 1,
+  "indexed": 1,
   "errors": 0
 }
 ```
+
+`documents_loaded` and `indexed` may be higher if the PDF is split into multiple indexed chunks.
 
 ### 5. Open the UI
 
@@ -189,13 +191,15 @@ The browser UI is the recommended local test surface.
 3. Select **Connect**.
 4. Select the **WhatsApp** tab.
 5. Enter `WHATSAPP_TEST_SIGNATURE`.
-6. Use a customer phone such as:
+6. Use a Meta-allowed recipient phone number such as:
 
 ```text
 919999999999
 ```
 
-7. Submit:
+7. For local-only testing, keep **Outbound delivery** as `Local mock reply`.
+8. For a real WhatsApp response through Meta, select **Real Meta WhatsApp reply**.
+9. Submit:
 
 ```text
 Where is my order delivery?
@@ -205,9 +209,11 @@ Expected result:
 
 - `intent` is `order_tracking`
 - `resolved` is `true`
-- citations reference files such as `orders.md` or `shipping.md`
+- citations reference `InboxIQ_BFSI_KB.pdf`
 - `outbound_status` is `sent`
 - no ticket is created
+
+For real Meta delivery, the phone number must be an allowed test recipient for your Meta WhatsApp sender.
 
 ### Test Email
 
@@ -266,20 +272,15 @@ Expected result:
 
 ## Knowledge Base And RAG
 
-Customer-facing RAG indexes only approved Markdown files from:
+Customer-facing RAG indexes only the approved PDF knowledge base file from:
 
 ```text
-data/knowledge_base/*.md
+data/knowledge_base/InboxIQ_BFSI_KB.pdf
 ```
 
-Current knowledge files include:
+Current knowledge file:
 
-- `billing.md`
-- `faq.md`
-- `orders.md`
-- `products.md`
-- `refunds.md`
-- `shipping.md`
+- `InboxIQ_BFSI_KB.pdf`
 
 Customer profiles, CRM records, uploaded ticket history, names, cities, phone numbers, emails, and order IDs are intentionally excluded from customer-facing RAG contexts and citations.
 
@@ -337,6 +338,24 @@ Expected:
 - `llm.model_installed: true`
 - `embeddings.active_backend: sentence_transformers`
 
+Check WhatsApp Meta configuration:
+
+```powershell
+Invoke-RestMethod -Headers $headers "http://localhost:8000/admin/whatsapp/status"
+```
+
+Expected for real Meta outbound:
+
+- `access_token_configured: true`
+- `phone_number_id_configured: true`
+- `meta_outbound_ready: true`
+
+Expected for real Meta webhook setup:
+
+- `verify_token_configured: true`
+- `app_secret_configured: true`
+- `meta_webhook_ready: true`
+
 Check outbound email configuration:
 
 ```powershell
@@ -375,6 +394,8 @@ GET  /admin/orchestration/workflow
 GET  /admin/orchestration/ai-runtime
 GET  /admin/email/status
 POST /admin/email/test-send
+GET  /admin/whatsapp/status
+GET  /admin/whatsapp/delivery-statuses?provider_message_id=<wamid...>
 ```
 
 Admin endpoints require:
@@ -436,6 +457,7 @@ $body = @{
   text = "Where is my order delivery?"
   profile_name = "Local WhatsApp Tester"
   message_id = "local-wa-001"
+  outbound_provider = "local_mock"
   metadata = @{ linked_email = "customer@example.com" }
 } | ConvertTo-Json
 
@@ -445,6 +467,22 @@ Invoke-RestMethod -Method Post -Headers $headers -ContentType "application/json"
 
 Always use a fresh `message_id` for a new test. Reusing the same message ID intentionally returns the deduplicated response.
 
+To simulate inbound locally but send the generated response through the real Meta WhatsApp Cloud API, use:
+
+```powershell
+$headers = @{ "x-test-whatsapp-signature" = "<WHATSAPP_TEST_SIGNATURE from .env>" }
+$body = @{
+  from = "<Meta-allowed-recipient-phone-without-plus>"
+  text = "Where is my order delivery?"
+  profile_name = "Local WhatsApp Tester"
+  message_id = "local-wa-meta-001"
+  outbound_provider = "meta"
+} | ConvertTo-Json
+
+Invoke-RestMethod -Method Post -Headers $headers -ContentType "application/json" `
+  -Body $body "http://localhost:8000/test/whatsapp/inbound-simulate"
+```
+
 ## Real WhatsApp Outbound Test
 
 For a real Meta outbound test, set:
@@ -452,6 +490,7 @@ For a real Meta outbound test, set:
 ```text
 WHATSAPP_ACCESS_TOKEN=<Meta access token>
 WHATSAPP_PHONE_NUMBER_ID=<Meta phone number ID>
+WHATSAPP_BUSINESS_ACCOUNT_ID=<WhatsApp business account ID, optional for this app>
 ```
 
 Recreate the API container:
@@ -472,9 +511,9 @@ Then call `POST /test/whatsapp/send` with:
 
 Use a Meta-verified recipient number in international format without `+`.
 
-## Real Webhook Setup Later
+## WhatsApp Webhook And Delivery Status
 
-For full Meta webhook testing later, expose port `8000` through VS Code Port Forwarding or an IT-installed ngrok tunnel.
+To receive real inbound WhatsApp messages and delivery statuses, expose port `8000` through VS Code Port Forwarding, ngrok, or another approved public tunnel.
 
 Configure Meta with:
 
@@ -482,7 +521,26 @@ Configure Meta with:
 https://<public-host>/integrations/whatsapp/webhook
 ```
 
-The production webhook validates `x-hub-signature-256` with `WHATSAPP_APP_SECRET`.
+In Meta Dashboard, subscribe the webhook to the WhatsApp `messages` field. Meta sends both inbound messages and outbound status callbacks through that same field.
+
+The production webhook validates `x-hub-signature-256` with `WHATSAPP_APP_SECRET`. The verification challenge uses `WHATSAPP_VERIFY_TOKEN`.
+
+After a real WhatsApp send returns a provider message id such as `wamid...`, check delivery status with:
+
+```powershell
+$headers = @{ "x-admin-key" = "<ADMIN_API_KEY from .env>" }
+Invoke-RestMethod -Headers $headers `
+  "http://localhost:8000/admin/whatsapp/delivery-statuses?provider_message_id=<wamid...>"
+```
+
+Expected statuses from Meta include:
+
+- `sent`
+- `delivered`
+- `read`
+- `failed`
+
+The app persists each callback in `whatsapp_delivery_statuses`, updates the matching outbound conversation turn, and writes a `whatsapp_delivery_status_received` audit event.
 
 ## Optional CRM Or Jira Sync
 

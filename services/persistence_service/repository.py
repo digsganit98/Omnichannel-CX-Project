@@ -40,6 +40,8 @@ class CXRepository(Protocol):
     def list_ticket_events(self, ticket_id: str) -> list[dict]: ...
     def add_retrieval_evidence(self, turn_id: str, contexts: list[dict]) -> None: ...
     def list_retrieval_evidence(self, turn_id: str | None = None) -> list[dict]: ...
+    def record_whatsapp_delivery_status(self, status: dict) -> dict: ...
+    def list_whatsapp_delivery_statuses(self, provider_message_id: str | None = None, limit: int = 50) -> list[dict]: ...
     def add_audit_event(self, event_type: str, correlation_id: str, **values) -> None: ...
     def list_audit_events(self, correlation_id: str | None = None) -> list[dict]: ...
     def get_conversation(self, conversation_id: str) -> dict | None: ...
@@ -316,6 +318,68 @@ class SQLiteCXRepository:
         with self.connection() as conn:
             rows = conn.execute(query, args).fetchall()
         return [self._json_fields(dict(row), "metadata_json") for row in rows]
+
+    def record_whatsapp_delivery_status(self, status: dict) -> dict:
+        provider_message_id = status["provider_message_id"]
+        turn = self._find_turn_by_provider_message_id(provider_message_id)
+        event_id = new_id("wastat")
+        created_at = utc_now()
+        with self.connection() as conn:
+            if turn:
+                conn.execute(
+                    "UPDATE conversation_turns SET delivery_status = ? WHERE turn_id = ?",
+                    (status["status"], turn["turn_id"]),
+                )
+            conn.execute(
+                "INSERT INTO whatsapp_delivery_statuses(status_event_id, provider_message_id, status, recipient_id, "
+                "conversation_id, turn_id, timestamp, error_code, error_title, error_details, raw_json, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    event_id,
+                    provider_message_id,
+                    status["status"],
+                    status.get("recipient_id"),
+                    turn["conversation_id"] if turn else None,
+                    turn["turn_id"] if turn else None,
+                    status.get("timestamp"),
+                    status.get("error_code"),
+                    status.get("error_title"),
+                    status.get("error_details"),
+                    json_text(status.get("raw")),
+                    created_at,
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM whatsapp_delivery_statuses WHERE status_event_id = ?", (event_id,)
+            ).fetchone()
+        return self._json_fields(dict(row), "raw_json")
+
+    def list_whatsapp_delivery_statuses(
+        self, provider_message_id: str | None = None, limit: int = 50
+    ) -> list[dict]:
+        query = "SELECT * FROM whatsapp_delivery_statuses"
+        args: tuple = ()
+        if provider_message_id:
+            query += " WHERE provider_message_id = ?"
+            args = (provider_message_id,)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        args = (*args, limit)
+        with self.connection() as conn:
+            rows = conn.execute(query, args).fetchall()
+        return [self._json_fields(dict(row), "raw_json") for row in rows]
+
+    def _find_turn_by_provider_message_id(self, provider_message_id: str) -> dict | None:
+        with self.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM conversation_turns WHERE channel = ? AND direction = 'outbound' ORDER BY created_at DESC",
+                (Channel.WHATSAPP.value,),
+            ).fetchall()
+        for row in rows:
+            turn = self._turn_dict(row)
+            metadata = turn.get("metadata", {})
+            if metadata.get("provider_message_id") == provider_message_id:
+                return turn
+        return None
 
     def add_audit_event(self, event_type: str, correlation_id: str, **values) -> None:
         with self.connection() as conn:

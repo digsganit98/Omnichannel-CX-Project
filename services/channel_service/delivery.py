@@ -19,6 +19,7 @@ class OutboundDeliveryService:
         if (
             os.getenv("OUTBOUND_DELIVERY_MODE", "log") == "log"
             and message.provider != "whatsapp_local_test"
+            and message.metadata.get("outbound_provider") != "meta"
             and not (self.whatsapp or self.email)
         ):
             logger.info("outbound_local_delivery", extra={"channel": message.channel.value, "message_id": message.external_message_id})

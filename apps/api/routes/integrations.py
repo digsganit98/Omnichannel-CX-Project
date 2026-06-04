@@ -4,9 +4,15 @@ import os
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
 
+from apps.api.dependencies.runtime import get_repository
 from apps.api.dependencies.security import validate_email_secret, validate_whatsapp_signature
-from services.channel_service.connectors.whatsapp_cloud import verify_webhook, whatsapp_cloud_webhook_to_payloads
+from services.channel_service.connectors.whatsapp_cloud import (
+    verify_webhook,
+    whatsapp_cloud_webhook_to_payloads,
+    whatsapp_cloud_webhook_to_statuses,
+)
 from shared.schemas.messages import EmailWebhookPayload
+from shared.utils.ids import new_id
 
 from .webhooks import handle_email_message, handle_whatsapp_message
 
@@ -29,11 +35,42 @@ def verify_whatsapp_webhook(
 async def receive_whatsapp_cloud_webhook(
     request: Request,
     x_hub_signature_256: str | None = Header(default=None),
-) -> list[dict]:
+) -> dict:
     body = await request.body()
     validate_whatsapp_signature(body, x_hub_signature_256)
-    payloads = whatsapp_cloud_webhook_to_payloads(json.loads(body))
-    return [handle_whatsapp_message(payload).model_dump(mode="json") for payload in payloads]
+    payload = json.loads(body)
+    payloads = whatsapp_cloud_webhook_to_payloads(payload)
+    statuses = whatsapp_cloud_webhook_to_statuses(payload)
+    message_results = [handle_whatsapp_message(item).model_dump(mode="json") for item in payloads]
+    status_results = [_record_whatsapp_status(status) for status in statuses]
+    return {
+        "messages_received": len(message_results),
+        "statuses_received": len(status_results),
+        "messages": message_results,
+        "statuses": status_results,
+    }
+
+
+def _record_whatsapp_status(status: dict) -> dict:
+    repo = get_repository()
+    recorded = repo.record_whatsapp_delivery_status(status)
+    repo.add_audit_event(
+        "whatsapp_delivery_status_received",
+        new_id("corr"),
+        channel="whatsapp",
+        message_id=status["provider_message_id"],
+        conversation_id=recorded.get("conversation_id"),
+        details={
+            "provider_message_id": status["provider_message_id"],
+            "status": status["status"],
+            "recipient_id": status.get("recipient_id"),
+            "turn_id": recorded.get("turn_id"),
+            "error_code": status.get("error_code"),
+            "error_title": status.get("error_title"),
+            "error_details": status.get("error_details"),
+        },
+    )
+    return recorded
 
 
 @router.post("/email/webhook")

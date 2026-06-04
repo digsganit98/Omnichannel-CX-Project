@@ -21,6 +21,7 @@ class LocalWhatsAppInbound(BaseModel):
     text: str
     profile_name: str | None = "Local WhatsApp Tester"
     message_id: str | None = None
+    outbound_provider: str = "local_mock"
     metadata: dict = Field(default_factory=dict)
 
     model_config = {"populate_by_name": True}
@@ -47,8 +48,9 @@ def simulate_whatsapp_inbound(
         message_id=message_id,
         metadata={
             **payload.metadata,
-            "provider": "whatsapp_local_test",
+            "provider": _inbound_provider(payload.outbound_provider),
             "test_mode": True,
+            "outbound_provider": payload.outbound_provider,
             "raw_reference": "local-whatsapp-simulation",
         },
     )
@@ -105,3 +107,20 @@ def _outbound_connector(provider: str):
             )
         return WhatsAppCloudConnector(access_token, phone_number_id)
     raise HTTPException(status_code=400, detail="provider must be local_mock or meta")
+
+
+def _inbound_provider(outbound_provider: str) -> str:
+    if outbound_provider == "local_mock":
+        return "whatsapp_local_test"
+    if outbound_provider == "meta":
+        _validate_meta_config()
+        return "whatsapp_cloud"
+    raise HTTPException(status_code=400, detail="outbound_provider must be local_mock or meta")
+
+
+def _validate_meta_config() -> None:
+    if not os.getenv("WHATSAPP_ACCESS_TOKEN") or not os.getenv("WHATSAPP_PHONE_NUMBER_ID"):
+        raise HTTPException(
+            status_code=503,
+            detail="WHATSAPP_ACCESS_TOKEN and WHATSAPP_PHONE_NUMBER_ID are required for Meta outbound delivery",
+        )
