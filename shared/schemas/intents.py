@@ -4,15 +4,20 @@ from pydantic import BaseModel, Field
 
 
 class Intent(StrEnum):
-    ORDER_TRACKING = "order_tracking"
-    REFUND_REQUEST = "refund_request"
-    RETURN_REQUEST = "return_request"
-    PRODUCT_INFORMATION = "product_information"
-    BILLING_ISSUE = "billing_issue"
-    TECHNICAL_SUPPORT = "technical_support"
-    COMPLAINT = "complaint"
-    GENERAL_INQUIRY = "general_inquiry"
-    HUMAN_ESCALATION = "human_escalation"
+    ACCOUNT_BALANCE_INQUIRY = "account_balance_inquiry"
+    TRANSACTION_DISPUTE     = "transaction_dispute"
+    FUND_TRANSFER           = "fund_transfer"
+    LOAN_STATUS             = "loan_status"
+    LOAN_APPLICATION        = "loan_application"
+    LOAN_DEFAULT_NOTICE     = "loan_default_notice"
+    POLICY_STATUS           = "policy_status"
+    INSURANCE_CLAIM         = "insurance_claim"
+    CARD_MANAGEMENT         = "card_management"
+    KYC_UPDATE              = "kyc_update"
+    FRAUD_REPORT            = "fraud_report"
+    COMPLAINT               = "complaint"
+    GENERAL_INQUIRY         = "general_inquiry"
+    HUMAN_ESCALATION        = "human_escalation"
 
 
 class Urgency(StrEnum):

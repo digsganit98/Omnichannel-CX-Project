@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends
 
 from apps.api.dependencies.security import require_admin_key
 from services.rag_service.config import embedding_backend, embedding_dimension, embedding_model
-from services.rag_service.generator import OllamaGenerator
+from services.rag_service.groq_generator import GroqGenerator
 from services.orchestration_service.graph import ORCHESTRATION_ENGINE, WORKFLOW_EDGES
 from services.orchestration_service.state import WorkflowStep
 
@@ -20,24 +20,19 @@ def workflow_definition() -> dict:
         "framework": "LangGraph",
         "agents": [
             {
-                "name": "intent_detection_agent",
-                "responsibility": "Classify intent, urgency, sentiment, confidence, and reason.",
-                "execution": "ollama_llm_with_validated_rule_fallback",
+                "name": "intent_classification_agent",
+                "responsibility": "Classify BFSI intent, urgency, sentiment with Groq LLM; enrich context from Neo4j customer graph.",
+                "execution": "groq_llm_with_neo4j_enrichment_and_rule_fallback",
             },
             {
                 "name": "query_resolution_agent",
-                "responsibility": "Retrieve verified knowledge and generate cited customer answers.",
-                "execution": "sentence_transformer_retrieval_and_ollama_llm_generation",
+                "responsibility": "Route to Neo4j (transactional intents) or RAG/KB (policy and general). Return cited answers.",
+                "execution": "neo4j_graph_or_opensearch_rag_with_groq_generation",
             },
             {
-                "name": "ticket_management_agent",
-                "responsibility": "Decide escalation, create durable tickets, and synchronize CRM records.",
-                "execution": "deterministic_business_policy",
-            },
-            {
-                "name": "workflow_automation_agent",
-                "responsibility": "Load context, compose the final action, deliver replies, and persist results.",
-                "execution": "deterministic_workflow_automation",
+                "name": "ticket_creation_agent",
+                "responsibility": "Decide when human review is needed, create JIRA tickets, and synchronise CRM records.",
+                "execution": "deterministic_bfsi_escalation_policy_with_jira_sync",
             },
         ],
         "steps": [step.value for step in WorkflowStep],
@@ -48,7 +43,7 @@ def workflow_definition() -> dict:
 @router.get("/ai-runtime")
 def ai_runtime_status() -> dict:
     return {
-        "llm": OllamaGenerator().status(check_connection=True),
+        "llm": GroqGenerator().status(check_connection=True),
         "embeddings": {
             "configured_backend": embedding_backend(),
             "model": embedding_model(),

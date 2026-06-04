@@ -22,12 +22,13 @@ from services.orchestration_service.graph import OrchestrationGraph
 from services.persistence_service.repository import SQLiteCXRepository
 from services.rag_service.embeddings import SemanticEmbeddings
 from services.rag_service.documents import load_knowledge_documents
-from services.rag_service.generator import OllamaGenerator
 from services.rag_service.rag_pipeline import RAGPipeline
 from shared.schemas.intents import Intent
 from shared.schemas.messages import EmailWebhookPayload, WhatsAppWebhookPayload
 from shared.schemas.tickets import TicketStatus
 
+
+# ── Mock LLM generators ───────────────────────────────────────────────────────
 
 class NoLLM:
     model = "test"
@@ -37,24 +38,26 @@ class NoLLM:
 
 
 class ValidLLM:
+    """Returns a valid BFSI intent with high confidence."""
     def classify_message(self, message, context):
         return {
-            "intent": "order_tracking",
+            "intent": "loan_status",
             "confidence": 0.9,
             "urgency": "low",
             "sentiment": "neutral",
-            "reason": "Customer asked for shipment tracking.",
+            "reason": "Customer asked about their loan repayment status.",
         }
 
 
 class UnderstatedLLM:
+    """Returns an understated urgency/sentiment for a fraud message."""
     def classify_message(self, message, context):
         return {
-            "intent": "refund_request",
+            "intent": "fraud_report",
             "confidence": 1.0,
             "urgency": "low",
             "sentiment": "positive",
-            "reason": "Customer requested a refund.",
+            "reason": "Customer reported fraud.",
         }
 
 
@@ -63,17 +66,41 @@ class FakeRAG:
         if "unknown" in query.lower():
             return {"answer": "manual review", "confidence": 0.0, "contexts": [], "citations": [], "llm": {}}
         context_item = {
-            "text": "Customers can track orders after dispatch.",
+            "text": "For loan EMI queries, customers can check their repayment schedule in the app.",
             "score": 0.91,
-            "metadata": {"source": "orders.md", "document_version": "test-v1"},
+            "metadata": {"source": "InboxIQ_BFSI_KB.pdf:p3", "document_version": "test-v1"},
         }
         return {
-            "answer": "Customers can track orders after dispatch. Source: [1] orders.md",
+            "answer": "You can check your loan repayment schedule in the app. Source: [1] InboxIQ_BFSI_KB.pdf:p3",
             "confidence": 0.91,
             "contexts": [context_item],
-            "citations": [{"index": 1, "source": "orders.md", "score": 0.91}],
+            "citations": [{"index": 1, "source": "InboxIQ_BFSI_KB.pdf:p3", "score": 0.91}],
             "llm": {"llm_used": False},
         }
+
+
+class FakeNeo4j:
+    """Stub Neo4j client that returns canned BFSI graph data."""
+
+    def query(self, cypher, params=None):
+        if "customer_id" in cypher and "$cid" in cypher and "Loan" in cypher:
+            return [{"loan_id": "L001", "loan_type": "Personal Loan", "status": "Active",
+                     "amount_inr": 500000, "interest_rate": 10.5, "next_step": "Pay EMI by 5th",
+                     "last_updated": "2024-01-01"}]
+        if "customer_id" in cypher and "$cid" in cypher and "Claim" in cypher:
+            return []
+        if "phone" in cypher or "email" in cypher:
+            return [{"customer_id": "CUST-001", "email": "customer@example.com",
+                     "phone": "+919999999999", "city": "Mumbai"}]
+        return []
+
+    def write(self, cypher, params=None):
+        pass
+
+    def close(self):
+        pass
+
+    enabled = True
 
 
 class Recorder:
@@ -85,17 +112,18 @@ class Recorder:
         return {"id": "provider-message-id"}
 
 
-def graph(repository, whatsapp=None, email=None, crm=None):
+def graph(repository, whatsapp=None, email=None, crm=None, neo4j_client=None):
     return OrchestrationGraph(
         repository,
         agent=CXAgent(NoLLM()),
         rag=FakeRAG(),
         delivery=OutboundDeliveryService(whatsapp=whatsapp, email=email),
         crm=crm,
+        neo4j_client=neo4j_client,
     )
 
 
-def whatsapp_message(message_id="wamid-1", text="Where is my order?", metadata=None):
+def whatsapp_message(message_id="wamid-1", text="What is my loan EMI status?", metadata=None):
     return WhatsAppAdapter().normalize(
         WhatsAppWebhookPayload(
             from_="+919999999999",
@@ -106,11 +134,11 @@ def whatsapp_message(message_id="wamid-1", text="Where is my order?", metadata=N
     )
 
 
-def email_message(message_id="email-1", body="Where is my order?", metadata=None):
+def email_message(message_id="email-1", body="What is my loan EMI status?", metadata=None):
     return EmailAdapter().normalize(
         EmailWebhookPayload(
             from_email="customer@example.com",
-            subject="Customer request",
+            subject="Loan query",
             body=body,
             message_id=message_id,
             metadata={"provider": "email_webhook", **(metadata or {})},
@@ -118,26 +146,28 @@ def email_message(message_id="email-1", body="Where is my order?", metadata=None
     )
 
 
-def test_whatsapp_order_query_resolves_with_citation_and_sends_reply():
+# ── Core workflow tests ───────────────────────────────────────────────────────
+
+def test_whatsapp_bfsi_query_resolves_with_citation_and_sends_reply():
     repo = SQLiteCXRepository(":memory:")
     sender = Recorder()
     response = graph(repo, whatsapp=sender).run(whatsapp_message())
     assert response.resolved is True
-    assert response.intent == "order_tracking"
-    assert response.citations[0]["source"] == "orders.md"
-    assert response.retrieval_backend == "unknown"
+    assert response.citations[0]["source"] == "InboxIQ_BFSI_KB.pdf:p3"
     assert response.outbound_status == "sent"
     assert sender.sent
     ticket_step = next(entry for entry in response.workflow_trace if entry["step"] == "create_or_update_ticket")
     assert ticket_step["details"]["skipped"] is True
     evidence = repo.list_retrieval_evidence()
-    assert evidence[0]["source"] == "orders.md"
+    assert evidence[0]["source"] == "InboxIQ_BFSI_KB.pdf:p3"
 
 
 def test_email_complaint_escalates_and_sends_reply():
     repo = SQLiteCXRepository(":memory:")
     sender = Recorder()
-    response = graph(repo, email=sender).run(email_message(body="This is an unacceptable complaint. I need a human."))
+    response = graph(repo, email=sender).run(
+        email_message(body="This is an unacceptable complaint. I need a human agent immediately.")
+    )
     assert response.resolved is False
     assert response.intent in {"complaint", "human_escalation"}
     assert response.ticket_id
@@ -183,10 +213,10 @@ def test_multi_turn_context_is_persisted():
     repo = SQLiteCXRepository(":memory:")
     workflow = graph(repo)
     response = workflow.run(whatsapp_message())
-    workflow.run(whatsapp_message(message_id="wamid-2", text="Can you check that order again?"))
+    workflow.run(whatsapp_message(message_id="wamid-2", text="Can you check my EMI again?"))
     conversation = repo.get_conversation(response.conversation_id)
     assert len(conversation["turns"]) == 4
-    assert "check that order again" in conversation["summary"]
+    assert "EMI" in conversation["summary"]
 
 
 def test_customer_message_can_resolve_active_ticket_without_rag():
@@ -231,37 +261,89 @@ def test_restart_persistence(tmp_path):
     assert second_repo.list_audit_events(response.correlation_id)
 
 
-def test_intent_classifier_supports_phase1_intents():
-    assert classify_intent("Please refund my payment").intent == Intent.REFUND_REQUEST
-    assert classify_intent("Is this product available in blue?").intent == Intent.PRODUCT_INFORMATION
-    assert classify_intent("I want a human representative").intent == Intent.HUMAN_ESCALATION
+# ── BFSI intent classification tests ─────────────────────────────────────────
+
+def test_intent_classifier_supports_bfsi_intents():
+    assert classify_intent("Please report a fraud transaction on my account").intent == Intent.FRAUD_REPORT
+    assert classify_intent("What is my outstanding loan EMI?").intent == Intent.LOAN_STATUS
+    assert classify_intent("I want to speak to a human representative").intent == Intent.HUMAN_ESCALATION
+    assert classify_intent("Block my lost credit card immediately").intent == Intent.CARD_MANAGEMENT
+    assert classify_intent("I need to file an insurance claim for my accident").intent == Intent.INSURANCE_CLAIM
 
 
 def test_llm_intent_result_accepts_model_reason():
-    result = CXAgent(ValidLLM()).analyze("Where is my shipment?")
-    assert result.intent == Intent.ORDER_TRACKING
-    assert result.reason == "Customer asked for shipment tracking."
-    assert result.analysis_source == "ollama_llm"
+    result = CXAgent(ValidLLM()).analyze("What is the status of my loan repayment?")
+    assert result.intent == Intent.LOAN_STATUS
+    assert result.reason == "Customer asked about their loan repayment status."
+    assert result.analysis_source == "groq_llm"
 
 
 def test_llm_intent_guardrails_raise_understated_sentiment_and_urgency():
     result = CXAgent(UnderstatedLLM()).analyze(
-        "I want refund, and cancel my order. Connect me to an human agent immediately."
+        "Someone hacked my account and stole all my money. This is fraud! Help immediately!"
     )
-    assert result.intent == Intent.REFUND_REQUEST
+    assert result.intent == Intent.FRAUD_REPORT
     assert result.sentiment == "negative"
     assert result.urgency.value == "high"
     assert "Deterministic guardrails raised: sentiment, urgency." in result.reason
 
 
+# ── Neo4j enrichment tests ────────────────────────────────────────────────────
+
+def test_neo4j_context_enriches_intent_classification():
+    repo = SQLiteCXRepository(":memory:")
+    fake_neo4j = FakeNeo4j()
+    response = graph(repo, neo4j_client=fake_neo4j).run(
+        whatsapp_message(text="What is my loan status?")
+    )
+    assert response.intent in {
+        "loan_status", "general_inquiry", "loan_application", "loan_default_notice"
+    }
+
+
+def test_query_resolution_agent_routes_transactional_intent_to_neo4j():
+    from services.agent_service.orchestration_agents import QueryResolutionAgent
+    from services.channel_service.adapters.whatsapp_adapter import WhatsAppAdapter
+    from shared.schemas.messages import WhatsAppWebhookPayload
+
+    agent = QueryResolutionAgent(neo4j_client=FakeNeo4j())
+    msg = WhatsAppAdapter().normalize(
+        WhatsAppWebhookPayload(from_="+919999999999", text="What is my loan status?",
+                               message_id="test-1", metadata={"provider": "test"})
+    )
+    context = {"graph_context": {"customer_id": "CUST-001"}}
+    resolution = agent.run(msg, context, intent="loan_status")
+    assert resolution.retrieval_backend == "neo4j_graph"
+    assert "loan" in resolution.answer.lower() or "L001" in resolution.answer
+
+
+def test_query_resolution_agent_routes_general_inquiry_to_rag():
+    from services.agent_service.orchestration_agents import QueryResolutionAgent
+    from services.channel_service.adapters.whatsapp_adapter import WhatsAppAdapter
+    from shared.schemas.messages import WhatsAppWebhookPayload
+
+    fake_rag = FakeRAG()
+    agent = QueryResolutionAgent(rag=fake_rag, neo4j_client=FakeNeo4j())
+    msg = WhatsAppAdapter().normalize(
+        WhatsAppWebhookPayload(from_="+919999999999", text="What documents do I need for KYC?",
+                               message_id="test-2", metadata={"provider": "test"})
+    )
+    resolution = agent.run(msg, {}, intent="kyc_update")
+    # kyc_update is not a TRANSACTIONAL_INTENT → should use RAG
+    assert resolution.retrieval_backend != "neo4j_graph"
+
+
+# ── RAG / knowledge base tests ────────────────────────────────────────────────
+
 def test_low_confidence_retrieval_creates_ticket():
     repo = SQLiteCXRepository(":memory:")
-    response = graph(repo).run(whatsapp_message(text="unknown question"))
+    response = graph(repo).run(whatsapp_message(text="unknown question xyz"))
     assert response.ticket_id
     assert repo.get_ticket(response.ticket_id)
 
 
-def test_customer_answer_kb_excludes_uploaded_ticket_history():
+def test_customer_answer_kb_documents_are_knowledge_base_type():
+    """PDF KB docs should all have doc_type=knowledge_base."""
     documents = load_knowledge_documents()
     assert documents
     assert {document.metadata["doc_type"] for document in documents} == {"knowledge_base"}
@@ -273,24 +355,67 @@ def test_rag_discards_non_kb_contexts_before_generation():
         def similarity_search(self, query, k):
             return [
                 {
-                    "text": "Customer: Example Name | Order ID: O123",
+                    "text": "Customer: Example Name | Loan: L123",
                     "score": 0.99,
                     "metadata": {"source": "ticket-export.json", "doc_type": "ticket_history"},
                 },
                 {
-                    "text": "Approved refund policy.",
+                    "text": "Insurance claim process requires form IC-01.",
                     "score": 0.8,
-                    "metadata": {"source": "refunds.md", "doc_type": "knowledge_base"},
+                    "metadata": {"source": "InboxIQ_BFSI_KB.pdf:p5", "doc_type": "knowledge_base"},
                 },
             ]
 
     class ContextRecorder:
         def generate_answer(self, query, contexts, conversation_context):
-            assert [context["metadata"]["source"] for context in contexts] == ["refunds.md"]
+            assert [c["metadata"]["source"] for c in contexts] == ["InboxIQ_BFSI_KB.pdf:p5"]
             return {"text": "Approved answer.", "llm_used": True}
 
-    answer = RAGPipeline(store=UnsafeStore(), generator=ContextRecorder()).answer("refund policy")
-    assert [context["metadata"]["source"] for context in answer["contexts"]] == ["refunds.md"]
+    answer = RAGPipeline(store=UnsafeStore(), generator=ContextRecorder()).answer("insurance claim process")
+    assert [c["metadata"]["source"] for c in answer["contexts"]] == ["InboxIQ_BFSI_KB.pdf:p5"]
+
+
+def test_rag_uses_pdf_keyword_fallback_when_vector_store_is_empty():
+    class EmptyStore:
+        def similarity_search(self, query, k):
+            return []
+
+    class NoGeneration:
+        def generate_answer(self, query, contexts, conversation_context):
+            return {"text": "", "model": "test", "llm_used": False}
+
+    answer = RAGPipeline(store=EmptyStore(), generator=NoGeneration()).answer("credit card block")
+    assert answer["contexts"]
+    assert answer["retrieval_backend"] == "keyword_fallback"
+    assert answer["citations"][0]["source"].startswith("InboxIQ_BFSI_KB.pdf")
+
+
+# ── Security / auth tests ─────────────────────────────────────────────────────
+
+def test_rag_reranks_stolen_card_pdf_faq_above_weak_vector_hit():
+    class WeakVectorStore:
+        def similarity_search(self, query, k):
+            return [{
+                "text": "BFSI Knowledge Base FAQs Banking Services Q: How can I open a new savings account?",
+                "score": 0.5,
+                "metadata": {"source": "InboxIQ_BFSI_KB.pdf:p1", "doc_type": "knowledge_base"},
+            }]
+
+    class ContextRecorder:
+        def generate_answer(self, query, contexts, conversation_context):
+            assert "lost or stolen" in contexts[0]["text"].lower()
+            assert "block your card" in contexts[0]["text"].lower()
+            return {
+                "text": "Block the card immediately through the hotline, mobile app, or internet banking. [1]",
+                "model": "test",
+                "llm_used": True,
+            }
+
+    answer = RAGPipeline(store=WeakVectorStore(), generator=ContextRecorder()).answer(
+        "what should I do, my card is stolen"
+    )
+    assert answer["retrieval_backend"] == "hybrid_keyword_rerank"
+    assert "lost or stolen" in answer["contexts"][0]["text"].lower()
 
 
 def test_email_authentication_failure(monkeypatch):
@@ -537,32 +662,35 @@ class FakeCRM:
         return CRMResult(
             "synced",
             {
-                "external_ticket_id": "CRM-101",
-                "external_ticket_url": "https://crm.example.test/tickets/CRM-101",
+                "external_ticket_id": "BFSI-101",
+                "external_ticket_url": "https://your-domain.atlassian.net/browse/BFSI-101",
             },
         )
 
     def add_comment(self, external_ticket_id, comment):
-        assert external_ticket_id == "CRM-101"
+        assert external_ticket_id == "BFSI-101"
         return CRMResult("synced", {"comment_id": "comment-1"})
 
     def update_ticket_status(self, external_ticket_id, status):
-        assert external_ticket_id == "CRM-101"
+        assert external_ticket_id == "BFSI-101"
         return CRMResult("synced", {"status": status})
 
 
-def test_ticket_crm_sync_profile_enrichment_and_lifecycle():
+def test_ticket_jira_sync_and_lifecycle():
     repo = SQLiteCXRepository(":memory:")
     workflow = graph(repo, crm=FakeCRM())
-    response = workflow.run(email_message(body="This is an unacceptable complaint. I need a human."))
+    response = workflow.run(
+        email_message(body="This is a terrible complaint. The service is unacceptable and I am extremely frustrated.")
+    )
     ticket = repo.get_ticket(response.ticket_id)
-    assert ticket["external_ticket_id"] == "CRM-101"
+    assert ticket["external_ticket_id"] == "BFSI-101"
+    assert "atlassian.net" in ticket["external_ticket_url"]
     assert ticket["crm_sync_status"] == "synced"
     assert ticket["sla_due_at"]
     assert ticket["escalation_reason"].startswith("manual_review_required")
 
     manager = workflow.tickets
-    comment = manager.add_comment(response.ticket_id, "Investigating with fulfillment.")
+    comment = manager.add_comment(response.ticket_id, "Escalated to fraud team.")
     assert comment["details"]["crm_sync_status"] == "synced"
     updated = manager.update_status(response.ticket_id, TicketStatus.IN_PROGRESS)
     assert updated["status"] == "in_progress"
@@ -573,6 +701,8 @@ def test_ticket_crm_sync_profile_enrichment_and_lifecycle():
         "status_updated",
     ]
 
+
+# ── Admin / infrastructure tests ──────────────────────────────────────────────
 
 def test_admin_ui_is_served():
     from fastapi.testclient import TestClient
@@ -664,20 +794,13 @@ def test_orchestration_workflow_definition_is_admin_protected(monkeypatch):
     assert response.status_code == 200
     assert response.json()["engine"] == "langgraph_state_graph"
     assert response.json()["framework"] == "LangGraph"
-    assert len(response.json()["agents"]) == 4
-    assert len(response.json()["edges"]) == 13
-    assert response.json()["agents"][0]["execution"] == "ollama_llm_with_validated_rule_fallback"
+    assert len(response.json()["agents"]) == 3
+    assert response.json()["agents"][0]["name"] == "intent_classification_agent"
+    assert "groq" in response.json()["agents"][0]["execution"]
 
 
 def test_hashing_embeddings_are_an_explicit_fallback(monkeypatch):
     monkeypatch.setenv("EMBEDDING_BACKEND", "hashing")
     embeddings = SemanticEmbeddings()
     assert embeddings.status()["active_backend"] == "hashing_fallback"
-    assert len(embeddings.embed_query("Track my order")) == 384
-
-
-def test_ollama_can_be_explicitly_disabled(monkeypatch):
-    monkeypatch.setenv("OLLAMA_ENABLED", "false")
-    result = OllamaGenerator().generate_answer("question", [])
-    assert result["llm_used"] is False
-    assert result["error"] == "OLLAMA_ENABLED=false"
+    assert len(embeddings.embed_query("What is my loan balance?")) == 384

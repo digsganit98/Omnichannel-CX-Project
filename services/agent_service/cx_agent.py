@@ -3,7 +3,7 @@ from pydantic import ValidationError
 from services.intent_service.classifier import classify_intent
 from services.intent_service.sentiment import detect_sentiment
 from services.intent_service.urgency import detect_urgency
-from services.rag_service.generator import OllamaGenerator
+from services.rag_service.groq_generator import GroqGenerator
 from shared.schemas.intents import IntentResult, Urgency
 
 
@@ -15,8 +15,8 @@ URGENCY_RANK = {
 
 
 class CXAgent:
-    def __init__(self, generator: OllamaGenerator | None = None) -> None:
-        self.generator = generator or OllamaGenerator()
+    def __init__(self, generator: GroqGenerator | None = None) -> None:
+        self.generator = generator or GroqGenerator()
 
     def analyze(self, message: str, context: dict | None = None) -> IntentResult:
         llm_result = self.generator.classify_message(message, context or {})
@@ -24,8 +24,8 @@ class CXAgent:
             try:
                 values = {
                     **llm_result,
-                    "analysis_source": "ollama_llm",
-                    "reason": llm_result.get("reason") or llm_result.get("rationale") or "Classified by local LLM.",
+                    "analysis_source": "groq_llm",
+                    "reason": llm_result.get("reason") or llm_result.get("rationale") or "Classified by Groq LLM.",
                 }
                 return self._apply_guardrails(message, IntentResult(**values))
             except ValidationError:

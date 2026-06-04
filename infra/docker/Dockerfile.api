@@ -2,6 +2,28 @@ FROM python:3.12-slim
 
 WORKDIR /app
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Install PyTorch CPU wheel first (separate step so SSL bypass is scoped only to the torch CDN).
+RUN pip install --no-cache-dir \
+    --trusted-host download.pytorch.org \
+    --trusted-host download-r2.pytorch.org \
+    --extra-index-url https://download.pytorch.org/whl/cpu \
+    "torch==2.5.1+cpu"
+# Install remaining dependencies from PyPI (no extra-index-url needed after torch is present).
+RUN pip install --no-cache-dir \
+    fastapi==0.115.6 \
+    "uvicorn[standard]==0.34.0" \
+    pydantic==2.10.4 \
+    python-dotenv==1.0.1 \
+    pytest==8.3.4 \
+    langchain-core==0.3.28 \
+    langchain-text-splitters==0.3.4 \
+    langgraph==0.2.76 \
+    opensearch-py==2.8.0 \
+    httpx==0.28.1 \
+    sentence-transformers==3.3.1 \
+    "groq>=0.8.0" \
+    "neo4j>=5.0.0" \
+    "openpyxl>=3.1.0" \
+    "pypdf>=4.0.0"
 COPY . .
 CMD ["uvicorn", "apps.api.main:app", "--host", "0.0.0.0", "--port", "8000"]

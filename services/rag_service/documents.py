@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def load_knowledge_documents() -> list[Document]:
-    return _split_documents(_load_pdf_kb())
+    return _split_documents(_load_markdown_kb() + _load_pdf_kb())
 
 
 def _load_pdf_kb() -> list[Document]:
@@ -29,10 +29,31 @@ def _load_pdf_kb() -> list[Document]:
     return docs
 
 
-def extract_pdf_text(path: str | Path) -> str:
-    reader = PdfReader(str(path))
-    pages = [page.extract_text() or "" for page in reader.pages]
-    return "\n\n".join(page.strip() for page in pages if page.strip())
+def _load_pdf_kb() -> list[Document]:
+    try:
+        from pypdf import PdfReader
+    except ImportError:
+        return []
+    docs = []
+    for path in (ROOT / "data" / "knowledge_base").glob("*.pdf"):
+        try:
+            reader = PdfReader(str(path))
+            for page_num, page in enumerate(reader.pages, start=1):
+                text = page.extract_text() or ""
+                if text.strip():
+                    docs.append(
+                        Document(
+                            page_content=text,
+                            metadata={
+                                "source": f"{path.name}:p{page_num}",
+                                "doc_type": "knowledge_base",
+                                "document_version": str(int(path.stat().st_mtime)),
+                            },
+                        )
+                    )
+        except Exception:
+            pass
+    return docs
 
 
 def _split_documents(documents: list[Document]) -> list[Document]:

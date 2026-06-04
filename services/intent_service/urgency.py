@@ -1,4 +1,9 @@
-URGENT = {"urgent", "asap", "immediately", "critical", "escalate", "complaint"}
+URGENT = {
+    "urgent", "asap", "immediately", "critical", "escalate", "complaint",
+    # BFSI-specific urgent signals
+    "fraud", "blocked", "stolen", "hacked", "overdue", "account hacked",
+    "immediate transfer", "money stolen", "unauthorized withdrawal",
+}
 
 
 def detect_urgency(text: str, sentiment: str) -> str:

@@ -12,8 +12,10 @@ from shared.schemas.tickets import Ticket, TicketStatus
 
 
 MANUAL_REVIEW_INTENTS = {
-    Intent.REFUND_REQUEST,
-    Intent.RETURN_REQUEST,
+    Intent.FRAUD_REPORT,
+    Intent.TRANSACTION_DISPUTE,
+    Intent.INSURANCE_CLAIM,
+    Intent.LOAN_DEFAULT_NOTICE,
     Intent.COMPLAINT,
     Intent.HUMAN_ESCALATION,
 }
@@ -44,34 +46,80 @@ class TicketActionDecision(BaseModel):
     reason: str | None = None
 
 
-class IntentDetectionAgent:
-    """Classifies a message with validated LLM output and deterministic fallback rules."""
+# ── Agent 1: Intent Classification ──────────────────────────────────────────
 
-    name = "intent_detection_agent"
+class IntentClassificationAgent:
+    """Classifies a BFSI message and enriches context with Neo4j customer graph."""
 
-    def __init__(self, classifier: CXAgent | None = None) -> None:
+    name = "intent_classification_agent"
+
+    def __init__(self, classifier: CXAgent | None = None, neo4j_client=None) -> None:
         self.classifier = classifier or CXAgent()
+        self.neo4j_client = neo4j_client
 
     def run(self, message: InboundMessage, context: dict) -> IntentResult:
+        if self.neo4j_client:
+            try:
+                from services.neo4j_service.queries import get_customer_context
+                graph_ctx = get_customer_context(self.neo4j_client, message.channel_identifier)
+                if graph_ctx:
+                    context = {**context, "graph_context": graph_ctx}
+            except Exception:
+                pass
         return self.classifier.analyze(message.text, context)
 
 
+# ── Agent 2: Query / Complaint Resolution ───────────────────────────────────
+
 class QueryResolutionAgent:
-    """Retrieves verified knowledge and generates a cited customer answer."""
+    """Routes to Neo4j (transactional) or RAG/KB (policy/general) based on intent."""
 
     name = "query_resolution_agent"
 
-    def __init__(self, rag: RAGPipeline | None = None) -> None:
+    def __init__(self, rag: RAGPipeline | None = None, neo4j_client=None) -> None:
         self.rag = rag or RAGPipeline()
+        self.neo4j_client = neo4j_client
 
-    def run(self, message: InboundMessage, context: dict) -> QueryResolution:
+    def run(self, message: InboundMessage, context: dict, intent: str | None = None) -> QueryResolution:
+        if intent and self.neo4j_client:
+            try:
+                from services.neo4j_service.queries import neo4j_answer, TRANSACTIONAL_INTENTS
+                if intent in TRANSACTIONAL_INTENTS:
+                    graph_ctx = context.get("graph_context", {})
+                    customer_id = graph_ctx.get("customer_id", "")
+                    if customer_id:
+                        answer = neo4j_answer(self.neo4j_client, intent, customer_id)
+                        if answer:
+                            return QueryResolution(
+                                answer=answer,
+                                confidence=0.95,
+                                contexts=[{
+                                    "text": answer,
+                                    "score": 0.95,
+                                    "metadata": {
+                                        "source": "neo4j_customer_graph",
+                                        "doc_type": "customer_graph",
+                                        "retrieval": "neo4j_graph",
+                                    },
+                                }],
+                                citations=[{
+                                    "index": 1,
+                                    "source": "neo4j_customer_graph",
+                                    "score": 0.95,
+                                }],
+                                retrieval_backend="neo4j_graph",
+                            )
+            except Exception:
+                pass
         return QueryResolution(**self.rag.answer(message.text, context))
 
 
-class TicketManagementAgent:
-    """Decides when human review is needed and delegates durable ticket creation."""
+# ── Agent 3: Ticket Creation ─────────────────────────────────────────────────
 
-    name = "ticket_management_agent"
+class TicketCreationAgent:
+    """Decides when a JIRA ticket is needed and creates it."""
+
+    name = "ticket_creation_agent"
 
     def __init__(self, tickets: TicketManager) -> None:
         self.tickets = tickets
@@ -82,7 +130,6 @@ class TicketManagementAgent:
 
     @staticmethod
     def detect_action(message: InboundMessage, context: dict) -> TicketActionDecision:
-        """Recognize narrow customer-side ticket commands before running the RAG path."""
         if not context.get("active_ticket"):
             return TicketActionDecision()
         text = message.text.lower()
@@ -126,15 +173,21 @@ class TicketManagementAgent:
             return "high_urgency"
         if analysis.confidence < 0.5:
             return "low_intent_confidence"
-        if not resolution.contexts:
+        if not resolution.contexts and resolution.retrieval_backend != "neo4j_graph":
             return "knowledge_not_found"
-        if resolution.confidence < 0.25:
+        if resolution.confidence < 0.25 and resolution.retrieval_backend != "neo4j_graph":
             return "low_retrieval_confidence"
         return None
 
 
+# ── Backwards-compatible aliases ─────────────────────────────────────────────
+# Old class names kept so existing imports in tests / other modules don't break.
+IntentDetectionAgent = IntentClassificationAgent
+TicketManagementAgent = TicketCreationAgent
+
+
 class WorkflowAutomationAgent:
-    """Builds the final action and delivers the answer through the inbound channel."""
+    """Thin wrapper kept for backwards compatibility; logic now lives in graph.py."""
 
     name = "workflow_automation_agent"
 
@@ -145,11 +198,14 @@ class WorkflowAutomationAgent:
     def compose_answer(resolution: QueryResolution, ticket: Ticket | None) -> str:
         if ticket is None:
             return resolution.answer
-        return (
+        ticket_note = (
             "I have captured your request and created a support ticket. "
             f"Our {ticket.assigned_team.replace('_', ' ')} team will review it. "
             f"Reference: {ticket.ticket_id}."
         )
+        if resolution.contexts and resolution.answer:
+            return f"{resolution.answer}\n\n{ticket_note}"
+        return ticket_note
 
     def send_reply(self, message: InboundMessage, answer: str) -> dict:
         return self.delivery.send(message, answer)
