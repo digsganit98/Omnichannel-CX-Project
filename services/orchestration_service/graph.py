@@ -174,6 +174,29 @@ class OrchestrationGraph:
     def _resolve_identity(self, graph_state: GraphState) -> dict:
         state = graph_state["runtime"]
         message = state.message
+        # Cross-channel linking: look up the sender in Neo4j to find their other identifiers
+        # (e.g. a WhatsApp phone maps to an email, or vice versa).  Injecting linked_email /
+        # linked_phone into metadata before resolve_customer runs lets the repository merge
+        # both channel identities under a single customer record instead of creating two.
+        if self.neo4j_client:
+            try:
+                from services.neo4j_service.queries import get_customer_by_identifier
+                neo4j_profile = get_customer_by_identifier(self.neo4j_client, message.channel_identifier)
+                if neo4j_profile:
+                    if neo4j_profile.get("email"):
+                        message.metadata["linked_email"] = neo4j_profile["email"]
+                        # Use the email as display_name so the frontend can infer a
+                        # readable name (e.g. "Fathima Devasahayam") from it.  Only
+                        # override generic channel-provided names like "Local WhatsApp
+                        # Tester"; a real name already set should be kept as-is.
+                        generic = {"local whatsapp tester", "whatsapp user", "unknown", ""}
+                        if (not message.display_name or
+                                message.display_name.lower() in generic):
+                            message.display_name = neo4j_profile["email"]
+                    if neo4j_profile.get("phone"):
+                        message.metadata["linked_phone"] = neo4j_profile["phone"]
+            except Exception:
+                logger.exception("neo4j_cross_channel_lookup_failed")
         crm_profile = self.crm.lookup_customer(message.channel.value, message.channel_identifier)
         if crm_profile.status == "synced":
             message.profile_metadata["crm"] = crm_profile.data
@@ -184,7 +207,7 @@ class OrchestrationGraph:
         if crm_profile.status != "not_configured":
             self._audit("crm_profile_lookup_" + crm_profile.status, state,
                         details={"error": crm_profile.error, **crm_profile.data})
-        self.repository.append_turn(
+        inbound_turn = self.repository.append_turn(
             conversation_id=state.conversation_id,
             customer_id=state.customer_id,
             channel=message.channel.value,
@@ -194,6 +217,7 @@ class OrchestrationGraph:
             subject=message.subject,
             metadata=message.metadata,
         )
+        state.inbound_turn_id = inbound_turn["turn_id"]
         self._complete(state, WorkflowStep.RESOLVE_IDENTITY, "identity_resolution",
                        crm_profile_status=crm_profile.status)
         return {"runtime": state}
@@ -242,6 +266,13 @@ class OrchestrationGraph:
     def _classify_intent(self, graph_state: GraphState) -> dict:
         state = graph_state["runtime"]
         state.analysis = self.intent_agent.run(state.message, state.context)
+        if state.inbound_turn_id:
+            self.repository.update_turn_metadata(state.inbound_turn_id, {"sentiment": state.analysis.sentiment})
+            self.repository.update_turn_intent_urgency(
+                state.inbound_turn_id,
+                state.analysis.intent.value,
+                state.analysis.urgency.value,
+            )
         self._audit("intent_classified", state, intent=state.analysis.intent.value,
                     details=state.analysis.model_dump())
         self._complete(state, WorkflowStep.CLASSIFY_INTENT, self.intent_agent.name,
@@ -419,9 +450,10 @@ class OrchestrationGraph:
 
     @staticmethod
     def _resolved(state: OrchestrationState) -> bool:
-        if state.ticket_action.action == TicketAction.RESOLVE:
-            return True
-        return not (state.ticket_decision and state.ticket_decision.required)
+        # Only mark the conversation resolved when the customer explicitly confirms it.
+        # Answering a query without creating a ticket is NOT resolution — the customer
+        # may send follow-up messages and must stay in the same conversation thread.
+        return state.ticket_action.action == TicketAction.RESOLVE
 
     def _audit(self, event_type: str, state: OrchestrationState, **values) -> None:
         self.repository.add_audit_event(event_type, **self._common(state), **values)

@@ -30,6 +30,8 @@ class CXRepository(Protocol):
     def get_or_create_conversation(self, customer_id: str) -> dict: ...
     def list_recent_turns(self, conversation_id: str, limit: int = 8) -> list[dict]: ...
     def append_turn(self, **values) -> dict: ...
+    def update_turn_metadata(self, turn_id: str, extra: dict) -> None: ...
+    def update_turn_intent_urgency(self, turn_id: str, intent: str, urgency: str) -> None: ...
     def update_conversation_summary(self, conversation_id: str, summary: str) -> None: ...
     def create_ticket(self, ticket: Ticket) -> Ticket: ...
     def update_ticket(self, ticket_id: str, **values) -> dict | None: ...
@@ -46,6 +48,11 @@ class CXRepository(Protocol):
     def list_audit_events(self, correlation_id: str | None = None) -> list[dict]: ...
     def get_conversation(self, conversation_id: str) -> dict | None: ...
     def list_conversations(self) -> list[dict]: ...
+    def list_customer_identifiers(self, customer_id: str) -> list[dict]: ...
+    def create_admin_user(self, username: str, email: str, password_hash: str) -> dict: ...
+    def get_admin_user_by_username(self, username: str) -> dict | None: ...
+    def get_admin_user_by_email(self, email: str) -> dict | None: ...
+    def list_admin_users(self) -> list[dict]: ...
 
 
 class SQLiteCXRepository:
@@ -127,7 +134,12 @@ class SQLiteCXRepository:
         if linked_email:
             identifiers.append((Channel.EMAIL.value, str(linked_email).strip().lower()))
         if linked_phone:
-            identifiers.append((Channel.WHATSAPP.value, str(linked_phone).strip().lstrip("+")))
+            phone = str(linked_phone).strip().lstrip("+")
+            identifiers.append((Channel.WHATSAPP.value, phone))
+            # Also try with 91 country-code prefix: BFSI data stores bare 10-digit numbers
+            # but WhatsApp channel identifiers arrive and are stored with the prefix.
+            if len(phone) == 10:
+                identifiers.append((Channel.WHATSAPP.value, "91" + phone))
 
         with self.connection() as conn:
             customer_id = None
@@ -170,11 +182,11 @@ class SQLiteCXRepository:
     def get_or_create_conversation(self, customer_id: str) -> dict:
         with self.connection() as conn:
             row = conn.execute(
-                "SELECT * FROM conversations WHERE customer_id = ? AND status = 'active' ORDER BY created_at DESC LIMIT 1",
+                "SELECT * FROM conversations WHERE customer_id = ? ORDER BY created_at DESC LIMIT 1",
                 (customer_id,),
             ).fetchone()
+            now = utc_now()
             if not row:
-                now = utc_now()
                 conversation_id = new_id("conv")
                 conn.execute(
                     "INSERT INTO conversations(conversation_id, customer_id, created_at, updated_at) VALUES (?, ?, ?, ?)",
@@ -182,6 +194,15 @@ class SQLiteCXRepository:
                 )
                 row = conn.execute(
                     "SELECT * FROM conversations WHERE conversation_id = ?", (conversation_id,)
+                ).fetchone()
+            elif dict(row)["status"] in ("resolved", "closed"):
+                # Reopen the existing conversation when the customer messages again
+                conn.execute(
+                    "UPDATE conversations SET status = 'active', updated_at = ? WHERE conversation_id = ?",
+                    (now, dict(row)["conversation_id"]),
+                )
+                row = conn.execute(
+                    "SELECT * FROM conversations WHERE conversation_id = ?", (dict(row)["conversation_id"],)
                 ).fetchone()
         return dict(row)
 
@@ -192,6 +213,25 @@ class SQLiteCXRepository:
                 (conversation_id, limit),
             ).fetchall()
         return [self._turn_dict(row) for row in reversed(rows)]
+
+    def update_turn_metadata(self, turn_id: str, extra: dict) -> None:
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT metadata_json FROM conversation_turns WHERE turn_id = ?", (turn_id,)
+            ).fetchone()
+            metadata = json.loads(row["metadata_json"] or "{}") if row else {}
+            metadata.update(extra)
+            conn.execute(
+                "UPDATE conversation_turns SET metadata_json = ? WHERE turn_id = ?",
+                (json_text(metadata), turn_id),
+            )
+
+    def update_turn_intent_urgency(self, turn_id: str, intent: str, urgency: str) -> None:
+        with self.connection() as conn:
+            conn.execute(
+                "UPDATE conversation_turns SET intent = ?, urgency = ? WHERE turn_id = ?",
+                (intent, urgency, turn_id),
+            )
 
     def append_turn(self, **values) -> dict:
         turn_id = values.get("turn_id") or new_id("turn")
@@ -208,10 +248,16 @@ class SQLiteCXRepository:
                     json_text(values.get("metadata")), values.get("delivery_status"), created_at,
                 ),
             )
-            conn.execute(
-                "UPDATE conversations SET updated_at = ? WHERE conversation_id = ?",
-                (created_at, values["conversation_id"]),
-            )
+            if values.get("resolved"):
+                conn.execute(
+                    "UPDATE conversations SET status = 'resolved', updated_at = ? WHERE conversation_id = ?",
+                    (created_at, values["conversation_id"]),
+                )
+            else:
+                conn.execute(
+                    "UPDATE conversations SET updated_at = ? WHERE conversation_id = ?",
+                    (created_at, values["conversation_id"]),
+                )
             row = conn.execute("SELECT * FROM conversation_turns WHERE turn_id = ?", (turn_id,)).fetchone()
         return self._turn_dict(row)
 
@@ -415,7 +461,67 @@ class SQLiteCXRepository:
 
     def list_conversations(self) -> list[dict]:
         with self.connection() as conn:
-            rows = conn.execute("SELECT * FROM conversations ORDER BY updated_at DESC").fetchall()
+            rows = conn.execute(
+                """
+                SELECT
+                    c.*,
+                    cu.display_name,
+                    cu.created_at AS customer_since,
+                    (SELECT channel FROM conversation_turns
+                     WHERE conversation_id = c.conversation_id
+                     ORDER BY created_at DESC LIMIT 1) AS last_channel,
+                    (SELECT text FROM conversation_turns
+                     WHERE conversation_id = c.conversation_id AND direction = 'inbound'
+                     ORDER BY created_at DESC LIMIT 1) AS last_message,
+                    (SELECT intent FROM conversation_turns
+                     WHERE conversation_id = c.conversation_id AND intent IS NOT NULL AND intent != ''
+                     ORDER BY created_at DESC LIMIT 1) AS last_intent,
+                    (SELECT urgency FROM conversation_turns
+                     WHERE conversation_id = c.conversation_id AND urgency IS NOT NULL
+                     ORDER BY created_at DESC LIMIT 1) AS last_urgency
+                FROM conversations c
+                LEFT JOIN customers cu ON c.customer_id = cu.customer_id
+                ORDER BY c.updated_at DESC
+
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_customer_identifiers(self, customer_id: str) -> list[dict]:
+        with self.connection() as conn:
+            rows = conn.execute(
+                "SELECT channel, identifier FROM channel_identities WHERE customer_id = ?",
+                (customer_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def create_admin_user(self, username: str, email: str, password_hash: str) -> dict:
+        now = utc_now()
+        with self.connection() as conn:
+            cursor = conn.execute(
+                "INSERT INTO admin_users (username, email, password_hash, created_at) VALUES (?, ?, ?, ?)",
+                (username, email, password_hash, now),
+            )
+            row = conn.execute("SELECT * FROM admin_users WHERE id = ?", (cursor.lastrowid,)).fetchone()
+        result = dict(row)
+        result.pop("password_hash", None)
+        return result
+
+    def get_admin_user_by_username(self, username: str) -> dict | None:
+        with self.connection() as conn:
+            row = conn.execute("SELECT * FROM admin_users WHERE username = ?", (username,)).fetchone()
+        return dict(row) if row else None
+
+    def get_admin_user_by_email(self, email: str) -> dict | None:
+        with self.connection() as conn:
+            row = conn.execute("SELECT * FROM admin_users WHERE email = ?", (email,)).fetchone()
+        return dict(row) if row else None
+
+    def list_admin_users(self) -> list[dict]:
+        with self.connection() as conn:
+            rows = conn.execute(
+                "SELECT id, username, email, created_at FROM admin_users ORDER BY created_at"
+            ).fetchall()
         return [dict(row) for row in rows]
 
     @staticmethod

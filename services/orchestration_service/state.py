@@ -43,6 +43,7 @@ class OrchestrationState(BaseModel):
     answer: str | None = None
     delivery: dict = Field(default_factory=dict)
     workflow_trace: list[WorkflowTraceEntry] = Field(default_factory=list)
+    inbound_turn_id: str | None = None
 
     @property
     def customer_id(self) -> str | None:

@@ -13,16 +13,26 @@ TRANSACTIONAL_INTENTS = {
 
 
 def get_customer_by_identifier(client, identifier: str) -> dict | None:
-    """Look up customer by phone or email (channel identifier)."""
+    """Look up customer by phone or email (channel identifier).
+
+    Handles WhatsApp phone numbers that arrive with a country-code prefix
+    (e.g. '919876510100') while the BFSI dataset stores bare 10-digit numbers
+    ('9876510100').  Both formats are tried in a single query.
+    """
+    # Derive a stripped variant: remove a leading 2-digit country code when the
+    # identifier is a 12-digit number starting with '91' (India).
+    stripped = identifier[2:] if (len(identifier) == 12 and identifier.startswith("91")) else identifier
     rows = client.query(
         """
         MATCH (c:Customer)
-        WHERE c.phone = $id OR c.email = $id OR c.secondary_email = $id
+        WHERE c.phone = $id OR c.phone = $stripped
+           OR c.email = $id OR c.secondary_email = $id
         RETURN c.customer_id AS customer_id, c.email AS email,
-               c.phone AS phone, c.city AS city
+               c.phone AS phone, c.city AS city,
+               c.registration_date AS registration_date
         LIMIT 1
         """,
-        {"id": identifier},
+        {"id": identifier, "stripped": stripped},
     )
     return rows[0] if rows else None
 

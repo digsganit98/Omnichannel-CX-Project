@@ -1,144 +1,562 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Omnichannel CX Ticket Operations</title>
-    <link rel="stylesheet" href="/admin-ui/assets/style.css">
-  </head>
-  <body>
-    <header class="topbar">
-      <div>
-        <p class="eyebrow">Omnichannel CX Accelerator</p>
-        <h1>Ticket Operations</h1>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Omnichannel CX Accelerator</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/admin-ui/assets/style.css">
+</head>
+<body>
+
+<!-- STAGE 1: API KEY MODAL -->
+<div class="modal-overlay" id="connectModal">
+  <div class="modal-card">
+    <div class="modal-logo">
+      <div class="modal-icon">
+        <svg viewBox="0 0 24 24"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-2 12H6v-2h12v2zm0-3H6V9h12v2zm0-3H6V6h12v2z"/></svg>
       </div>
-      <div class="credentials">
-        <label>
-          Admin API key
-          <input id="admin-key" type="password" autocomplete="off" placeholder="Enter ADMIN_API_KEY">
-        </label>
-        <button id="save-key" type="button">Connect</button>
+      <span class="modal-brand">Omnichannel <span>CX Accelerator</span></span>
+    </div>
+    <div>
+      <div class="modal-title">Connect to workspace</div>
+      <div class="modal-sub">Enter your admin API key to continue</div>
+    </div>
+    <div class="modal-err" id="connectErr">Invalid admin key. Please check and try again.</div>
+    <div class="modal-field">
+      <label for="adminKeyInput">Admin API key</label>
+      <input id="adminKeyInput" type="password" placeholder="Enter ADMIN_API_KEY" autocomplete="off">
+    </div>
+    <button class="modal-btn" id="connectBtn">Connect</button>
+  </div>
+</div>
+
+<!-- STAGE 2: ADMIN LOGIN / SIGNUP PAGE -->
+<div class="auth-page hidden" id="authPage">
+  <div class="auth-card">
+    <div class="auth-logo">
+      <div class="modal-icon">
+        <svg viewBox="0 0 24 24"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-2 12H6v-2h12v2zm0-3H6V9h12v2zm0-3H6V6h12v2z"/></svg>
       </div>
-    </header>
+      <span class="modal-brand">Omnichannel <span>CX Accelerator</span></span>
+    </div>
+    <div class="auth-tabs">
+      <button class="auth-tab active" id="authTabLogin" onclick="switchAuthTab('login')">Login</button>
+      <button class="auth-tab" id="authTabSignup" onclick="switchAuthTab('signup')">Sign Up</button>
+    </div>
+    <div class="modal-err" id="authErr"></div>
 
-    <main>
-      <p id="flash" class="flash" role="status"></p>
+    <!-- LOGIN FORM -->
+    <div id="loginForm">
+      <div class="modal-field">
+        <label for="loginUsername">Username</label>
+        <input id="loginUsername" type="text" placeholder="Your username" autocomplete="username">
+      </div>
+      <div class="modal-field">
+        <label for="loginPassword">Password</label>
+        <input id="loginPassword" type="password" placeholder="Your password" autocomplete="current-password">
+      </div>
+      <button class="modal-btn" id="loginBtn">Login</button>
+      <div class="auth-switch">No account? <a href="#" onclick="switchAuthTab('signup');return false;">Sign up here</a></div>
+    </div>
 
-      <section class="summary-grid">
-        <article class="card">
-          <p class="eyebrow">CRM connector</p>
-          <h2 id="crm-provider">Not loaded</h2>
-          <p id="crm-detail" class="muted">Enter the admin key to load status.</p>
-        </article>
-        <article class="card">
-          <p class="eyebrow">Ticket queue</p>
-          <h2 id="ticket-total">0 tickets</h2>
-          <p id="ticket-detail" class="muted">No queue data loaded.</p>
-        </article>
-        <article class="card">
-          <p class="eyebrow">Operations</p>
-          <button id="refresh" type="button" class="secondary">Refresh dashboard</button>
-          <p class="muted">Admin calls use the protected same-origin API.</p>
-        </article>
-      </section>
+    <!-- SIGNUP FORM -->
+    <div id="signupForm" style="display:none">
+      <div class="modal-field">
+        <label for="signupUsername">Username</label>
+        <input id="signupUsername" type="text" placeholder="Choose a username (min 3 chars)" autocomplete="username">
+      </div>
+      <div class="modal-field">
+        <label for="signupEmail">Email</label>
+        <input id="signupEmail" type="email" placeholder="your@email.com" autocomplete="email">
+      </div>
+      <div class="modal-field">
+        <label for="signupPassword">Password</label>
+        <input id="signupPassword" type="password" placeholder="Min 6 characters" autocomplete="new-password">
+      </div>
+      <div class="modal-field">
+        <label for="signupConfirm">Confirm password</label>
+        <input id="signupConfirm" type="password" placeholder="Repeat password" autocomplete="new-password">
+      </div>
+      <button class="modal-btn" id="signupBtn">Create account</button>
+      <div class="auth-switch">Have an account? <a href="#" onclick="switchAuthTab('login');return false;">Login here</a></div>
+    </div>
+  </div>
+</div>
 
-      <section class="workspace">
-        <article class="card wide">
-          <div class="section-heading">
-            <div>
-              <p class="eyebrow">Support queue</p>
-              <h2>Tickets</h2>
+<!-- STAGE 3: MAIN SHELL -->
+<div class="shell" id="mainShell" style="display:none">
+
+  <!-- RIBBON -->
+  <div class="ribbon">
+    <div class="ribbon-logo">
+      <div class="ribbon-icon">
+        <svg viewBox="0 0 24 24"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-2 12H6v-2h12v2zm0-3H6V9h12v2zm0-3H6V6h12v2z"/></svg>
+      </div>
+      <span class="ribbon-name">Omnichannel <span>CX Accelerator</span></span>
+    </div>
+    <div class="ribbon-spacer"></div>
+    <div class="ribbon-user">
+      <div class="ribbon-user-info">
+        <span class="ribbon-user-name" id="ribbonUserName">Admin</span>
+        <span class="ribbon-user-role" id="ribbonUserRole">CX Operations</span>
+      </div>
+      <div class="ribbon-user-av" id="ribbonUserAv">CX</div>
+      <button class="ribbon-logout" id="ribbonLogout" onclick="doLogout()" title="Logout">
+        <svg viewBox="0 0 24 24"><path d="M17 7l-1.41 1.41L18.17 11H8v2h10.17l-2.58 2.58L17 17l5-5-5-5zM4 5h8V3H4c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h8v-2H4V5z"/></svg>
+      </button>
+    </div>
+  </div>
+
+  <!-- BODY -->
+  <div class="body-row">
+
+    <!-- LEFT NAV -->
+    <div class="leftnav">
+      <div class="nav-item active" id="nav-inbox" onclick="switchPage('inbox')">
+        <svg viewBox="0 0 24 24"><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/></svg>
+        <span class="nav-tooltip">Inbox</span>
+        <span class="nav-badge" id="inboxBadge" style="display:none">0</span>
+      </div>
+      <div class="nav-item" id="nav-tickets" onclick="switchPage('tickets')">
+        <svg viewBox="0 0 24 24"><path d="M20 12c0-1.1.9-2 2-2V6c0-1.1-.9-2-2-2H4c-1.1 0-2 .9-2 2v4c1.1 0 2 .9 2 2s-.9 2-2 2v4c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2v-4c-1.1 0-2-.9-2-2zm-5 4.5H9v-2h6v2zm0-4H9v-2h6v2zm0-4H9v-2h6v2z"/></svg>
+        <span class="nav-tooltip">Tickets</span>
+        <span class="nav-badge" id="ticketsBadge" style="display:none">0</span>
+      </div>
+      <div class="nav-item" id="nav-analytics" onclick="switchPage('analytics')">
+        <svg viewBox="0 0 24 24"><path d="M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z"/></svg>
+        <span class="nav-tooltip">Analytics</span>
+      </div>
+      <div class="nav-item" id="nav-connectors" onclick="switchPage('connectors')">
+        <svg viewBox="0 0 24 24"><path d="M17 7H7C4.24 7 2 9.24 2 12s2.24 5 5 5h10c2.76 0 5-2.24 5-5s-2.24-5-5-5zM7 15c-1.66 0-3-1.34-3-3s1.34-3 3-3 3 1.34 3 3-1.34 3-3 3z"/></svg>
+        <span class="nav-tooltip">Connectors</span>
+      </div>
+      <div class="nav-item" id="nav-sim" onclick="switchPage('sim')">
+        <svg viewBox="0 0 24 24"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-7 3c1.93 0 3.5 1.57 3.5 3.5S13.93 13 12 13s-3.5-1.57-3.5-3.5S10.07 6 12 6zm7 13H5v-.23c0-.62.28-1.2.76-1.58C7.47 15.82 9.64 15 12 15s4.53.82 6.24 2.19c.48.38.76.97.76 1.58V19z"/></svg>
+        <span class="nav-tooltip">Run Simulation</span>
+      </div>
+      <div class="nav-divider"></div>
+      <div class="nav-item" id="nav-settings" onclick="switchPage('settings')" style="margin-top:auto">
+        <svg viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.56-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.07.63-.07.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
+        <span class="nav-tooltip">Settings</span>
+      </div>
+    </div>
+
+    <!-- ── INBOX PAGE ── -->
+    <div class="page active" id="page-inbox">
+      <div class="app">
+
+        <!-- QUEUE -->
+        <div class="queue">
+          <div class="q-top">
+            <div class="q-head">
+              <span class="q-title">Inbox</span>
+              <span class="q-cnt" id="qcnt">—</span>
+            </div>
+            <div class="srch">
+              <svg viewBox="0 0 24 24"><path d="M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+              <input id="srchInput" placeholder="Search conversations...">
+            </div>
+            <div class="ftags" id="ftags">
+              <button class="ftag on" data-f="all">All</button>
+              <button class="ftag" data-f="urgent">Urgent</button>
             </div>
           </div>
-          <div class="table-scroll">
-            <table>
+          <div class="q-list" id="qlist">
+            <div style="padding:20px;text-align:center;color:var(--t3);font-size:12px">Loading conversations…</div>
+          </div>
+        </div>
+
+        <!-- CENTRE -->
+        <div class="ctr">
+          <div class="chdr">
+            <div class="cnfo">
+              <div class="cnm" id="convName">Select a conversation</div>
+            </div>
+            <div class="hbtns">
+              <button class="hbtn wrn" id="btnEsc" onclick="doEscalate()">Escalate</button>
+              <button class="hbtn prim" id="btnResolve" onclick="doResolve()">Resolve</button>
+            </div>
+          </div>
+          <div class="chbar" id="chbar">
+            <span class="chbar-label">View:</span>
+            <button class="chfilt on">All channels</button>
+          </div>
+          <div class="msgs" id="msgs">
+            <div class="empty-conv">
+              <svg viewBox="0 0 24 24"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-2 12H6v-2h12v2zm0-3H6V9h12v2zm0-3H6V6h12v2z"/></svg>
+              Select a conversation from the queue
+            </div>
+          </div>
+          <div class="resbanner" id="resbanner">
+            <svg viewBox="0 0 24 24"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+            Conversation resolved. Customer has been notified.
+          </div>
+          <div id="aipanelwrap"></div>
+          <div class="compose" id="compwrap" style="display:none">
+            <div class="compose-hdr">
+              <span class="compose-ch-label">Reply via:</span>
+              <div class="compose-ch-btns" id="compChBtns"></div>
+            </div>
+            <div class="cbox">
+              <textarea class="cinput" id="cinput" rows="1" placeholder="Type a reply…"></textarea>
+              <button class="sndbtn" onclick="doSend()">
+                <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- RIGHT PANEL -->
+        <div class="rp">
+          <div class="rphdr">
+            <div class="rpav" id="rpav">—</div>
+            <div class="rpnm" id="rpnm">No conversation selected</div>
+            <div class="rpsub" id="rpsub">Select from queue</div>
+            <div class="rpcontact" id="rpcontact"></div>
+            <div class="rpchs" id="rpchs"></div>
+          </div>
+          <div class="rpbody" id="rpbody">
+            <div style="text-align:center;color:var(--t3);font-size:12px;padding:24px 0">Profile appears here</div>
+          </div>
+        </div>
+
+      </div>
+    </div><!-- end #page-inbox -->
+
+    <!-- ── TICKETS PAGE ── -->
+    <div class="page" id="page-tickets">
+      <div class="tkt-page">
+
+        <!-- PAGE HEADER -->
+        <div class="dash-header" style="flex-shrink:0">
+          <div>
+            <div class="dash-title">Tickets</div>
+          </div>
+          <div style="display:flex;align-items:center;gap:10px">
+            <span class="rt-badge">Live</span>
+            <div class="dash-refresh" id="ticketsRefresh" onclick="loadTickets()">
+              <svg id="ticketsSpinner" viewBox="0 0 24 24"><path d="M17.65 6.35A7.958 7.958 0 0 0 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 0 1 12 18c-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
+              Refresh
+            </div>
+          </div>
+        </div>
+
+        <!-- OPEN TICKETS -->
+        <div class="tkt-section">
+          <div class="tkt-section-hdr">
+            <div class="tkt-section-title">
+              <span class="tkt-dot open"></span>Open tickets
+              <span class="tkt-count" id="openTktCount">—</span>
+            </div>
+            <div class="tkt-filters">
+              <input class="tkt-search" id="openTktSearch" placeholder="Search…" oninput="filterTickets()">
+              <select class="tkt-date-sel" id="openTktDate" onchange="onTktDateChange('open')">
+                <option value="all">All time</option>
+                <option value="today">Today</option>
+                <option value="7d">Last 7 days</option>
+                <option value="30d">Last 30 days</option>
+                <option value="month">This month</option>
+                <option value="custom">Custom range…</option>
+              </select>
+            </div>
+          </div>
+          <div class="tkt-daterange hidden" id="openTktRange">
+            <svg viewBox="0 0 24 24"><path d="M19 3h-1V1h-2v2H8V1H6v2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V8h14v11zM7 10h5v5H7z"/></svg>
+            <span class="tkt-range-label">From</span>
+            <input type="date" class="tkt-date-input" id="openTktFrom" onchange="filterTickets()">
+            <span class="tkt-range-label">To</span>
+            <input type="date" class="tkt-date-input" id="openTktTo" onchange="filterTickets()">
+            <button class="tkt-range-clear" onclick="clearTktRange('open')" title="Clear">✕</button>
+          </div>
+          <div class="tkt-table-wrap">
+            <table class="tkt-table" id="openTktTable">
+              <colgroup>
+                <col style="width:130px"><col style="width:180px"><col style="width:100px">
+                <col style="width:85px"><col style="width:130px"><col style="width:160px">
+                <col style="width:120px"><col style="width:120px"><col style="width:95px">
+              </colgroup>
               <thead>
                 <tr>
                   <th>Ticket</th>
-                  <th>Status</th>
+                  <th>Title</th>
+                  <th>Team</th>
                   <th>Priority</th>
                   <th>Intent</th>
-                  <th>SLA due</th>
-                  <th>CRM sync</th>
+                  <th>Customer</th>
+                  <th>Channel</th>
+                  <th>Created At</th>
+                  <th>CRM Sync</th>
                 </tr>
               </thead>
-              <tbody id="tickets-body">
-                <tr><td colspan="6" class="empty">No tickets loaded.</td></tr>
+              <tbody id="openTktBody">
+                <tr><td colspan="9" class="tkt-empty">Loading…</td></tr>
               </tbody>
             </table>
           </div>
-        </article>
+        </div>
 
-        <aside class="card detail-card">
-          <p class="eyebrow">Selected ticket</p>
-          <div id="ticket-detail-panel" class="empty">Choose a ticket from the queue.</div>
-        </aside>
-      </section>
-
-      <section class="workspace lower">
-        <article class="card">
-          <p class="eyebrow">Local channel test mode</p>
-          <h2>Simulate inbound customer message</h2>
-          <div class="channel-tabs" role="tablist" aria-label="Inbound simulation channel">
-            <button id="whatsapp-tab" type="button" class="channel-tab active" data-channel="whatsapp">WhatsApp</button>
-            <button id="email-tab" type="button" class="channel-tab" data-channel="email">Email</button>
-          </div>
-          <form id="whatsapp-simulate-form" class="stack channel-form">
-            <label>
-              Test signature
-              <input id="test-signature" type="password" autocomplete="off" placeholder="WHATSAPP_TEST_SIGNATURE">
-            </label>
-            <label>
-              Customer phone
-              <input id="sim-phone" value="919999999999" required>
-            </label>
-            <label>
-              Message
-              <textarea id="sim-message" rows="4" required>Please connect me to a human support agent about my refund.</textarea>
-            </label>
-            <label>
-              Outbound delivery
-              <select id="whatsapp-outbound-provider">
-                <option value="local_mock">Local mock reply</option>
-                <option value="meta">Real Meta WhatsApp reply</option>
+        <!-- CLOSED / RESOLVED TICKETS -->
+        <div class="tkt-section">
+          <div class="tkt-section-hdr">
+            <div class="tkt-section-title">
+              <span class="tkt-dot closed"></span>Closed &amp; resolved tickets
+              <span class="tkt-count" id="closedTktCount">—</span>
+            </div>
+            <div class="tkt-filters">
+              <input class="tkt-search" id="closedTktSearch" placeholder="Search…" oninput="filterTickets()">
+              <select class="tkt-date-sel" id="closedTktDate" onchange="onTktDateChange('closed')">
+                <option value="all">All time</option>
+                <option value="today">Today</option>
+                <option value="7d">Last 7 days</option>
+                <option value="30d">Last 30 days</option>
+                <option value="month">This month</option>
+                <option value="custom">Custom range…</option>
               </select>
-            </label>
-            <button id="simulate-submit" type="submit">Run simulated inbound flow</button>
-          </form>
-          <form id="email-simulate-form" class="stack channel-form hidden">
-            <label>
-              Email webhook secret
-              <input id="email-secret" type="password" autocomplete="off" placeholder="EMAIL_WEBHOOK_SECRET">
-            </label>
-            <label>
-              Customer email
-              <input id="sim-email" type="email" value="customer@example.com" required>
-            </label>
-            <label>
-              Subject
-              <input id="sim-email-subject" value="Customer support request" required>
-            </label>
-            <label>
-              Message
-              <textarea id="sim-email-message" rows="4" required>I need help tracking my order.</textarea>
-            </label>
-            <button id="email-simulate-submit" type="submit">Run simulated inbound flow</button>
-          </form>
-          <div id="simulate-status" class="processing hidden" role="status" aria-live="polite"></div>
-          <div id="simulate-summary" class="simulation-summary hidden"></div>
-          <pre id="simulate-result" class="result">Simulation output appears here.</pre>
-        </article>
-
-        <article class="card">
-          <p class="eyebrow">Persistent operations trail</p>
-          <h2>Recent audit events</h2>
-          <div id="audit-events" class="timeline">
-            <p class="empty">No audit events loaded.</p>
+            </div>
           </div>
-        </article>
-      </section>
-    </main>
+          <div class="tkt-daterange hidden" id="closedTktRange">
+            <svg viewBox="0 0 24 24"><path d="M19 3h-1V1h-2v2H8V1H6v2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V8h14v11zM7 10h5v5H7z"/></svg>
+            <span class="tkt-range-label">From</span>
+            <input type="date" class="tkt-date-input" id="closedTktFrom" onchange="filterTickets()">
+            <span class="tkt-range-label">To</span>
+            <input type="date" class="tkt-date-input" id="closedTktTo" onchange="filterTickets()">
+            <button class="tkt-range-clear" onclick="clearTktRange('closed')" title="Clear">✕</button>
+          </div>
+          <div class="tkt-table-wrap">
+            <table class="tkt-table" id="closedTktTable">
+              <colgroup>
+                <col style="width:130px"><col style="width:180px"><col style="width:100px">
+                <col style="width:85px"><col style="width:130px"><col style="width:160px">
+                <col style="width:120px"><col style="width:120px"><col style="width:95px">
+              </colgroup>
+              <thead>
+                <tr>
+                  <th>Ticket</th>
+                  <th>Title</th>
+                  <th>Team</th>
+                  <th>Priority</th>
+                  <th>Intent</th>
+                  <th>Customer</th>
+                  <th>Channel</th>
+                  <th>Resolved At</th>
+                  <th>CRM Sync</th>
+                </tr>
+              </thead>
+              <tbody id="closedTktBody">
+                <tr><td colspan="9" class="tkt-empty">Loading…</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
 
-    <script src="/admin-ui/assets/app.js"></script>
-  </body>
+      </div>
+    </div><!-- end #page-tickets -->
+
+    <!-- ── ANALYTICS PAGE ── -->
+    <div class="page" id="page-analytics">
+      <div class="dash">
+        <div class="dash-header">
+          <div>
+            <div class="dash-title">Analytics Dashboard</div>
+          </div>
+          <div style="display:flex;align-items:center;gap:10px">
+            <span class="sse-badge" id="sseStatus">Connecting…</span>
+            <div class="dash-refresh" id="analyticsRefresh" onclick="loadAnalytics()">
+              <svg id="analyticsSpinner" viewBox="0 0 24 24"><path d="M17.65 6.35A7.958 7.958 0 0 0 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 0 1 12 18c-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
+              Refresh
+            </div>
+          </div>
+        </div>
+
+        <div>
+          <div class="stat-grid" style="grid-template-columns:repeat(4,1fr)" id="overviewGrid">
+            <div class="stat-card"><div class="stat-val">—</div><div class="stat-lbl">Loading…</div></div>
+            <div class="stat-card"><div class="stat-val">—</div><div class="stat-lbl">Loading…</div></div>
+            <div class="stat-card"><div class="stat-val">—</div><div class="stat-lbl">Loading…</div></div>
+            <div class="stat-card"><div class="stat-val">—</div><div class="stat-lbl">Loading…</div></div>
+          </div>
+        </div>
+
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+          <div class="chart-card"><div class="chart-title">Tickets by channel</div><div id="channelBars"><div class="empty-state">Loading…</div></div></div>
+          <div class="chart-card"><div class="chart-title">Top intent trends (BFSI)</div><div id="intentBars"><div class="empty-state">Loading…</div></div></div>
+        </div>
+
+
+        <div class="chart-card">
+          <div class="chart-title">Agent / team performance</div>
+          <div id="agentPanel"><div class="empty-state">Loading…</div></div>
+        </div>
+
+        <div class="chart-card">
+          <div class="chart-title">
+            <span>Live event feed</span>
+          </div>
+          <div class="feed-list" id="feedList"><div class="empty-state">Waiting for events…</div></div>
+        </div>
+      </div>
+    </div><!-- end #page-analytics -->
+
+    <!-- ── CONNECTORS PAGE ── -->
+    <div class="page" id="page-connectors">
+      <div class="conn-page">
+        <div>
+          <div class="dash-title">Connectors</div>
+          <div class="dash-sub">Channel integrations for this Omnichannel CX Accelerator workspace</div>
+        </div>
+        <div class="conn-grid" id="connGrid">
+          <div style="color:var(--t3);font-size:12px;padding:20px 0">Loading connector status…</div>
+        </div>
+      </div>
+    </div><!-- end #page-connectors -->
+
+    <!-- ── RUN SIMULATION PAGE ── -->
+    <div class="page" id="page-sim">
+      <div class="settings-page">
+        <div>
+          <div class="dash-title">Run Simulation</div>
+        </div>
+        <div class="settings-grid">
+
+          <!-- WHATSAPP -->
+          <div class="settings-card">
+            <div class="sim-card-hdr">
+              <div class="sim-card-icon" style="background:#22c55e">
+                <svg viewBox="0 0 24 24" fill="#fff"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51C10.25 6.01 10.052 6 9.853 6c-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413z"/><path d="M20.52 3.449C12.831-3.984.106 1.407.101 11.893c0 2.096.549 4.14 1.595 5.945L.057 24l6.335-1.652c1.746.943 3.71 1.444 5.71 1.447h.006c9.756 0 15.466-8.65 11.466-16.001a11.816 11.816 0 0 0-3.054-4.345z"/></svg>
+              </div>
+              <div class="settings-card-title" style="margin:0">WhatsApp simulation</div>
+            </div>
+            <div class="sim-field">
+              <label>Test signature</label>
+              <input id="testSig" type="password" placeholder="WHATSAPP_TEST_SIGNATURE">
+            </div>
+            <div class="sim-field">
+              <label>Customer phone</label>
+              <input id="simPhone" value="919999999999">
+            </div>
+            <div class="sim-field">
+              <label>Message</label>
+              <textarea id="simMsg">Please help me with my loan status inquiry.</textarea>
+            </div>
+            <div class="sim-field">
+              <label>Outbound delivery</label>
+              <select id="simDelivery">
+                <option value="local_mock">Local mock reply</option>
+                <option value="meta">Real Meta WhatsApp</option>
+              </select>
+            </div>
+            <button class="sim-btn" id="simWaBtn" onclick="runWhatsAppSim()">Run simulation</button>
+            <div class="sim-status" id="simStatus"></div>
+            <pre class="sim-result" id="simResult"></pre>
+          </div>
+
+          <!-- EMAIL -->
+          <div class="settings-card">
+            <div class="sim-card-hdr">
+              <div class="sim-card-icon" style="background:#ea4335">
+                <svg viewBox="0 0 24 24" fill="#fff"><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/></svg>
+              </div>
+              <div class="settings-card-title" style="margin:0">Email simulation</div>
+            </div>
+            <div class="sim-field">
+              <label>Email webhook secret</label>
+              <input id="emailSecret" type="password" placeholder="EMAIL_WEBHOOK_SECRET">
+            </div>
+            <div class="sim-field">
+              <label>Customer email</label>
+              <input id="simEmail" type="email" value="customer@example.com">
+            </div>
+            <div class="sim-field">
+              <label>Subject</label>
+              <input id="simEmailSubject" value="Customer support request">
+            </div>
+            <div class="sim-field">
+              <label>Message</label>
+              <textarea id="simEmailMsg">I need help with my account balance inquiry.</textarea>
+            </div>
+            <button class="sim-btn" id="simEmBtn" onclick="runEmailSim()">Run simulation</button>
+            <div class="sim-status" id="simStatusEm"></div>
+            <pre class="sim-result" id="simResultEm"></pre>
+          </div>
+
+        </div>
+      </div>
+    </div><!-- end #page-sim -->
+
+    <!-- ── SETTINGS PAGE ── -->
+    <div class="page" id="page-settings">
+      <div class="acct-page">
+        <div class="acct-header">
+          <div class="dash-title">Settings</div>
+          <div class="dash-sub">Manage your admin account and workspace members</div>
+        </div>
+        <div class="acct-grid">
+
+          <!-- MY ACCOUNT -->
+          <div class="settings-card">
+            <div class="settings-card-title">My account</div>
+            <div class="acct-profile" id="acctProfile">
+              <div class="acct-av" id="acctAv">—</div>
+              <div class="acct-info">
+                <div class="acct-name" id="acctName">—</div>
+                <div class="acct-email" id="acctEmail">—</div>
+                <div class="acct-since" id="acctSince">—</div>
+              </div>
+            </div>
+            <div style="height:1px;background:var(--bdr);margin:14px 0"></div>
+            <div class="settings-card-title" style="font-size:12px;margin-bottom:10px">Change password</div>
+            <div class="sim-field">
+              <label>Current password</label>
+              <input id="pwdCurrent" type="password" placeholder="Enter current password">
+            </div>
+            <div class="sim-field">
+              <label>New password</label>
+              <input id="pwdNew" type="password" placeholder="Min 6 characters">
+            </div>
+            <div class="sim-field">
+              <label>Confirm new password</label>
+              <input id="pwdConfirm" type="password" placeholder="Repeat new password">
+            </div>
+            <div class="sim-status" id="pwdStatus"></div>
+            <button class="sim-btn" onclick="doChangePassword()">Update password</button>
+          </div>
+
+          <!-- ADMIN USERS -->
+          <div class="settings-card">
+            <div class="settings-card-title" style="display:flex;align-items:center;justify-content:space-between">
+              <span>Admin users</span>
+              <button class="sim-btn" onclick="loadAdminUsers()" style="font-size:10px;padding:4px 10px">Refresh</button>
+            </div>
+            <div id="adminUsersList">
+              <div style="text-align:center;color:var(--t3);font-size:12px;padding:20px 0">Loading…</div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div><!-- end #page-settings -->
+
+  </div><!-- end .body-row -->
+</div><!-- end #mainShell -->
+
+<div class="toast" id="toastEl"></div>
+
+<!-- CONFIRMATION MODAL -->
+<div class="modal-overlay hidden" id="confirmModal">
+  <div class="modal-card" style="width:380px;gap:14px">
+    <div class="confirm-icon" id="confirmIcon"></div>
+    <div>
+      <div class="modal-title" id="confirmTitle">Confirm action</div>
+      <div class="modal-sub" id="confirmMsg"></div>
+    </div>
+    <div style="display:flex;gap:10px">
+      <button class="modal-btn" style="background:var(--surf2);color:var(--t2);border:1px solid var(--bdr);flex:1" id="confirmCancelBtn" onclick="closeConfirm()">Cancel</button>
+      <button class="modal-btn" style="flex:1" id="confirmOkBtn" onclick="confirmOk()">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<script src="/admin-ui/assets/app.js"></script>
+</body>
 </html>
