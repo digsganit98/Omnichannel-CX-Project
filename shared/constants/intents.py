@@ -11,6 +11,7 @@ INTENT_TO_TEAM = {
     "kyc_update":              "compliance",
     "fraud_report":            "fraud_and_disputes",
     "complaint":               "customer_care",
+    "ticket_status":           "customer_care",
     "general_inquiry":         "customer_care",
     "human_escalation":        "customer_care",
 }

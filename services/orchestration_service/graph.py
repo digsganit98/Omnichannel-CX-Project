@@ -1,5 +1,6 @@
 import logging
 import time
+from datetime import datetime, timezone
 from typing import Literal, TypedDict
 
 from langgraph.graph import END, START, StateGraph
@@ -19,6 +20,11 @@ from services.rag_service.rag_pipeline import RAGPipeline
 from services.ticket_service.ticket_manager import TicketManager
 from shared.schemas.messages import InboundMessage
 from shared.schemas.responses import ChannelResponse
+
+try:
+    from services.neo4j_service import writer as neo4j_writer
+except Exception:
+    neo4j_writer = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -178,8 +184,28 @@ class OrchestrationGraph:
         if crm_profile.status == "synced":
             message.profile_metadata["crm"] = crm_profile.data
             message.metadata["crm_customer_id"] = crm_profile.data.get("customer_id") or crm_profile.data.get("id")
+        # Cross-channel linking: if a WhatsApp customer's phone matches a Neo4j BFSI
+        # customer that already has an email, inject that email so resolve_customer()
+        # will merge the two SQLite identities into one customer_id automatically.
+        if self.neo4j_client and message.channel.value == "whatsapp":
+            try:
+                from services.neo4j_service.queries import get_customer_by_identifier
+                neo4j_cust = get_customer_by_identifier(self.neo4j_client, message.channel_identifier)
+                if neo4j_cust and neo4j_cust.get("email"):
+                    message.profile_metadata.setdefault("linked_email", neo4j_cust["email"])
+            except Exception:
+                pass
+
         state.customer = self.repository.resolve_customer(message)
         state.conversation = self.repository.get_or_create_conversation(state.customer_id)
+        if neo4j_writer and self.neo4j_client:
+            neo4j_writer.upsert_customer(
+                self.neo4j_client,
+                customer_id=state.customer_id,
+                phone=message.channel_identifier if message.channel.value == "whatsapp" else "",
+                name=state.customer.get("display_name", ""),
+                channel=message.channel.value,
+            )
         self._audit("inbound_received", state, details={"provider": message.provider})
         if crm_profile.status != "not_configured":
             self._audit("crm_profile_lookup_" + crm_profile.status, state,
@@ -201,15 +227,33 @@ class OrchestrationGraph:
     def _load_context(self, graph_state: GraphState) -> dict:
         state = graph_state["runtime"]
         active_ticket = self.repository.find_active_ticket(state.conversation_id)
+        customer_tickets = self.repository.find_open_tickets_for_customer(state.customer_id)
+
+        # Fetch Neo4j graph context once here so BOTH intent and resolution agents share it.
+        graph_context: dict = {}
+        if self.neo4j_client:
+            try:
+                from services.neo4j_service.queries import get_customer_context
+                graph_context = get_customer_context(
+                    self.neo4j_client, state.message.channel_identifier
+                ) or {}
+            except Exception:
+                pass
+
         state.context = {
             "conversation_summary": state.conversation.get("summary", ""),
             "recent_turns": self.repository.list_recent_turns(state.conversation_id),
             "customer_metadata": state.customer.get("metadata", {}),
+            "channel": state.message.channel.value,
             "active_ticket": active_ticket.model_dump(mode="json") if active_ticket else None,
+            "customer_tickets": customer_tickets,
+            "graph_context": graph_context,
         }
         self._complete(state, WorkflowStep.LOAD_CONVERSATION_CONTEXT, "workflow_automation_agent",
                        recent_turn_count=len(state.context["recent_turns"]),
-                       active_ticket_id=active_ticket.ticket_id if active_ticket else None)
+                       active_ticket_id=active_ticket.ticket_id if active_ticket else None,
+                       open_ticket_count=len(customer_tickets),
+                       graph_customer_id=graph_context.get("customer_id") or None)
         return {"runtime": state}
 
     def _detect_ticket_action(self, graph_state: GraphState) -> dict:
@@ -254,7 +298,12 @@ class OrchestrationGraph:
     def _resolve_query(self, graph_state: GraphState) -> dict:
         state = graph_state["runtime"]
         intent_str = state.analysis.intent.value if state.analysis else None
-        state.resolution = self.resolution_agent.run(state.message, state.context, intent=intent_str)
+        # Pass detected language into context so Groq generator can respond in customer's language
+        enriched_context = {
+            **state.context,
+            "language": state.analysis.language if state.analysis else "en",
+        }
+        state.resolution = self.resolution_agent.run(state.message, enriched_context, intent=intent_str)
         self._audit("retrieval_performed", state,
                     intent=intent_str or "unknown",
                     details={
@@ -273,7 +322,7 @@ class OrchestrationGraph:
 
     def _decide_ticket(self, graph_state: GraphState) -> dict:
         state = graph_state["runtime"]
-        state.ticket_decision = self.ticket_agent.decide(state.analysis, state.resolution)
+        state.ticket_decision = self.ticket_agent.decide(state.analysis, state.resolution, state.context)
         self._complete(state, WorkflowStep.DECIDE_RESOLUTION, self.ticket_agent.name,
                        ticket_required=state.ticket_decision.required,
                        reason=state.ticket_decision.reason)
@@ -351,6 +400,26 @@ class OrchestrationGraph:
         if state.resolution:
             self.repository.add_retrieval_evidence(outbound_turn["turn_id"], state.resolution.contexts)
         self.repository.update_conversation_summary(state.conversation_id, self._summary(state.conversation_id))
+        if neo4j_writer and self.neo4j_client and state.analysis:
+            _ts = datetime.now(timezone.utc).isoformat()
+            neo4j_writer.upsert_interaction(
+                self.neo4j_client,
+                customer_id=state.customer_id,
+                conversation_id=state.conversation_id,
+                intent=state.analysis.intent.value,
+                urgency=state.analysis.urgency.value,
+                channel=state.message.channel.value,
+                timestamp=_ts,
+            )
+            if state.ticket:
+                neo4j_writer.upsert_ticket_node(
+                    self.neo4j_client,
+                    ticket_id=state.ticket.ticket_id,
+                    customer_id=state.customer_id,
+                    intent=state.analysis.intent.value,
+                    priority=state.ticket.priority.value if hasattr(state.ticket.priority, "value") else str(state.ticket.priority),
+                    status=state.ticket.status.value if hasattr(state.ticket.status, "value") else str(state.ticket.status),
+                )
         self._complete(state, WorkflowStep.PERSIST_AUDIT_EVENTS, "workflow_automation_agent",
                        outbound_turn_id=outbound_turn["turn_id"])
         self._audit("workflow_completed", state, intent=self._intent(state),

@@ -80,6 +80,39 @@ class OpenSearchVectorStore:
         self.client.indices.refresh(index=self.index_name)
         return {"indexed": success, "errors": len(errors)}
 
+    def count_documents(self) -> int:
+        """Return total number of documents indexed in the knowledge base."""
+        if not self.client.indices.exists(index=self.index_name):
+            return 0
+        response = self.client.count(
+            index=self.index_name,
+            body={"query": {"term": {"metadata.doc_type.keyword": "knowledge_base"}}},
+        )
+        return response.get("count", 0)
+
+    def list_documents(self, limit: int = 20) -> list[dict]:
+        """Return a sample of indexed document chunks with metadata."""
+        if not self.client.indices.exists(index=self.index_name):
+            return []
+        response = self.client.search(
+            index=self.index_name,
+            body={
+                "size": limit,
+                "query": {"term": {"metadata.doc_type.keyword": "knowledge_base"}},
+                "_source": ["text", "metadata"],
+            },
+        )
+        hits = response.get("hits", {}).get("hits", [])
+        return [
+            {
+                "id": hit["_id"],
+                "text_preview": hit["_source"]["text"][:200],
+                "source": hit["_source"].get("metadata", {}).get("source", "unknown"),
+                "doc_type": hit["_source"].get("metadata", {}).get("doc_type", ""),
+            }
+            for hit in hits
+        ]
+
     def similarity_search(self, query: str, k: int = 4) -> list[dict]:
         vector = self.embeddings.embed_query(query)
         response = self.client.search(
