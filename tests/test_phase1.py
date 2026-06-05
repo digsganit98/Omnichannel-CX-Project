@@ -19,6 +19,7 @@ from services.channel_service.delivery import OutboundDeliveryService
 from services.crm_service.client import CRMResult
 from services.intent_service.classifier import classify_intent
 from services.orchestration_service.graph import OrchestrationGraph
+from services.orchestration_service.router import OmnichannelRouter
 from services.persistence_service.repository import SQLiteCXRepository
 from services.rag_service.embeddings import SemanticEmbeddings
 from services.rag_service.documents import load_knowledge_documents
@@ -261,6 +262,101 @@ def test_restart_persistence(tmp_path):
     assert second_repo.list_audit_events(response.correlation_id)
 
 
+def test_whatsapp_cloud_webhook_e2e_preserves_channel_and_sends_reply(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from apps.api.main import app
+    from apps.api.routes import webhooks
+
+    repo = SQLiteCXRepository(":memory:")
+    sender = Recorder()
+    router = OmnichannelRouter(graph(repo, whatsapp=sender))
+    monkeypatch.setattr(webhooks, "get_router", lambda: router)
+    monkeypatch.setenv("WHATSAPP_APP_SECRET", "e2e-whatsapp-secret")
+
+    payload = {
+        "entry": [
+            {
+                "changes": [
+                    {
+                        "value": {
+                            "contacts": [
+                                {"wa_id": "918555870077", "profile": {"name": "Phase 1 Tester"}}
+                            ],
+                            "messages": [
+                                {
+                                    "from": "918555870077",
+                                    "id": "wamid-e2e-kyc",
+                                    "timestamp": "1710000000",
+                                    "type": "text",
+                                    "text": {"body": "How can I update my KYC?"},
+                                }
+                            ],
+                        }
+                    }
+                ]
+            }
+        ]
+    }
+    body = json.dumps(payload, separators=(",", ":")).encode()
+    signature = "sha256=" + hmac.new(b"e2e-whatsapp-secret", body, hashlib.sha256).hexdigest()
+
+    response = TestClient(app).post(
+        "/integrations/whatsapp/webhook",
+        content=body,
+        headers={"x-hub-signature-256": signature, "content-type": "application/json"},
+    )
+
+    assert response.status_code == 200
+    result = response.json()["messages"][0]
+    assert response.json()["messages_received"] == 1
+    assert result["outbound_status"] == "sent"
+    assert result["workflow_trace"][0]["step"] == "receive_message"
+    assert sender.sent[0][0] == "918555870077"
+
+    conversation = repo.get_conversation(result["conversation_id"])
+    assert [turn["channel"] for turn in conversation["turns"]] == ["whatsapp", "whatsapp"]
+    assert conversation["turns"][0]["external_message_id"] == "wamid-e2e-kyc"
+    assert conversation["turns"][1]["delivery_status"] == "sent"
+
+
+def test_email_webhook_e2e_preserves_channel_creates_ticket_and_sends_reply(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from apps.api.main import app
+    from apps.api.routes import webhooks
+
+    repo = SQLiteCXRepository(":memory:")
+    sender = Recorder()
+    router = OmnichannelRouter(graph(repo, email=sender))
+    monkeypatch.setattr(webhooks, "get_router", lambda: router)
+    monkeypatch.setenv("EMAIL_WEBHOOK_SECRET", "e2e-email-secret")
+
+    response = TestClient(app).post(
+        "/integrations/email/webhook",
+        json={
+            "from_email": "customer@example.com",
+            "subject": "Loan support",
+            "body": "What is the status of my loan LN001? Please connect me to a human agent.",
+            "message_id": "email-e2e-human-agent",
+            "metadata": {"source": "phase1-e2e"},
+        },
+        headers={"x-email-webhook-secret": "e2e-email-secret"},
+    )
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["outbound_status"] == "sent"
+    assert result["ticket_id"]
+    assert result["next_best_action"] == "human_follow_up"
+    assert sender.sent[0][0] == "customer@example.com"
+
+    conversation = repo.get_conversation(result["conversation_id"])
+    assert [turn["channel"] for turn in conversation["turns"]] == ["email", "email"]
+    assert conversation["turns"][0]["external_message_id"] == "email-e2e-human-agent"
+    assert conversation["turns"][1]["ticket_id"] == result["ticket_id"]
+
+
 # ── BFSI intent classification tests ─────────────────────────────────────────
 
 def test_intent_classifier_supports_bfsi_intents():
@@ -347,7 +443,7 @@ def test_customer_answer_kb_documents_are_knowledge_base_type():
     documents = load_knowledge_documents()
     assert documents
     assert {document.metadata["doc_type"] for document in documents} == {"knowledge_base"}
-    assert all(document.metadata["source"].endswith(".pdf") for document in documents)
+    assert all(document.metadata["source"].split(":p", 1)[0].endswith(".pdf") for document in documents)
 
 
 def test_rag_discards_non_kb_contexts_before_generation():
