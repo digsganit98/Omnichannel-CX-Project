@@ -220,6 +220,17 @@ class OrchestrationGraph:
             subject=message.subject,
             metadata=message.metadata,
         )
+        # Phase 1 of 2-phase Neo4j write: create Interaction node immediately ("open")
+        # so the graph always has a record even if the AI pipeline fails.
+        if neo4j_writer and self.neo4j_client:
+            neo4j_writer.write_incoming_interaction(
+                self.neo4j_client,
+                conversation_id=state.conversation_id,
+                customer_id=state.customer_id,
+                channel=message.channel.value,
+                message_text=message.text,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+            )
         self._complete(state, WorkflowStep.RESOLVE_IDENTITY, "identity_resolution",
                        crm_profile_status=crm_profile.status)
         return {"runtime": state}
@@ -401,15 +412,17 @@ class OrchestrationGraph:
             self.repository.add_retrieval_evidence(outbound_turn["turn_id"], state.resolution.contexts)
         self.repository.update_conversation_summary(state.conversation_id, self._summary(state.conversation_id))
         if neo4j_writer and self.neo4j_client and state.analysis:
-            _ts = datetime.now(timezone.utc).isoformat()
-            neo4j_writer.upsert_interaction(
+            # Phase 2 of 2-phase write: close the Interaction node and create ResolutionMemory.
+            neo4j_writer.update_interaction_resolution(
                 self.neo4j_client,
-                customer_id=state.customer_id,
                 conversation_id=state.conversation_id,
+                customer_id=state.customer_id,
+                resolution=state.answer or "",
                 intent=state.analysis.intent.value,
+                sentiment=state.analysis.sentiment,
+                product_id=_extract_product_ref(state),
+                embedding_str=_extract_embedding(state.resolution),
                 urgency=state.analysis.urgency.value,
-                channel=state.message.channel.value,
-                timestamp=_ts,
             )
             if state.ticket:
                 neo4j_writer.upsert_ticket_node(
@@ -506,3 +519,35 @@ def _try_neo4j():
         return Neo4jClient()
     except Exception:
         return None
+
+
+def _extract_product_ref(state: "OrchestrationState") -> str:  # type: ignore[name-defined]
+    """Derive the product_id key for ResolutionMemory from the conversation context."""
+    graph_ctx = state.context.get("graph_context", {}) if state.context else {}
+    intent = state.analysis.intent.value if state.analysis else ""
+    if "loan" in intent:
+        loans = graph_ctx.get("loans", [])
+        return loans[0].get("loan_id", "loan_general") if loans else "loan_general"
+    if any(k in intent for k in ("claim", "insurance", "policy")):
+        claims = graph_ctx.get("claims", [])
+        return claims[0].get("claim_id", "insurance_general") if claims else "insurance_general"
+    return "general"
+
+
+def _extract_embedding(resolution) -> str:
+    """Extract the first context embedding vector as a compact string for Neo4j storage.
+
+    Returns empty string when no vector is available (e.g., Neo4j-sourced answers).
+    """
+    if resolution is None:
+        return ""
+    contexts = getattr(resolution, "contexts", []) or []
+    for ctx in contexts:
+        emb = ctx.get("embedding")
+        if emb:
+            # Store as comma-joined string; Neo4j will store as a string property
+            # (vector index applies when the value is a list — upgrade path for later)
+            if isinstance(emb, (list, tuple)):
+                return ",".join(str(round(float(v), 6)) for v in emb[:384])
+            return str(emb)[:2000]
+    return ""

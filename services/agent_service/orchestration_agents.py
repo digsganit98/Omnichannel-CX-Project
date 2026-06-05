@@ -85,6 +85,37 @@ class QueryResolutionAgent:
     def run(self, message: InboundMessage, context: dict, intent: str | None = None) -> QueryResolution:
         channel = context.get("channel", "")
 
+        # ── Priority 0: ResolutionMemory cache (agent-verified cross-customer answers) ──
+        # Only for non-sensitive, non-ticket intents. Verified = human agent approved it.
+        if intent and intent not in {Intent.TICKET_STATUS.value, Intent.FRAUD_REPORT.value,
+                                     Intent.HUMAN_ESCALATION.value} and self.neo4j_client:
+            try:
+                from services.neo4j_service.query_library import search_resolution_memory
+                graph_ctx = context.get("graph_context", {})
+                product_id = _derive_product_id_for_memory(intent, graph_ctx)
+                memory = search_resolution_memory(self.neo4j_client, product_id, intent)
+                if memory and memory.get("verified") and memory.get("resolution"):
+                    cached_answer = memory["resolution"]
+                    return QueryResolution(
+                        answer=cached_answer,
+                        confidence=0.92,
+                        contexts=[{
+                            "text": cached_answer,
+                            "score": 0.92,
+                            "metadata": {
+                                "source": "resolution_memory_cache",
+                                "doc_type": "customer_graph",
+                                "times_reused": memory.get("times_reused", 0),
+                                "product_id": product_id,
+                                "intent_type": intent,
+                            },
+                        }],
+                        citations=[{"index": 1, "source": "resolution_memory_cache", "score": 0.92}],
+                        retrieval_backend="resolution_memory_cache",
+                    )
+            except Exception:
+                pass
+
         # ── Priority 1: Ticket status lookup (cross-channel memory) ──────────
         if intent == Intent.TICKET_STATUS:
             tickets = context.get("customer_tickets", [])
@@ -323,3 +354,16 @@ class WorkflowAutomationAgent:
 
     def send_reply(self, message: InboundMessage, answer: str) -> dict:
         return self.delivery.send(message, answer)
+
+
+# ── Module-level helpers ──────────────────────────────────────────────────────
+
+def _derive_product_id_for_memory(intent: str, graph_ctx: dict) -> str:
+    """Derive the product_id key for ResolutionMemory lookup from intent + graph context."""
+    if "loan" in intent:
+        loans = graph_ctx.get("loans", [])
+        return loans[0].get("loan_id", "loan_general") if loans else "loan_general"
+    if any(k in intent for k in ("claim", "insurance", "policy")):
+        claims = graph_ctx.get("claims", [])
+        return claims[0].get("claim_id", "insurance_general") if claims else "insurance_general"
+    return "general"

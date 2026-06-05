@@ -1,10 +1,12 @@
 """Load bfsi.xlsx into Neo4j graph.
 
 Sheets handled:
-  Customer_data          → (:Customer) nodes
-  Loan_Processing_data   → (:Loan) nodes + [:HAS_LOAN] edges
-  Claim_data             → (:Claim) nodes + [:HAS_CLAIM] edges
+  Customer_data          → (:Customer) nodes + (:KYC) nodes
+  Loan_Processing_data   → (:Loan) nodes + [:HAS_LOAN] edges + [:PRODUCT_IS] links
+  Claim_data             → (:Claim) nodes + (:Policy) nodes + [:HAS_CLAIM] / [:HAS_POLICY] edges
   Loan_Policy_Product_data → (:Product) nodes
+Runtime:
+  (:Agent) nodes for AI and human handlers (always created)
 """
 
 from pathlib import Path
@@ -25,6 +27,10 @@ def load_bfsi_data(client) -> dict:
     counts["loans"] = _load_loans(client, wb)
     counts["claims"] = _load_claims(client, wb)
     counts["products"] = _load_products(client, wb)
+    counts["policies"] = _load_policies(client, wb)
+    counts["kyc"] = _load_kyc(client, wb)
+    counts["product_links"] = _load_product_links(client, wb)
+    counts["agents"] = _load_agents(client)
 
     logger.info("bfsi_data_loaded", extra=counts)
     return counts
@@ -162,6 +168,123 @@ def _load_products(client, wb) -> int:
             },
         )
     return len(rows)
+
+
+def _load_policies(client, wb) -> int:
+    """Synthesize :Policy nodes from Claim_data (unique CustomerID + PolicyType combos)."""
+    rows = _rows(wb, "Claim_data")
+    seen: set[str] = set()
+    count = 0
+    for row in rows:
+        customer_id = str(row.get("CustomerID", ""))
+        policy_type = str(row.get("PolicyType") or "")
+        claim_id = str(row.get("ClaimID", ""))
+        if not customer_id or not policy_type:
+            continue
+        policy_id = f"{customer_id}_{policy_type.replace(' ', '_').upper()}"
+        if policy_id not in seen:
+            seen.add(policy_id)
+            client.write(
+                """
+                MERGE (p:Policy {policy_id: $policy_id})
+                SET p.policy_type = $policy_type,
+                    p.customer_id = $customer_id,
+                    p.status = 'Active'
+                WITH p
+                MATCH (c:Customer {customer_id: $customer_id})
+                MERGE (c)-[:HAS_POLICY]->(p)
+                """,
+                {"policy_id": policy_id, "policy_type": policy_type, "customer_id": customer_id},
+            )
+            count += 1
+        # Link Policy → Claim
+        if claim_id:
+            client.write(
+                """
+                MATCH (p:Policy {policy_id: $policy_id})
+                MATCH (cl:Claim {claim_id: $claim_id})
+                MERGE (p)-[:HAS_CLAIM]->(cl)
+                """,
+                {"policy_id": policy_id, "claim_id": claim_id},
+            )
+    return count
+
+
+def _load_kyc(client, wb) -> int:
+    """Create one :KYC node per customer (stub with Pending status)."""
+    rows = _rows(wb, "Customer_data")
+    for row in rows:
+        customer_id = str(row.get("CustomerID", ""))
+        if not customer_id:
+            continue
+        client.write(
+            """
+            MERGE (k:KYC {customer_id: $customer_id})
+            SET k.kyc_status   = 'Pending',
+                k.registered_at = $registered_at
+            WITH k
+            MATCH (c:Customer {customer_id: $customer_id})
+            MERGE (c)-[:KYC_VERIFIED_BY]->(k)
+            """,
+            {
+                "customer_id": customer_id,
+                "registered_at": str(row.get("RegistrationDate") or ""),
+            },
+        )
+    return len(rows)
+
+
+def _load_product_links(client, wb) -> int:
+    """Link Loan nodes to Product nodes via [:PRODUCT_IS] by matching loan_type."""
+    rows = _rows(wb, "Loan_Processing_data")
+    count = 0
+    for row in rows:
+        loan_id = str(row.get("LoanID", ""))
+        loan_type = str(row.get("LoanType") or "")
+        if not loan_id or not loan_type:
+            continue
+        client.write(
+            """
+            MATCH (l:Loan {loan_id: $loan_id})
+            MATCH (p:Product)
+            WHERE p.product_type = $loan_type
+               OR p.name CONTAINS $loan_type
+               OR p.category = $loan_type
+            MERGE (l)-[:PRODUCT_IS]->(p)
+            """,
+            {"loan_id": loan_id, "loan_type": loan_type},
+        )
+        count += 1
+    return count
+
+
+def _load_agents(client) -> int:
+    """Create default Agent nodes for AI handler and stub human handler."""
+    agents = [
+        {
+            "agent_id": "AI_GROQ",
+            "agent_type": "ai",
+            "name": "InboxIQ AI",
+            "model": "llama-3.1-8b-instant",
+        },
+        {
+            "agent_id": "HUMAN_SR",
+            "agent_type": "human",
+            "name": "Support Representative",
+            "model": "",
+        },
+    ]
+    for agent in agents:
+        client.write(
+            """
+            MERGE (a:Agent {agent_id: $agent_id})
+            SET a.agent_type = $agent_type,
+                a.name       = $name,
+                a.model      = $model
+            """,
+            agent,
+        )
+    return len(agents)
 
 
 if __name__ == "__main__":

@@ -78,6 +78,127 @@ def upsert_interaction(
         )
 
 
+def write_incoming_interaction(
+    client,
+    conversation_id: str,
+    customer_id: str,
+    channel: str,
+    message_text: str,
+    timestamp: str,
+) -> None:
+    """Write an :Interaction node in 'open' status the moment a message arrives.
+
+    Called BEFORE the AI pipeline runs so the graph always has a record of every
+    inbound message even if the pipeline fails partway through.
+    """
+    if client is None or not conversation_id or not customer_id:
+        return
+    try:
+        client.write(
+            """
+            MERGE (i:Interaction {conversation_id: $conversation_id})
+            SET i.channel    = $channel,
+                i.message    = $message,
+                i.status     = 'open',
+                i.created_at = $timestamp
+            WITH i
+            MATCH (c:Customer {customer_id: $customer_id})
+            MERGE (c)-[:HAS_INTERACTION]->(i)
+            """,
+            {
+                "conversation_id": conversation_id,
+                "customer_id": customer_id,
+                "channel": channel or "",
+                "message": message_text or "",
+                "timestamp": timestamp or "",
+            },
+        )
+    except Exception:
+        logger.warning(
+            "neo4j_write_incoming_interaction_failed",
+            extra={"conversation_id": conversation_id},
+            exc_info=True,
+        )
+
+
+def update_interaction_resolution(
+    client,
+    conversation_id: str,
+    customer_id: str,
+    resolution: str,
+    intent: str,
+    sentiment: str,
+    product_id: str,
+    embedding_str: str,
+    urgency: str,
+) -> None:
+    """Update the :Interaction node with the AI resolution and create/update ResolutionMemory.
+
+    Called AFTER the AI pipeline completes. Closes the open interaction and stores
+    the answer as a reusable ResolutionMemory node keyed by (product_id, intent_type).
+    """
+    if client is None or not conversation_id:
+        return
+    try:
+        from datetime import datetime, timezone
+        import uuid
+        now = datetime.now(timezone.utc).isoformat()
+        mem_id = "RESMEM-" + str(uuid.uuid4())[:8].upper()
+        client.write(
+            """
+            MERGE (i:Interaction {conversation_id: $conversation_id})
+            SET i.resolution           = $resolution,
+                i.intent               = $intent,
+                i.sentiment            = $sentiment,
+                i.urgency              = $urgency,
+                i.product_ref          = $product_id,
+                i.resolution_embedding = $embedding,
+                i.status               = 'closed',
+                i.handled_by           = 'AI_GROQ',
+                i.updated_at           = $now
+
+            WITH i
+            MERGE (rm:ResolutionMemory {product_id: $product_id, intent_type: $intent})
+            ON CREATE SET
+                rm.id                   = $mem_id,
+                rm.query_pattern        = i.message,
+                rm.resolution_text      = $resolution,
+                rm.resolution_embedding = $embedding,
+                rm.verified             = false,
+                rm.times_reused         = 1,
+                rm.created_at           = $now
+            ON MATCH SET
+                rm.resolution_text      = $resolution,
+                rm.resolution_embedding = $embedding,
+                rm.times_reused         = rm.times_reused + 1,
+                rm.updated_at           = $now
+
+            MERGE (i)-[:CREATED_MEMORY]->(rm)
+
+            WITH i
+            MATCH (a:Agent {agent_id: 'AI_GROQ'})
+            MERGE (i)-[:HANDLED_BY]->(a)
+            """,
+            {
+                "conversation_id": conversation_id,
+                "resolution": resolution or "",
+                "intent": intent or "",
+                "sentiment": sentiment or "",
+                "urgency": urgency or "",
+                "product_id": product_id or "general",
+                "embedding": embedding_str or "",
+                "mem_id": mem_id,
+                "now": now,
+            },
+        )
+    except Exception:
+        logger.warning(
+            "neo4j_update_interaction_resolution_failed",
+            extra={"conversation_id": conversation_id},
+            exc_info=True,
+        )
+
+
 def upsert_ticket_node(
     client,
     ticket_id: str,

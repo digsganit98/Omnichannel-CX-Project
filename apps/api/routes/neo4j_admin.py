@@ -54,8 +54,40 @@ def graph_status() -> dict:
         client.close()
 
 
+@router.post("/setup-indexes")
+def setup_vector_indexes() -> dict:
+    """Create Neo4j vector indexes on ResolutionMemory and Interaction nodes.
+
+    Requires Neo4j 5.11+. Safe to call multiple times (IF NOT EXISTS guard).
+    """
+    client = _get_client()
+    try:
+        from services.neo4j_service.query_library import create_vector_indexes
+        result = create_vector_indexes(client)
+        return result
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    finally:
+        client.close()
+
+
+@router.get("/cross-sell-candidates")
+def cross_sell_candidates(limit: int = 50) -> dict:
+    """Return customers with loans but no life/term insurance — cross-sell opportunity."""
+    client = _get_client()
+    try:
+        from services.neo4j_service.query_library import get_cross_sell_candidates
+        candidates = get_cross_sell_candidates(client, limit=limit)
+        return {"count": len(candidates), "candidates": candidates}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    finally:
+        client.close()
+
+
 def _count_nodes(client) -> dict:
-    labels = ["Customer", "Loan", "Claim", "Product", "Interaction", "Ticket"]
+    labels = ["Customer", "Loan", "Claim", "Product", "Policy", "KYC",
+              "Agent", "Interaction", "Ticket", "ResolutionMemory"]
     counts = {}
     for label in labels:
         try:
@@ -67,7 +99,9 @@ def _count_nodes(client) -> dict:
 
 
 def _count_relationships(client) -> dict:
-    rel_types = ["HAS_LOAN", "HAS_CLAIM", "HAS_INTERACTION", "HAS_TICKET"]
+    rel_types = ["HAS_LOAN", "HAS_CLAIM", "HAS_POLICY", "HAS_INTERACTION",
+                 "HAS_TICKET", "KYC_VERIFIED_BY", "PRODUCT_IS",
+                 "CREATED_MEMORY", "HANDLED_BY"]
     counts = {}
     for rel in rel_types:
         try:
