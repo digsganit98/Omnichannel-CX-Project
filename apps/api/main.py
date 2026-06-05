@@ -3,6 +3,13 @@ import os
 import time
 from pathlib import Path
 
+# Load .env before anything else so all os.getenv() calls see the values
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).resolve().parents[2] / ".env", override=False)
+except ImportError:
+    pass
+
 from fastapi import FastAPI, Header
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -21,6 +28,7 @@ from .routes.customers import router as customers_router
 from .routes.crm import router as crm_router
 from .routes.email import router as email_router
 from .routes.integrations import router as integrations_router
+from .routes.neo4j_admin import router as neo4j_admin_router
 from .routes.orchestration import router as orchestration_router
 from .routes.rag import router as rag_router
 from .routes.tickets import router as tickets_router
@@ -62,6 +70,7 @@ app.include_router(crm_router)
 app.include_router(email_router)
 app.include_router(tickets_router)
 app.include_router(integrations_router)
+app.include_router(neo4j_admin_router)
 app.include_router(orchestration_router)
 app.include_router(rag_router)
 app.include_router(audit_router)

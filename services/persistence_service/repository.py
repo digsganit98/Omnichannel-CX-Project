@@ -36,6 +36,7 @@ class CXRepository(Protocol):
     def create_ticket(self, ticket: Ticket) -> Ticket: ...
     def update_ticket(self, ticket_id: str, **values) -> dict | None: ...
     def find_active_ticket(self, conversation_id: str) -> Ticket | None: ...
+    def find_open_tickets_for_customer(self, customer_id: str, limit: int = 5) -> list[dict]: ...
     def list_tickets(self) -> list[dict]: ...
     def get_ticket(self, ticket_id: str) -> dict | None: ...
     def add_ticket_event(self, ticket_id: str, event_type: str, actor: str, details: dict | None = None) -> dict: ...
@@ -309,6 +310,16 @@ class SQLiteCXRepository:
                 (conversation_id,),
             ).fetchone()
         return self._ticket(row) if row else None
+
+    def find_open_tickets_for_customer(self, customer_id: str, limit: int = 5) -> list[dict]:
+        """Return all open (non-resolved) tickets for a customer across all channels."""
+        with self.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM tickets WHERE customer_id = ? AND status != 'resolved' "
+                "ORDER BY created_at DESC LIMIT ?",
+                (customer_id, limit),
+            ).fetchall()
+        return [self._ticket_dict(row) for row in rows]
 
     def list_tickets(self) -> list[dict]:
         with self.connection() as conn:

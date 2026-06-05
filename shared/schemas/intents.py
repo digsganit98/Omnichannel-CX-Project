@@ -16,6 +16,7 @@ class Intent(StrEnum):
     KYC_UPDATE              = "kyc_update"
     FRAUD_REPORT            = "fraud_report"
     COMPLAINT               = "complaint"
+    TICKET_STATUS           = "ticket_status"
     GENERAL_INQUIRY         = "general_inquiry"
     HUMAN_ESCALATION        = "human_escalation"
 
@@ -33,3 +34,5 @@ class IntentResult(BaseModel):
     reason: str
     sentiment: str = "neutral"
     analysis_source: str = "rule_fallback"
+    secondary_intent: Intent | None = None
+    language: str = "en"

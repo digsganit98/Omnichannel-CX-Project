@@ -2,7 +2,6 @@ from pathlib import Path
 
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from pypdf import PdfReader
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -10,6 +9,27 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def load_knowledge_documents() -> list[Document]:
     return _split_documents(_load_pdf_kb())
+
+
+def _load_markdown_kb() -> list[Document]:
+    docs = []
+    for path in (ROOT / "data" / "knowledge_base").glob("*.md"):
+        try:
+            text = path.read_text(encoding="utf-8")
+            if text.strip():
+                docs.append(
+                    Document(
+                        page_content=text,
+                        metadata={
+                            "source": path.name,
+                            "doc_type": "knowledge_base",
+                            "document_version": str(int(path.stat().st_mtime)),
+                        },
+                    )
+                )
+        except Exception:
+            pass
+    return docs
 
 
 def _load_pdf_kb() -> list[Document]:
