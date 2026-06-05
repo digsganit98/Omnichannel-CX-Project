@@ -72,6 +72,14 @@ def get_customer_context(client, channel_identifier: str) -> dict:
     }
 
 
+def _fmt_amount(value) -> str:
+    """Safely format a currency amount that may be stored as int, float, or string."""
+    try:
+        return f"₹{int(float(str(value).replace(',', ''))):,}"
+    except (ValueError, TypeError):
+        return str(value) if value else "N/A"
+
+
 def neo4j_answer(client, intent: str, customer_id: str) -> str | None:
     """Return a formatted natural-language answer for transactional intents.
 
@@ -85,11 +93,13 @@ def neo4j_answer(client, intent: str, customer_id: str) -> str | None:
         if not loans:
             return "No active loan records were found for your account."
         lines = ["Here is your loan summary:"]
-        for l in loans:
+        for loan in loans:
             lines.append(
-                f"  • {l['loan_type']} (ID: {l['loan_id']}): Status = {l['status']}, "
-                f"Amount = ₹{l['amount_inr']:,}, Rate = {l['interest_rate']}%, "
-                f"Next step: {l['next_step']}"
+                f"  • {loan['loan_type']} (ID: {loan['loan_id']}): "
+                f"Status = {loan['status']}, "
+                f"Amount = {_fmt_amount(loan['amount_inr'])}, "
+                f"Rate = {loan['interest_rate']}%, "
+                f"Next step: {loan['next_step']}"
             )
         return "\n".join(lines)
 
@@ -98,11 +108,14 @@ def neo4j_answer(client, intent: str, customer_id: str) -> str | None:
         if not claims:
             return "No insurance claims or policies were found for your account."
         lines = ["Here is your claims summary:"]
-        for c in claims:
+        for claim in claims:
+            approved = _fmt_amount(claim["amount_approved"]) if str(claim.get("amount_approved", "")).upper() != "N/A" else "Pending"
             lines.append(
-                f"  • Claim {c['claim_id']} ({c['policy_type']} / {c['claim_type']}): "
-                f"Status = {c['status']}, Claimed = ₹{c['amount_claimed']:,}, "
-                f"Approved = ₹{c['amount_approved']:,}. {c['reason']}"
+                f"  • Claim {claim['claim_id']} ({claim['policy_type']} / {claim['claim_type']}): "
+                f"Status = {claim['status']}, "
+                f"Claimed = {_fmt_amount(claim['amount_claimed'])}, "
+                f"Approved = {approved}. "
+                f"{claim['reason']}"
             )
         return "\n".join(lines)
 

@@ -18,6 +18,10 @@ KEYWORDS = {
     Intent.INSURANCE_CLAIM:         {"claim", "file claim", "accident", "damage claim", "claim status", "reimbursement", "hospitalization"},
     Intent.CARD_MANAGEMENT:         {"block card", "lost card", "stolen card", "card limit", "pin change", "debit card", "credit card", "card blocked"},
     Intent.KYC_UPDATE:              {"kyc", "update documents", "pan card", "aadhaar", "address proof", "kyc update", "document update"},
+    Intent.TICKET_STATUS:           {"ticket status", "case status", "query status", "reference number",
+                                     "status of my", "update on my", "what happened to my",
+                                     "my complaint status", "follow up", "ticket number",
+                                     "is my request", "any update", "complaint reference"},
 }
 
 

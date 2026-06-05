@@ -22,8 +22,20 @@ class CXAgent:
         llm_result = self.generator.classify_message(message, context or {})
         if llm_result:
             try:
+                # Map secondary_intent string to Intent enum safely
+                secondary_raw = llm_result.get("secondary_intent")
+                secondary = None
+                if secondary_raw and secondary_raw != "null":
+                    try:
+                        from shared.schemas.intents import Intent as _Intent
+                        secondary = _Intent(secondary_raw)
+                    except ValueError:
+                        secondary = None
+
                 values = {
                     **llm_result,
+                    "secondary_intent": secondary,
+                    "language": llm_result.get("language", "en") or "en",
                     "analysis_source": "groq_llm",
                     "reason": llm_result.get("reason") or llm_result.get("rationale") or "Classified by Groq LLM.",
                 }
