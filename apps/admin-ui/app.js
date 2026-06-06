@@ -1056,19 +1056,15 @@ window.loadConnectors = async function() {
       icon:'background:#22c55e', svg:'<svg viewBox="0 0 24 24" fill="#fff"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413z"/><path d="M20.52 3.449C12.831-3.984.106 1.407.101 11.893c0 2.096.549 4.14 1.595 5.945L.057 24l6.335-1.652c1.746.943 3.71 1.444 5.71 1.447h.006c9.756 0 15.466-8.65 11.466-16.001a11.816 11.816 0 0 0-3.054-4.345z"/></svg>' },
     { nm:'Gmail / SMTP', desc:'Outbound email delivery', status: emStatus,
       icon:'background:#ea4335', svg:'<svg viewBox="0 0 24 24" fill="#fff"><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/></svg>' },
-    { nm:'Neo4j Graph DB', desc:'Customer knowledge graph', status:'connected',
-      icon:'background:#0183b6', svg:'<svg viewBox="0 0 24 24" fill="#fff"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z"/></svg>' },
-    { nm:'OpenSearch RAG', desc:'Knowledge base & semantic search', status:'connected',
-      icon:'background:#005eb8', svg:'<svg viewBox="0 0 24 24" fill="#fff"><path d="M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>' },
-    { nm:'Groq LLM', desc:'Intent classification & response generation', status:'connected',
-      icon:'background:#f55036', svg:'<svg viewBox="0 0 24 24" fill="#fff"><path d="M12 2a10 10 0 1 0 0 20A10 10 0 0 0 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/></svg>' },
+    { nm:'Call', desc:'Voice channel integration', status:'phase2',
+      icon:'background:#6366f1', svg:'<svg viewBox="0 0 24 24" fill="#fff"><path d="M6.62 10.79c1.44 2.83 3.76 5.14 6.59 6.59l2.2-2.2c.27-.27.67-.36 1.02-.24 1.12.37 2.33.57 3.57.57.55 0 1 .45 1 1V20c0 .55-.45 1-1 1-9.39 0-17-7.61-17-17 0-.55.45-1 1-1h3.5c.55 0 1 .45 1 1 0 1.25.2 2.45.57 3.57.11.35.03.74-.25 1.02l-2.2 2.2z"/></svg>' },
     { nm:'Jira CRM', desc:'Ticket synchronisation', status:'disconnected',
       icon:'background:#0052cc', svg:'<svg viewBox="0 0 24 24" fill="#fff"><path d="M11.571 11.513H0a5.218 5.218 0 0 0 5.232 5.215h2.13v2.057A5.218 5.218 0 0 0 12.575 24V12.518a1.005 1.005 0 0 0-1.004-1.005zm5.723-5.756H5.736a5.218 5.218 0 0 0 5.215 5.214h2.129v2.058a5.218 5.218 0 0 0 5.215 5.214V6.762a1.005 1.005 0 0 0-1.001-1.005z"/></svg>' },
   ];
 
   connectors.forEach(function(c) {
-    var badgeCls = c.status === 'connected' ? 'connected' : c.status === 'error' ? 'error' : 'disconnected';
-    var badgeTxt = c.status === 'connected' ? 'Connected' : c.status === 'error' ? 'Error' : 'Disconnected';
+    var badgeCls = c.status === 'connected' ? 'connected' : c.status === 'error' ? 'error' : c.status === 'phase2' ? 'phase2' : 'disconnected';
+    var badgeTxt = c.status === 'connected' ? 'Connected' : c.status === 'error' ? 'Error' : c.status === 'phase2' ? '✦ Phase 2' : 'Disconnected';
     var card = document.createElement('div');
     card.className = 'conn-card';
     card.innerHTML = '<div class="conn-hdr"><div class="conn-icon" style="' + c.icon + '">' + c.svg + '</div><div><div class="conn-nm">'+escH(c.nm)+'</div><div class="conn-desc">'+escH(c.desc)+'</div></div></div>'
@@ -1200,7 +1196,7 @@ window.loadTickets = async function() {
 
     filterTickets();
   } catch(e) {
-    document.getElementById('openTktBody').innerHTML = '<tr><td colspan="9" class="tkt-empty" style="color:var(--red-t)">' + escH(e.message) + '</td></tr>';
+    document.getElementById('openTktBody').innerHTML = '<tr><td colspan="8" class="tkt-empty" style="color:var(--red-t)">' + escH(e.message) + '</td></tr>';
   } finally {
     if (spinner) spinner.classList.remove('spinning');
   }
@@ -1281,7 +1277,7 @@ function tktCustomerCell(t) {
 function renderTicketRows(tbodyId, tickets, isClosed) {
   var tbody = document.getElementById(tbodyId);
   if (!tickets.length) {
-    tbody.innerHTML = '<tr><td colspan="9" class="tkt-empty">No tickets</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="8" class="tkt-empty">No tickets</td></tr>';
     return;
   }
   tbody.innerHTML = '';
@@ -1291,7 +1287,6 @@ function renderTicketRows(tbodyId, tickets, isClosed) {
     tr.title = 'Click to open conversation in Inbox';
 
     var priCls = t.priority === 'critical' ? 'pri-crit' : t.priority === 'high' ? 'pri-high' : t.priority === 'medium' ? 'pri-med' : 'pri-low';
-    var crmCls = t.crm_sync_status === 'synced' ? 'crm-ok' : t.crm_sync_status === 'failed' ? 'crm-fail' : 'crm-pend';
     var channel = (t.metadata && t.metadata.channel) ? t.metadata.channel : '—';
     var chMd = chMeta(channel);
     var dateCol = isClosed ? fmtDateTime(t.updated_at) : fmtDateTime(t.created_at);
@@ -1303,8 +1298,7 @@ function renderTicketRows(tbodyId, tickets, isClosed) {
       + '<td class="tkt-intent">' + escH((t.intent || '—').replace(/_/g, ' ')) + '</td>'
       + tktCustomerCell(t)
       + '<td><span class="cp ' + chMd.pill + '" style="font-size:10px">' + chMd.svg + chMd.label + '</span></td>'
-      + '<td>' + dateCol + '</td>'
-      + '<td><span class="tkt-crm ' + crmCls + '">' + escH(t.crm_sync_status || '—') + '</span></td>';
+      + '<td>' + dateCol + '</td>';
 
     tr.addEventListener('click', function() { goToConversation(t.conversation_id, t.ticket_id); });
     tbody.appendChild(tr);

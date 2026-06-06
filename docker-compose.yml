@@ -50,6 +50,7 @@ services:
     volumes:
       - cx-data:/app/data
       - huggingface-cache:/root/.cache/huggingface
+      - ./apps/admin-ui:/app/apps/admin-ui
     depends_on:
       ollama:
         condition: service_started

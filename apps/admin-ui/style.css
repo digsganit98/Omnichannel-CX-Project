@@ -344,6 +344,7 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .conn-badge.connected{background:var(--grn-bg);border-color:var(--grn-bd);color:var(--grn-t)}
 .conn-badge.disconnected{background:var(--surf2);border-color:var(--bdr);color:var(--t3)}
 .conn-badge.error{background:var(--red-bg);border-color:var(--red-bd);color:var(--red-t)}
+.conn-badge.phase2{background:#fff8e1;border-color:#f59e0b;color:#b45309;font-weight:700;letter-spacing:.3px}
 .conn-fields{display:flex;flex-direction:column;gap:6px;border-top:1px solid var(--bdr);padding-top:10px}
 .conn-field label{font-size:10px;font-weight:600;color:var(--t3);text-transform:uppercase;letter-spacing:.4px;display:block;margin-bottom:3px}
 .conn-field input{width:100%;font-family:inherit;font-size:12px;padding:6px 9px;border:1px solid var(--bdr);border-radius:var(--rs);color:var(--t1);background:var(--surf2);outline:none}
