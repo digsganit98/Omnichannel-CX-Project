@@ -62,8 +62,13 @@ class IntentClassificationAgent:
     def run(self, message: InboundMessage, context: dict) -> IntentResult:
         if self.neo4j_client:
             try:
-                from services.neo4j_service.queries import get_customer_context
-                graph_ctx = get_customer_context(self.neo4j_client, message.channel_identifier)
+                from services.neo4j_service.queries import get_customer_context, get_customer_context_by_id
+                graph_customer_id = message.metadata.get("portal_graph_customer_id")
+                graph_ctx = (
+                    get_customer_context_by_id(self.neo4j_client, str(graph_customer_id))
+                    if graph_customer_id
+                    else get_customer_context(self.neo4j_client, message.channel_identifier)
+                )
                 if graph_ctx:
                     context = {**context, "graph_context": graph_ctx}
             except Exception:
@@ -87,8 +92,17 @@ class QueryResolutionAgent:
 
         # ── Priority 0: ResolutionMemory cache (agent-verified cross-customer answers) ──
         # Only for non-sensitive, non-ticket intents. Verified = human agent approved it.
-        if intent and intent not in {Intent.TICKET_STATUS.value, Intent.FRAUD_REPORT.value,
-                                     Intent.HUMAN_ESCALATION.value} and self.neo4j_client:
+        memory_excluded_intents = {
+            Intent.TICKET_STATUS.value,
+            Intent.FRAUD_REPORT.value,
+            Intent.HUMAN_ESCALATION.value,
+            Intent.LOAN_STATUS.value,
+            Intent.LOAN_APPLICATION.value,
+            Intent.CLAIM_STATUS.value,
+            Intent.INSURANCE_CLAIM.value,
+            Intent.POLICY_STATUS.value,
+        }
+        if intent and intent not in memory_excluded_intents and self.neo4j_client:
             try:
                 from services.neo4j_service.query_library import search_resolution_memory
                 graph_ctx = context.get("graph_context", {})

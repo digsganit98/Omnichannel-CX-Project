@@ -4,7 +4,7 @@ from services.intent_service.classifier import classify_intent
 from services.intent_service.sentiment import detect_sentiment
 from services.intent_service.urgency import detect_urgency
 from services.rag_service.groq_generator import GroqGenerator
-from shared.schemas.intents import IntentResult, Urgency
+from shared.schemas.intents import Intent, IntentResult, Urgency
 
 
 URGENCY_RANK = {
@@ -47,6 +47,18 @@ class CXAgent:
     @staticmethod
     def _apply_guardrails(message: str, result: IntentResult) -> IntentResult:
         guarded_fields = []
+        rule_result = classify_intent(message)
+        boundary_intents = {
+            Intent.LOAN_STATUS,
+            Intent.LOAN_APPLICATION,
+            Intent.CLAIM_STATUS,
+            Intent.INSURANCE_CLAIM,
+            Intent.HUMAN_ESCALATION,
+        }
+        if rule_result.intent in boundary_intents and result.intent != rule_result.intent:
+            result.intent = rule_result.intent
+            guarded_fields.append("intent")
+
         rule_sentiment = detect_sentiment(message)
         if rule_sentiment == "negative" and result.sentiment != "negative":
             result.sentiment = "negative"

@@ -54,6 +54,9 @@ class CXRepository(Protocol):
     def get_admin_user_by_username(self, username: str) -> dict | None: ...
     def get_admin_user_by_email(self, email: str) -> dict | None: ...
     def list_admin_users(self) -> list[dict]: ...
+    def create_customer_user(self, user_id: str, email: str, password_hash: str) -> dict: ...
+    def get_customer_user_by_id(self, user_id: str) -> dict | None: ...
+    def get_customer_user_by_email(self, email: str) -> dict | None: ...
 
 
 class SQLiteCXRepository:
@@ -129,7 +132,14 @@ class SQLiteCXRepository:
         return json.loads(row["response_json"]) if row and row["response_json"] else None
 
     def resolve_customer(self, message: InboundMessage) -> dict:
-        identifiers = [(message.channel.value, message.channel_identifier)]
+        identifiers = []
+        portal_user_id = message.metadata.get("portal_user_id")
+        portal_graph_customer_id = message.metadata.get("portal_graph_customer_id")
+        if portal_user_id:
+            identifiers.append(("portal", str(portal_user_id).strip()))
+        if portal_graph_customer_id:
+            identifiers.append(("graph", str(portal_graph_customer_id).strip()))
+        identifiers.append((message.channel.value, message.channel_identifier))
         linked_email = message.metadata.get("linked_email")
         linked_phone = message.metadata.get("linked_phone")
         if linked_email:
@@ -141,10 +151,16 @@ class SQLiteCXRepository:
             # but WhatsApp channel identifiers arrive and are stored with the prefix.
             if len(phone) == 10:
                 identifiers.append((Channel.WHATSAPP.value, "91" + phone))
+        lookup_identifiers = identifiers
+        if portal_user_id or portal_graph_customer_id:
+            lookup_identifiers = [
+                item for item in identifiers
+                if item[0] in {"portal", "graph", Channel.EMAIL.value}
+            ]
 
         with self.connection() as conn:
             customer_id = None
-            for channel, identifier in identifiers:
+            for channel, identifier in lookup_identifiers:
                 row = conn.execute(
                     "SELECT customer_id FROM channel_identities WHERE channel = ? AND identifier = ?",
                     (channel, identifier),
@@ -534,6 +550,28 @@ class SQLiteCXRepository:
                 "SELECT id, username, email, created_at FROM admin_users ORDER BY created_at"
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def create_customer_user(self, user_id: str, email: str, password_hash: str) -> dict:
+        now = utc_now()
+        with self.connection() as conn:
+            cursor = conn.execute(
+                "INSERT INTO customer_users (user_id, email, password_hash, created_at) VALUES (?, ?, ?, ?)",
+                (user_id, email, password_hash, now),
+            )
+            row = conn.execute("SELECT * FROM customer_users WHERE id = ?", (cursor.lastrowid,)).fetchone()
+        result = dict(row)
+        result.pop("password_hash", None)
+        return result
+
+    def get_customer_user_by_id(self, user_id: str) -> dict | None:
+        with self.connection() as conn:
+            row = conn.execute("SELECT * FROM customer_users WHERE user_id = ?", (user_id,)).fetchone()
+        return dict(row) if row else None
+
+    def get_customer_user_by_email(self, email: str) -> dict | None:
+        with self.connection() as conn:
+            row = conn.execute("SELECT * FROM customer_users WHERE email = ?", (email,)).fetchone()
+        return dict(row) if row else None
 
     @staticmethod
     def _json_fields(value: dict, *fields: str) -> dict:

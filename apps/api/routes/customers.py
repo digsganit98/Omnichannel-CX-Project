@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends
 from apps.api.dependencies.runtime import get_repository
 from apps.api.dependencies.security import require_admin_key
 from services.neo4j_service.client import Neo4jClient
-from services.neo4j_service.queries import get_customer_by_identifier, get_claim_status, get_loan_status
+from services.neo4j_service.queries import get_customer_by_id, get_customer_by_identifier, get_claim_status, get_loan_status
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +34,11 @@ def customer_graph(customer_id: str) -> dict:
         neo4j_cid = None
         registration_date = None
         for row in identifiers:
-            customer = get_customer_by_identifier(client, row["identifier"])
+            customer = (
+                get_customer_by_id(client, row["identifier"])
+                if row["channel"] == "graph"
+                else get_customer_by_identifier(client, row["identifier"])
+            )
             if customer:
                 neo4j_cid = customer["customer_id"]
                 registration_date = customer.get("registration_date")

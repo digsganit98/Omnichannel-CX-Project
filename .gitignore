@@ -13,3 +13,6 @@ data/exports/*
 !data/exports/uploaded_ecommerce_omnichannel_records.json
 data/uploaded_docs/*
 !data/uploaded_docs/.gitkeep
+artifacts/*
+!artifacts/.gitkeep
+logs/*

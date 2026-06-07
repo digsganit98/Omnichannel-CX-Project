@@ -10,7 +10,182 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def upsert_customer(client, customer_id: str, phone: str, name: str, channel: str = "") -> None:
+def seed_synthetic_bfsi_records(
+    client,
+    customer_id: str,
+    registration_date: str,
+    email: str = "",
+    phone: str = "",
+) -> dict:
+    """Create demo BFSI graph records for a newly signed-up portal customer.
+
+    The generated nodes follow the same labels, properties, and relationships
+    used by ``data/bfsi.xlsx`` loader rows: Customer has Loan, Claim, Policy,
+    KYC, and loan Product links. IDs are deterministic from customer_id so
+    repeated calls update records instead of duplicating them.
+    """
+    if client is None or not customer_id:
+        return {"loans": 0, "claims": 0, "policies": 0, "kyc": 0, "product_links": 0}
+
+    suffix = "".join(ch for ch in customer_id if ch.isdigit())[-6:] or "000000"
+    last_updated = registration_date or ""
+    loans = [
+        {
+            "loan_id": f"LN{suffix}01",
+            "loan_type": "Personal Loan",
+            "application_date": registration_date,
+            "status": "Approved",
+            "last_updated": last_updated,
+            "amount_inr": 500000,
+            "interest_rate": "12.5",
+            "next_step": "Disbursement pending",
+        },
+        {
+            "loan_id": f"LN{suffix}02",
+            "loan_type": "Home Loan",
+            "application_date": registration_date,
+            "status": "Under Review",
+            "last_updated": last_updated,
+            "amount_inr": 6000000,
+            "interest_rate": "8.2",
+            "next_step": "Property valuation",
+        },
+    ]
+    claims = [
+        {
+            "claim_id": f"CLM{suffix}01",
+            "policy_type": "Health",
+            "claim_type": "Hospitalization",
+            "status": "Approved",
+            "last_updated": last_updated,
+            "amount_claimed": 50000,
+            "amount_approved": 45000,
+            "reason": "Documents verified",
+        },
+        {
+            "claim_id": f"CLM{suffix}02",
+            "policy_type": "Auto",
+            "claim_type": "Minor Damage",
+            "status": "Under Review",
+            "last_updated": last_updated,
+            "amount_claimed": 15000,
+            "amount_approved": "N/A",
+            "reason": "Awaiting repair estimate",
+        },
+    ]
+
+    try:
+        for loan in loans:
+            client.write(
+                """
+                MERGE (l:Loan {loan_id: $loan_id})
+                SET l.loan_type = $loan_type,
+                    l.application_date = $application_date,
+                    l.status = $status,
+                    l.last_updated = $last_updated,
+                    l.amount_inr = $amount_inr,
+                    l.interest_rate = $interest_rate,
+                    l.next_step = $next_step,
+                    l.email = CASE WHEN $email <> '' THEN $email ELSE l.email END,
+                    l.phone = CASE WHEN $phone <> '' THEN $phone ELSE l.phone END
+                WITH l
+                MATCH (c:Customer {customer_id: $customer_id})
+                MERGE (c)-[:HAS_LOAN]->(l)
+                """,
+                {**loan, "customer_id": customer_id, "email": email or "", "phone": phone or ""},
+            )
+            client.write(
+                """
+                MATCH (l:Loan {loan_id: $loan_id})
+                MATCH (p:Product)
+                WHERE p.product_type = $loan_type
+                   OR p.name CONTAINS $loan_type
+                   OR p.category = $loan_type
+                MERGE (l)-[:PRODUCT_IS]->(p)
+                """,
+                {"loan_id": loan["loan_id"], "loan_type": loan["loan_type"]},
+            )
+
+        policy_types = set()
+        for claim in claims:
+            policy_types.add(claim["policy_type"])
+            client.write(
+                """
+                MERGE (cl:Claim {claim_id: $claim_id})
+                SET cl.policy_type = $policy_type,
+                    cl.claim_type = $claim_type,
+                    cl.status = $status,
+                    cl.last_updated = $last_updated,
+                    cl.amount_claimed_inr = $amount_claimed,
+                    cl.amount_approved_inr = $amount_approved,
+                    cl.reason = $reason,
+                    cl.email = CASE WHEN $email <> '' THEN $email ELSE cl.email END,
+                    cl.phone = CASE WHEN $phone <> '' THEN $phone ELSE cl.phone END
+                WITH cl
+                MATCH (c:Customer {customer_id: $customer_id})
+                MERGE (c)-[:HAS_CLAIM]->(cl)
+                """,
+                {**claim, "customer_id": customer_id, "email": email or "", "phone": phone or ""},
+            )
+
+            policy_id = f"{customer_id}_{claim['policy_type'].replace(' ', '_').upper()}"
+            client.write(
+                """
+                MERGE (p:Policy {policy_id: $policy_id})
+                SET p.policy_type = $policy_type,
+                    p.customer_id = $customer_id,
+                    p.status = 'Active'
+                WITH p
+                MATCH (c:Customer {customer_id: $customer_id})
+                MERGE (c)-[:HAS_POLICY]->(p)
+                WITH p
+                MATCH (cl:Claim {claim_id: $claim_id})
+                MERGE (p)-[:HAS_CLAIM]->(cl)
+                """,
+                {
+                    "policy_id": policy_id,
+                    "policy_type": claim["policy_type"],
+                    "customer_id": customer_id,
+                    "claim_id": claim["claim_id"],
+                },
+            )
+
+        client.write(
+            """
+            MERGE (k:KYC {customer_id: $customer_id})
+            SET k.kyc_status = 'Pending',
+                k.registered_at = $registered_at
+            WITH k
+            MATCH (c:Customer {customer_id: $customer_id})
+            MERGE (c)-[:KYC_VERIFIED_BY]->(k)
+            """,
+            {"customer_id": customer_id, "registered_at": registration_date or ""},
+        )
+        return {
+            "loans": len(loans),
+            "claims": len(claims),
+            "policies": len(policy_types),
+            "kyc": 1,
+            "product_links": len(loans),
+        }
+    except Exception:
+        logger.warning("neo4j_seed_synthetic_bfsi_records_failed", extra={"customer_id": customer_id}, exc_info=True)
+        return {"loans": 0, "claims": 0, "policies": 0, "kyc": 0, "product_links": 0, "failed": True}
+
+
+def upsert_customer(
+    client,
+    customer_id: str,
+    phone: str,
+    name: str,
+    channel: str = "",
+    email: str = "",
+    secondary_email: str = "",
+    city: str = "",
+    country: str = "",
+    registration_date: str = "",
+    last_activity_date: str = "",
+) -> None:
     """Create or update a :Customer node from a runtime inbound message.
 
     If the customer already exists (loaded from bfsi.xlsx), only the runtime
@@ -24,10 +199,27 @@ def upsert_customer(client, customer_id: str, phone: str, name: str, channel: st
             """
             MERGE (c:Customer {customer_id: $customer_id})
             SET c.phone        = CASE WHEN $phone <> '' THEN $phone ELSE c.phone END,
+                c.email        = CASE WHEN $email <> '' THEN $email ELSE c.email END,
+                c.secondary_email = CASE WHEN $secondary_email <> '' THEN $secondary_email ELSE c.secondary_email END,
+                c.city         = CASE WHEN $city <> '' THEN $city ELSE c.city END,
+                c.country      = CASE WHEN $country <> '' THEN $country ELSE c.country END,
+                c.registration_date = CASE WHEN $registration_date <> '' THEN $registration_date ELSE c.registration_date END,
+                c.last_activity_date = CASE WHEN $last_activity_date <> '' THEN $last_activity_date ELSE c.last_activity_date END,
                 c.display_name = CASE WHEN $name  <> '' THEN $name  ELSE c.display_name END,
                 c.channel      = $channel
             """,
-            {"customer_id": customer_id, "phone": phone or "", "name": name or "", "channel": channel},
+            {
+                "customer_id": customer_id,
+                "phone": phone or "",
+                "email": email or "",
+                "secondary_email": secondary_email or "",
+                "city": city or "",
+                "country": country or "",
+                "registration_date": registration_date or "",
+                "last_activity_date": last_activity_date or "",
+                "name": name or "",
+                "channel": channel,
+            },
         )
     except Exception:
         logger.warning("neo4j_upsert_customer_failed", extra={"customer_id": customer_id}, exc_info=True)

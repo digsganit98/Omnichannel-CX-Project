@@ -6,6 +6,7 @@ INTENT_TO_TEAM = {
     "loan_application":        "loans",
     "loan_default_notice":     "collections",
     "policy_status":           "insurance_operations",
+    "claim_status":            "claims",
     "insurance_claim":         "claims",
     "card_management":         "card_services",
     "kyc_update":              "compliance",

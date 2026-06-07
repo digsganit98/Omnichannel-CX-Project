@@ -2,9 +2,8 @@
 
 TRANSACTIONAL_INTENTS = {
     "loan_status",
-    "loan_application",
     "loan_default_notice",
-    "insurance_claim",
+    "claim_status",
     "policy_status",
     "transaction_dispute",
     "account_balance_inquiry",
@@ -33,6 +32,20 @@ def get_customer_by_identifier(client, identifier: str) -> dict | None:
         LIMIT 1
         """,
         {"id": identifier, "stripped": stripped},
+    )
+    return rows[0] if rows else None
+
+
+def get_customer_by_id(client, customer_id: str) -> dict | None:
+    rows = client.query(
+        """
+        MATCH (c:Customer {customer_id: $customer_id})
+        RETURN c.customer_id AS customer_id, c.email AS email,
+               c.phone AS phone, c.city AS city,
+               c.registration_date AS registration_date
+        LIMIT 1
+        """,
+        {"customer_id": customer_id},
     )
     return rows[0] if rows else None
 
@@ -67,6 +80,17 @@ def get_claim_status(client, customer_id: str) -> list[dict]:
 def get_customer_context(client, channel_identifier: str) -> dict:
     """Return a rich context dict for LLM enrichment, looked up by phone/email."""
     customer = get_customer_by_identifier(client, channel_identifier)
+    return get_customer_context_for_customer(client, customer)
+
+
+def get_customer_context_by_id(client, customer_id: str) -> dict:
+    """Return graph context for a known Neo4j customer_id."""
+    customer = get_customer_by_id(client, customer_id)
+    return get_customer_context_for_customer(client, customer)
+
+
+def get_customer_context_for_customer(client, customer: dict | None) -> dict:
+    """Return a rich context dict for an already resolved Neo4j customer."""
     if not customer:
         return {}
     cid = customer["customer_id"]
@@ -98,7 +122,7 @@ def neo4j_answer(client, intent: str, customer_id: str) -> str | None:
     if intent not in TRANSACTIONAL_INTENTS:
         return None
 
-    if intent in {"loan_status", "loan_application", "loan_default_notice"}:
+    if intent in {"loan_status", "loan_default_notice"}:
         loans = get_loan_status(client, customer_id)
         if not loans:
             return "No active loan records were found for your account."
@@ -113,7 +137,7 @@ def neo4j_answer(client, intent: str, customer_id: str) -> str | None:
             )
         return "\n".join(lines)
 
-    if intent in {"insurance_claim", "policy_status"}:
+    if intent in {"claim_status", "policy_status"}:
         claims = get_claim_status(client, customer_id)
         if not claims:
             return "No insurance claims or policies were found for your account."

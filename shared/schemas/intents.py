@@ -11,6 +11,7 @@ class Intent(StrEnum):
     LOAN_APPLICATION        = "loan_application"
     LOAN_DEFAULT_NOTICE     = "loan_default_notice"
     POLICY_STATUS           = "policy_status"
+    CLAIM_STATUS            = "claim_status"
     INSURANCE_CLAIM         = "insurance_claim"
     CARD_MANAGEMENT         = "card_management"
     KYC_UPDATE              = "kyc_update"

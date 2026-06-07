@@ -3,15 +3,15 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Omnichannel CX Accelerator</title>
+<title>Omnichannel CX Accelerator - Ticket Operations</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/admin-ui/assets/style.css">
+<link rel="stylesheet" href="/admin-ui/assets/style.css?v=20260607-2">
 </head>
 <body>
 
-<!-- STAGE 1: API KEY MODAL -->
+<!-- STAGE 1: LOGIN MODE -->
 <div class="modal-overlay" id="connectModal">
-  <div class="modal-card">
+  <div class="modal-card login-mode-card">
     <div class="modal-logo">
       <div class="modal-icon">
         <svg viewBox="0 0 24 24"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-2 12H6v-2h12v2zm0-3H6V9h12v2zm0-3H6V6h12v2z"/></svg>
@@ -19,15 +19,61 @@
       <span class="modal-brand">Omnichannel <span>CX Accelerator</span></span>
     </div>
     <div>
-      <div class="modal-title">Connect to workspace</div>
-      <div class="modal-sub">Enter your admin API key to continue</div>
+      <div class="modal-title">Sign in to your workspace</div>
+      <div class="modal-sub">Choose the portal that matches your role</div>
     </div>
-    <div class="modal-err" id="connectErr">Invalid admin key. Please check and try again.</div>
-    <div class="modal-field">
-      <label for="adminKeyInput">Admin API key</label>
-      <input id="adminKeyInput" type="password" placeholder="Enter ADMIN_API_KEY" autocomplete="off">
+    <div class="login-mode-tabs">
+      <button class="login-mode-tab active" id="modeAdminBtn" onclick="switchLoginMode('admin')">Admin</button>
+      <button class="login-mode-tab" id="modeUserBtn" onclick="switchLoginMode('user')">Customer Login</button>
     </div>
-    <button class="modal-btn" id="connectBtn">Connect</button>
+
+    <div id="adminModeForm">
+      <div class="login-mode-note">Admin access continues through the existing API key and account login flow.</div>
+      <div class="modal-err" id="connectErr">Invalid admin key. Please check and try again.</div>
+      <div class="modal-field">
+        <label for="adminKeyInput">Admin API key</label>
+        <input id="adminKeyInput" type="password" placeholder="Enter ADMIN_API_KEY" autocomplete="off">
+      </div>
+      <button class="modal-btn" id="connectBtn">Continue as Admin</button>
+    </div>
+
+    <div id="userModeForm" style="display:none">
+      <div class="customer-auth-tabs">
+        <button class="customer-auth-tab active" id="customerLoginTab" onclick="switchCustomerAuth('login')">Login</button>
+        <button class="customer-auth-tab" id="customerSignupTab" onclick="switchCustomerAuth('signup')">Sign Up</button>
+      </div>
+      <div class="modal-err" id="userLoginErr"></div>
+      <div id="customerLoginForm">
+        <div class="modal-field">
+          <label for="userIdInput">User ID</label>
+          <input id="userIdInput" type="text" placeholder="Your user ID" autocomplete="username">
+        </div>
+        <div class="modal-field">
+          <label for="userPasswordInput">Password</label>
+          <input id="userPasswordInput" type="password" placeholder="Your password" autocomplete="current-password">
+        </div>
+        <button class="modal-btn" id="userLoginBtn">Customer Login</button>
+      </div>
+      <div id="customerSignupForm" style="display:none">
+        <div class="modal-field">
+          <label for="customerSignupId">User ID</label>
+          <input id="customerSignupId" type="text" placeholder="Choose a user ID" autocomplete="username">
+        </div>
+        <div class="modal-field">
+          <label for="customerSignupEmail">Email</label>
+          <input id="customerSignupEmail" type="email" placeholder="customer@example.com" autocomplete="email">
+        </div>
+        <div class="modal-field">
+          <label for="customerSignupPassword">Password</label>
+          <input id="customerSignupPassword" type="password" placeholder="Minimum 6 characters" autocomplete="new-password">
+        </div>
+        <div class="modal-field">
+          <label for="customerSignupConfirm">Confirm password</label>
+          <input id="customerSignupConfirm" type="password" placeholder="Repeat password" autocomplete="new-password">
+        </div>
+        <button class="modal-btn" id="customerSignupBtn">Create Customer Account</button>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -40,6 +86,7 @@
       </div>
       <span class="modal-brand">Omnichannel <span>CX Accelerator</span></span>
     </div>
+    <button class="auth-back" type="button" onclick="backToPortalSelection()">Back to portal selection</button>
     <div class="auth-tabs">
       <button class="auth-tab active" id="authTabLogin" onclick="switchAuthTab('login')">Login</button>
       <button class="auth-tab" id="authTabSignup" onclick="switchAuthTab('signup')">Sign Up</button>
@@ -84,6 +131,97 @@
   </div>
 </div>
 
+<!-- USER TICKETS PORTAL -->
+<div class="user-portal" id="userPortal" style="display:none">
+  <div class="ribbon">
+    <div class="ribbon-logo">
+      <div class="ribbon-icon">
+        <svg viewBox="0 0 24 24"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-2 12H6v-2h12v2zm0-3H6V9h12v2zm0-3H6V6h12v2z"/></svg>
+      </div>
+      <span class="ribbon-name">Omnichannel <span>User Tickets</span></span>
+    </div>
+    <div class="ribbon-spacer"></div>
+    <div class="ribbon-user">
+      <div class="ribbon-user-info">
+        <span class="ribbon-user-name" id="portalUserName">Customer</span>
+        <span class="ribbon-user-role">Customer Portal</span>
+      </div>
+      <div class="ribbon-user-av" id="portalUserAv">CU</div>
+      <button class="ribbon-logout" onclick="doUserLogout()" title="Logout">
+        <svg viewBox="0 0 24 24"><path d="M17 7l-1.41 1.41L18.17 11H8v2h10.17l-2.58 2.58L17 17l5-5-5-5zM4 5h8V3H4c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h8v-2H4V5z"/></svg>
+      </button>
+    </div>
+  </div>
+
+  <main class="user-main">
+    <section class="user-hero">
+      <div>
+        <div class="user-eyebrow">Customer support</div>
+        <h1>User Tickets</h1>
+        <p>Send a support request through WhatsApp or email and track the latest response.</p>
+      </div>
+      <button class="user-refresh-btn" id="userRefreshBtn" onclick="loadUserTickets()">Refresh tickets</button>
+    </section>
+
+    <div class="user-grid">
+      <section class="user-card user-compose-card">
+        <div class="user-card-title">Create a support request</div>
+        <div class="user-card-sub">This simulates a real customer message through the existing channel workflow.</div>
+        <div class="user-field">
+          <label for="userChannel">Source channel</label>
+          <select id="userChannel">
+            <option value="whatsapp">WhatsApp</option>
+            <option value="email">Email</option>
+          </select>
+        </div>
+        <div class="user-contact-highlight" id="userWhatsAppField">
+          <input id="userWhatsAppInput" type="tel" placeholder="WhatsApp number with country code" aria-label="WhatsApp number">
+        </div>
+        <div class="user-contact-highlight" id="userEmailField" style="display:none">
+          <input id="userEmailInput" type="email" value="customer@example.com" placeholder="Email address" aria-label="Email address">
+        </div>
+        <div class="user-field">
+          <label for="userMessage">Query or message</label>
+          <textarea id="userMessage" rows="7" placeholder="Describe how we can help..."></textarea>
+        </div>
+        <button class="modal-btn user-submit-btn" id="userSubmitBtn" onclick="submitUserTicket()">Submit request</button>
+        <div class="sim-status" id="userSubmitStatus"></div>
+      </section>
+
+      <section class="user-card user-result-card">
+        <div class="user-card-title">Latest submission</div>
+        <div class="user-empty" id="userLatestEmpty">Your latest ticket or conversation details will appear here.</div>
+        <div id="userLatestResult" style="display:none">
+          <div class="user-result-grid">
+            <div class="user-result-item"><span>Conversation ID</span><strong id="userConversationId">-</strong></div>
+            <div class="user-result-item"><span>Ticket ID</span><strong id="userTicketId">-</strong></div>
+            <div class="user-result-item"><span>Status</span><strong id="userTicketStatus">-</strong></div>
+            <div class="user-result-item"><span>Channel</span><strong id="userResultChannel">-</strong></div>
+            <div class="user-result-item user-result-contact"><span>Phone / Email used</span><strong id="userResultContact">-</strong></div>
+          </div>
+          <div class="user-response-box">
+            <span>Latest response</span>
+            <p id="userLatestResponse">-</p>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <section class="user-card user-list-card">
+      <div class="user-list-heading">
+        <div>
+          <div class="user-card-title">My submitted tickets</div>
+          <div class="user-card-sub">Requests associated with this user account.</div>
+        </div>
+        <span class="q-cnt" id="userTicketCount">0 tickets</span>
+      </div>
+      <div class="user-ticket-list" id="userTicketList">
+        <div class="user-empty">No requests submitted yet.</div>
+      </div>
+    </section>
+  </main>
+</div>
+
 <!-- STAGE 3: MAIN SHELL -->
 <div class="shell" id="mainShell" style="display:none">
 
@@ -97,6 +235,7 @@
     </div>
     <div class="ribbon-spacer"></div>
     <div class="ribbon-user">
+      <button class="ribbon-switch" type="button" onclick="backToPortalSelection()">Switch portal</button>
       <div class="ribbon-user-info">
         <span class="ribbon-user-name" id="ribbonUserName">Admin</span>
         <span class="ribbon-user-role" id="ribbonUserRole">CX Operations</span>
@@ -450,7 +589,7 @@
           </div>
 
           <!-- EMAIL -->
-          <div class="settings-card">
+          <div class="settings-card" id="email-simulate-form">
             <div class="sim-card-hdr">
               <div class="sim-card-icon" style="background:#ea4335">
                 <svg viewBox="0 0 24 24" fill="#fff"><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/></svg>
@@ -555,6 +694,6 @@
   </div>
 </div>
 
-<script src="/admin-ui/assets/app.js"></script>
+<script src="/admin-ui/assets/app.js?v=20260607-2"></script>
 </body>
 </html>

@@ -34,6 +34,7 @@ from .routes.rag import router as rag_router
 from .routes.tickets import router as tickets_router
 from .routes.neo4j_admin import router as neo4j_admin_router
 from .routes.test_whatsapp import router as test_whatsapp_router
+from .routes.user_portal import router as user_portal_router
 from .routes.webhooks import handle_email_message
 from .routes.whatsapp import router as whatsapp_router
 
@@ -76,6 +77,7 @@ app.include_router(rag_router)
 app.include_router(audit_router)
 app.include_router(neo4j_admin_router)
 app.include_router(test_whatsapp_router)
+app.include_router(user_portal_router)
 app.include_router(whatsapp_router)
 
 ADMIN_UI_ROOT = Path(__file__).resolve().parents[1] / "admin-ui"

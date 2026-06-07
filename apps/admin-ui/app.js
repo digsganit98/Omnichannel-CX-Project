@@ -15,11 +15,17 @@ function chMeta(ch) { return CH[(ch||'').toLowerCase()] || { label: ch||'?', pil
 // ── Auth state ────────────────────────────────────────────────────────────────
 var adminKey = sessionStorage.getItem('cx-admin-key') || '';
 var adminToken = sessionStorage.getItem('cx-admin-jwt') || '';
+var userToken = sessionStorage.getItem('cx-user-jwt') || '';
 var currentUser = null;
+var portalUser = null;
 
 try {
   var savedUser = sessionStorage.getItem('cx-admin-user');
   if (savedUser) currentUser = JSON.parse(savedUser);
+} catch(e) {}
+try {
+  var savedPortalUser = sessionStorage.getItem('cx-user-account');
+  if (savedPortalUser) portalUser = JSON.parse(savedPortalUser);
 } catch(e) {}
 
 var state = { convs: [], selectedConvId: null, convDetail: null, simTimer: null, sseSource: null };
@@ -63,6 +69,35 @@ function showStage(stage) {
   document.getElementById('connectModal').classList.toggle('hidden', stage !== 'apikey');
   document.getElementById('authPage').classList.toggle('hidden', stage !== 'auth');
   document.getElementById('mainShell').style.display = stage === 'app' ? 'flex' : 'none';
+  document.getElementById('userPortal').style.display = stage === 'user' ? 'flex' : 'none';
+}
+
+window.switchLoginMode = function(mode) {
+  var isAdmin = mode === 'admin';
+  document.getElementById('adminModeForm').style.display = isAdmin ? 'flex' : 'none';
+  document.getElementById('userModeForm').style.display = isAdmin ? 'none' : 'flex';
+  document.getElementById('modeAdminBtn').classList.toggle('active', isAdmin);
+  document.getElementById('modeUserBtn').classList.toggle('active', !isAdmin);
+  document.getElementById('connectErr').classList.remove('show');
+  document.getElementById('userLoginErr').classList.remove('show');
+};
+
+window.switchCustomerAuth = function(tab) {
+  var isLogin = tab === 'login';
+  document.getElementById('customerLoginForm').style.display = isLogin ? 'flex' : 'none';
+  document.getElementById('customerSignupForm').style.display = isLogin ? 'none' : 'flex';
+  document.getElementById('customerLoginTab').classList.toggle('active', isLogin);
+  document.getElementById('customerSignupTab').classList.toggle('active', !isLogin);
+  document.getElementById('userLoginErr').classList.remove('show');
+};
+
+function onCustomerAuthSuccess(data) {
+  userToken = data.token;
+  portalUser = data.user;
+  sessionStorage.setItem('cx-user-jwt', userToken);
+  sessionStorage.setItem('cx-user-account', JSON.stringify(portalUser));
+  showStage('user');
+  bootUserPortal();
 }
 
 // ── STAGE 1: API Key ──────────────────────────────────────────────────────────
@@ -88,7 +123,7 @@ document.getElementById('connectBtn').addEventListener('click', async function()
     adminKey = '';
     err.classList.add('show');
   } finally {
-    btn.disabled = false; btn.textContent = 'Connect';
+    btn.disabled = false; btn.textContent = 'Continue as Admin';
   }
 });
 document.getElementById('adminKeyInput').addEventListener('keydown', function(e) {
@@ -96,6 +131,78 @@ document.getElementById('adminKeyInput').addEventListener('keydown', function(e)
 });
 
 // ── STAGE 2: Auth (Login / Signup) ────────────────────────────────────────────
+document.getElementById('userLoginBtn').addEventListener('click', async function() {
+  var userId = document.getElementById('userIdInput').value.trim();
+  var password = document.getElementById('userPasswordInput').value;
+  var err = document.getElementById('userLoginErr');
+  err.classList.remove('show');
+  if (!userId || !password) {
+    err.textContent = 'Please enter user ID and password.';
+    err.classList.add('show');
+    return;
+  }
+  var btn = document.getElementById('userLoginBtn');
+  btn.disabled = true;
+  btn.textContent = 'Logging in...';
+  try {
+    var res = await fetch('/user/auth/login', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ user_id: userId, password: password })
+    });
+    var data = await res.json().catch(function() { return {}; });
+    if (!res.ok) throw new Error(data.detail || 'Login failed');
+    onCustomerAuthSuccess(data);
+  } catch(e) {
+    err.textContent = e.message;
+    err.classList.add('show');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Customer Login';
+  }
+});
+document.getElementById('userPasswordInput').addEventListener('keydown', function(e) {
+  if (e.key === 'Enter') document.getElementById('userLoginBtn').click();
+});
+
+document.getElementById('customerSignupBtn').addEventListener('click', async function() {
+  var userId = document.getElementById('customerSignupId').value.trim();
+  var email = document.getElementById('customerSignupEmail').value.trim();
+  var password = document.getElementById('customerSignupPassword').value;
+  var confirm = document.getElementById('customerSignupConfirm').value;
+  var err = document.getElementById('userLoginErr');
+  err.classList.remove('show');
+  if (!userId || !email || !password || !confirm) {
+    err.textContent = 'All fields are required.';
+    err.classList.add('show');
+    return;
+  }
+  if (password !== confirm) {
+    err.textContent = 'Passwords do not match.';
+    err.classList.add('show');
+    return;
+  }
+  var btn = document.getElementById('customerSignupBtn');
+  btn.disabled = true;
+  btn.textContent = 'Creating account...';
+  try {
+    var res = await fetch('/user/auth/signup', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ user_id: userId, email: email, password: password })
+    });
+    var data = await res.json().catch(function() { return {}; });
+    if (!res.ok) throw new Error(data.detail || 'Signup failed');
+    onCustomerAuthSuccess(data);
+  } catch(e) {
+    err.textContent = e.message;
+    err.classList.add('show');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Create Customer Account';
+  }
+});
+
 window.switchAuthTab = function(tab) {
   document.getElementById('loginForm').style.display = tab === 'login' ? 'block' : 'none';
   document.getElementById('signupForm').style.display = tab === 'signup' ? 'block' : 'none';
@@ -185,6 +292,20 @@ window.doLogout = function() {
   document.getElementById('signupConfirm').value = '';
   switchAuthTab('login');
   showStage('auth');
+};
+
+window.backToPortalSelection = function() {
+  stopRealtime();
+  if (state.sseSource) { state.sseSource.close(); state.sseSource = null; }
+  adminKey = '';
+  adminToken = '';
+  currentUser = null;
+  sessionStorage.removeItem('cx-admin-key');
+  sessionStorage.removeItem('cx-admin-jwt');
+  sessionStorage.removeItem('cx-admin-user');
+  document.getElementById('adminKeyInput').value = '';
+  switchLoginMode('admin');
+  showStage('apikey');
 };
 
 function updateRibbonUser() {
@@ -1340,6 +1461,159 @@ function goToConversation(conversationId, ticketId) {
 }
 
 // ── SETTINGS (admin account) ──────────────────────────────────────────────────
+function userHeaders() {
+  return { 'Authorization': 'Bearer ' + userToken };
+}
+
+async function userApi(path, opts) {
+  opts = opts || {};
+  var headers = Object.assign({}, userHeaders(), opts.headers || {});
+  if (opts.body) headers['content-type'] = 'application/json';
+  var response = await fetch(path, Object.assign({}, opts, { headers: headers }));
+  var data = await response.json().catch(function() { return {}; });
+  if (!response.ok) throw new Error(data.detail || (response.status + ' ' + response.statusText));
+  return data;
+}
+
+function setUserStatus(message, type) {
+  var el = document.getElementById('userSubmitStatus');
+  el.textContent = message;
+  el.className = 'sim-status' + (type ? ' ' + type : '');
+  el.style.display = message ? 'block' : 'none';
+}
+
+function showUserLatest(item) {
+  if (!item) return;
+  document.getElementById('userLatestEmpty').style.display = 'none';
+  document.getElementById('userLatestResult').style.display = 'block';
+  document.getElementById('userConversationId').textContent = item.conversation_id || '-';
+  document.getElementById('userTicketId').textContent = item.ticket_id || 'Not required';
+  document.getElementById('userTicketStatus').textContent = item.status || 'active';
+  document.getElementById('userResultChannel').textContent = item.channel || '-';
+  document.getElementById('userResultContact').textContent = item.contact_identifier || '-';
+  document.getElementById('userLatestResponse').textContent = item.latest_response || item.message || 'Response pending';
+}
+
+function updateUserContactField() {
+  var channel = document.getElementById('userChannel').value;
+  document.getElementById('userWhatsAppField').style.display = channel === 'whatsapp' ? 'block' : 'none';
+  document.getElementById('userEmailField').style.display = channel === 'email' ? 'block' : 'none';
+}
+document.getElementById('userChannel').addEventListener('change', updateUserContactField);
+
+window.submitUserTicket = async function() {
+  var message = document.getElementById('userMessage').value.trim();
+  var channel = document.getElementById('userChannel').value;
+  var contactIdentifier = channel === 'email'
+    ? document.getElementById('userEmailInput').value.trim()
+    : document.getElementById('userWhatsAppInput').value.trim();
+  if (!message) {
+    setUserStatus('Please enter a query or message.', 'error');
+    return;
+  }
+  if (!contactIdentifier) {
+    setUserStatus(channel === 'email' ? 'Please enter an email address.' : 'Please enter a WhatsApp number.', 'error');
+    return;
+  }
+  var btn = document.getElementById('userSubmitBtn');
+  btn.disabled = true;
+  btn.textContent = 'Submitting...';
+  setUserStatus('Processing your request...', '');
+  try {
+    var data = await userApi('/user/messages', {
+      method: 'POST',
+      body: JSON.stringify({
+        channel: channel,
+        message: message,
+        contact_identifier: contactIdentifier
+      })
+    });
+    showUserLatest({
+      conversation_id: data.conversation_id,
+      ticket_id: data.ticket_id,
+      status: data.resolved ? 'resolved' : (data.ticket_id ? 'open' : 'active'),
+      channel: channel,
+      contact_identifier: data.contact_identifier || contactIdentifier,
+      latest_response: data.message
+    });
+    document.getElementById('userMessage').value = '';
+    if (data.outbound_status === 'failed') {
+      setUserStatus('Request processed, but delivery failed: ' + (data.outbound_error || 'provider rejected the message'), 'error');
+    } else {
+      setUserStatus('Request submitted successfully.', 'success');
+    }
+    await loadUserTickets();
+  } catch(e) {
+    setUserStatus(e.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Submit request';
+  }
+};
+
+window.loadUserTickets = async function() {
+  var list = document.getElementById('userTicketList');
+  var refresh = document.getElementById('userRefreshBtn');
+  refresh.disabled = true;
+  refresh.textContent = 'Refreshing...';
+  try {
+    var tickets = await userApi('/user/tickets');
+    document.getElementById('userTicketCount').textContent =
+      tickets.length + ' ticket' + (tickets.length === 1 ? '' : 's');
+    if (!tickets.length) {
+      list.innerHTML = '<div class="user-empty">No requests submitted yet.</div>';
+      return;
+    }
+    list.innerHTML = '';
+    tickets.forEach(function(ticket) {
+      var row = document.createElement('div');
+      row.className = 'user-ticket-row';
+      row.innerHTML =
+        '<div class="user-ticket-main"><strong>' + escH(ticket.ticket_id || ticket.conversation_id) + '</strong>'
+        + '<span>' + escH((ticket.message || '').replace('Customer portal request\\n\\n', '')) + '</span></div>'
+        + '<div class="user-ticket-meta">' + escH(ticket.channel || '-') + '</div>'
+        + '<div><span class="user-status-pill">' + escH(ticket.status || 'active') + '</span></div>'
+        + '<div class="user-ticket-meta">' + escH(fmtDateTime(ticket.updated_at)) + '</div>';
+      row.addEventListener('click', function() { refreshUserTicket(ticket.conversation_id); });
+      list.appendChild(row);
+    });
+    showUserLatest(tickets[0]);
+  } catch(e) {
+    list.innerHTML = '<div class="user-empty" style="color:var(--red-t)">' + escH(e.message) + '</div>';
+  } finally {
+    refresh.disabled = false;
+    refresh.textContent = 'Refresh tickets';
+  }
+};
+
+async function refreshUserTicket(conversationId) {
+  try {
+    var ticket = await userApi('/user/tickets/' + encodeURIComponent(conversationId));
+    showUserLatest(ticket);
+  } catch(e) {
+    setUserStatus(e.message, 'error');
+  }
+}
+
+window.doUserLogout = function() {
+  userToken = '';
+  portalUser = null;
+  sessionStorage.removeItem('cx-user-jwt');
+  sessionStorage.removeItem('cx-user-account');
+  document.getElementById('userIdInput').value = '';
+  document.getElementById('userPasswordInput').value = '';
+  switchLoginMode('user');
+  showStage('apikey');
+};
+
+function bootUserPortal() {
+  var userId = portalUser && portalUser.user_id ? portalUser.user_id : 'Customer';
+  document.getElementById('portalUserName').textContent = userId;
+  document.getElementById('portalUserAv').textContent = userId.slice(0, 2).toUpperCase();
+  updateUserContactField();
+  loadUserTickets();
+}
+
 function loadSettings() {
   if (currentUser) {
     var nm = currentUser.username || '—';
@@ -1463,7 +1737,10 @@ if (savedSig) document.getElementById('testSig').value = savedSig;
 if (savedEmailSecret) document.getElementById('emailSecret').value = savedEmailSecret;
 
 // Determine initial stage
-if (adminKey && adminToken && !isTokenExpired(adminToken)) {
+if (userToken && portalUser && !isTokenExpired(userToken)) {
+  showStage('user');
+  bootUserPortal();
+} else if (adminKey && adminToken && !isTokenExpired(adminToken)) {
   showStage('app');
   bootApp();
 } else if (adminKey) {

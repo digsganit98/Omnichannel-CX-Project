@@ -23,7 +23,8 @@ loan_status              – Customer asking about the status of an existing loa
 loan_application         – Customer wants to apply for a NEW loan (not check an existing one).
 loan_default_notice      – Customer received or is asking about a loan default or overdue notice.
 policy_status            – Customer asking about the status of an existing insurance policy.
-insurance_claim          – Customer filing or inquiring about an insurance claim.
+claim_status             – Customer asking for the status or progress of an EXISTING claim.
+insurance_claim          – Customer asking how to file or submitting a NEW insurance claim.
 card_management          – Customer wants to block, replace, or manage their debit/credit card.
 kyc_update               – Customer needs to update Know-Your-Customer (KYC) documents.
 fraud_report             – Customer is reporting fraud, account hacking, phishing, or stolen money.
@@ -39,6 +40,12 @@ _FEW_SHOT_EXAMPLES = """
 Example 1 – loan_status vs loan_application:
   Message: "I applied for a home loan last week, what is the status?"
   → intent: loan_status  (checking existing application), secondary_intent: null
+
+Example 1b – claim_status vs insurance_claim:
+  Message: "How do I file a health insurance claim?"
+  → intent: insurance_claim  (asking about the new-claim process), secondary_intent: null
+  Message: "What is the status of my existing claim?"
+  → intent: claim_status  (checking an existing claim), secondary_intent: null
 
 Example 2 – complaint vs fraud_report:
   Message: "I'm very unhappy with the charges on my account this month."
@@ -139,7 +146,7 @@ class GroqGenerator:
             "Think step by step:\n"
             "1. Detect the customer's language. Set `language` to ISO-639-1 code (e.g. `en`, `hi`, `ta`).\n"
             "2. Identify key entities (product, action, emotion) in the message.\n"
-            "3. Match to the PRIMARY intent from the list of 15 intents above.\n"
+            "3. Match to the PRIMARY intent from the list of 16 intents above.\n"
             "4. If the message contains a SECOND distinct request, set `secondary_intent`; otherwise set it to null.\n"
             "5. Determine urgency: high if fraud/stolen/urgent/ASAP/blocked/overdue; "
             "medium if sentiment is negative; low otherwise.\n"

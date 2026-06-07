@@ -180,11 +180,12 @@ class OrchestrationGraph:
     def _resolve_identity(self, graph_state: GraphState) -> dict:
         state = graph_state["runtime"]
         message = state.message
+        is_portal_message = bool(message.metadata.get("portal_graph_customer_id"))
         # Cross-channel linking: look up the sender in Neo4j to find their other identifiers
         # (e.g. a WhatsApp phone maps to an email, or vice versa).  Injecting linked_email /
         # linked_phone into metadata before resolve_customer runs lets the repository merge
         # both channel identities under a single customer record instead of creating two.
-        if self.neo4j_client:
+        if self.neo4j_client and not is_portal_message:
             try:
                 from services.neo4j_service.queries import get_customer_by_identifier
                 neo4j_profile = get_customer_by_identifier(self.neo4j_client, message.channel_identifier)
@@ -210,7 +211,7 @@ class OrchestrationGraph:
         # Cross-channel linking: if a WhatsApp customer's phone matches a Neo4j BFSI
         # customer that already has an email, inject that email so resolve_customer()
         # will merge the two SQLite identities into one customer_id automatically.
-        if self.neo4j_client and message.channel.value == "whatsapp":
+        if self.neo4j_client and message.channel.value == "whatsapp" and not is_portal_message:
             try:
                 from services.neo4j_service.queries import get_customer_by_identifier
                 neo4j_cust = get_customer_by_identifier(self.neo4j_client, message.channel_identifier)
@@ -224,10 +225,11 @@ class OrchestrationGraph:
         if neo4j_writer and self.neo4j_client:
             neo4j_writer.upsert_customer(
                 self.neo4j_client,
-                customer_id=state.customer_id,
+                customer_id=_neo4j_customer_id(state),
                 phone=message.channel_identifier if message.channel.value == "whatsapp" else "",
                 name=state.customer.get("display_name", ""),
                 channel=message.channel.value,
+                email=message.metadata.get("linked_email", "") if message.channel.value == "whatsapp" else message.channel_identifier,
             )
         self._audit("inbound_received", state, details={"provider": message.provider})
         if crm_profile.status != "not_configured":
@@ -249,7 +251,7 @@ class OrchestrationGraph:
             neo4j_writer.write_incoming_interaction(
                 self.neo4j_client,
                 conversation_id=state.conversation_id,
-                customer_id=state.customer_id,
+                customer_id=_neo4j_customer_id(state),
                 channel=message.channel.value,
                 message_text=message.text,
                 timestamp=datetime.now(timezone.utc).isoformat(),
@@ -267,9 +269,12 @@ class OrchestrationGraph:
         graph_context: dict = {}
         if self.neo4j_client:
             try:
-                from services.neo4j_service.queries import get_customer_context
-                graph_context = get_customer_context(
-                    self.neo4j_client, state.message.channel_identifier
+                from services.neo4j_service.queries import get_customer_context, get_customer_context_by_id
+                graph_customer_id = state.message.metadata.get("portal_graph_customer_id")
+                graph_context = (
+                    get_customer_context_by_id(self.neo4j_client, str(graph_customer_id))
+                    if graph_customer_id
+                    else get_customer_context(self.neo4j_client, state.message.channel_identifier)
                 ) or {}
             except Exception:
                 pass
@@ -446,7 +451,7 @@ class OrchestrationGraph:
             neo4j_writer.update_interaction_resolution(
                 self.neo4j_client,
                 conversation_id=state.conversation_id,
-                customer_id=state.customer_id,
+                customer_id=_neo4j_customer_id(state),
                 resolution=state.answer or "",
                 intent=state.analysis.intent.value,
                 sentiment=state.analysis.sentiment,
@@ -458,7 +463,7 @@ class OrchestrationGraph:
                 neo4j_writer.upsert_ticket_node(
                     self.neo4j_client,
                     ticket_id=state.ticket.ticket_id,
-                    customer_id=state.customer_id,
+                    customer_id=_neo4j_customer_id(state),
                     intent=state.analysis.intent.value,
                     priority=state.ticket.priority.value if hasattr(state.ticket.priority, "value") else str(state.ticket.priority),
                     status=state.ticket.status.value if hasattr(state.ticket.status, "value") else str(state.ticket.status),
@@ -550,6 +555,13 @@ def _try_neo4j():
         return Neo4jClient()
     except Exception:
         return None
+
+
+def _neo4j_customer_id(state: "OrchestrationState") -> str:  # type: ignore[name-defined]
+    """Use portal graph CustomerID for Neo4j writes when the message came from the portal."""
+    if state.message and state.message.metadata.get("portal_graph_customer_id"):
+        return str(state.message.metadata["portal_graph_customer_id"])
+    return state.customer_id or ""
 
 
 def _extract_product_ref(state: "OrchestrationState") -> str:  # type: ignore[name-defined]

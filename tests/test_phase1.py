@@ -104,6 +104,90 @@ class FakeNeo4j:
     enabled = True
 
 
+class EmptyNeo4j:
+    """Active Neo4j test double with no matching customer graph data."""
+
+    def query(self, cypher, params=None):
+        return []
+
+    def write(self, cypher, params=None):
+        pass
+
+    def close(self):
+        pass
+
+    enabled = True
+
+
+class WorkbookNeo4j:
+    """Neo4j test double backed by the same XLSX rows used by the graph loader."""
+
+    enabled = True
+
+    def __init__(self):
+        import openpyxl
+
+        workbook = openpyxl.load_workbook("data/bfsi.xlsx", data_only=True)
+        self.customers = self._rows(workbook["Customer_data"])
+        self.loans = self._rows(workbook["Loan_Processing_data"])
+        self.claims = self._rows(workbook["Claim_data"])
+
+    @staticmethod
+    def _rows(sheet):
+        headers = [cell.value for cell in next(sheet.iter_rows(max_row=1))]
+        return [dict(zip(headers, row)) for row in sheet.iter_rows(min_row=2, values_only=True)]
+
+    def query(self, cypher, params=None):
+        params = params or {}
+        if "MATCH (c:Customer)" in cypher:
+            identifiers = {str(params.get("id", "")), str(params.get("stripped", ""))}
+            for row in self.customers:
+                values = {
+                    str(row.get("Phone") or ""),
+                    str(row.get("PrimaryEmail") or ""),
+                    str(row.get("SecondaryEmail") or ""),
+                }
+                if identifiers & values:
+                    return [{
+                        "customer_id": str(row["CustomerID"]),
+                        "email": str(row.get("PrimaryEmail") or ""),
+                        "phone": str(row.get("Phone") or ""),
+                        "city": str(row.get("City") or ""),
+                        "registration_date": str(row.get("RegistrationDate") or ""),
+                    }]
+            return []
+
+        customer_id = str(params.get("cid", ""))
+        if "HAS_LOAN" in cypher:
+            return [{
+                "loan_id": str(row["LoanID"]),
+                "loan_type": str(row["LoanType"]),
+                "status": str(row["LoanStatus"]),
+                "amount_inr": row["LoanAmount (INR)"],
+                "interest_rate": row["InterestRate (%)"],
+                "next_step": str(row["NextStep"]),
+                "last_updated": str(row["LastUpdatedDate"]),
+            } for row in self.loans if str(row["CustomerID"]) == customer_id]
+        if "HAS_CLAIM" in cypher:
+            return [{
+                "claim_id": str(row["ClaimID"]),
+                "policy_type": str(row["PolicyType"]),
+                "claim_type": str(row["ClaimType"]),
+                "status": str(row["ClaimStatus"]),
+                "amount_claimed": row["AmountClaimed (INR)"],
+                "amount_approved": row["AmountApproved (INR)"],
+                "reason": str(row["ReasonForStatus"]),
+                "last_updated": str(row["LastUpdatedDate"]),
+            } for row in self.claims if str(row["CustomerID"]) == customer_id]
+        return []
+
+    def write(self, cypher, params=None):
+        pass
+
+    def close(self):
+        pass
+
+
 class Recorder:
     def __init__(self):
         self.sent = []
@@ -113,7 +197,12 @@ class Recorder:
         return {"id": "provider-message-id"}
 
 
-def graph(repository, whatsapp=None, email=None, crm=None, neo4j_client=None):
+_DEFAULT_TEST_NEO4J = object()
+
+
+def graph(repository, whatsapp=None, email=None, crm=None, neo4j_client=_DEFAULT_TEST_NEO4J):
+    if neo4j_client is _DEFAULT_TEST_NEO4J:
+        neo4j_client = EmptyNeo4j()
     return OrchestrationGraph(
         repository,
         agent=CXAgent(NoLLM()),
@@ -153,7 +242,8 @@ def test_whatsapp_bfsi_query_resolves_with_citation_and_sends_reply():
     repo = SQLiteCXRepository(":memory:")
     sender = Recorder()
     response = graph(repo, whatsapp=sender).run(whatsapp_message())
-    assert response.resolved is True
+    assert response.resolved is False
+    assert response.next_best_action == "answer_delivered"
     assert response.citations[0]["source"] == "InboxIQ_BFSI_KB.pdf:p3"
     assert response.outbound_status == "sent"
     assert sender.sent
@@ -365,6 +455,8 @@ def test_intent_classifier_supports_bfsi_intents():
     assert classify_intent("I want to speak to a human representative").intent == Intent.HUMAN_ESCALATION
     assert classify_intent("Block my lost credit card immediately").intent == Intent.CARD_MANAGEMENT
     assert classify_intent("I need to file an insurance claim for my accident").intent == Intent.INSURANCE_CLAIM
+    assert classify_intent("What is the status of my existing claim?").intent == Intent.CLAIM_STATUS
+    assert classify_intent("How do I apply for a home loan?").intent == Intent.LOAN_APPLICATION
 
 
 def test_llm_intent_result_accepts_model_reason():
@@ -427,6 +519,142 @@ def test_query_resolution_agent_routes_general_inquiry_to_rag():
     resolution = agent.run(msg, {}, intent="kyc_update")
     # kyc_update is not a TRANSACTIONAL_INTENT → should use RAG
     assert resolution.retrieval_backend != "neo4j_graph"
+
+
+def test_process_intents_never_route_to_customer_graph():
+    from services.agent_service.orchestration_agents import QueryResolutionAgent
+
+    fake_rag = FakeRAG()
+    agent = QueryResolutionAgent(rag=fake_rag, neo4j_client=FakeNeo4j())
+    context = {"graph_context": {"customer_id": "CUST-001"}}
+
+    claim = agent.run(
+        whatsapp_message(text="How do I file a health insurance claim?"),
+        context,
+        intent=Intent.INSURANCE_CLAIM.value,
+    )
+    loan = agent.run(
+        whatsapp_message(text="How do I apply for a home loan?"),
+        context,
+        intent=Intent.LOAN_APPLICATION.value,
+    )
+
+    assert claim.retrieval_backend != "neo4j_graph"
+    assert loan.retrieval_backend != "neo4j_graph"
+
+
+def test_five_question_kb_and_graph_e2e_matrix():
+    class EmptyStore:
+        def similarity_search(self, query, k):
+            return []
+
+    class NoGeneration:
+        model = "test"
+
+        def generate_answer(self, query, contexts, conversation_context):
+            return {"text": "", "model": self.model, "llm_used": False}
+
+    rag = RAGPipeline(store=EmptyStore(), generator=NoGeneration())
+    neo4j = WorkbookNeo4j()
+
+    cases = [
+        {
+            "message": WhatsAppAdapter().normalize(WhatsAppWebhookPayload(
+                from_="917700920746",
+                text="How do I file a health insurance claim?",
+                message_id="matrix-kb-health-claim",
+                metadata={"provider": "test"},
+            )),
+            "intent": Intent.INSURANCE_CLAIM.value,
+            "backend": "keyword_fallback",
+            "source_page": ":p2",
+            "expected": ("cashless", "reimbursement"),
+            "forbidden": "No insurance claims",
+        },
+        {
+            "message": EmailAdapter().normalize(EmailWebhookPayload(
+                from_email="digvijayyadav48@gmail.com",
+                subject="Home loan application",
+                body="How do I apply for a home loan?",
+                message_id="matrix-kb-home-loan",
+                metadata={"provider": "test"},
+            )),
+            "intent": Intent.LOAN_APPLICATION.value,
+            "backend": "keyword_fallback",
+            "source_page": ":p1",
+            "expected": ("application form", "property documents"),
+            "forbidden": "No active loan",
+        },
+        {
+            "message": WhatsAppAdapter().normalize(WhatsAppWebhookPayload(
+                from_="917700920746",
+                text="How do I report a lost or stolen credit card?",
+                message_id="matrix-kb-lost-card",
+                metadata={"provider": "test"},
+            )),
+            "intent": Intent.CARD_MANAGEMENT.value,
+            "backend": "keyword_fallback",
+            "source_page": ":p1",
+            "expected": ("block", "replacement"),
+            "forbidden": "No active",
+        },
+        {
+            "message": WhatsAppAdapter().normalize(WhatsAppWebhookPayload(
+                from_="919876510100",
+                text="What is the status of my home loan application?",
+                message_id="matrix-graph-loan-status",
+                metadata={"provider": "test"},
+            )),
+            "intent": Intent.LOAN_STATUS.value,
+            "backend": "neo4j_graph",
+            "source_page": None,
+            "expected": ("LN001", "LN016", "Under Review"),
+            "forbidden": "application form",
+        },
+        {
+            "message": EmailAdapter().normalize(EmailWebhookPayload(
+                from_email="fathima.devasahayam@ganitinc.com",
+                subject="Claim status",
+                body="What is the status of my existing insurance claim?",
+                message_id="matrix-graph-claim-status",
+                metadata={"provider": "test"},
+            )),
+            "intent": Intent.CLAIM_STATUS.value,
+            "backend": "neo4j_graph",
+            "source_page": None,
+            "expected": ("CLM001", "CLM016", "Under Review"),
+            "forbidden": "cashless claims",
+        },
+    ]
+
+    for case in cases:
+        repository = SQLiteCXRepository(":memory:")
+        sender = Recorder()
+        delivery = (
+            OutboundDeliveryService(whatsapp=sender)
+            if case["message"].channel.value == "whatsapp"
+            else OutboundDeliveryService(email=sender)
+        )
+        workflow = OrchestrationGraph(
+            repository,
+            agent=CXAgent(NoLLM()),
+            rag=rag,
+            delivery=delivery,
+            neo4j_client=neo4j,
+        )
+        response = workflow.run(case["message"])
+
+        assert response.intent == case["intent"]
+        assert response.retrieval_backend == case["backend"]
+        assert all(text.lower() in response.message.lower() for text in case["expected"])
+        assert case["forbidden"].lower() not in response.message.lower()
+        assert response.outbound_status == "sent"
+        assert sender.sent
+        if case["source_page"]:
+            assert response.citations
+            assert case["source_page"] in response.citations[0]["source"]
+        else:
+            assert response.citations[0]["source"] == "neo4j_customer_graph"
 
 
 # ── RAG / knowledge base tests ────────────────────────────────────────────────
