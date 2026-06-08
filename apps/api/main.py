@@ -27,6 +27,7 @@ from .routes.conversations import router as conversations_router
 from .routes.customers import router as customers_router
 from .routes.crm import router as crm_router
 from .routes.email import router as email_router
+from .routes.integrations_whatsapp import router as integrations_whatsapp_router
 from .routes.integrations import router as integrations_router
 from .routes.neo4j_admin import router as neo4j_admin_router
 from .routes.orchestration import router as orchestration_router
@@ -80,6 +81,7 @@ app.include_router(customers_router)
 app.include_router(crm_router)
 app.include_router(email_router)
 app.include_router(tickets_router)
+app.include_router(integrations_whatsapp_router)
 app.include_router(integrations_router)
 app.include_router(neo4j_admin_router)
 app.include_router(orchestration_router)

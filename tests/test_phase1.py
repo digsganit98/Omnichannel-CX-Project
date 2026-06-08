@@ -397,7 +397,7 @@ def test_whatsapp_cloud_webhook_e2e_preserves_channel_and_sends_reply(monkeypatc
         headers={"x-hub-signature-256": signature, "content-type": "application/json"},
     )
 
-    assert response.status_code == 200
+    assert response.status_code == 202
     result = response.json()["messages"][0]
     assert response.json()["messages_received"] == 1
     assert result["outbound_status"] == "sent"
@@ -956,7 +956,7 @@ def test_whatsapp_status_webhook_updates_outbound_turn_and_admin_lookup(monkeypa
         headers={"x-hub-signature-256": signature, "content-type": "application/json"},
     )
 
-    assert webhook.status_code == 200
+    assert webhook.status_code == 202
     assert webhook.json()["statuses_received"] == 1
     assert webhook.json()["statuses"][0]["status"] == "delivered"
 

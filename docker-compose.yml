@@ -66,6 +66,17 @@ services:
       neo4j:
         condition: service_healthy
 
+  ngrok:
+    image: ngrok/ngrok:latest
+    environment:
+      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN:-}
+    command: http --url=${NGROK_DOMAIN:-https://smartly-shredder-overhang.ngrok-free.dev} --log=stdout api:8000
+    ports:
+      - "4040:4040"
+    depends_on:
+      api:
+        condition: service_started
+
   opensearch:
     image: opensearchproject/opensearch:2.17.1
     environment:
