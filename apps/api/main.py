@@ -45,6 +45,16 @@ app = FastAPI(title="Omnichannel CX Accelerator", version="2.0.0")
 
 
 @app.on_event("startup")
+async def _start_email_poller() -> None:
+    if os.getenv("IMAP_ENABLED", "false").lower() != "true":
+        return
+    import asyncio
+    from services.channel_service.email_poller import run_email_poller
+    asyncio.create_task(run_email_poller())
+    logger.info("email_poller_task_created")
+
+
+@app.on_event("startup")
 def _seed_neo4j() -> None:
     if os.getenv("NEO4J_ENABLED", "true").lower() != "true":
         return

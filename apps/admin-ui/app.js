@@ -579,12 +579,18 @@ function renderCentre(conv) {
     el.className = 'flow-step';
 
     // LEFT — customer query
+    var inboundSubject = (step.inbound && step.inbound.subject) || '';
+    var inboundBody = (step.inbound && step.inbound.text) || '';
+    if (inboundSubject && inboundBody.startsWith(inboundSubject)) {
+      inboundBody = inboundBody.slice(inboundSubject.length).replace(/^\s+/, '');
+    }
     var leftHtml = step.inbound
       ? '<div class="flow-query-card">'
         + '<div class="flow-query-hdr"><span>Customer Query</span>'
         + (urgency ? '<span class="flow-emotion ' + emotionCls + '">' + escH(emotion) + '</span>' : '')
         + '</div>'
-        + '<div class="flow-query-text">' + escH(step.inbound.text || '') + '</div>'
+        + (inboundSubject ? '<div class="flow-query-subject">' + escH(inboundSubject) + '</div>' : '')
+        + '<div class="flow-query-text">' + escH(inboundBody) + '</div>'
         + (intent ? '<span class="flow-intent-pill">' + escH(intent) + '</span>' : '')
         + '</div>'
       : '';

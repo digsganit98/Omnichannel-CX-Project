@@ -30,7 +30,12 @@ class OutboundDeliveryService:
                 if message.channel == Channel.WHATSAPP:
                     result = connector.send_text(message.channel_identifier, text)
                 else:
-                    result = connector.send_text(message.channel_identifier, message.subject or "", text)
+                    result = connector.send_text(
+                        message.channel_identifier,
+                        message.subject or "",
+                        text,
+                        reply_to_message_id=message.external_message_id,
+                    )
                 return {"status": "sent", "attempts": attempt, "provider_response": result}
             except Exception as exc:
                 logger.exception("outbound_delivery_failed", extra={"channel": message.channel.value, "attempt": attempt})

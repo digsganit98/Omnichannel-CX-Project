@@ -31,11 +31,14 @@ class SMTPEmailConnector:
             and (self.use_tls or self.use_ssl),
         }
 
-    def send_text(self, to: str, subject: str, text: str) -> dict:
+    def send_text(self, to: str, subject: str, text: str, reply_to_message_id: str | None = None) -> dict:
         message = EmailMessage()
         message["From"] = self.from_email
         message["To"] = to
         message["Subject"] = f"Re: {subject or 'Customer support request'}"
+        if reply_to_message_id:
+            message["In-Reply-To"] = reply_to_message_id
+            message["References"] = reply_to_message_id
         message.set_content(text)
         client_class = smtplib.SMTP_SSL if self.use_ssl else smtplib.SMTP
         with client_class(self.host, self.port, timeout=15) as client:

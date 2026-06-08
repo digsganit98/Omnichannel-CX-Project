@@ -328,7 +328,8 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 /* customer query card */
 .flow-query-card{background:var(--surf);border:1px solid var(--bdr);border-radius:var(--r);padding:13px}
 .flow-query-hdr{display:flex;align-items:center;justify-content:space-between;font-size:9px;font-weight:700;color:var(--t3);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px}
-.flow-query-text{font-size:12px;color:var(--t1);line-height:1.6;margin-bottom:8px;word-break:break-word}
+.flow-query-subject{font-size:12px;font-weight:600;color:var(--t1);margin-bottom:7px;padding-bottom:7px;border-bottom:1px solid var(--bdr)}
+.flow-query-text{font-size:12px;color:var(--t1);line-height:1.6;margin-bottom:8px;word-break:break-word;white-space:pre-wrap}
 .flow-intent-pill{display:inline-block;font-size:10px;font-weight:500;padding:2px 9px;border-radius:20px;background:var(--blue-bg);color:var(--blue-t);border:1px solid var(--blue-bd)}
 
 /* emotion badge */
@@ -342,7 +343,7 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .flow-reply-card{background:var(--pur-bg);border:1px solid var(--pur-bd);border-radius:var(--r);padding:13px}
 .flow-reply-hdr{display:flex;align-items:center;justify-content:space-between;font-size:9px;font-weight:700;color:var(--pur-t);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px}
 .flow-agent-pill{font-size:10px;font-weight:600;padding:2px 7px;border-radius:20px;background:rgba(124,58,237,.12);color:var(--pur-t);border:1px solid var(--pur-bd);white-space:nowrap}
-.flow-reply-text{font-size:12px;color:var(--t2);line-height:1.6;word-break:break-word}
+.flow-reply-text{font-size:12px;color:var(--t2);line-height:1.6;word-break:break-word;white-space:pre-wrap}
 
 /* ── ANALYTICS (DASHBOARD) ── */
 .dash{flex:1;overflow-y:auto;padding:24px;display:flex;flex-direction:column;gap:20px;background:var(--bg)}
