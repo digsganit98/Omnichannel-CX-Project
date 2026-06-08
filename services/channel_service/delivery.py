@@ -1,9 +1,12 @@
+import asyncio
 import logging
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 
+from services.channel_adapter import ChannelAdapterRegistry, OutboundMessage
 from services.channel_service.connectors.email_sender import SMTPEmailConnector
-from services.channel_service.connectors.whatsapp_cloud import LocalWhatsAppTestConnector, WhatsAppCloudConnector
+from services.channel_service.connectors.whatsapp_cloud import LocalWhatsAppTestConnector
 from shared.schemas.messages import Channel, InboundMessage
 
 logger = logging.getLogger(__name__)
@@ -27,7 +30,10 @@ class OutboundDeliveryService:
         connector = self._connector(message)
         for attempt in range(1, self.retries + 1):
             try:
-                if message.channel == Channel.WHATSAPP:
+                if message.channel == Channel.WHATSAPP and connector is None:
+                    adapter = ChannelAdapterRegistry.get(message.channel)
+                    result = _run_async(adapter.send_outbound(OutboundMessage(to_id=message.channel_identifier, text=text)))
+                elif message.channel == Channel.WHATSAPP:
                     result = connector.send_text(message.channel_identifier, text)
                 else:
                     result = connector.send_text(message.channel_identifier, message.subject or "", text)
@@ -43,7 +49,14 @@ class OutboundDeliveryService:
         if message.channel == Channel.WHATSAPP and message.provider == "whatsapp_local_test":
             return LocalWhatsAppTestConnector()
         if message.channel == Channel.WHATSAPP:
-            return self.whatsapp or WhatsAppCloudConnector(
-                os.environ["WHATSAPP_ACCESS_TOKEN"], os.environ["WHATSAPP_PHONE_NUMBER_ID"]
-            )
+            return self.whatsapp
         return self.email or SMTPEmailConnector()
+
+
+def _run_async(coro):
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        return executor.submit(lambda: asyncio.run(coro)).result()
