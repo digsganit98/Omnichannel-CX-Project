@@ -1171,11 +1171,13 @@ window.loadConnectors = async function() {
   var waStatus = 'disconnected', emStatus = 'disconnected';
   try { var waRes = await api('/admin/whatsapp/status'); waStatus = waRes.connected ? 'connected' : (waRes.mode === 'local_test' ? 'connected' : 'disconnected'); } catch(e){}
   try { var emRes = await api('/admin/email/status'); emStatus = emRes.configured ? 'connected' : 'disconnected'; } catch(e){}
+  var inboxRes = null;
+  try { inboxRes = await api('/admin/email-inbox/status'); } catch(e){}
 
   var connectors = [
-    { nm:'WhatsApp Business', desc:'Meta Cloud API', status: waStatus,
+    { nm:'WhatsApp Business', desc:'Meta Cloud API · inbound webhook + outbound', status: waStatus,
       icon:'background:#22c55e', svg:'<svg viewBox="0 0 24 24" fill="#fff"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413z"/><path d="M20.52 3.449C12.831-3.984.106 1.407.101 11.893c0 2.096.549 4.14 1.595 5.945L.057 24l6.335-1.652c1.746.943 3.71 1.444 5.71 1.447h.006c9.756 0 15.466-8.65 11.466-16.001a11.816 11.816 0 0 0-3.054-4.345z"/></svg>' },
-    { nm:'Gmail / SMTP', desc:'Outbound email delivery', status: emStatus,
+    { nm:'Gmail SMTP', desc:'Outbound email delivery to customers', status: emStatus,
       icon:'background:#ea4335', svg:'<svg viewBox="0 0 24 24" fill="#fff"><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/></svg>' },
     { nm:'Call', desc:'Voice channel integration', status:'phase2',
       icon:'background:#6366f1', svg:'<svg viewBox="0 0 24 24" fill="#fff"><path d="M6.62 10.79c1.44 2.83 3.76 5.14 6.59 6.59l2.2-2.2c.27-.27.67-.36 1.02-.24 1.12.37 2.33.57 3.57.57.55 0 1 .45 1 1V20c0 .55-.45 1-1 1-9.39 0-17-7.61-17-17 0-.55.45-1 1-1h3.5c.55 0 1 .45 1 1 0 1.25.2 2.45.57 3.57.11.35.03.74-.25 1.02l-2.2 2.2z"/></svg>' },
@@ -1192,6 +1194,67 @@ window.loadConnectors = async function() {
       + '<div class="conn-status"><span class="conn-badge '+badgeCls+'">'+badgeTxt+'</span></div>';
     grid.appendChild(card);
   });
+
+  // Email Inbox (IMAP) — extended card with live stats and Poll Now button
+  var inboxCard = document.createElement('div');
+  inboxCard.className = 'conn-card';
+  inboxCard.id = 'connInboxCard';
+  var inboxConfigured = inboxRes && inboxRes.configured;
+  var inboxBadgeCls = inboxConfigured ? 'connected' : 'disconnected';
+  var inboxBadgeTxt = inboxConfigured ? 'Active' : 'Not configured';
+  var lastPollTxt = (inboxRes && inboxRes.last_poll_ts)
+    ? new Date(inboxRes.last_poll_ts * 1000).toLocaleTimeString() : 'Never';
+  var processedTxt = inboxRes ? String(inboxRes.emails_processed) : '0';
+  var intervalTxt = inboxRes ? inboxRes.poll_interval_seconds + 's' : '30s';
+  var mailboxTxt = (inboxRes && inboxRes.configured) ? escH(inboxRes.mailbox || 'INBOX') : '—';
+  var errorHtml = (inboxRes && inboxRes.last_error)
+    ? '<div style="font-size:10px;color:#dc2626;margin-top:6px;word-break:break-all">'+escH(inboxRes.last_error)+'</div>' : '';
+  inboxCard.innerHTML =
+    '<div class="conn-hdr">'
+    + '<div class="conn-icon" style="background:#db4437"><svg viewBox="0 0 24 24" fill="#fff"><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/></svg></div>'
+    + '<div><div class="conn-nm">Email Inbox (IMAP)</div><div class="conn-desc">Inbound customer emails · Gmail IMAP auto-poll</div></div>'
+    + '</div>'
+    + '<div class="conn-status"><span class="conn-badge ' + inboxBadgeCls + '">' + inboxBadgeTxt + '</span></div>'
+    + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;font-size:11px;color:var(--t2);margin-top:10px">'
+    + '<span style="color:var(--t3)">Mailbox</span><span>' + mailboxTxt + '</span>'
+    + '<span style="color:var(--t3)">Poll interval</span><span>' + intervalTxt + '</span>'
+    + '<span style="color:var(--t3)">Last poll</span><span id="inboxLastPoll">' + lastPollTxt + '</span>'
+    + '<span style="color:var(--t3)">Emails processed</span><span id="inboxProcessed">' + processedTxt + '</span>'
+    + '</div>'
+    + errorHtml
+    + '<button class="sim-btn" id="inboxPollBtn" onclick="triggerEmailInboxPoll()" style="margin-top:12px;font-size:11px;padding:5px 12px">'
+    + (inboxConfigured ? 'Poll now' : 'Set IMAP_USERNAME + IMAP_PASSWORD in .env')
+    + '</button>'
+    + '<div class="sim-status" id="inboxPollStatus" style="display:none;font-size:11px;margin-top:6px"></div>';
+  grid.appendChild(inboxCard);
+};
+
+window.triggerEmailInboxPoll = async function() {
+  var btn = document.getElementById('inboxPollBtn');
+  var statusEl = document.getElementById('inboxPollStatus');
+  if (!btn) return;
+  btn.disabled = true;
+  btn.textContent = 'Polling…';
+  statusEl.style.display = 'none';
+  try {
+    var res = await api('/admin/email-inbox/poll', { method: 'POST' });
+    var n = res.emails_processed_this_poll || 0;
+    statusEl.textContent = n === 0 ? 'No new emails.' : '✓ Processed ' + n + ' new email' + (n === 1 ? '' : 's') + '.';
+    statusEl.className = 'sim-status success';
+    statusEl.style.display = 'block';
+    var lpEl = document.getElementById('inboxLastPoll');
+    if (lpEl && res.last_poll_ts) lpEl.textContent = new Date(res.last_poll_ts * 1000).toLocaleTimeString();
+    var pcEl = document.getElementById('inboxProcessed');
+    if (pcEl) pcEl.textContent = String(res.emails_processed || 0);
+    if (n > 0) loadConversations();
+  } catch(e) {
+    statusEl.textContent = 'Error: ' + e.message;
+    statusEl.className = 'sim-status error';
+    statusEl.style.display = 'block';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Poll now';
+  }
 };
 
 // ── SETTINGS / SIMULATOR ────────────────────────────────────────────────────

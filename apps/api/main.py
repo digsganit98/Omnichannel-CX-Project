@@ -27,6 +27,7 @@ from .routes.conversations import router as conversations_router
 from .routes.customers import router as customers_router
 from .routes.crm import router as crm_router
 from .routes.email import router as email_router
+from .routes.email_inbox import router as email_inbox_router, set_poller as set_inbox_poller
 from .routes.integrations import router as integrations_router
 from .routes.neo4j_admin import router as neo4j_admin_router
 from .routes.orchestration import router as orchestration_router
@@ -42,6 +43,30 @@ configure_structured_logging(os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Omnichannel CX Accelerator", version="2.0.0")
+
+
+@app.on_event("startup")
+async def _start_email_inbox_poller() -> None:
+    import asyncio
+    from services.channel_service.email_inbox_poller import EmailInboxPoller
+
+    poller = EmailInboxPoller()
+    set_inbox_poller(poller)
+
+    if not poller.is_configured():
+        logger.info("email_inbox_poller_skipped: IMAP_USERNAME or IMAP_PASSWORD not set")
+        return
+
+    async def _poll_loop() -> None:
+        while True:
+            await asyncio.sleep(poller.poll_interval)
+            try:
+                await asyncio.to_thread(poller.poll_once, handle_email_message)
+            except Exception:
+                logger.exception("email_inbox_background_poll_failed")
+
+    asyncio.create_task(_poll_loop())
+    logger.info("email_inbox_poller_started", extra={"interval_seconds": poller.poll_interval, "mailbox": poller.username})
 
 
 @app.on_event("startup")
@@ -69,6 +94,7 @@ app.include_router(conversations_router)
 app.include_router(customers_router)
 app.include_router(crm_router)
 app.include_router(email_router)
+app.include_router(email_inbox_router)
 app.include_router(tickets_router)
 app.include_router(integrations_router)
 app.include_router(neo4j_admin_router)
