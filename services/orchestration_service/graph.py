@@ -408,7 +408,51 @@ class OrchestrationGraph:
     def _generate_and_send_reply(self, graph_state: GraphState) -> dict:
         state = graph_state["runtime"]
         if not state.answer:
-            state.answer = self.workflow_automation_agent.compose_answer(state.resolution, state.ticket)
+            state.answer = self.workflow_automation_agent.compose_answer(
+                state.resolution,
+                state.ticket,
+                channel=state.message.channel.value,
+                customer_name=state.customer.get("display_name", ""),
+            )
+        # GAP-I1: Secondary intent processing — if the customer's message contained a second
+        # distinct intent that requires manual review (e.g. "check loan AND report fraud"),
+        # create a separate ticket for it and append a note so the customer knows both
+        # issues are being tracked.  Primary resolution and ticket are unaffected.
+        if state.analysis and getattr(state.analysis, "secondary_intent", None):
+            try:
+                from services.agent_service.orchestration_agents import MANUAL_REVIEW_INTENTS, TicketDecision
+                from shared.schemas.intents import Intent
+                sec_intent_str = state.analysis.secondary_intent
+                try:
+                    sec_intent_enum = Intent(sec_intent_str)
+                except ValueError:
+                    sec_intent_enum = None
+                if sec_intent_enum and sec_intent_enum in MANUAL_REVIEW_INTENTS:
+                    sec_analysis = state.analysis.model_copy(update={
+                        "intent": sec_intent_enum,
+                        "secondary_intent": None,
+                    })
+                    sec_decision = TicketDecision(
+                        required=True,
+                        reason=f"secondary_intent_manual_review:{sec_intent_str}",
+                    )
+                    sec_ticket = self.ticket_agent.create_or_get(
+                        state.conversation_id, state.customer_id, state.message,
+                        sec_analysis, sec_decision, state.customer,
+                    )
+                    team = sec_ticket.assigned_team.replace("_", " ")
+                    ref = (
+                        f"*{sec_ticket.ticket_id}*"
+                        if state.message.channel.value == "whatsapp"
+                        else sec_ticket.ticket_id
+                    )
+                    sec_note = (
+                        f"\n\nWe have also flagged your {sec_intent_str.replace('_', ' ')} "
+                        f"for our {team} team (reference: {ref})."
+                    )
+                    state.answer = (state.answer or "") + sec_note
+            except Exception:
+                pass
         self._audit("answer_generated", state, intent=self._intent(state),
                     ticket_id=state.ticket.ticket_id if state.ticket else None)
         state.delivery = self.workflow_automation_agent.send_reply(state.message, state.answer)

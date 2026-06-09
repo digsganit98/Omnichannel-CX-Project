@@ -16,10 +16,22 @@ from shared.schemas.tickets import Ticket, TicketStatus
 MANUAL_REVIEW_INTENTS = {
     Intent.FRAUD_REPORT,
     Intent.TRANSACTION_DISPUTE,
-    Intent.INSURANCE_CLAIM,
+    # insurance_claim removed: "How do I file a claim?" is a KB FAQ, not always an escalation.
+    # Claim filing now escalates only via Rules 7/8 when KB confidence is too low to answer.
     Intent.LOAN_DEFAULT_NOTICE,
     Intent.COMPLAINT,
     Intent.HUMAN_ESCALATION,
+}
+
+# Pure informational lookups where the system has real customer data to return via Neo4j.
+# Never create tickets for these regardless of urgency or sentiment — high urgency on a
+# status query means the customer is anxious, not that an incident needs tracking.
+# GENERAL_INQUIRY is excluded: KB may not have the answer, and Rule 7 must be able to
+# create a ticket when the system genuinely cannot help.
+INFORMATIONAL_INTENTS = {
+    Intent.LOAN_STATUS,
+    Intent.CLAIM_STATUS,
+    Intent.POLICY_STATUS,
 }
 
 
@@ -73,7 +85,33 @@ class IntentClassificationAgent:
                     context = {**context, "graph_context": graph_ctx}
             except Exception:
                 pass
-        return self.classifier.analyze(message.text, context)
+        result = self.classifier.analyze(message.text, context)
+        # Post-classification fix: small LLMs often label "I applied X weeks ago, any update?"
+        # as loan_application when it is clearly a status check on an existing application.
+        # Override to loan_status when the customer already has loans and the message uses
+        # past-tense applied + update/status/decision/wait keywords.
+        if result.intent == Intent.LOAN_APPLICATION:
+            existing_loans = context.get("graph_context", {}).get("loans", [])
+            if existing_loans:
+                txt = message.text.lower()
+                status_keywords = {
+                    "update", "status", "decision", "heard", "waiting", "delay",
+                    "no news", "how long", "when will", "any news", "any update",
+                    "answer", "approved", "rejected", "disbursed", "sanctioned",
+                    "get a response", "hear back", "still waiting",
+                }
+                if any(kw in txt for kw in status_keywords):
+                    result = result.model_copy(update={"intent": Intent.LOAN_STATUS})
+        # Mirror fix for insurance_claim: "What happened with my claim?" should be claim_status
+        # (checking an existing claim), not insurance_claim (starting a new filing).
+        if result.intent == Intent.INSURANCE_CLAIM:
+            existing_claims = context.get("graph_context", {}).get("claims", [])
+            if existing_claims:
+                txt = message.text.lower()
+                status_keywords = {"status", "update", "what happened", "progress", "approved", "rejected", "decided", "paid", "settled"}
+                if any(kw in txt for kw in status_keywords):
+                    result = result.model_copy(update={"intent": Intent.CLAIM_STATUS})
+        return result
 
 
 # ── Agent 2: Query / Complaint Resolution ───────────────────────────────────
@@ -134,17 +172,25 @@ class QueryResolutionAgent:
         if intent == Intent.TICKET_STATUS:
             tickets = context.get("customer_tickets", [])
             if tickets:
-                answer = _format_ticket_status(tickets, channel)
+                raw_text = _format_ticket_status(tickets, channel)
+                ticket_ctx = [{
+                    "text": raw_text,
+                    "score": 0.98,
+                    "metadata": {"source": "customer_ticket_lookup", "doc_type": "customer_data"},
+                }]
+                # Route through Groq so the LLM produces a natural sentence
+                # ("Your home loan query is with our Loans team…") instead of a raw bullet list.
+                generation = self.rag.generator.generate_answer(message.text, ticket_ctx, context)
                 return QueryResolution(
-                    answer=answer,
+                    answer=generation.get("text") or raw_text,
                     confidence=0.98,
-                    contexts=[{
-                        "text": answer,
-                        "score": 0.98,
-                        "metadata": {"source": "customer_ticket_lookup", "doc_type": "customer_data"},
-                    }],
+                    contexts=ticket_ctx,
                     citations=[{"index": 1, "source": "customer_ticket_lookup", "score": 0.98}],
                     retrieval_backend="customer_ticket_lookup",
+                    llm={
+                        "model": generation.get("model"),
+                        "llm_used": generation.get("llm_used", False),
+                    },
                 )
 
         # ── Priority 2: Neo4j transactional data (loans, claims, etc.) ───────
@@ -155,22 +201,31 @@ class QueryResolutionAgent:
                     graph_ctx = context.get("graph_context", {})
                     customer_id = graph_ctx.get("customer_id", "")
                     if customer_id:
-                        answer = neo4j_answer(self.neo4j_client, intent, customer_id)
-                        if answer:
+                        raw_data = neo4j_answer(self.neo4j_client, intent, customer_id)
+                        if raw_data:
+                            neo4j_ctx = [{
+                                "text": raw_data,
+                                "score": 0.95,
+                                "metadata": {
+                                    "source": "neo4j_customer_graph",
+                                    "doc_type": "customer_graph",
+                                },
+                            }]
+                            # Pass through Groq so the LLM produces a natural CS response
+                            # rather than returning raw field=value database output.
+                            generation = self.rag.generator.generate_answer(
+                                message.text, neo4j_ctx, context
+                            )
                             return QueryResolution(
-                                answer=answer,
+                                answer=generation.get("text") or raw_data,
                                 confidence=0.95,
-                                contexts=[{
-                                    "text": answer,
-                                    "score": 0.95,
-                                    "metadata": {
-                                        "source": "neo4j_customer_graph",
-                                        "doc_type": "customer_graph",
-                                        "retrieval": "neo4j_graph",
-                                    },
-                                }],
+                                contexts=neo4j_ctx,
                                 citations=[{"index": 1, "source": "neo4j_customer_graph", "score": 0.95}],
                                 retrieval_backend="neo4j_graph",
+                                llm={
+                                    "model": generation.get("model"),
+                                    "llm_used": generation.get("llm_used", False),
+                                },
                             )
             except Exception:
                 pass
@@ -191,7 +246,7 @@ def _format_ticket_status(tickets: list[dict], channel: str = "") -> str:
         for t in tickets:
             sla = _relative_time(t.get("sla_due_at"))
             lines.append(
-                f"• Ref: {t['ticket_id']} | {t['intent'].replace('_', ' ').title()} | "
+                f"- Ref: {t['ticket_id']} | {t['intent'].replace('_', ' ').title()} | "
                 f"Status: {t['status'].upper()} | Team: {t['assigned_team'].replace('_', ' ').title()}"
                 + (f" | Due: {sla}" if sla else "")
             )
@@ -256,9 +311,11 @@ class TicketCreationAgent:
         # Fast keyword check first (no LLM cost for clear cases).
         text = message.text.lower()
         has_close_action = any(phrase in text for phrase in ("close", "resolve", "mark as resolved"))
-        has_ticket_context = any(phrase in text for phrase in ("ticket", "case", "query", "request"))
-        has_resolution_cue = any(phrase in text for phrase in ("resolved", "fixed", "sorted", "thanks", "thank you"))
-        if has_close_action and has_ticket_context and has_resolution_cue:
+        has_ticket_context = any(phrase in text for phrase in ("ticket", "case", "query", "request", "issue", "problem"))
+        has_resolution_cue = any(phrase in text for phrase in ("resolved", "fixed", "sorted", "done", "all good", "no longer", "thanks", "thank you"))
+        # Require close_action + ticket_context, OR resolution_cue + ticket_context.
+        # The original triple-AND was too strict — "My issue is sorted, thanks" never matched.
+        if has_ticket_context and (has_close_action or has_resolution_cue):
             return TicketActionDecision(action=TicketAction.RESOLVE, reason="customer_confirmed_resolution")
 
         # LLM fallback for ambiguous messages (e.g., "All good now", "Issue is sorted").
@@ -311,8 +368,37 @@ class TicketCreationAgent:
         if analysis.intent in MANUAL_REVIEW_INTENTS:
             return f"manual_review_required:{analysis.intent.value}"
 
+        # Rule 2b: Intents that need live banking data this system does not have.
+        # RAG may return generic KB content that looks like an answer but isn't the
+        # customer's actual balance or transfer status — always escalate to a human.
+        if analysis.intent in {Intent.ACCOUNT_BALANCE_INQUIRY, Intent.FUND_TRANSFER}:
+            return "no_live_banking_data"
+
         # Rule 3: Ticket status is a lookup — never create a new ticket
         if analysis.intent == Intent.TICKET_STATUS:
+            return None
+
+        # Rule 9: Same intent handled ≥ 2 times (outbound, unresolved) with no active ticket.
+        # Only count turns where resolved=False/0 — if prior turns were resolved successfully,
+        # the customer asking again is a new check, not an unresolved follow-up.
+        # MUST come before Rule 3b so informational intents (loan_status etc.) can still
+        # escalate when the system has repeatedly failed to give a useful answer.
+        recent_turns = context.get("recent_turns", [])
+        repeat_count = sum(
+            1 for t in recent_turns
+            if (
+                t.get("direction") == "outbound"
+                and t.get("intent") == analysis.intent.value
+                and not t.get("resolved")
+            )
+        )
+        if repeat_count >= 2 and not context.get("active_ticket"):
+            return "repeated_unresolved_query"
+
+        # Rule 3b: Pure informational intents — customer is asking for data, not reporting a
+        # problem. High urgency/negative sentiment on a status query means they are anxious,
+        # not that an incident needs tracking. A real CS agent would just answer them.
+        if analysis.intent in INFORMATIONAL_INTENTS:
             return None
 
         # Rule 4: High urgency
@@ -323,9 +409,15 @@ class TicketCreationAgent:
         if analysis.confidence < 0.6:
             return "low_intent_confidence"
 
-        # Rule 6: Repeat customer — has ≥ 3 open tickets (escalate to avoid ticket spam)
-        if len(context.get("customer_tickets", [])) >= 3:
-            return "repeat_customer_escalation"
+        # Rule 6: Repeat customer with many open tickets — only escalate if this specific intent
+        # is not already covered by an existing ticket (prevents piling on more tickets when
+        # the customer is already overwhelmed with open cases).
+        customer_tickets = context.get("customer_tickets", [])
+        if len(customer_tickets) >= 3:
+            existing_intents = {t.get("intent") for t in customer_tickets}
+            if analysis.intent.value not in existing_intents:
+                return "repeat_customer_new_issue"
+            return None  # Existing ticket already covers this intent — no new one needed
 
         # Rule 7: No knowledge found and not sourced from Neo4j
         if not resolution.contexts and resolution.retrieval_backend != "neo4j_graph":
@@ -354,23 +446,75 @@ class WorkflowAutomationAgent:
         self.delivery = delivery or OutboundDeliveryService()
 
     @staticmethod
-    def compose_answer(resolution: QueryResolution, ticket: Ticket | None) -> str:
-        if ticket is None:
-            return resolution.answer
-        ticket_note = (
-            "I have captured your request and created a support ticket. "
-            f"Our {ticket.assigned_team.replace('_', ' ')} team will review it. "
-            f"Reference: {ticket.ticket_id}."
-        )
-        if resolution.contexts and resolution.answer:
-            return f"{resolution.answer}\n\n{ticket_note}"
-        return ticket_note
+    def compose_answer(
+        resolution: QueryResolution,
+        ticket: Ticket | None,
+        channel: str = "",
+        customer_name: str = "",
+    ) -> str:
+        body = _strip_email_boilerplate((resolution.answer or "").strip()) if resolution else ""
+
+        if ticket:
+            ref = f"*{ticket.ticket_id}*" if channel == "whatsapp" else ticket.ticket_id
+            team = ticket.assigned_team.replace("_", " ")
+            if getattr(ticket, "escalation_reason", None) == "customer_requested_human":
+                sla_eta = _relative_time(getattr(ticket, "sla_due_at", None))
+                eta_clause = f" You will be contacted {sla_eta}." if sla_eta else ""
+                ticket_note = (
+                    f"Your request has been logged under reference {ref}. "
+                    f"Our {team} team will be in touch with you.{eta_clause}"
+                )
+            else:
+                ticket_note = (
+                    f"Your request has been logged under reference {ref}. "
+                    f"Our {team} team will follow up with you."
+                )
+            body = f"{body}\n\n{ticket_note}".strip() if body else ticket_note
+
+        if channel == "email":
+            salutation_name = _salutation(customer_name)
+            return (
+                f"Dear {salutation_name},\n\n"
+                f"{body}\n\n"
+                "Thank you for reaching out to us. We are committed to resolving your query promptly.\n\n"
+                "Warm regards,\nCustomer Support Team"
+            )
+        # WhatsApp and default: LLM body is the full reply
+        return body
 
     def send_reply(self, message: InboundMessage, answer: str) -> dict:
         return self.delivery.send(message, answer)
 
 
 # ── Module-level helpers ──────────────────────────────────────────────────────
+
+def _strip_email_boilerplate(body: str) -> str:
+    """Remove LLM-added greetings and sign-offs so the system wrapper doesn't duplicate them."""
+    lines = body.splitlines()
+    # Strip leading greeting line: "Dear Customer," / "Dear Priya," / "Dear Sir/Madam,"
+    if lines and lines[0].lower().strip().startswith("dear "):
+        lines = lines[1:]
+        while lines and not lines[0].strip():
+            lines = lines[1:]
+    # Strip trailing sign-off block (Warm regards, Best regards, Thank you, etc.)
+    sign_off_tokens = ("warm regards", "best regards", "kind regards", "sincerely", "regards,", "thank you", "thanks and")
+    while lines and any(lines[-1].lower().strip().startswith(s) for s in sign_off_tokens):
+        lines = lines[:-1]
+        while lines and not lines[-1].strip():
+            lines = lines[:-1]
+    return "\n".join(lines).strip()
+
+
+def _salutation(customer_name: str) -> str:
+    """Derive a safe salutation name from the customer's display_name."""
+    name = (customer_name or "").strip()
+    if not name:
+        return "Customer"
+    # If it looks like an email address, extract and title-case the local part
+    if "@" in name:
+        name = name.split("@")[0].replace(".", " ").replace("_", " ").title()
+    return name or "Customer"
+
 
 def _derive_product_id_for_memory(intent: str, graph_ctx: dict) -> str:
     """Derive the product_id key for ResolutionMemory lookup from intent + graph context."""
