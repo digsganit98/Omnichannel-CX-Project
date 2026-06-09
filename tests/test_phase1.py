@@ -1000,6 +1000,41 @@ class FakeCRM:
         return CRMResult("synced", {"status": status})
 
 
+def test_invalid_crm_url_is_recorded_without_raising(monkeypatch):
+    from services.crm_service.client import CRMClient
+
+    monkeypatch.setenv("CRM_PROVIDER", "jira")
+    monkeypatch.setenv("CRM_BASE_URL", "Log in with Atlassian account")
+    monkeypatch.setenv("CRM_API_TOKEN", "token")
+    monkeypatch.setenv("CRM_USER_EMAIL", "support@example.com")
+    monkeypatch.setenv("CRM_PROJECT_KEY", "SUP")
+
+    result = CRMClient()._request("GET", "/rest/api/3/myself")
+
+    assert result.status == "failed"
+    assert "invalid URL" in result.error
+
+
+def test_invalid_crm_url_does_not_block_whatsapp_reply(monkeypatch):
+    monkeypatch.setenv("CRM_PROVIDER", "jira")
+    monkeypatch.setenv("CRM_BASE_URL", "Log in with Atlassian account")
+    monkeypatch.setenv("CRM_API_TOKEN", "token")
+    monkeypatch.setenv("CRM_USER_EMAIL", "support@example.com")
+    monkeypatch.setenv("CRM_PROJECT_KEY", "SUP")
+
+    repo = SQLiteCXRepository(":memory:")
+    sender = Recorder()
+    response = graph(repo, whatsapp=sender).run(
+        whatsapp_message(message_id="crm-failure-reply", text="unknown question xyz")
+    )
+
+    assert response.outbound_status == "sent"
+    assert sender.sent
+    ticket = repo.get_ticket(response.ticket_id)
+    assert ticket["crm_sync_status"] == "failed"
+    assert "invalid URL" in ticket["crm_sync_error"]
+
+
 def test_ticket_jira_sync_and_lifecycle():
     repo = SQLiteCXRepository(":memory:")
     workflow = graph(repo, crm=FakeCRM())

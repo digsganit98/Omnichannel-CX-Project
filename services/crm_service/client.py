@@ -130,17 +130,21 @@ class CRMClient:
 
     def _request(self, method: str, path: str, payload: dict | None = None) -> CRMResult:
         body = json.dumps(payload).encode("utf-8") if payload is not None else None
-        request = Request(
-            f"{self.base_url}{path}",
-            data=body,
-            method=method,
-            headers=self._headers(),
-        )
         for attempt in range(1, self.retries + 2):
             try:
+                request = Request(
+                    f"{self.base_url}{path}",
+                    data=body,
+                    method=method,
+                    headers=self._headers(),
+                )
                 with urlopen(request, timeout=self.timeout) as response:
                     raw = response.read().decode("utf-8")
                     return CRMResult("synced", json.loads(raw) if raw else {})
+            except ValueError as exc:
+                error = f"CRM {method} {path} has an invalid URL: {exc}"
+                logger.error(error)
+                return CRMResult("failed", {}, error)
             except HTTPError as exc:
                 detail = exc.read().decode("utf-8", errors="replace")
                 error = f"CRM {method} {path} failed with {exc.code}: {detail}"
