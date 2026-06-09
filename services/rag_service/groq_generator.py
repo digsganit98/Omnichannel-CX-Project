@@ -19,8 +19,8 @@ _INTENT_DEFINITIONS = """
 account_balance_inquiry  – Customer wants to know their account balance or recent transactions.
 transaction_dispute      – Customer reports an incorrect, unauthorized, or failed transaction.
 fund_transfer            – Customer wants to initiate or track a fund transfer.
-loan_status              – Customer asking about the status of an existing loan.
-loan_application         – Customer wants to apply for a NEW loan (not check an existing one).
+loan_status              – Customer asking about the status of an existing loan. ALSO use this when the customer says they "applied" weeks/days ago and are asking for an update, decision, or why there is a delay — that is status-checking, NOT a new application.
+loan_application         – Customer wants to apply for a NEW loan they have NOT yet submitted. If they already applied and are waiting for news, use loan_status instead.
 loan_default_notice      – Customer received or is asking about a loan default or overdue notice.
 policy_status            – Customer asking about the status of an existing insurance policy.
 claim_status             – Customer asking for the status or progress of an EXISTING claim.
@@ -39,7 +39,11 @@ human_escalation         – Customer explicitly asks to speak with a human agen
 _FEW_SHOT_EXAMPLES = """
 Example 1 – loan_status vs loan_application:
   Message: "I applied for a home loan last week, what is the status?"
-  → intent: loan_status  (checking existing application), secondary_intent: null
+  → intent: loan_status  (checking existing application, NOT a new request), secondary_intent: null
+  Message: "I applied for a home loan 3 weeks ago and have not heard back. When will I get a decision?"
+  → intent: loan_status  (waiting for update on existing application), secondary_intent: null
+  Message: "I want to apply for a home loan."
+  → intent: loan_application  (new application request), secondary_intent: null
 
 Example 1b – claim_status vs insurance_claim:
   Message: "How do I file a health insurance claim?"
@@ -112,30 +116,71 @@ class GroqGenerator:
                 f"Reply in {lang_name}. Keep ticket IDs, amounts, and dates in their original format."
             )
 
+        # No numbered references — avoids the LLM citing "[1]" inline or appending a Sources section.
         sources = "\n\n".join(
-            f"[{i}] {item.get('metadata', {}).get('source', 'unknown')}:\n{item['text']}"
-            for i, item in enumerate(contexts, start=1)
+            f"[{item.get('metadata', {}).get('source', 'unknown')}]:\n{item['text']}"
+            for item in contexts
         )
         graph_ctx_text = _format_graph_context(ctx.get("graph_context"))
+        conv_history_text = _format_conversation_history(ctx.get("recent_turns", []))
+        # Conversation summary is a raw pipe-delimited log — inject it only when there are
+        # no recent_turns to avoid sending redundant and hard-to-parse content to the LLM.
+        conv_summary = (ctx.get("conversation_summary") or "").strip() if not conv_history_text else ""
 
+        no_data_note = (
+            "- IMPORTANT: No customer account context is provided. Do NOT say 'I checked your account' or "
+            "imply you have access to account data. Say: 'I am currently unable to access your account "
+            "details — let me connect you with our support team.'\n"
+            if not graph_ctx_text else ""
+        )
         user_prompt = (
             f"{channel_rule}{lang_rule}\n\n"
             "Rules:\n"
-            "- Answer ONLY using the retrieved context below. Do NOT invent facts.\n"
-            "- Cite sources inline like [1] or [2]. List them at the end.\n"
-            "- If the customer context includes open tickets, reference them by ticket ID and status.\n"
-            "- If context is insufficient, say: \"I need to escalate this to our support team.\"\n"
-            "- Never mention internal system names like OpenSearch, Neo4j, or RAG.\n\n"
+            # PROMPT-1: No-ticket-promise and no-citation rules are FIRST — LLMs weight earlier rules more.
+            "- CRITICAL: Do NOT invent ticket IDs, loan IDs, claim IDs, or reference numbers. "
+            "Only mention a ticket ID if it appears verbatim in the customer data below. "
+            "Do NOT say 'your ticket reference is ...' unless that exact ID is shown. "
+            "Do NOT say 'I will create a ticket' or 'a ticket will be raised'.\n"
+            "- Do NOT add a 'Sources:' or 'References:' section. Do NOT cite sources inline. Just answer.\n"
+            # PROMPT-2: No invented timelines.
+            "- CRITICAL: Do NOT state a specific processing timeline or turnaround time unless "
+            "the ticket SLA or system data explicitly provides one. Do NOT say 'within 5-7 business days' "
+            "unless that came from a loan/claim record below.\n"
+            "- Answer ONLY the specific question the customer asked. Do NOT volunteer info about "
+            "unrelated products (e.g. claims when they asked about loans) unless explicitly asked.\n"
+            "- Answer ONLY using the retrieved context and conversation history below. Do NOT invent facts.\n"
+            "- If the customer references a prior issue from another channel, find it in the history below.\n"
+            "- When account data is provided, present it in natural sentences as a human CS agent would. "
+            "Do NOT write 'Status: X' or 'Amount: Y' — say 'Your car loan has been approved' instead.\n"
+            "- Address the customer's concern first — acknowledge worry or frustration before giving data.\n"
+            "- If context is insufficient, say: 'I need to escalate this to our support team.'\n"
+            "- Never mention internal system names like OpenSearch, Neo4j, or RAG.\n"
+            + no_data_note
+            + "\n"
             + (f"Customer account context:\n{graph_ctx_text}\n\n" if graph_ctx_text else "")
+            + (f"{conv_history_text}\n\n" if conv_history_text else "")
+            + (f"Conversation summary: {conv_summary}\n\n" if conv_summary else "")
             + f"Customer query: {query}\n\n"
             f"Retrieved context:\n{sources or '(none)'}\n\n"
-            "Answer:"
+            "Answer (body only — no greeting, no sign-off):"
         )
         return self._generate(system_prompt=_system_prompt(), user_prompt=user_prompt)
 
     def classify_message(self, message: str, context: dict | None = None) -> dict | None:
-        graph_ctx = context.get("graph_context") if context else None
+        ctx = context or {}
+        graph_ctx = ctx.get("graph_context")
         graph_text = _format_graph_context(graph_ctx) if graph_ctx else ""
+
+        # Last 3 inbound turns give the classifier conversation context so it can
+        # correctly handle follow-ups like "What about the other issue I mentioned?"
+        recent = ctx.get("recent_turns", [])
+        history_lines = []
+        for t in list(reversed(recent))[:6]:
+            if t.get("direction") == "inbound":
+                history_lines.append(f"  Prior message: {(t.get('text') or '')[:150]}")
+                if len(history_lines) >= 3:
+                    break
+        history_text = "\n".join(history_lines)
 
         user_prompt = (
             "## Intent Definitions\n"
@@ -146,9 +191,14 @@ class GroqGenerator:
             "Think step by step:\n"
             "1. Detect the customer's language. Set `language` to ISO-639-1 code (e.g. `en`, `hi`, `ta`).\n"
             "2. Identify key entities (product, action, emotion) in the message.\n"
-            "3. Match to the PRIMARY intent from the list of 16 intents above.\n"
+            "3. Match to the PRIMARY intent. IMPORTANT disambiguation rules:\n"
+            "   - If the customer says they 'applied' weeks/days ago and are asking for an update, status, or decision → use loan_status (NOT loan_application). Use loan_application ONLY when the customer has NOT yet applied and wants to start a new application.\n"
+            "   - If the customer account context shows an existing loan/claim of the same type the customer is asking about, and the message asks for an update/status → use loan_status or claim_status.\n"
+            "   - Use recent conversation context (prior messages) to resolve ambiguous follow-ups.\n"
             "4. If the message contains a SECOND distinct request, set `secondary_intent`; otherwise set it to null.\n"
-            "5. Determine urgency: high if fraud/stolen/urgent/ASAP/blocked/overdue; "
+            "5. Determine urgency: high if fraud/stolen/urgent/ASAP/blocked/overdue, "
+            "OR if a time-sensitive financial deadline is mentioned (same day or next day — "
+            "e.g. court date, property registration, flight, payment due today); "
             "medium if sentiment is negative; low otherwise.\n"
             "6. Return ONLY a JSON object — no explanation, no markdown.\n\n"
             "Required JSON schema:\n"
@@ -160,6 +210,7 @@ class GroqGenerator:
             '"language": "<ISO-639-1 code>", '
             '"reason": "<one short sentence>"}\n\n'
             + (f"Customer account context:\n{graph_text}\n\n" if graph_text else "")
+            + (f"Recent customer messages (for context):\n{history_text}\n\n" if history_text else "")
             + f"Customer message: {message}"
         )
 
@@ -218,10 +269,36 @@ class GroqGenerator:
 
 def _channel_format_rule(channel: str) -> str:
     if channel == "whatsapp":
-        return "Format: Reply in 2–3 short sentences. Use bullet points only when listing 3+ items. Be conversational."
+        return (
+            "CHANNEL: WhatsApp\n"
+            "Write the response BODY only — greeting and sign-off are added automatically by the system.\n"
+            "Rules: max 3–4 lines · first line = one direct answer · "
+            "use *bold* (WhatsApp markdown) for ticket IDs, amounts, and status · "
+            "bullets only for 3+ items · conversational, no formal salutations."
+        )
     if channel == "email":
-        return "Format: Use structured paragraphs with a brief greeting and a professional closing. Be formal."
+        return (
+            "CHANNEL: Email\n"
+            "Write the response BODY only — 'Dear Customer' and 'Thank you / Warm regards' are added "
+            "automatically by the system. Do NOT include them yourself.\n"
+            "Rules: 1–3 formal paragraphs · first paragraph acknowledges the customer's concern empathetically "
+            "and gives the direct answer · second paragraph provides relevant details in natural sentences "
+            "(no field=value lists) · last paragraph covers next steps or ticket reference if applicable · "
+            "no informal contractions."
+        )
     return "Format: Be concise and professional."
+
+
+def _format_conversation_history(recent_turns: list[dict]) -> str:
+    if not recent_turns:
+        return ""
+    lines = ["Recent conversation history (newest first):"]
+    for turn in list(reversed(recent_turns))[:8]:
+        who = "Customer" if turn.get("direction") == "inbound" else "Support"
+        ch = (turn.get("channel") or "?").upper()
+        text = (turn.get("text") or "")[:400]
+        lines.append(f"  [{ch} · {who}]: {text}")
+    return "\n".join(lines)
 
 
 def _safe_amount(value) -> str:
@@ -260,5 +337,18 @@ def _format_graph_context(graph_ctx: dict | None) -> str:
                 f"(ID: {claim.get('claim_id', '')}) | "
                 f"Status: {claim.get('status', '')} | "
                 f"Claimed: {_safe_amount(claim.get('amount_claimed', 0))}"
+            )
+    policies = graph_ctx.get("policies") or []
+    if policies:
+        lines.append("Policies:")
+        for p in policies:
+            maturity = f" | Maturity: {p['maturity_date']}" if p.get("maturity_date") else ""
+            next_due = f" | Next premium due: {p['next_premium_due']}" if p.get("next_premium_due") else ""
+            lines.append(
+                f"  - {p.get('policy_type', 'Policy')} (ID: {p.get('policy_id', '')}) | "
+                f"Status: {p.get('status', '')} | "
+                f"Coverage: {_safe_amount(p.get('coverage_inr', 0))} | "
+                f"Premium: {_safe_amount(p.get('premium_inr', 0))}"
+                f"{maturity}{next_due}"
             )
     return "\n".join(lines)

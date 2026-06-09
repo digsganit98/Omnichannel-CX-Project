@@ -55,7 +55,15 @@ class CXAgent:
             Intent.INSURANCE_CLAIM,
             Intent.HUMAN_ESCALATION,
         }
-        if rule_result.intent in boundary_intents and result.intent != rule_result.intent:
+        # Only override LLM intent with rule result when the LLM is uncertain (< 0.65)
+        # AND the rule classifier is confident (> 0.70). A high-confidence LLM result for
+        # "I applied 3 weeks ago, any update?" should not be overwritten by keyword matching.
+        if (
+            rule_result.intent in boundary_intents
+            and result.intent != rule_result.intent
+            and result.confidence < 0.65
+            and rule_result.confidence > 0.70
+        ):
             result.intent = rule_result.intent
             guarded_fields.append("intent")
 

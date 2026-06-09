@@ -552,7 +552,12 @@
     <div class="page" id="page-sim">
       <div class="settings-page">
         <div>
-          <div class="dash-title">Run Simulation</div>
+          <div class="dash-title">Channel Testing</div>
+          <div class="dash-sub" style="margin-top:4px">
+            <strong>Email</strong> customer queries arrive automatically via Gmail IMAP polling (digvijayyadav48@gmail.com).
+            Use <em>Connectors → Email Inbox → Poll now</em> to manually fetch new emails.
+            Use the WhatsApp simulator below to inject test WhatsApp messages.
+          </div>
         </div>
         <div class="settings-grid">
 
@@ -588,33 +593,33 @@
             <pre class="sim-result" id="simResult"></pre>
           </div>
 
-          <!-- EMAIL -->
+          <!-- EMAIL INBOX INFO -->
           <div class="settings-card" id="email-simulate-form">
             <div class="sim-card-hdr">
               <div class="sim-card-icon" style="background:#ea4335">
                 <svg viewBox="0 0 24 24" fill="#fff"><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/></svg>
               </div>
-              <div class="settings-card-title" style="margin:0">Email simulation</div>
+              <div class="settings-card-title" style="margin:0">Email inbox (IMAP)</div>
             </div>
-            <div class="sim-field">
+            <div class="sim-field" style="margin-top:10px">
+              <p style="font-size:12px;color:var(--t2);line-height:1.6;margin:0">
+                Customer emails sent to <strong>digvijayyadav48@gmail.com</strong> are fetched automatically every <strong>30 seconds</strong> via Gmail IMAP.<br><br>
+                Each new email is normalised by the channel adapter and routed through the agentic pipeline — intent classification, RAG resolution, optional Jira ticket creation — and the AI-generated response appears in the <strong>Inbox</strong> for your review before sending.<br><br>
+                To manually trigger a poll go to <strong>Connectors → Email Inbox (IMAP) → Poll now</strong>.
+              </p>
+            </div>
+            <div class="sim-field" style="display:none">
               <label>Email webhook secret</label>
               <input id="emailSecret" type="password" placeholder="EMAIL_WEBHOOK_SECRET">
             </div>
-            <div class="sim-field">
-              <label>Customer email</label>
+            <div style="display:none">
               <input id="simEmail" type="email" value="customer@example.com">
-            </div>
-            <div class="sim-field">
-              <label>Subject</label>
               <input id="simEmailSubject" value="Customer support request">
-            </div>
-            <div class="sim-field">
-              <label>Message</label>
               <textarea id="simEmailMsg">I need help with my account balance inquiry.</textarea>
+              <button id="simEmBtn"></button>
+              <div id="simStatusEm"></div>
+              <pre id="simResultEm"></pre>
             </div>
-            <button class="sim-btn" id="simEmBtn" onclick="runEmailSim()">Run simulation</button>
-            <div class="sim-status" id="simStatusEm"></div>
-            <pre class="sim-result" id="simResultEm"></pre>
           </div>
 
         </div>

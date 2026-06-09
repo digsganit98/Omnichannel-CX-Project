@@ -1,13 +1,14 @@
 """Intent-routed Neo4j query helpers for BFSI customer data."""
 
+# Intents where Neo4j has real customer data to return.
+# account_balance_inquiry and fund_transfer excluded: no live banking integration.
+# transaction_dispute excluded: no transactions table — neo4j_answer() always returned None
+# for it, wasting a Neo4j round-trip before falling to RAG + MANUAL_REVIEW escalation.
 TRANSACTIONAL_INTENTS = {
     "loan_status",
     "loan_default_notice",
     "claim_status",
     "policy_status",
-    "transaction_dispute",
-    "account_balance_inquiry",
-    "fund_transfer",
 }
 
 
@@ -63,6 +64,23 @@ def get_loan_status(client, customer_id: str) -> list[dict]:
     )
 
 
+def get_policy_status(client, customer_id: str) -> list[dict]:
+    try:
+        return client.query(
+            """
+            MATCH (c:Customer {customer_id: $cid})-[:HAS_POLICY]->(p:Policy)
+            RETURN p.policy_id AS policy_id, p.policy_type AS policy_type,
+                   p.status AS status, p.premium_inr AS premium_inr,
+                   p.coverage_inr AS coverage_inr,
+                   p.maturity_date AS maturity_date,
+                   p.next_premium_due AS next_premium_due
+            """,
+            {"cid": customer_id},
+        )
+    except Exception:
+        return []
+
+
 def get_claim_status(client, customer_id: str) -> list[dict]:
     return client.query(
         """
@@ -96,6 +114,7 @@ def get_customer_context_for_customer(client, customer: dict | None) -> dict:
     cid = customer["customer_id"]
     loans = get_loan_status(client, cid)
     claims = get_claim_status(client, cid)
+    policies = get_policy_status(client, cid)
     return {
         "customer_id": cid,
         "email": customer.get("email"),
@@ -103,13 +122,14 @@ def get_customer_context_for_customer(client, customer: dict | None) -> dict:
         "city": customer.get("city"),
         "loans": loans,
         "claims": claims,
+        "policies": policies,
     }
 
 
 def _fmt_amount(value) -> str:
     """Safely format a currency amount that may be stored as int, float, or string."""
     try:
-        return f"₹{int(float(str(value).replace(',', ''))):,}"
+        return f"Rs.{int(float(str(value).replace(',', ''))):,}"
     except (ValueError, TypeError):
         return str(value) if value else "N/A"
 
@@ -125,36 +145,62 @@ def neo4j_answer(client, intent: str, customer_id: str) -> str | None:
     if intent in {"loan_status", "loan_default_notice"}:
         loans = get_loan_status(client, customer_id)
         if not loans:
-            return "No active loan records were found for your account."
-        lines = ["Here is your loan summary:"]
+            return None  # Fall through to RAG — PROMPT-5 handles the no-data response cleanly
+        lines = ["Loan records:"]
         for loan in loans:
             lines.append(
-                f"  • {loan['loan_type']} (ID: {loan['loan_id']}): "
-                f"Status = {loan['status']}, "
-                f"Amount = {_fmt_amount(loan['amount_inr'])}, "
-                f"Rate = {loan['interest_rate']}%, "
+                f"  - {loan['loan_type']} (ID: {loan['loan_id']}): "
+                f"Status: {loan['status']}, "
+                f"Amount: {_fmt_amount(loan['amount_inr'])}, "
+                f"Rate: {loan['interest_rate']}%, "
                 f"Next step: {loan['next_step']}"
             )
         return "\n".join(lines)
 
-    if intent in {"claim_status", "policy_status"}:
+    if intent == "claim_status":
         claims = get_claim_status(client, customer_id)
         if not claims:
-            return "No insurance claims or policies were found for your account."
-        lines = ["Here is your claims summary:"]
+            return None  # Fall through to RAG
+        lines = ["Claim records:"]
         for claim in claims:
-            approved = _fmt_amount(claim["amount_approved"]) if str(claim.get("amount_approved", "")).upper() != "N/A" else "Pending"
+            approved = _fmt_amount(claim["amount_approved"]) if str(claim.get("amount_approved", "")).upper() not in ("N/A", "NONE", "") else "Pending"
             lines.append(
-                f"  • Claim {claim['claim_id']} ({claim['policy_type']} / {claim['claim_type']}): "
-                f"Status = {claim['status']}, "
-                f"Claimed = {_fmt_amount(claim['amount_claimed'])}, "
-                f"Approved = {approved}. "
-                f"{claim['reason']}"
+                f"  - Claim {claim['claim_id']} ({claim['policy_type']} / {claim['claim_type']}): "
+                f"Status: {claim['status']}, "
+                f"Claimed: {_fmt_amount(claim['amount_claimed'])}, "
+                f"Approved: {approved}. "
+                f"{claim.get('reason', '')}"
             )
         return "\n".join(lines)
 
-    # account_balance_inquiry / transaction_dispute / fund_transfer → no account table in xlsx
-    return (
-        "I can see your profile but detailed account balance and transaction history "
-        "require live banking integration. A support specialist will assist you shortly."
-    )
+    if intent == "policy_status":
+        # Try dedicated Policy nodes first; fall back to claim records if none exist.
+        policies = get_policy_status(client, customer_id)
+        if policies:
+            lines = ["Policy records:"]
+            for p in policies:
+                maturity = f", Maturity: {p['maturity_date']}" if p.get("maturity_date") else ""
+                next_due = f", Next premium due: {p['next_premium_due']}" if p.get("next_premium_due") else ""
+                lines.append(
+                    f"  - {p.get('policy_type', 'Policy')} (ID: {p.get('policy_id', '')}): "
+                    f"Status: {p.get('status', 'Unknown')}, "
+                    f"Coverage: {_fmt_amount(p.get('coverage_inr', 0))}, "
+                    f"Premium: {_fmt_amount(p.get('premium_inr', 0))}"
+                    f"{maturity}{next_due}"
+                )
+            return "\n".join(lines)
+        # No Policy nodes — check if claim data gives partial context
+        claims = get_claim_status(client, customer_id)
+        if claims:
+            lines = ["Insurance records (claims on file):"]
+            for claim in claims:
+                lines.append(
+                    f"  - {claim['policy_type']} policy / {claim['claim_type']} "
+                    f"(Claim ID: {claim['claim_id']}): Status: {claim['status']}, "
+                    f"Claimed: {_fmt_amount(claim['amount_claimed'])}"
+                )
+            return "\n".join(lines)
+        return None  # Fall through to RAG
+
+    # transaction_dispute → no transaction table; returns None → RAG → Rule 2 still fires (MANUAL_REVIEW)
+    return None
