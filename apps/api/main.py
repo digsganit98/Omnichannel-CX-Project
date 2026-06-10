@@ -51,8 +51,11 @@ async def _start_email_poller() -> None:
     if os.getenv("IMAP_ENABLED", "false").lower() != "true":
         return
     import asyncio
+    from services.channel_service.email_inbox_poller import EmailInboxPoller
     from services.channel_service.email_poller import run_email_poller
-    asyncio.create_task(run_email_poller())
+    poller = EmailInboxPoller()
+    set_inbox_poller(poller)
+    asyncio.create_task(run_email_poller(poller))
     logger.info("email_poller_task_created")
 
 
