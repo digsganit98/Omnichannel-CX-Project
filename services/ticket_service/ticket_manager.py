@@ -32,6 +32,11 @@ class TicketManager:
         if existing:
             return existing
         priority = TicketPriority.HIGH if urgency == Urgency.HIGH else TicketPriority.MEDIUM
+        approval_status = (
+            "pending"
+            if requires_approval(intent.value) or str(escalation_reason or "").startswith("assisted_resolution_required:")
+            else "not_required"
+        )
         ticket = Ticket(
             ticket_id=new_id("tkt"),
             conversation_id=conversation_id,
@@ -41,7 +46,7 @@ class TicketManager:
             intent=intent.value,
             priority=priority,
             assigned_team=assign_team(intent.value),
-            approval_status="pending" if requires_approval(intent.value) else "not_required",
+            approval_status=approval_status,
             escalation_reason=escalation_reason,
             sla_due_at=datetime.now(timezone.utc) + timedelta(hours=sla_hours(priority.value)),
             metadata={"channel": message.channel.value, "provider": message.provider},
