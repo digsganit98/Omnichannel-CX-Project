@@ -192,7 +192,7 @@ class Recorder:
     def __init__(self):
         self.sent = []
 
-    def send_text(self, *args):
+    def send_text(self, *args, **kwargs):
         self.sent.append(args)
         return {"id": "provider-message-id"}
 
@@ -667,11 +667,16 @@ def test_low_confidence_retrieval_creates_ticket():
 
 
 def test_customer_answer_kb_documents_are_knowledge_base_type():
-    """PDF KB docs should all have doc_type=knowledge_base."""
+    """All KB docs (PDF and markdown) should have doc_type=knowledge_base."""
     documents = load_knowledge_documents()
     assert documents
     assert {document.metadata["doc_type"] for document in documents} == {"knowledge_base"}
-    assert all(document.metadata["source"].split(":p", 1)[0].endswith(".pdf") for document in documents)
+    # Phase 2: the KB loader now indexes markdown alongside the original PDF, so KB
+    # sources may end in .pdf (with a :pN page suffix) or .md.
+    assert all(
+        document.metadata["source"].split(":p", 1)[0].endswith((".pdf", ".md"))
+        for document in documents
+    )
 
 
 def test_rag_discards_non_kb_contexts_before_generation():
@@ -692,11 +697,19 @@ def test_rag_discards_non_kb_contexts_before_generation():
 
     class ContextRecorder:
         def generate_answer(self, query, contexts, conversation_context):
-            assert [c["metadata"]["source"] for c in contexts] == ["InboxIQ_BFSI_KB.pdf:p5"]
+            sources = [c["metadata"]["source"] for c in contexts]
+            # The non-KB context (ticket-export.json) must be dropped; the KB doc kept.
+            # (Phase 2: the keyword fallback may add other real KB .md contexts too, so
+            # we assert exclusion/inclusion rather than an exact single-item list.)
+            assert "ticket-export.json" not in sources
+            assert "InboxIQ_BFSI_KB.pdf:p5" in sources
+            assert all(c["metadata"]["doc_type"] == "knowledge_base" for c in contexts)
             return {"text": "Approved answer.", "llm_used": True}
 
     answer = RAGPipeline(store=UnsafeStore(), generator=ContextRecorder()).answer("insurance claim process")
-    assert [c["metadata"]["source"] for c in answer["contexts"]] == ["InboxIQ_BFSI_KB.pdf:p5"]
+    sources = [c["metadata"]["source"] for c in answer["contexts"]]
+    assert "ticket-export.json" not in sources
+    assert "InboxIQ_BFSI_KB.pdf:p5" in sources
 
 
 def test_rag_uses_pdf_keyword_fallback_when_vector_store_is_empty():

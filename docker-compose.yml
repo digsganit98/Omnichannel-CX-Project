@@ -6,7 +6,10 @@ services:
     env_file:
       - .env
     environment:
-      DATABASE_PATH: /app/data/cx_phase1.db
+      # Runtime DB lives in a dedicated sub-folder that is the ONLY thing the
+      # cx-data volume mounts — so seed data (bfsi.xlsx, knowledge_base/) is served
+      # fresh from the image on every build and is never shadowed by a stale volume.
+      DATABASE_PATH: /app/data/db/cx_phase1.db
       SMTP_HOST: ${SMTP_HOST:-mailpit}
       SMTP_PORT: ${SMTP_PORT:-1025}
       SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL:-support@example.com}
@@ -50,12 +53,13 @@ services:
       GROQ_API_KEY: ${GROQ_API_KEY:-}
       GROQ_MODEL: ${GROQ_MODEL:-llama-3.1-8b-instant}
     command: >
-      sh -c "python -m services.persistence_service.migrate &&
+      sh -c "mkdir -p /app/data/db &&
+             python -m services.persistence_service.migrate &&
              uvicorn apps.api.main:app --host 0.0.0.0 --port 8000"
     ports:
       - "8888:8000"
     volumes:
-      - cx-data:/app/data
+      - cx-data:/app/data/db
       - huggingface-cache:/root/.cache/huggingface
       - ./apps/admin-ui:/app/apps/admin-ui
     depends_on:

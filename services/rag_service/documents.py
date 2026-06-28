@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def load_knowledge_documents() -> list[Document]:
-    return _split_documents(_load_pdf_kb())
+    return _split_documents(_load_pdf_kb() + _load_markdown_kb())
 
 
 def _load_markdown_kb() -> list[Document]:

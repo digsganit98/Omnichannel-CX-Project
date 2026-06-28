@@ -39,6 +39,17 @@ def seed_synthetic_bfsi_records(
             "amount_inr": 500000,
             "interest_rate": "12.5",
             "next_step": "Disbursement pending",
+            # Item 15: summary EMI schedule (this demo loan is Approved/disbursed).
+            # Derived from amount 500000 @ 12.5% over 36 months (EMI formula).
+            "emi_amount_inr": 16727,
+            "outstanding_principal_inr": 416807,
+            "next_emi_date": "2026-07-05",
+            "foreclosure_amount_inr": 416807,
+            "tenure_months": 36,
+            "emis_paid": 7,
+            # Item 17: Personal Loan is unsecured (no collateral); Approved -> fully disbursed.
+            "sanctioned_amount_inr": 500000,
+            "disbursed_amount_inr": 500000,
         },
         {
             "loan_id": f"LN{suffix}02",
@@ -49,6 +60,12 @@ def seed_synthetic_bfsi_records(
             "amount_inr": 6000000,
             "interest_rate": "8.2",
             "next_step": "Property valuation",
+            # Item 17: Home Loan is secured (Property collateral); Under Review -> not disbursed.
+            "collateral_type": "Property",
+            "collateral_value_inr": 8000000,
+            "ltv_percent": 75,
+            "sanctioned_amount_inr": 6000000,
+            "disbursed_amount_inr": 0,
         },
     ]
     claims = [
@@ -87,12 +104,48 @@ def seed_synthetic_bfsi_records(
                     l.interest_rate = $interest_rate,
                     l.next_step = $next_step,
                     l.email = CASE WHEN $email <> '' THEN $email ELSE l.email END,
-                    l.phone = CASE WHEN $phone <> '' THEN $phone ELSE l.phone END
+                    l.phone = CASE WHEN $phone <> '' THEN $phone ELSE l.phone END,
+                    l.emi_amount_inr = $emi_amount_inr,
+                    l.outstanding_principal_inr = $outstanding_principal_inr,
+                    l.next_emi_date = $next_emi_date,
+                    l.foreclosure_amount_inr = $foreclosure_amount_inr,
+                    l.tenure_months = $tenure_months,
+                    l.emis_paid = $emis_paid,
+                    l.dpd = $dpd,
+                    l.overdue_amount_inr = $overdue_amount_inr,
+                    l.penalty_inr = $penalty_inr,
+                    l.arrears_bucket = $arrears_bucket,
+                    l.collections_stage = $collections_stage,
+                    l.collateral_type = $collateral_type,
+                    l.collateral_value_inr = $collateral_value_inr,
+                    l.ltv_percent = $ltv_percent,
+                    l.sanctioned_amount_inr = $sanctioned_amount_inr,
+                    l.disbursed_amount_inr = $disbursed_amount_inr
                 WITH l
                 MATCH (c:Customer {customer_id: $customer_id})
                 MERGE (c)-[:HAS_LOAN]->(l)
                 """,
-                {**loan, "customer_id": customer_id, "email": email or "", "phone": phone or ""},
+                {
+                    **loan, "customer_id": customer_id, "email": email or "", "phone": phone or "",
+                    "emi_amount_inr": loan.get("emi_amount_inr", 0),
+                    "outstanding_principal_inr": loan.get("outstanding_principal_inr", 0),
+                    "next_emi_date": loan.get("next_emi_date", ""),
+                    "foreclosure_amount_inr": loan.get("foreclosure_amount_inr", 0),
+                    "tenure_months": loan.get("tenure_months", 0),
+                    "emis_paid": loan.get("emis_paid", 0),
+                    # Item 16: demo loans are current (no arrears).
+                    "dpd": loan.get("dpd", 0),
+                    "overdue_amount_inr": loan.get("overdue_amount_inr", 0),
+                    "penalty_inr": loan.get("penalty_inr", 0),
+                    "arrears_bucket": loan.get("arrears_bucket", "Current"),
+                    "collections_stage": loan.get("collections_stage", "None"),
+                    # Item 17: collateral (secured loans only) + disbursement.
+                    "collateral_type": loan.get("collateral_type", ""),
+                    "collateral_value_inr": loan.get("collateral_value_inr", 0),
+                    "ltv_percent": loan.get("ltv_percent", 0),
+                    "sanctioned_amount_inr": loan.get("sanctioned_amount_inr", 0),
+                    "disbursed_amount_inr": loan.get("disbursed_amount_inr", 0),
+                },
             )
             client.write(
                 """
@@ -129,12 +182,32 @@ def seed_synthetic_bfsi_records(
             )
 
             policy_id = f"{customer_id}_{claim['policy_type'].replace(' ', '_').upper()}"
+            # Synthetic per-customer policy fields, mirroring the Customer_Policy_data
+            # loader so portal-seeded demo customers also get real policy_status data
+            # (coverage/premium/etc.) instead of the old 3-field stub that returned nulls.
+            # The two demo policy types (Health, Auto) are annual-renewal -> no maturity.
+            policy_fields = {
+                "Health": {"coverage_inr": 500000, "premium_inr": 12000},
+                "Auto":   {"coverage_inr": 400000, "premium_inr": 9000},
+            }.get(claim["policy_type"], {"coverage_inr": 500000, "premium_inr": 10000})
             client.write(
                 """
                 MERGE (p:Policy {policy_id: $policy_id})
-                SET p.policy_type = $policy_type,
-                    p.customer_id = $customer_id,
-                    p.status = 'Active'
+                SET p.policy_type      = $policy_type,
+                    p.customer_id      = $customer_id,
+                    p.status           = 'Active',
+                    p.coverage_inr     = $coverage_inr,
+                    p.premium_inr      = $premium_inr,
+                    p.premium_frequency = 'Annual',
+                    p.premium_paid_to  = '2025-09-30',
+                    p.next_premium_due = '2026-03-31',
+                    p.maturity_date    = '',
+                    p.premium_status   = 'Paid',
+                    p.premiums_paid    = 3,
+                    p.last_premium_date = '2025-09-30',
+                    p.overdue_premium_inr = 0,
+                    p.late_fee_inr     = 0,
+                    p.grace_period_days = 30
                 WITH p
                 MATCH (c:Customer {customer_id: $customer_id})
                 MERGE (c)-[:HAS_POLICY]->(p)
@@ -147,6 +220,8 @@ def seed_synthetic_bfsi_records(
                     "policy_type": claim["policy_type"],
                     "customer_id": customer_id,
                     "claim_id": claim["claim_id"],
+                    "coverage_inr": policy_fields["coverage_inr"],
+                    "premium_inr": policy_fields["premium_inr"],
                 },
             )
 

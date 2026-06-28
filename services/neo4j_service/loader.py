@@ -25,6 +25,8 @@ def load_bfsi_data(client) -> dict:
 
     counts["customers"] = _load_customers(client, wb)
     counts["loans"] = _load_loans(client, wb)
+    counts["loan_schedules"] = _load_loan_schedules(client, wb)
+    counts["loan_collateral"] = _load_loan_collateral(client, wb)
     counts["claims"] = _load_claims(client, wb)
     counts["products"] = _load_products(client, wb)
     counts["policies"] = _load_policies(client, wb)
@@ -110,6 +112,91 @@ def _load_loans(client, wb) -> int:
     return len(rows)
 
 
+def _load_loan_schedules(client, wb) -> int:
+    """Set summary loan-servicing properties on existing :Loan nodes (items 15 & 16).
+
+    Reads Loan_Schedule_data, which contains ONLY disbursed loans (a non-disbursed
+    loan has no EMI obligation and therefore no schedule and no arrears — it simply
+    has no row here, and the answer layer's `if loan.get('emi_amount_inr')` /
+    `if dpd > 0` guards handle the absent properties gracefully). For each row we set
+    both the EMI-schedule fields (item 15) and the arrears/DPD fields (item 16).
+    """
+    rows = _rows(wb, "Loan_Schedule_data")
+    applied = 0
+    for row in rows:
+        loan_id = str(row.get("LoanID") or "")
+        if not loan_id:
+            continue
+        client.write(
+            """
+            MATCH (l:Loan {loan_id: $loan_id})
+            SET l.tenure_months            = $tenure_months,
+                l.emis_paid                = $emis_paid,
+                l.emi_amount_inr           = $emi_amount_inr,
+                l.outstanding_principal_inr = $outstanding_principal_inr,
+                l.next_emi_date            = $next_emi_date,
+                l.foreclosure_amount_inr   = $foreclosure_amount_inr,
+                l.dpd                      = $dpd,
+                l.overdue_amount_inr       = $overdue_amount_inr,
+                l.penalty_inr              = $penalty_inr,
+                l.arrears_bucket           = $arrears_bucket,
+                l.collections_stage        = $collections_stage
+            """,
+            {
+                "loan_id": loan_id,
+                "tenure_months": row.get("TenureMonths") or 0,
+                "emis_paid": row.get("EMIs_Paid") or 0,
+                "emi_amount_inr": row.get("EMI_Amount_INR") or 0,
+                "outstanding_principal_inr": row.get("Outstanding_Principal_INR") or 0,
+                "next_emi_date": str(row.get("Next_EMI_Date") or ""),
+                "foreclosure_amount_inr": row.get("Foreclosure_Amount_INR") or 0,
+                "dpd": row.get("DPD") or 0,
+                "overdue_amount_inr": row.get("Overdue_Amount_INR") or 0,
+                "penalty_inr": row.get("Penalty_INR") or 0,
+                "arrears_bucket": str(row.get("Bucket") or "Current"),
+                "collections_stage": str(row.get("Collections_Stage") or "None"),
+            },
+        )
+        applied += 1
+    return applied
+
+
+def _load_loan_collateral(client, wb) -> int:
+    """Set collateral + disbursement props on existing :Loan nodes (item 17).
+
+    Reads Loan_Collateral_data. Secured loans get collateral_type / collateral_value_inr
+    / ltv_percent; all loans get sanctioned_amount_inr / disbursed_amount_inr. Unsecured
+    loans (Personal/Education) carry no collateral fields — the answer layer's
+    `if loan.get('collateral_type')` guard skips them.
+    """
+    rows = _rows(wb, "Loan_Collateral_data")
+    for row in rows:
+        loan_id = str(row.get("LoanID") or "")
+        if not loan_id:
+            continue
+        secured = str(row.get("Secured") or "").strip().lower() == "yes"
+        client.write(
+            """
+            MATCH (l:Loan {loan_id: $loan_id})
+            SET l.sanctioned_amount_inr = $sanctioned,
+                l.disbursed_amount_inr  = $disbursed,
+                l.collateral_type       = $collateral_type,
+                l.collateral_value_inr  = $collateral_value,
+                l.ltv_percent           = $ltv
+            """,
+            {
+                "loan_id": loan_id,
+                "sanctioned": row.get("Sanctioned_Amount_INR") or 0,
+                "disbursed": row.get("Disbursed_Amount_INR") or 0,
+                # Secured-only fields; unsecured loans store empty/0 so guards skip them.
+                "collateral_type": str(row.get("Collateral_Type") or "") if secured else "",
+                "collateral_value": (row.get("Collateral_Value_INR") or 0) if secured else 0,
+                "ltv": (row.get("LTV_Percent") or 0) if secured else 0,
+            },
+        )
+    return len(rows)
+
+
 def _load_claims(client, wb) -> int:
     rows = _rows(wb, "Claim_data")
     for row in rows:
@@ -171,43 +258,97 @@ def _load_products(client, wb) -> int:
 
 
 def _load_policies(client, wb) -> int:
-    """Synthesize :Policy nodes from Claim_data (unique CustomerID + PolicyType combos)."""
-    rows = _rows(wb, "Claim_data")
-    seen: set[str] = set()
-    count = 0
+    """Load per-customer :Policy nodes from the Customer_Policy_data sheet.
+
+    This is the customer-held policy instance data (distinct from the
+    Loan_Policy_Product_data product catalogue). It sets the real financial
+    fields that get_policy_status() queries — premium_inr, coverage_inr,
+    maturity_date, next_premium_due — which the old claim-synthesized stub
+    never populated (they always returned null).
+
+    Policies are linked to their matching catalogue :Product by policy_type,
+    and to the customer's existing :Claim nodes by (customer + policy_type),
+    preserving the prior Policy->Claim relationship.
+    """
+    rows = _rows(wb, "Customer_Policy_data")
     for row in rows:
-        customer_id = str(row.get("CustomerID", ""))
+        customer_id = str(row.get("CustomerID") or "")
+        policy_id = str(row.get("PolicyID") or "")
         policy_type = str(row.get("PolicyType") or "")
-        claim_id = str(row.get("ClaimID", ""))
-        if not customer_id or not policy_type:
+        if not customer_id or not policy_id:
             continue
-        policy_id = f"{customer_id}_{policy_type.replace(' ', '_').upper()}"
-        if policy_id not in seen:
-            seen.add(policy_id)
-            client.write(
-                """
-                MERGE (p:Policy {policy_id: $policy_id})
-                SET p.policy_type = $policy_type,
-                    p.customer_id = $customer_id,
-                    p.status = 'Active'
-                WITH p
-                MATCH (c:Customer {customer_id: $customer_id})
-                MERGE (c)-[:HAS_POLICY]->(p)
-                """,
-                {"policy_id": policy_id, "policy_type": policy_type, "customer_id": customer_id},
-            )
-            count += 1
-        # Link Policy → Claim
-        if claim_id:
+        maturity = str(row.get("MaturityDate") or "")
+        # Treat the "annual renewal" sentinel as no maturity date so the query's
+        # `if p.get('maturity_date')` guard skips it cleanly.
+        if maturity.upper().startswith("N/A"):
+            maturity = ""
+        client.write(
+            """
+            MERGE (p:Policy {policy_id: $policy_id})
+            SET p.customer_id      = $customer_id,
+                p.policy_type      = $policy_type,
+                p.policy_number    = $policy_number,
+                p.coverage_inr     = $coverage_inr,
+                p.premium_inr      = $premium_inr,
+                p.premium_frequency = $premium_frequency,
+                p.premium_paid_to  = $premium_paid_to,
+                p.next_premium_due = $next_premium_due,
+                p.maturity_date    = $maturity_date,
+                p.status           = $status,
+                p.premiums_paid       = $premiums_paid,
+                p.last_premium_date   = $last_premium_date,
+                p.premium_status      = $premium_status,
+                p.overdue_premium_inr = $overdue_premium_inr,
+                p.late_fee_inr        = $late_fee_inr,
+                p.grace_period_days   = $grace_period_days
+            WITH p
+            MATCH (c:Customer {customer_id: $customer_id})
+            MERGE (c)-[:HAS_POLICY]->(p)
+            """,
+            {
+                "policy_id": policy_id,
+                "customer_id": customer_id,
+                "policy_type": policy_type,
+                "policy_number": str(row.get("PolicyNumber") or ""),
+                "coverage_inr": row.get("SumAssured_INR") or 0,
+                "premium_inr": row.get("PremiumAmount_INR") or 0,
+                "premium_frequency": str(row.get("PremiumFrequency") or ""),
+                "premium_paid_to": str(row.get("PremiumPaidTo") or ""),
+                "next_premium_due": str(row.get("NextPremiumDue") or ""),
+                "maturity_date": maturity,
+                "status": str(row.get("Status") or "Active"),
+                # Item 12: premium payment history (derived consistent with status).
+                "premiums_paid": row.get("Premiums_Paid") or 0,
+                "last_premium_date": str(row.get("Last_Premium_Date") or ""),
+                "premium_status": str(row.get("Premium_Status") or "Paid"),
+                "overdue_premium_inr": row.get("Overdue_Premium_INR") or 0,
+                "late_fee_inr": row.get("Late_Fee_INR") or 0,
+                "grace_period_days": row.get("Grace_Period_Days") or 0,
+            },
+        )
+        # Link Policy -> matching catalogue Product by policy_type (best-effort).
+        if policy_type:
             client.write(
                 """
                 MATCH (p:Policy {policy_id: $policy_id})
-                MATCH (cl:Claim {claim_id: $claim_id})
-                MERGE (p)-[:HAS_CLAIM]->(cl)
+                MATCH (prod:Product)
+                WHERE prod.product_type = 'Policy'
+                  AND (prod.category CONTAINS $policy_type OR $policy_type CONTAINS prod.category)
+                MERGE (p)-[:PRODUCT_IS]->(prod)
                 """,
-                {"policy_id": policy_id, "claim_id": claim_id},
+                {"policy_id": policy_id, "policy_type": policy_type},
             )
-    return count
+        # Preserve Policy -> Claim links: attach this customer's claims of the same type.
+        client.write(
+            """
+            MATCH (c:Customer {customer_id: $customer_id})-[:HAS_CLAIM]->(cl:Claim)
+            WHERE cl.policy_type = $policy_type
+            MATCH (p:Policy {policy_id: $policy_id})
+            MERGE (p)-[:HAS_CLAIM]->(cl)
+            """,
+            {"customer_id": customer_id, "policy_id": policy_id, "policy_type": policy_type},
+        )
+    return len(rows)
 
 
 def _load_kyc(client, wb) -> int:

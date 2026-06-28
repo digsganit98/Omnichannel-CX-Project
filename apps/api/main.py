@@ -64,11 +64,12 @@ def _seed_neo4j() -> None:
         from services.neo4j_service.client import Neo4jClient
         from services.neo4j_service.loader import load_bfsi_data
         client = Neo4jClient()
-        existing = client.query("MATCH (c:Customer) RETURN count(c) AS n")
-        if existing and existing[0].get("n", 0) > 0:
-            logger.info("neo4j_seed_skipped: data already present")
-            client.close()
-            return
+        # Always reconcile the graph to the current bfsi.xlsx on startup. load_bfsi_data
+        # is fully MERGE-based, so re-running is idempotent — it updates existing nodes
+        # and adds any new fields/sheets. Do NOT re-add a "skip if data exists" guard:
+        # that froze the graph at its first seed, so data-model changes (new sheets like
+        # Customer_Policy_data / Loan_Schedule_data, or new properties) silently never
+        # loaded for anyone who already had a seeded Neo4j volume.
         counts = load_bfsi_data(client)
         logger.info("neo4j_seed_complete", extra=counts)
         client.close()
