@@ -62,7 +62,8 @@ def _load_customers(client, wb) -> int:
                 c.city = $city,
                 c.country = $country,
                 c.registration_date = $registration_date,
-                c.last_activity_date = $last_activity_date
+                c.last_activity_date = $last_activity_date,
+                c.display_name = CASE WHEN $name <> '' THEN $name ELSE c.display_name END
             """,
             {
                 "customer_id": str(row.get("CustomerID", "")),
@@ -73,6 +74,7 @@ def _load_customers(client, wb) -> int:
                 "country": str(row.get("Country") or ""),
                 "registration_date": str(row.get("RegistrationDate") or ""),
                 "last_activity_date": str(row.get("LastActivityDate") or ""),
+                "name": str(row.get("Name") or ""),
             },
         )
     return len(rows)

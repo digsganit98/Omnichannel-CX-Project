@@ -21,10 +21,26 @@ baseline. Newest entries at the bottom of each section.
 - **Storage shape = summary PROPERTIES on the parent node** (option a), not full child-node
   tables. Stores headline facts that answer chat intents (next EMI, outstanding, foreclosure,
   arrears, premium next-due) — not exhaustive amortization rows. Full tables can be added
-  later if a "download schedule" feature ever needs them (not a one-way door).
+  later if a "download schedule" feature evAdd nameer needs them (not a one-way door).
 - Same recipe as item 11: real loan_id/policy_id keys from existing sheets + approved
   synthetic fields; deterministic IDs; MERGE-idempotent; an already-seeded graph needs a
   manual re-load to pick up new fields (auto-seed only fires on an empty graph).
+
+## Deliberately deferred (NOT missing/unfinished — intentional)
+
+- **Group C — core banking data (items 1 accounts/balances, 2 transactions, 4/5
+  cards/statements, 6 mandates).** DEFERRED on purpose. Reason: the system has no
+  step-up authentication (phase2-plan W2 / gaps G1–G2 — identity = sender of the
+  message, auto-trusted). The secure, BFSI-correct behavior for balance/card/
+  transaction queries on an unverified channel is to ESCALATE to a human (verify
+  before disclose), not auto-answer. So this data would be loaded-but-gated/unused
+  until W2 step-up exists, and it is also the slice most coupled to real bank APIs
+  (live balances/transactions) which are out of scope. Decision: don't add synthetic
+  data that can't be securely used yet. `shared/utils/masking.py` is already in place
+  (last-4 masking) for whenever Group C / W2 is picked up — wire it into the new
+  answer formatters then.
+- **Item 18 — loan documents/certificates.** Skipped: metadata-only pointers with no
+  real file-delivery path in this system; lowest value of Group B.
 
 ---
 
@@ -35,7 +51,7 @@ baseline. Newest entries at the bottom of each section.
 | Security utility | PII masking helpers (output-layer redaction) | `shared/utils/masking.py`, `tests/test_masking.py` | Done (inert until call-sites exist) |
 | RAG / KB | Wire markdown loader into KB indexing | `services/rag_service/documents.py`, `tests/test_documents_loader.py` | Done |
 | RAG / KB | Add BFSI knowledge-base content — 9 files: how_to_procedures, fees_and_charges, fraud_and_security, grievance_redressal, interest_rates, product_eligibility, regulatory_faqs, branch_atm_directory, bank_reference | `data/knowledge_base/*.md` (see log #3–#11 for per-file detail) | Done (9 of 9) |
-| RAG / KB | KB verification eval set (pass/fail target) | `docs/phase2-kb-eval-set.md` | RUN 2026-06-28 — ALL PASS (pos 10/10, regr 2/2, neg 5/5) |
+| RAG / KB | KB verification (pass/fail target + result) | `docs/phase2-test-plan.md` (folded in; was `phase2-kb-eval-set.md`) | RUN 2026-06-28 — ALL PASS (pos 10/10, regr 2/2, neg 5/5) |
 | Graph data | Fix Policy null-fields bug: new per-customer policy sheet + loader | `data/bfsi.xlsx` (new `Customer_Policy_data` sheet), `services/neo4j_service/loader.py`, `services/neo4j_service/writer.py` | Done — verified end-to-end (45 policies w/ coverage) |
 | Graph data | Item 15: loan EMI schedule (summary props on :Loan) | `data/bfsi.xlsx` (new `Loan_Schedule_data` sheet), `loader.py`, `queries.py`, `writer.py` | Done — verified end-to-end (EMI in answer) |
 | Graph data | Item 16: loan arrears / DPD (cols added to `Loan_Schedule_data`) | `data/bfsi.xlsx` (arrears cols), `loader.py`, `queries.py`, `writer.py` | Done — verified end-to-end (arrears in answer) |
@@ -44,6 +60,8 @@ baseline. Newest entries at the bottom of each section.
 | RAG / KB | Items 13 & 14: network providers + claim filing guide | `data/knowledge_base/network_providers.md`, `data/knowledge_base/claim_filing_guide.md` | Done — verified (indexed + retrieved) |
 | Graph data | Item 17: collateral & disbursement (new `Loan_Collateral_data` sheet) | `data/bfsi.xlsx`, `loader.py`, `queries.py`, `writer.py` | Done — verified end-to-end (collateral on secured only) |
 | Tests | Updated 3 tests for Phase 2 behavior + fixed 1 pre-existing test-double | `tests/test_phase1.py` | 60/61 pass; 1 known pre-existing (see #21) |
+| Graph data | Customer name: add `Name` to `Customer_data`; use real name in greetings | `data/bfsi.xlsx`, `loader.py`, `queries.py`, `graph.py` | Done — verified end-to-end ("Dear <real name>") |
+| Test run | Full test plan executed against live app | `docs/phase2-test-plan.md` | 27/28 correct; 1 known generator quirk (see #23) |
 
 ---
 
@@ -120,11 +138,10 @@ unless an entry says otherwise — not repeated per entry.
 - **Synthetic:** sample IFSC `BANK0001234`, sample MICR `400123456`, illustrative BIN first-digit map (4=Visa, 5=MC, 6=RuPay/Discover, 3=Amex), `1800-200-1947` (helpline) — all clearly illustrative. Real standards stated as fact (IFSC 11-char structure, MICR 9-digit, MII first-digit network rule). No full/real issuer BINs invented. Generic bank/app/portal. Omitted: support email, SMS short-code.
 - **Verified:** loads → 5 chunks; ALL 9 markdown KB files index (66 chunks total), no regression.
 
-### 12. KB verification eval set — `docs/phase2-kb-eval-set.md`
-- **What:** Defined the pass/fail target for end-to-end KB verification: 10 positive cases (KB should answer, should NOT escalate) + 2 regression cases (old PDF must still retrieve) + 5 negative cases (must STILL escalate/refuse). Hard gate per question = R (retrieval) + E (escalation); A (answer wording) is a soft/quality signal. Overall bar: ≥8/10 positive, both regression cases retrieve a PDF chunk, and all negative cases still escalate.
-- **Why:** Judge verification against a fixed bar set before running, not rationalised after. Positive cases target content unique to the new files (avoid overlap with the original PDF's topics). Negative cases guard the inverse risk — that richer KB makes the bot over-confident and stops escalating fraud/dispute/balance/human/complaint.
-- **Synthetic:** none (it's a test spec).
-- **Verified:** N/A — this is the spec; execution needs the Docker stack (OpenSearch + Groq). Note: local env can't run embeddings (torch DLL crash `0xc0000139`), so verification must run inside Docker.
+### 12. KB verification — folded into `docs/phase2-test-plan.md`
+- **What:** KB verification pass/fail target (10 positive + 2 PDF-regression + 5 negative cases). Defined before running; judged against a fixed bar. Originally a standalone `phase2-kb-eval-set.md`, now **consolidated into the single `phase2-test-plan.md`** (§2d holds the regression cases; the acceptance result is recorded in its header) to avoid multiple overlapping Phase 2 test docs. The old file was deleted.
+- **Why:** one Phase 2 test doc, no content lost.
+- **Verified:** RUN 2026-06-28 — positive 10/10, regression 2/2, negative 5/5. ALL PASS.
 
 ### 13. Graph data — Policy null-fields fix (`Customer_Policy_data` + loader/writer)
 - **What:** New `Customer_Policy_data` sheet (45 rows, per-customer policies); rewrote `_load_policies()` to set the fields `get_policy_status()` queries (coverage_inr, premium_inr, maturity_date, next_premium_due, +policy_number/frequency/paid_to/status); writer seed updated. Links Policy→Product (by type), preserves Policy→Claim.
@@ -180,3 +197,15 @@ unless an entry says otherwise — not repeated per entry.
 - **Why:** Confirm no regressions; align tests with approved Phase 2 behavior.
 - **Synthetic:** none.
 - **Verified:** 60 passed. KNOWN PRE-EXISTING (1): `test_five_question_kb_and_graph_e2e_matrix` expects `neo4j_graph` backend but the mock-based full-orchestration run returns `keyword_fallback`. This test was already red at session start (masked by the reply_to_message_id error). The real app is verified working — live stack returns neo4j_graph answers (policy/EMI/arrears/collateral all confirmed). Root cause is in the test's Neo4j mock vs. orchestration, NOT the production data work. Left as-is.
+
+### 22. Graph data — Customer name (`Name` col on `Customer_data`)
+- **What:** Added a `Name` column to `Customer_data` (22 customers); `_load_customers` now sets `:Customer.display_name`; `get_customer_by_identifier`/`get_customer_by_id` return it; `resolve_identity` prefers the real name over the prior email-as-name fallback for greetings.
+- **Why:** BFSI `Customer_data` had NO name — the system faked a greeting from the email local-part ("Dear Digvijayyadav48"). Now greetings use the real name.
+- **Synthetic:** names approved (list 'a'). CUST108–122 derived from email local-part (synthetic customers). CUST101–107 (real-for-testing records) names match their real emails (user-approved): Fathima Devasahayam, Sayantini S, Sireesha S, Digvijay Yadav, Suraj Golthi, Abhishek Jain, Nivethitha JM. (Real PII — but emails/phones for these already existed in the committed sheet.)
+- **Verified:** end-to-end — 22/22 customers have display_name in graph; email reply to CUST106 greets "Dear Abhishek Jain,"; suite still 60/61 (no new breakage).
+
+### 23. Test plan run + known generator quirk (NOT fixed — by decision)
+- **What:** Ran the full Phase 2 test plan (`docs/phase2-test-plan.md`) against the live app — per-customer graph answers, escalations, identity, KB FAQs, no-data safety. Result: **27/28 correct** (1 was a false-negative in the test harness, not the app — Swati-Q3 answered correctly with outstanding+overdue instead of EMI).
+- **Why log:** records the one genuine quirk found.
+- **Synthetic:** none (test run).
+- **KNOWN QUIRK (not fixed, user decision):** the Groq generator sometimes deflects a GENERAL KB question ("What are the ATM withdrawal charges?", "foreclosure on a home loan?") with "I am currently unable to access your account details — let me connect you to support," EVEN when the KB retrieved the answer. Root cause: the `no_data_note` in `services/rag_service/groq_generator.py` (~line 130) is injected whenever there is NO `graph_context` (e.g. KB-only / unidentified-sender queries), conflating "no account data for an account-specific question" with "general FAQ we can answer". Real chat flow (identified customer via email/whatsapp) HAS graph_context, so this mostly affects KB-only/`/admin/rag/query` and unidentified senders. It errs toward caution (never fabricates), so it's safe but hurts general-FAQ answer quality. Proposed fix (deferred): only inject the note when graph_context AND KB contexts are both empty, or scope it to account-specific questions. Needs re-test of the negative/safety cases if applied.

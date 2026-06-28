@@ -29,7 +29,8 @@ def get_customer_by_identifier(client, identifier: str) -> dict | None:
            OR c.email = $id OR c.secondary_email = $id
         RETURN c.customer_id AS customer_id, c.email AS email,
                c.phone AS phone, c.city AS city,
-               c.registration_date AS registration_date
+               c.registration_date AS registration_date,
+               c.display_name AS display_name
         LIMIT 1
         """,
         {"id": identifier, "stripped": stripped},
@@ -43,7 +44,8 @@ def get_customer_by_id(client, customer_id: str) -> dict | None:
         MATCH (c:Customer {customer_id: $customer_id})
         RETURN c.customer_id AS customer_id, c.email AS email,
                c.phone AS phone, c.city AS city,
-               c.registration_date AS registration_date
+               c.registration_date AS registration_date,
+               c.display_name AS display_name
         LIMIT 1
         """,
         {"customer_id": customer_id},

@@ -192,14 +192,18 @@ class OrchestrationGraph:
                 if neo4j_profile:
                     if neo4j_profile.get("email"):
                         message.metadata["linked_email"] = neo4j_profile["email"]
-                        # Use the email as display_name so the frontend can infer a
-                        # readable name (e.g. "Fathima Devasahayam") from it.  Only
-                        # override generic channel-provided names like "Local WhatsApp
-                        # Tester"; a real name already set should be kept as-is.
-                        generic = {"local whatsapp tester", "whatsapp user", "unknown", ""}
-                        if (not message.display_name or
-                                message.display_name.lower() in generic):
-                            message.display_name = neo4j_profile["email"]
+                    # Prefer the customer's real name from the graph; fall back to the
+                    # email only if no name is on record. Only override generic
+                    # channel-provided names ("Local WhatsApp Tester" etc.); a real
+                    # name already supplied by the channel is kept as-is.
+                    generic = {"local whatsapp tester", "whatsapp user", "unknown", ""}
+                    if (not message.display_name or
+                            message.display_name.lower() in generic):
+                        message.display_name = (
+                            neo4j_profile.get("display_name")
+                            or neo4j_profile.get("email")
+                            or message.display_name
+                        )
                     if neo4j_profile.get("phone"):
                         message.metadata["linked_phone"] = neo4j_profile["phone"]
             except Exception:
