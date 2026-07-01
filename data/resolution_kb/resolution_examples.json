@@ -1,0 +1,274 @@
+[
+  {
+    "customer_query": "How do I open a savings account?",
+    "intent": "Account Opening",
+    "resolution_level": "L1",
+    "reason": "General informational query."
+  },
+  {
+    "customer_query": "What documents are required for KYC?",
+    "intent": "KYC",
+    "resolution_level": "L1",
+    "reason": "General banking information."
+  },
+  {
+    "customer_query": "How can I reset my internet banking password?",
+    "intent": "Password Reset",
+    "resolution_level": "L1",
+    "reason": "Standard self-service process."
+  },
+  {
+    "customer_query": "What is the minimum balance for my account?",
+    "intent": "Minimum Balance",
+    "resolution_level": "L1",
+    "reason": "General FAQ."
+  },
+  {
+    "customer_query": "How can I apply for a credit card?",
+    "intent": "Credit Card Application",
+    "resolution_level": "L1",
+    "reason": "General product information."
+  },
+  {
+    "customer_query": "What are your home loan interest rates?",
+    "intent": "Loan Information",
+    "resolution_level": "L1",
+    "reason": "Informational query."
+  },
+  {
+    "customer_query": "How do I download my account statement?",
+    "intent": "Statement Download",
+    "resolution_level": "L1",
+    "reason": "Standard banking process."
+  },
+  {
+    "customer_query": "How can I activate mobile banking?",
+    "intent": "Mobile Banking",
+    "resolution_level": "L1",
+    "reason": "General service guidance."
+  },
+  {
+    "customer_query": "How do I link Aadhaar with my bank account?",
+    "intent": "Aadhaar Linking",
+    "resolution_level": "L1",
+    "reason": "General banking procedure."
+  },
+  {
+    "customer_query": "What are the NEFT transaction timings?",
+    "intent": "NEFT Information",
+    "resolution_level": "L1",
+    "reason": "General informational query."
+  },
+  {
+    "customer_query": "How can I register for UPI?",
+    "intent": "UPI Registration",
+    "resolution_level": "L1",
+    "reason": "General onboarding information."
+  },
+  {
+    "customer_query": "How do I add a nominee to my account?",
+    "intent": "Nominee Update",
+    "resolution_level": "L1",
+    "reason": "Standard banking procedure."
+  },
+  {
+    "customer_query": "Where is the nearest branch located?",
+    "intent": "Branch Information",
+    "resolution_level": "L1",
+    "reason": "General informational query."
+  },
+  {
+    "customer_query": "What are the locker charges?",
+    "intent": "Locker Services",
+    "resolution_level": "L1",
+    "reason": "General product information."
+  },
+  {
+    "customer_query": "How do I activate my debit card?",
+    "intent": "Debit Card Activation",
+    "resolution_level": "L1",
+    "reason": "Standard self-service request."
+  },
+
+  {
+    "customer_query": "My debit card has not been delivered.",
+    "intent": "Card Delivery",
+    "resolution_level": "L2",
+    "reason": "Requires verification of delivery status."
+  },
+  {
+    "customer_query": "My EMI was deducted twice.",
+    "intent": "Billing Complaint",
+    "resolution_level": "L2",
+    "reason": "Requires transaction verification."
+  },
+  {
+    "customer_query": "My cheque has not been cleared yet.",
+    "intent": "Cheque Clearance",
+    "resolution_level": "L2",
+    "reason": "Requires backend verification."
+  },
+  {
+    "customer_query": "I submitted KYC but it still shows pending.",
+    "intent": "KYC Issue",
+    "resolution_level": "L2",
+    "reason": "Requires document verification."
+  },
+  {
+    "customer_query": "My UPI payment failed but money was deducted.",
+    "intent": "UPI Failure",
+    "resolution_level": "L2",
+    "reason": "Requires transaction investigation."
+  },
+  {
+    "customer_query": "My ATM withdrawal failed but my account was debited.",
+    "intent": "ATM Failure",
+    "resolution_level": "L2",
+    "reason": "Requires transaction verification."
+  },
+  {
+    "customer_query": "I haven't received my credit card yet.",
+    "intent": "Credit Card Delivery",
+    "resolution_level": "L2",
+    "reason": "Requires shipment verification."
+  },
+  {
+    "customer_query": "My address update has not been reflected.",
+    "intent": "Profile Update",
+    "resolution_level": "L2",
+    "reason": "Requires backend validation."
+  },
+  {
+    "customer_query": "I want to increase my credit card limit.",
+    "intent": "Credit Limit Increase",
+    "resolution_level": "L2",
+    "reason": "Requires eligibility verification."
+  },
+  {
+    "customer_query": "My loan approval is taking too long.",
+    "intent": "Loan Processing",
+    "resolution_level": "L2",
+    "reason": "Requires internal review."
+  },
+  {
+    "customer_query": "My FD closure request is still pending.",
+    "intent": "FD Closure",
+    "resolution_level": "L2",
+    "reason": "Requires operational verification."
+  },
+  {
+    "customer_query": "My account closure request has not been processed.",
+    "intent": "Account Closure",
+    "resolution_level": "L2",
+    "reason": "Requires manual verification."
+  },
+  {
+    "customer_query": "Reward points were not credited.",
+    "intent": "Rewards Issue",
+    "resolution_level": "L2",
+    "reason": "Requires account verification."
+  },
+  {
+    "customer_query": "I was charged incorrect service fees.",
+    "intent": "Service Charge Complaint",
+    "resolution_level": "L2",
+    "reason": "Requires billing review."
+  },
+  {
+    "customer_query": "My complaint has not received any response.",
+    "intent": "Complaint Follow-up",
+    "resolution_level": "L2",
+    "reason": "Requires customer support review."
+  },
+
+  {
+    "customer_query": "Someone transferred money from my account without my permission.",
+    "intent": "Fraud",
+    "resolution_level": "L3",
+    "reason": "Unauthorized financial transaction."
+  },
+  {
+    "customer_query": "My account has been hacked.",
+    "intent": "Account Compromise",
+    "resolution_level": "L3",
+    "reason": "Critical security incident."
+  },
+  {
+    "customer_query": "I shared my OTP after receiving a fake bank call.",
+    "intent": "Phishing",
+    "resolution_level": "L3",
+    "reason": "Potential fraud requiring immediate action."
+  },
+  {
+    "customer_query": "I noticed multiple unauthorized debit card transactions.",
+    "intent": "Card Fraud",
+    "resolution_level": "L3",
+    "reason": "Fraud investigation required."
+  },
+  {
+    "customer_query": "Someone created a loan using my identity.",
+    "intent": "Identity Theft",
+    "resolution_level": "L3",
+    "reason": "Critical fraud case."
+  },
+  {
+    "customer_query": "My account has been frozen unexpectedly.",
+    "intent": "Account Freeze",
+    "resolution_level": "L3",
+    "reason": "Requires immediate manual investigation."
+  },
+  {
+    "customer_query": "I want to file a legal complaint against the bank.",
+    "intent": "Legal Complaint",
+    "resolution_level": "L3",
+    "reason": "Legal escalation required."
+  },
+  {
+    "customer_query": "I have already complained to the RBI Ombudsman.",
+    "intent": "Regulatory Complaint",
+    "resolution_level": "L3",
+    "reason": "Regulatory escalation."
+  },
+  {
+    "customer_query": "I suspect my account has been used for fraudulent transactions.",
+    "intent": "Fraud Investigation",
+    "resolution_level": "L3",
+    "reason": "Requires fraud investigation."
+  },
+  {
+    "customer_query": "My SIM was swapped and I lost access to my bank account.",
+    "intent": "SIM Swap Fraud",
+    "resolution_level": "L3",
+    "reason": "Critical security incident."
+  },
+  {
+    "customer_query": "Someone added a beneficiary without my permission.",
+    "intent": "Unauthorized Beneficiary",
+    "resolution_level": "L3",
+    "reason": "Security breach."
+  },
+  {
+    "customer_query": "I received a fake loan approval asking me to pay processing fees.",
+    "intent": "Loan Scam",
+    "resolution_level": "L3",
+    "reason": "Fraudulent activity."
+  },
+  {
+    "customer_query": "My personal banking information has been leaked.",
+    "intent": "Data Privacy",
+    "resolution_level": "L3",
+    "reason": "Sensitive data breach."
+  },
+  {
+    "customer_query": "I suspect someone forged my signature for a transaction.",
+    "intent": "Forgery",
+    "resolution_level": "L3",
+    "reason": "Serious fraud investigation."
+  },
+  {
+    "customer_query": "A large amount was withdrawn from my account without authorization.",
+    "intent": "Unauthorized Withdrawal",
+    "resolution_level": "L3",
+    "reason": "Critical financial fraud."
+  }
+]

@@ -1,0 +1,363 @@
+[
+  {
+    "record_id": "cx_7681af3ef581",
+    "source": {
+      "channel": "whatsapp",
+      "external_message_id": "wa_1001",
+      "received_at": "2026-05-29T09:05:00+05:30"
+    },
+    "customer": {
+      "customer_id": "cust_001",
+      "name": "Asha Mehta",
+      "segment": "premium",
+      "contact": {
+        "phone": "919900001001",
+        "email": "asha.mehta@example.com"
+      }
+    },
+    "conversation": {
+      "conversation_id": "conv_cust_001",
+      "is_cross_channel": false,
+      "previous_channels": [
+        "whatsapp"
+      ]
+    },
+    "message": {
+      "subject": null,
+      "body": "Hi, where is my order OD45821? It was supposed to arrive yesterday.",
+      "normalized_text": "Hi, where is my order OD45821? It was supposed to arrive yesterday.",
+      "entities": {
+        "order_id": "OD45821",
+        "return_id": null,
+        "payment_id": null,
+        "invoice_id": null,
+        "category": "electronics",
+        "order_value": 45999
+      }
+    },
+    "classification": {
+      "intent": "order_tracking",
+      "sentiment": "neutral",
+      "urgency": "low",
+      "topic": "where",
+      "confidence": 0.6
+    },
+    "resolution": {
+      "status": "auto_resolved",
+      "answer": "Customers can track orders using the order tracking page or by sharing their order ID with support. Standard delivery takes 3 to 5 business days after dispatch.",
+      "knowledge_source": "orders.md"
+    },
+    "ticket": null,
+    "agent_assist": {
+      "next_best_action": "Share the answer and confirm whether the customer needs anything else.",
+      "coaching_tip": "Keep the reply concise and specific to the customer's order.",
+      "suggested_reply": "Customers can track orders using the order tracking page or by sharing their order ID with support. Standard delivery takes 3 to 5 business days after dispatch."
+    },
+    "audit": {
+      "processed_by": "synthetic_consolidator_v1",
+      "processed_at": "2026-05-29T07:12:17.301917+00:00"
+    }
+  },
+  {
+    "record_id": "cx_921aac9231fb",
+    "source": {
+      "channel": "email",
+      "external_message_id": "email_1002",
+      "received_at": "2026-05-29T09:42:00+05:30"
+    },
+    "customer": {
+      "customer_id": "cust_002",
+      "name": "Rohan Iyer",
+      "segment": "standard",
+      "contact": {
+        "phone": "919900001002",
+        "email": "rohan.iyer@example.com"
+      }
+    },
+    "conversation": {
+      "conversation_id": "conv_cust_002",
+      "is_cross_channel": false,
+      "previous_channels": [
+        "email"
+      ]
+    },
+    "message": {
+      "subject": "Refund not received",
+      "body": "I returned my shoes last week but the refund has not been credited. Please check order OD77210.",
+      "normalized_text": "Refund not received\n\nI returned my shoes last week but the refund has not been credited. Please check order OD77210.",
+      "entities": {
+        "order_id": "OD77210",
+        "return_id": "RET9981",
+        "payment_id": null,
+        "invoice_id": null,
+        "category": "fashion",
+        "order_value": 3499
+      }
+    },
+    "classification": {
+      "intent": "refund_request",
+      "sentiment": "negative",
+      "urgency": "medium",
+      "topic": "refund",
+      "confidence": 0.54
+    },
+    "resolution": {
+      "status": "auto_resolved",
+      "answer": "Refund requests can be initiated within the allowed return window after validating the order ID and payment method. Approved refunds are usually processed in 5 to 7 business days.",
+      "knowledge_source": "refunds.md"
+    },
+    "ticket": null,
+    "agent_assist": {
+      "next_best_action": "Validate return eligibility and share refund processing timelines.",
+      "coaching_tip": "Acknowledge the customer impact before explaining the process.",
+      "suggested_reply": "Refund requests can be initiated within the allowed return window after validating the order ID and payment method. Approved refunds are usually processed in 5 to 7 business days."
+    },
+    "audit": {
+      "processed_by": "synthetic_consolidator_v1",
+      "processed_at": "2026-05-29T07:12:17.303734+00:00"
+    }
+  },
+  {
+    "record_id": "cx_0e0015ec8fdc",
+    "source": {
+      "channel": "whatsapp",
+      "external_message_id": "wa_1003",
+      "received_at": "2026-05-29T10:15:00+05:30"
+    },
+    "customer": {
+      "customer_id": "cust_003",
+      "name": "Neha Kapoor",
+      "segment": "standard",
+      "contact": {
+        "phone": "919900001003",
+        "email": "neha.kapoor@example.com"
+      }
+    },
+    "conversation": {
+      "conversation_id": "conv_cust_003",
+      "is_cross_channel": false,
+      "previous_channels": [
+        "whatsapp"
+      ]
+    },
+    "message": {
+      "subject": null,
+      "body": "I was charged twice for my grocery order OD88440. This is a payment issue.",
+      "normalized_text": "I was charged twice for my grocery order OD88440. This is a payment issue.",
+      "entities": {
+        "order_id": "OD88440",
+        "return_id": null,
+        "payment_id": "PAY44291",
+        "invoice_id": null,
+        "category": "grocery",
+        "order_value": 1875
+      }
+    },
+    "classification": {
+      "intent": "billing_issue",
+      "sentiment": "negative",
+      "urgency": "medium",
+      "topic": "charged",
+      "confidence": 0.65
+    },
+    "resolution": {
+      "status": "auto_resolved",
+      "answer": "For duplicate charges, failed payments, or invoice issues, validate the customer email, transaction ID, and payment timestamp. Billing issues that cannot be verified automatically should be routed to the billing team.",
+      "knowledge_source": "billing.md"
+    },
+    "ticket": null,
+    "agent_assist": {
+      "next_best_action": "Use an empathetic response and monitor for escalation.",
+      "coaching_tip": "Acknowledge the customer impact before explaining the process.",
+      "suggested_reply": "For duplicate charges, failed payments, or invoice issues, validate the customer email, transaction ID, and payment timestamp. Billing issues that cannot be verified automatically should be routed to the billing team."
+    },
+    "audit": {
+      "processed_by": "synthetic_consolidator_v1",
+      "processed_at": "2026-05-29T07:12:17.304730+00:00"
+    }
+  },
+  {
+    "record_id": "cx_5a8515d849c5",
+    "source": {
+      "channel": "email",
+      "external_message_id": "email_1004",
+      "received_at": "2026-05-29T11:02:00+05:30"
+    },
+    "customer": {
+      "customer_id": "cust_004",
+      "name": "Imran Shaikh",
+      "segment": "premium",
+      "contact": {
+        "phone": "919900001004",
+        "email": "imran.shaikh@example.com"
+      }
+    },
+    "conversation": {
+      "conversation_id": "conv_cust_004",
+      "is_cross_channel": false,
+      "previous_channels": [
+        "email"
+      ]
+    },
+    "message": {
+      "subject": "App login failed",
+      "body": "I cannot login to the app after the update. Password reset also failed and I need urgent help.",
+      "normalized_text": "App login failed\n\nI cannot login to the app after the update. Password reset also failed and I need urgent help.",
+      "entities": {
+        "order_id": null,
+        "return_id": null,
+        "payment_id": null,
+        "invoice_id": null,
+        "category": null,
+        "order_value": null
+      }
+    },
+    "classification": {
+      "intent": "technical_support",
+      "sentiment": "negative",
+      "urgency": "high",
+      "topic": "login",
+      "confidence": 0.29
+    },
+    "resolution": {
+      "status": "ticket_created",
+      "answer": "For duplicate charges, failed payments, or invoice issues, validate the customer email, transaction ID, and payment timestamp. Billing issues that cannot be verified automatically should be routed to the billing team.",
+      "knowledge_source": "billing.md"
+    },
+    "ticket": {
+      "ticket_id": "tkt_50bf8d250a5d",
+      "title": "App login failed",
+      "priority": "high",
+      "assigned_team": "technical_support",
+      "status": "open",
+      "summary": "App login failed\n\nI cannot login to the app after the update. Password reset also failed and I need urgent help."
+    },
+    "agent_assist": {
+      "next_best_action": "Review customer context, validate order details, and update the ticket with the next action.",
+      "coaching_tip": "Acknowledge the customer impact before explaining the process.",
+      "suggested_reply": "I have created ticket tkt_50bf8d250a5d and routed it to our technical support team. We will update you shortly."
+    },
+    "audit": {
+      "processed_by": "synthetic_consolidator_v1",
+      "processed_at": "2026-05-29T07:12:17.305782+00:00"
+    }
+  },
+  {
+    "record_id": "cx_b52c66d8d35a",
+    "source": {
+      "channel": "whatsapp",
+      "external_message_id": "wa_1005",
+      "received_at": "2026-05-29T11:26:00+05:30"
+    },
+    "customer": {
+      "customer_id": "cust_005",
+      "name": "Meera Rao",
+      "segment": "standard",
+      "contact": {
+        "phone": "919900001005",
+        "email": "meera.rao@example.com"
+      }
+    },
+    "conversation": {
+      "conversation_id": "conv_cust_005",
+      "is_cross_channel": false,
+      "previous_channels": [
+        "whatsapp"
+      ]
+    },
+    "message": {
+      "subject": null,
+      "body": "The mixer I received in order OD99031 is damaged. I want to return it.",
+      "normalized_text": "The mixer I received in order OD99031 is damaged. I want to return it.",
+      "entities": {
+        "order_id": "OD99031",
+        "return_id": null,
+        "payment_id": null,
+        "invoice_id": null,
+        "category": "home_appliances",
+        "order_value": 5299
+      }
+    },
+    "classification": {
+      "intent": "refund_request",
+      "sentiment": "negative",
+      "urgency": "medium",
+      "topic": "mixer",
+      "confidence": 0.91
+    },
+    "resolution": {
+      "status": "auto_resolved",
+      "answer": "Refund requests can be initiated within the allowed return window after validating the order ID and payment method. Approved refunds are usually processed in 5 to 7 business days.",
+      "knowledge_source": "refunds.md"
+    },
+    "ticket": null,
+    "agent_assist": {
+      "next_best_action": "Validate return eligibility and share refund processing timelines.",
+      "coaching_tip": "Acknowledge the customer impact before explaining the process.",
+      "suggested_reply": "Refund requests can be initiated within the allowed return window after validating the order ID and payment method. Approved refunds are usually processed in 5 to 7 business days."
+    },
+    "audit": {
+      "processed_by": "synthetic_consolidator_v1",
+      "processed_at": "2026-05-29T07:12:17.306709+00:00"
+    }
+  },
+  {
+    "record_id": "cx_01e91e264150",
+    "source": {
+      "channel": "email",
+      "external_message_id": "email_1006",
+      "received_at": "2026-05-29T12:10:00+05:30"
+    },
+    "customer": {
+      "customer_id": "cust_006",
+      "name": "Vikram Singh",
+      "segment": "standard",
+      "contact": {
+        "phone": "919900001006",
+        "email": "vikram.singh@example.com"
+      }
+    },
+    "conversation": {
+      "conversation_id": "conv_cust_006",
+      "is_cross_channel": false,
+      "previous_channels": [
+        "email"
+      ]
+    },
+    "message": {
+      "subject": "Invoice copy needed",
+      "body": "Please send me the tax invoice for order OD33127. I need it for reimbursement.",
+      "normalized_text": "Invoice copy needed\n\nPlease send me the tax invoice for order OD33127. I need it for reimbursement.",
+      "entities": {
+        "order_id": "OD33127",
+        "return_id": null,
+        "payment_id": null,
+        "invoice_id": "INV55220",
+        "category": "office_supplies",
+        "order_value": 7999
+      }
+    },
+    "classification": {
+      "intent": "billing_issue",
+      "sentiment": "neutral",
+      "urgency": "low",
+      "topic": "invoice",
+      "confidence": 0.6
+    },
+    "resolution": {
+      "status": "auto_resolved",
+      "answer": "For duplicate charges, failed payments, or invoice issues, validate the customer email, transaction ID, and payment timestamp. Billing issues that cannot be verified automatically should be routed to the billing team.",
+      "knowledge_source": "billing.md"
+    },
+    "ticket": null,
+    "agent_assist": {
+      "next_best_action": "Share the answer and confirm whether the customer needs anything else.",
+      "coaching_tip": "Keep the reply concise and specific to the customer's order.",
+      "suggested_reply": "For duplicate charges, failed payments, or invoice issues, validate the customer email, transaction ID, and payment timestamp. Billing issues that cannot be verified automatically should be routed to the billing team."
+    },
+    "audit": {
+      "processed_by": "synthetic_consolidator_v1",
+      "processed_at": "2026-05-29T07:12:17.307636+00:00"
+    }
+  }
+]
