@@ -1,0 +1,296 @@
+[
+  {
+    "customer_query": "How can I open a new savings account?",
+    "intent": "general_inquiry",
+    "resolution_level": "L1",
+    "reason": "General onboarding information, no customer-specific lookup needed."
+  },
+  {
+    "customer_query": "What documents are required for KYC verification?",
+    "intent": "kyc_update",
+    "resolution_level": "L1",
+    "reason": "General documentation FAQ, not a request on the customer's own KYC record."
+  },
+  {
+    "customer_query": "What is the minimum balance required for a regular savings account?",
+    "intent": "general_inquiry",
+    "resolution_level": "L1",
+    "reason": "General product FAQ answerable from the knowledge base."
+  },
+  {
+    "customer_query": "What are the current interest rates for a personal loan?",
+    "intent": "loan_application",
+    "resolution_level": "L1",
+    "reason": "General product information, not tied to an existing application."
+  },
+  {
+    "customer_query": "How do I apply for a home loan?",
+    "intent": "loan_application",
+    "resolution_level": "L1",
+    "reason": "General application process guidance."
+  },
+  {
+    "customer_query": "What is the process to file a health insurance claim?",
+    "intent": "insurance_claim",
+    "resolution_level": "L1",
+    "reason": "General claim-filing process, not a status check on an existing claim."
+  },
+  {
+    "customer_query": "How can I activate my new debit card?",
+    "intent": "card_management",
+    "resolution_level": "L1",
+    "reason": "Standard self-service activation steps."
+  },
+  {
+    "customer_query": "What are the NEFT and IMPS transfer timings?",
+    "intent": "general_inquiry",
+    "resolution_level": "L1",
+    "reason": "General banking-hours FAQ."
+  },
+  {
+    "customer_query": "How do I register for UPI on my phone?",
+    "intent": "general_inquiry",
+    "resolution_level": "L1",
+    "reason": "General onboarding steps."
+  },
+  {
+    "customer_query": "What is a Fixed Deposit and how does the interest work?",
+    "intent": "general_inquiry",
+    "resolution_level": "L1",
+    "reason": "General product education, no account lookup required."
+  },
+  {
+    "customer_query": "What is the annual fee for the Gold credit card?",
+    "intent": "general_inquiry",
+    "resolution_level": "L1",
+    "reason": "General product/pricing information."
+  },
+  {
+    "customer_query": "How can I add a nominee to my account?",
+    "intent": "kyc_update",
+    "resolution_level": "L1",
+    "reason": "Standard procedure, not a personal-record status request."
+  },
+  {
+    "customer_query": "What is the eligibility criteria for an education loan?",
+    "intent": "loan_application",
+    "resolution_level": "L1",
+    "reason": "General eligibility FAQ."
+  },
+  {
+    "customer_query": "How do I download my account statement from the app?",
+    "intent": "general_inquiry",
+    "resolution_level": "L1",
+    "reason": "Standard self-service how-to."
+  },
+  {
+    "customer_query": "What is term insurance and who should buy it?",
+    "intent": "general_inquiry",
+    "resolution_level": "L1",
+    "reason": "General product education."
+  },
+  {
+    "customer_query": "What factors affect my car insurance premium?",
+    "intent": "general_inquiry",
+    "resolution_level": "L1",
+    "reason": "General informational query."
+  },
+  {
+    "customer_query": "What is the status of my personal loan application?",
+    "intent": "loan_status",
+    "resolution_level": "L2",
+    "reason": "Requires looking up this customer's own loan record."
+  },
+  {
+    "customer_query": "Can you check the status of my insurance claim CLM001013?",
+    "intent": "claim_status",
+    "resolution_level": "L2",
+    "reason": "Requires backend claim record verification."
+  },
+  {
+    "customer_query": "I was charged a minimum balance non-maintenance penalty this month, why?",
+    "intent": "complaint",
+    "resolution_level": "L2",
+    "reason": "Requires checking this account's actual average monthly balance and charge history."
+  },
+  {
+    "customer_query": "My e-NACH auto-debit for my loan EMI bounced, can you tell me why?",
+    "intent": "complaint",
+    "resolution_level": "L2",
+    "reason": "Requires backend verification of the mandate and account balance at debit time."
+  },
+  {
+    "customer_query": "I submitted my KYC documents last week but it still shows pending.",
+    "intent": "kyc_update",
+    "resolution_level": "L2",
+    "reason": "Requires checking this customer's KYC verification status."
+  },
+  {
+    "customer_query": "My UPI payment failed but the amount was debited from my account.",
+    "intent": "transaction_dispute",
+    "resolution_level": "L2",
+    "reason": "Requires transaction-level investigation before it can be resolved."
+  },
+  {
+    "customer_query": "I sent money via NEFT to my landlord but it still shows pending credit to the beneficiary.",
+    "intent": "transaction_dispute",
+    "resolution_level": "L2",
+    "reason": "Requires tracing the specific transaction with the beneficiary bank."
+  },
+  {
+    "customer_query": "My reward points were not credited after my last purchase.",
+    "intent": "card_management",
+    "resolution_level": "L2",
+    "reason": "Requires checking this card's transaction and rewards ledger."
+  },
+  {
+    "customer_query": "I want to increase my credit card limit.",
+    "intent": "card_management",
+    "resolution_level": "L2",
+    "reason": "Requires eligibility and credit assessment specific to this customer."
+  },
+  {
+    "customer_query": "My fixed deposit premature closure request is still pending.",
+    "intent": "general_inquiry",
+    "resolution_level": "L2",
+    "reason": "Requires checking this customer's specific FD record."
+  },
+  {
+    "customer_query": "My loan EMI amount seems higher than expected this month, can you check?",
+    "intent": "loan_status",
+    "resolution_level": "L2",
+    "reason": "Requires reviewing this customer's actual loan ledger."
+  },
+  {
+    "customer_query": "I haven't received any update on the complaint I raised last week.",
+    "intent": "ticket_status",
+    "resolution_level": "L2",
+    "reason": "Requires looking up the status of this customer's existing ticket."
+  },
+  {
+    "customer_query": "Why was I charged an annual fee when I was told my card was free?",
+    "intent": "complaint",
+    "resolution_level": "L2",
+    "reason": "Requires reviewing this card's fee waiver eligibility and charge history."
+  },
+  {
+    "customer_query": "My address change request has not been reflected in your records yet.",
+    "intent": "kyc_update",
+    "resolution_level": "L2",
+    "reason": "Requires checking the status of this customer's profile update request."
+  },
+  {
+    "customer_query": "Can you tell me my current account balance and recent transactions?",
+    "intent": "account_balance_inquiry",
+    "resolution_level": "L2",
+    "reason": "Requires live access to this customer's own account data."
+  },
+  {
+    "customer_query": "I want to transfer funds to another account, please process it.",
+    "intent": "fund_transfer",
+    "resolution_level": "L2",
+    "reason": "Requires backend action on this customer's own account."
+  },
+  {
+    "customer_query": "My claim was rejected, can you re-check the reason with the assessor?",
+    "intent": "claim_status",
+    "resolution_level": "L2",
+    "reason": "Requires reviewing this customer's specific claim decision."
+  },
+  {
+    "customer_query": "My salary has not been credited to my corporate salary account this month.",
+    "intent": "complaint",
+    "resolution_level": "L2",
+    "reason": "Requires checking this account's credit history with the employer's payroll batch."
+  },
+  {
+    "customer_query": "Someone made a transaction from my account that I did not authorize.",
+    "intent": "fraud_report",
+    "resolution_level": "L3",
+    "reason": "Unauthorized transaction — credible fraud risk requiring immediate escalation."
+  },
+  {
+    "customer_query": "My net banking login shows unfamiliar transactions and I think my account has been hacked.",
+    "intent": "fraud_report",
+    "resolution_level": "L3",
+    "reason": "Suspected account compromise — critical security incident."
+  },
+  {
+    "customer_query": "I got a call from someone claiming to be the bank and I shared my OTP, now money is missing from my account.",
+    "intent": "fraud_report",
+    "resolution_level": "L3",
+    "reason": "Phishing-driven unauthorized transaction requiring immediate action."
+  },
+  {
+    "customer_query": "I noticed multiple transactions on my credit card that I never made.",
+    "intent": "fraud_report",
+    "resolution_level": "L3",
+    "reason": "Card fraud requiring immediate investigation and card block."
+  },
+  {
+    "customer_query": "Someone took a personal loan in my name without my knowledge.",
+    "intent": "fraud_report",
+    "resolution_level": "L3",
+    "reason": "Identity theft — critical fraud case."
+  },
+  {
+    "customer_query": "My account has been frozen without any explanation and I need access urgently.",
+    "intent": "complaint",
+    "resolution_level": "L3",
+    "reason": "Unexplained account freeze requires immediate manual investigation."
+  },
+  {
+    "customer_query": "I want to file a legal complaint against the bank for mishandling my funds.",
+    "intent": "complaint",
+    "resolution_level": "L3",
+    "reason": "Legal escalation requires immediate specialist handling."
+  },
+  {
+    "customer_query": "I have already escalated this issue to the RBI Ombudsman.",
+    "intent": "complaint",
+    "resolution_level": "L3",
+    "reason": "Regulatory escalation requires immediate priority handling."
+  },
+  {
+    "customer_query": "My SIM was swapped and I lost access to my banking app and OTPs.",
+    "intent": "fraud_report",
+    "resolution_level": "L3",
+    "reason": "SIM-swap fraud is a critical account-takeover risk."
+  },
+  {
+    "customer_query": "Someone added a new beneficiary to my account without my permission.",
+    "intent": "fraud_report",
+    "resolution_level": "L3",
+    "reason": "Unauthorized account change indicating a security breach."
+  },
+  {
+    "customer_query": "I think my personal banking details have been leaked online.",
+    "intent": "complaint",
+    "resolution_level": "L3",
+    "reason": "Potential data breach requiring immediate security review."
+  },
+  {
+    "customer_query": "I suspect someone forged my signature on a loan document.",
+    "intent": "fraud_report",
+    "resolution_level": "L3",
+    "reason": "Forgery is a serious fraud case requiring immediate investigation."
+  },
+  {
+    "customer_query": "A large amount was withdrawn from my account that I never authorized.",
+    "intent": "fraud_report",
+    "resolution_level": "L3",
+    "reason": "Large unauthorized withdrawal is a critical financial fraud case."
+  },
+  {
+    "customer_query": "I lost my phone with the banking app logged in and I'm worried someone could misuse it.",
+    "intent": "card_management",
+    "resolution_level": "L3",
+    "reason": "Immediate safety/security risk requiring urgent account protection."
+  },
+  {
+    "customer_query": "I am being threatened over the phone about an unpaid loan and asked to pay immediately or face consequences.",
+    "intent": "complaint",
+    "resolution_level": "L3",
+    "reason": "Safety and harassment risk requiring immediate escalation."
+  }
+]

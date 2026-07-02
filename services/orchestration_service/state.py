@@ -2,7 +2,12 @@ from enum import StrEnum
 
 from pydantic import BaseModel, Field
 
-from services.agent_service.orchestration_agents import QueryResolution, TicketActionDecision, TicketDecision
+from services.agent_service.orchestration_agents import (
+    CustomerValidationResult,
+    QueryResolution,
+    TicketActionDecision,
+    TicketDecision,
+)
 from shared.schemas.intents import IntentResult
 from shared.schemas.messages import InboundMessage
 from shared.schemas.tickets import Ticket
@@ -14,6 +19,8 @@ class WorkflowStep(StrEnum):
     LOAD_CONVERSATION_CONTEXT = "load_conversation_context"
     DETECT_TICKET_ACTION = "detect_ticket_action"
     CLASSIFY_INTENT = "classify_intent"
+    VALIDATE_CUSTOMER = "validate_customer"
+    REJECT_UNREGISTERED_CUSTOMER = "reject_unregistered_customer"
     RETRIEVE_KNOWLEDGE = "retrieve_knowledge"
     DECIDE_RESOLUTION = "decide_resolution"
     CREATE_OR_UPDATE_TICKET = "create_or_update_ticket"
@@ -36,6 +43,7 @@ class OrchestrationState(BaseModel):
     conversation: dict | None = None
     context: dict = Field(default_factory=dict)
     ticket_action: TicketActionDecision = Field(default_factory=TicketActionDecision)
+    customer_validation: CustomerValidationResult = Field(default_factory=CustomerValidationResult)
     analysis: IntentResult | None = None
     resolution: QueryResolution | None = None
     ticket_decision: TicketDecision | None = None

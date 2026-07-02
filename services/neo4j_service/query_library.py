@@ -23,18 +23,46 @@ def get_customer_360(client, phone_or_email: str) -> dict:
             """
             MATCH (c:Customer)
             WHERE c.phone = $id OR c.email = $id OR c.secondary_email = $id
+            OPTIONAL MATCH (c)-[:HAS_ACCOUNT]->(a:Account)
+            OPTIONAL MATCH (c)-[:HAS_CREDIT_CARD]->(cc:CreditCard)
+            OPTIONAL MATCH (c)-[:HAS_FD]->(fd:FixedDeposit)
             OPTIONAL MATCH (c)-[:HAS_LOAN]->(l:Loan)
             OPTIONAL MATCH (c)-[:HAS_CLAIM]->(cl:Claim)
+            OPTIONAL MATCH (clp:Policy)-[:HAS_CLAIM]->(cl)
             OPTIONAL MATCH (c)-[:HAS_POLICY]->(p:Policy)
             OPTIONAL MATCH (c)-[:HAS_INTERACTION]->(i:Interaction) WHERE i.status = 'open'
             OPTIONAL MATCH (c)-[:KYC_VERIFIED_BY]->(k:KYC)
             RETURN
                 c.customer_id     AS customer_id,
+                c.name            AS name,
+                c.age             AS age,
+                c.occupation      AS occupation,
+                c.segment         AS segment,
                 c.email           AS email,
                 c.phone           AS phone,
                 c.city            AS city,
                 c.country         AS country,
                 k.kyc_status      AS kyc_status,
+                collect(DISTINCT {
+                    account_number: a.account_number,
+                    account_type:   a.account_type,
+                    account_sub_type: a.account_sub_type,
+                    status:         a.status,
+                    avg_monthly_balance: a.avg_monthly_balance
+                }) AS accounts,
+                collect(DISTINCT {
+                    card_id:      cc.card_id,
+                    card_variant: cc.card_variant,
+                    balance_due:  cc.balance_due,
+                    min_amount_due: cc.min_amount_due,
+                    dpd:          cc.dpd
+                }) AS credit_cards,
+                collect(DISTINCT {
+                    fd_id:           fd.fd_id,
+                    principal_amount: fd.principal_amount,
+                    maturity_date:   fd.maturity_date,
+                    status:          fd.status
+                }) AS fixed_deposits,
                 collect(DISTINCT {
                     loan_id:      l.loan_id,
                     loan_type:    l.loan_type,
@@ -46,7 +74,7 @@ def get_customer_360(client, phone_or_email: str) -> dict:
                 }) AS loans,
                 collect(DISTINCT {
                     claim_id:     cl.claim_id,
-                    policy_type:  cl.policy_type,
+                    policy_type:  clp.policy_type,
                     claim_type:   cl.claim_type,
                     status:       cl.status,
                     amount_claimed: cl.amount_claimed_inr,
@@ -75,11 +103,18 @@ def get_customer_360(client, phone_or_email: str) -> dict:
         # Filter out null-valued collect results (Neo4j includes {key: null} dicts)
         return {
             "customer_id": row.get("customer_id"),
+            "name": row.get("name"),
+            "age": row.get("age"),
+            "occupation": row.get("occupation"),
+            "segment": row.get("segment"),
             "email": row.get("email"),
             "phone": row.get("phone"),
             "city": row.get("city"),
             "country": row.get("country"),
             "kyc_status": row.get("kyc_status", "Unknown"),
+            "accounts": [a for a in (row.get("accounts") or []) if a.get("account_number")],
+            "credit_cards": [cc for cc in (row.get("credit_cards") or []) if cc.get("card_id")],
+            "fixed_deposits": [fd for fd in (row.get("fixed_deposits") or []) if fd.get("fd_id")],
             "loans": [l for l in (row.get("loans") or []) if l.get("loan_id")],
             "claims": [c for c in (row.get("claims") or []) if c.get("claim_id")],
             "policies": [p for p in (row.get("policies") or []) if p.get("policy_id")],

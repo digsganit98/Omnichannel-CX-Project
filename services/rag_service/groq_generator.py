@@ -2,6 +2,12 @@ import json
 import os
 from pathlib import Path
 
+from services.pii_service.masker import mask_text, unmask_text
+
+# Separator used to mask several text fragments in a single mask_text() call so
+# placeholder numbering (PHONE_1, PHONE_2, ...) stays unique across the whole prompt
+# instead of colliding if each fragment were masked independently.
+_PII_JOIN = "\x00"
 
 _SYSTEM_MD = Path(__file__).resolve().parents[2] / "shared" / "prompts" / "system.md"
 
@@ -127,6 +133,15 @@ class GroqGenerator:
         # no recent_turns to avoid sending redundant and hard-to-parse content to the LLM.
         conv_summary = (ctx.get("conversation_summary") or "").strip() if not conv_history_text else ""
 
+        # Mask PII before it reaches the LLM. All fragments are masked in one call (joined
+        # by a separator) so placeholder numbering stays unique across the whole prompt;
+        # the mapping is used to restore the customer's own name/phone/email in the answer
+        # below, and discarded after — never persisted.
+        known_values = _known_values(ctx.get("graph_context"))
+        (query, graph_ctx_text, conv_history_text, conv_summary), pii_mapping = _mask_fragments(
+            [query, graph_ctx_text, conv_history_text, conv_summary], known_values
+        )
+
         no_data_note = (
             "- IMPORTANT: No customer account context is provided. Do NOT say 'I checked your account' or "
             "imply you have access to account data. Say: 'I am currently unable to access your account "
@@ -164,7 +179,12 @@ class GroqGenerator:
             f"Retrieved context:\n{sources or '(none)'}\n\n"
             "Answer (body only — no greeting, no sign-off):"
         )
-        return self._generate(system_prompt=_system_prompt(), user_prompt=user_prompt)
+        result = self._generate(system_prompt=_system_prompt(), user_prompt=user_prompt)
+        if result.get("text"):
+            # Restore the customer's own masked values (e.g. name) if the LLM echoed a
+            # placeholder back — never send [NAME_1]-style tokens to the customer.
+            result = {**result, "text": unmask_text(result["text"], pii_mapping)}
+        return result
 
     def classify_message(self, message: str, context: dict | None = None) -> dict | None:
         ctx = context or {}
@@ -181,6 +201,13 @@ class GroqGenerator:
                 if len(history_lines) >= 3:
                     break
         history_text = "\n".join(history_lines)
+
+        # Mask PII before it reaches the LLM — see generate_answer() for why fragments are
+        # masked together in one call rather than independently.
+        known_values = _known_values(graph_ctx)
+        (message, graph_text, history_text), pii_mapping = _mask_fragments(
+            [message, graph_text, history_text], known_values
+        )
 
         user_prompt = (
             "## Intent Definitions\n"
@@ -221,7 +248,9 @@ class GroqGenerator:
         if not result["llm_used"]:
             return None
         try:
-            text = result["text"].strip()
+            # Defensive: unmask before parsing in case a placeholder leaked into the
+            # "reason" field. intent/urgency/sentiment/language never contain PII.
+            text = unmask_text(result["text"].strip(), pii_mapping)
             return json.loads(text[text.find("{") : text.rfind("}") + 1])
         except (json.JSONDecodeError, ValueError):
             return None
@@ -301,6 +330,38 @@ def _format_conversation_history(recent_turns: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _mask_fragments(fragments: list[str], known_values: dict[str, str]) -> tuple[list[str], dict[str, str]]:
+    """Mask several text fragments in one mask_text() call (shared placeholder numbering),
+    then split back apart. Falls back to the original fragments (no masking) if anything
+    about the join/split round-trip goes wrong — e.g. a fragment containing the separator
+    byte itself — so a masking edge case can never break answer generation.
+    """
+    try:
+        combined = _PII_JOIN.join(fragments)
+        masked_combined, mapping = mask_text(combined, known_values)
+        parts = masked_combined.split(_PII_JOIN)
+        if len(parts) != len(fragments):
+            raise ValueError("fragment count mismatch after masking")
+        return parts, mapping
+    except Exception:
+        return fragments, {}
+
+
+def _known_values(graph_ctx: dict | None) -> dict[str, str]:
+    """Extract the resolved customer's own name/phone/email for PII masking.
+
+    Sourced from the same Neo4j graph_context dict already used elsewhere in this file —
+    no new lookup. Missing fields are simply omitted (mask_text handles that).
+    """
+    if not graph_ctx:
+        return {}
+    return {
+        "name": graph_ctx.get("name") or "",
+        "phone": graph_ctx.get("phone") or "",
+        "email": graph_ctx.get("email") or "",
+    }
+
+
 def _safe_amount(value) -> str:
     """Convert a currency value (int, float, or string) to a formatted rupee string."""
     try:
@@ -316,6 +377,12 @@ def _format_graph_context(graph_ctx: dict | None) -> str:
     lines = []
     if graph_ctx.get("customer_id"):
         lines.append(f"Customer ID: {graph_ctx['customer_id']}")
+    # Name is included (and PII-masked to [NAME_1] before this text reaches the LLM, then
+    # restored in the final answer — see generate_answer()/_mask_fragments()) purely so
+    # the LLM can address the customer by name. Phone/email are deliberately NOT included
+    # here — they add no value to answer generation, so there's no reason to expose them.
+    if graph_ctx.get("name"):
+        lines.append(f"Customer Name: {graph_ctx['name']}")
     if graph_ctx.get("city"):
         lines.append(f"City: {graph_ctx['city']}")
     loans = graph_ctx.get("loans") or []

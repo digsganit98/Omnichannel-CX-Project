@@ -6,6 +6,7 @@ from typing import Literal, TypedDict
 from langgraph.graph import END, START, StateGraph
 from services.agent_service.cx_agent import CXAgent
 from services.agent_service.orchestration_agents import (
+    CustomerValidationAgent,
     IntentClassificationAgent,
     QueryResolutionAgent,
     TicketAction,
@@ -38,7 +39,9 @@ WORKFLOW_EDGES = [
     ("load_conversation_context", "detect_ticket_action"),
     ("detect_ticket_action", "resolve_ticket | classify_intent [Agent 1]"),
     ("resolve_ticket", "send_outbound_reply"),
-    ("classify_intent [Agent 1]", "resolve_query [Agent 2]"),
+    ("classify_intent [Agent 1]", "validate_customer"),
+    ("validate_customer", "resolve_query [Agent 2] | reject_unregistered_customer"),
+    ("reject_unregistered_customer", "send_outbound_reply"),
     ("resolve_query [Agent 2]", "decide_ticket [Agent 3]"),
     ("decide_ticket [Agent 3]", "create_ticket | skip_ticket"),
     ("create_ticket", "send_outbound_reply"),
@@ -53,9 +56,10 @@ class GraphState(TypedDict):
 
 
 class OrchestrationGraph:
-    """LangGraph workflow with 3 BFSI agents:
+    """LangGraph workflow with 4 BFSI agents:
 
     Agent 1 – IntentClassificationAgent  (classify intent + Neo4j enrichment)
+    Agent 1b – CustomerValidationAgent   (confirm registered customer for account-specific intents)
     Agent 2 – QueryResolutionAgent       (KB / Neo4j answer)
     Agent 3 – TicketCreationAgent        (JIRA ticket decision + creation)
     """
@@ -68,6 +72,7 @@ class OrchestrationGraph:
         delivery: OutboundDeliveryService | None = None,
         crm: CRMClient | None = None,
         neo4j_client=None,
+        resolution_engine=None,
     ) -> None:
         self.repository = repository
         self.crm = crm or CRMClient()
@@ -75,9 +80,10 @@ class OrchestrationGraph:
 
         self.neo4j_client = neo4j_client or _try_neo4j()
 
-        # 3 named agents
+        # Named agents
         self.intent_agent = IntentClassificationAgent(agent, neo4j_client=self.neo4j_client)
-        self.resolution_agent = QueryResolutionAgent(rag, neo4j_client=self.neo4j_client)
+        self.validation_agent = CustomerValidationAgent(neo4j_client=self.neo4j_client)
+        self.resolution_agent = QueryResolutionAgent(rag, neo4j_client=self.neo4j_client, resolution_engine=resolution_engine)
         self.ticket_agent = TicketCreationAgent(self.tickets)
 
         # Outbound delivery wrapper (not a named agent, infrastructure concern)
@@ -134,6 +140,9 @@ class OrchestrationGraph:
 
         # Agent 1
         workflow.add_node("classify_intent", self._classify_intent)
+        # Agent 1b
+        workflow.add_node("validate_customer", self._validate_customer)
+        workflow.add_node("reject_unregistered_customer", self._reject_unregistered_customer)
         # Agent 2
         workflow.add_node("resolve_query", self._resolve_query)
         # Agent 3 – two sub-nodes: decide + execute
@@ -157,7 +166,13 @@ class OrchestrationGraph:
         )
         workflow.add_edge("resolve_ticket", "send_outbound_reply")
         # Agent chain
-        workflow.add_edge("classify_intent", "resolve_query")
+        workflow.add_edge("classify_intent", "validate_customer")
+        workflow.add_conditional_edges(
+            "validate_customer",
+            self._route_customer_validation,
+            {"proceed": "resolve_query", "unregistered": "reject_unregistered_customer"},
+        )
+        workflow.add_edge("reject_unregistered_customer", "send_outbound_reply")
         workflow.add_edge("resolve_query", "decide_ticket")
         workflow.add_conditional_edges(
             "decide_ticket",
@@ -339,6 +354,46 @@ class OrchestrationGraph:
                        urgency=state.analysis.urgency.value, source=state.analysis.analysis_source)
         return {"runtime": state}
 
+    # ── Agent 1b: Customer Validation ─────────────────────────────────────
+
+    def _validate_customer(self, graph_state: GraphState) -> dict:
+        state = graph_state["runtime"]
+        intent = state.analysis.intent if state.analysis else None
+        state.customer_validation = self.validation_agent.validate(intent, state.context)
+        self._complete(state, WorkflowStep.VALIDATE_CUSTOMER, self.validation_agent.name,
+                       validation_required=state.customer_validation.validation_required,
+                       is_registered=state.customer_validation.is_registered,
+                       reason=state.customer_validation.reason)
+        return {"runtime": state}
+
+    @staticmethod
+    def _route_customer_validation(graph_state: GraphState) -> Literal["proceed", "unregistered"]:
+        validation = graph_state["runtime"].customer_validation
+        if validation.validation_required and not validation.is_registered:
+            return "unregistered"
+        return "proceed"
+
+    def _reject_unregistered_customer(self, graph_state: GraphState) -> dict:
+        state = graph_state["runtime"]
+        if state.message.channel.value == "email":
+            state.answer = (
+                "Dear Customer,\n\n"
+                "We were unable to verify your account using the email address you contacted us from. "
+                "For your security, please write to us again using the email address or mobile number "
+                "registered with your account so we can look into this for you.\n\n"
+                "Warm regards,\nCustomer Support Team"
+            )
+        else:
+            state.answer = (
+                "We couldn't verify your account with this contact number. Please reach out to us "
+                "using the mobile number or email address registered with your account so we can help."
+            )
+        self._audit("customer_validation_failed", state, intent=self._intent(state),
+                    details={"reason": state.customer_validation.reason})
+        self._complete(state, WorkflowStep.REJECT_UNREGISTERED_CUSTOMER, self.validation_agent.name,
+                       reason=state.customer_validation.reason)
+        return {"runtime": state}
+
     # ── Agent 2: Query / Complaint Resolution ─────────────────────────────
 
     def _resolve_query(self, graph_state: GraphState) -> dict:
@@ -418,7 +473,8 @@ class OrchestrationGraph:
         # distinct intent that requires manual review (e.g. "check loan AND report fraud"),
         # create a separate ticket for it and append a note so the customer knows both
         # issues are being tracked.  Primary resolution and ticket are unaffected.
-        if state.analysis and getattr(state.analysis, "secondary_intent", None):
+        customer_rejected = state.customer_validation.validation_required and not state.customer_validation.is_registered
+        if state.analysis and getattr(state.analysis, "secondary_intent", None) and not customer_rejected:
             try:
                 from services.agent_service.orchestration_agents import MANUAL_REVIEW_INTENTS, TicketDecision
                 from shared.schemas.intents import Intent
@@ -533,8 +589,12 @@ class OrchestrationGraph:
             urgency=state.analysis.urgency.value if state.analysis else "low",
             confidence=state.resolution.confidence if state.resolution else 1.0,
             ticket_id=state.ticket.ticket_id if state.ticket else None,
-            next_best_action="ticket_closed" if state.ticket_action.action == TicketAction.RESOLVE else (
-                "human_follow_up" if state.ticket else "answer_delivered"
+            next_best_action=(
+                "ticket_closed" if state.ticket_action.action == TicketAction.RESOLVE else
+                "customer_validation_required" if (
+                    state.customer_validation.validation_required and not state.customer_validation.is_registered
+                ) else
+                ("human_follow_up" if state.ticket else "answer_delivered")
             ),
             analysis_source=state.analysis.analysis_source if state.analysis else "operational_command",
             rag_contexts=state.resolution.contexts if state.resolution else [],
@@ -576,6 +636,8 @@ class OrchestrationGraph:
     def _intent(state: OrchestrationState) -> str:
         if state.ticket_action.action == TicketAction.RESOLVE:
             return "ticket_resolution"
+        if state.customer_validation.validation_required and not state.customer_validation.is_registered:
+            return "customer_not_registered"
         return state.analysis.intent.value if state.analysis else "unknown"
 
     @staticmethod

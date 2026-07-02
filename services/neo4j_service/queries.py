@@ -29,7 +29,10 @@ def get_customer_by_identifier(client, identifier: str) -> dict | None:
            OR c.email = $id OR c.secondary_email = $id
         RETURN c.customer_id AS customer_id, c.email AS email,
                c.phone AS phone, c.city AS city,
-               c.registration_date AS registration_date
+               c.registration_date AS registration_date,
+               c.name AS name, c.age AS age, c.gender AS gender,
+               c.occupation AS occupation, c.income_level AS income_level,
+               c.segment AS segment
         LIMIT 1
         """,
         {"id": identifier, "stripped": stripped},
@@ -43,7 +46,10 @@ def get_customer_by_id(client, customer_id: str) -> dict | None:
         MATCH (c:Customer {customer_id: $customer_id})
         RETURN c.customer_id AS customer_id, c.email AS email,
                c.phone AS phone, c.city AS city,
-               c.registration_date AS registration_date
+               c.registration_date AS registration_date,
+               c.name AS name, c.age AS age, c.gender AS gender,
+               c.occupation AS occupation, c.income_level AS income_level,
+               c.segment AS segment
         LIMIT 1
         """,
         {"customer_id": customer_id},
@@ -81,11 +87,83 @@ def get_policy_status(client, customer_id: str) -> list[dict]:
         return []
 
 
+def get_accounts(client, customer_id: str) -> list[dict]:
+    return client.query(
+        """
+        MATCH (c:Customer {customer_id: $cid})-[:HAS_ACCOUNT]->(a:Account)
+        RETURN a.account_number AS account_number, a.account_category AS account_category,
+               a.account_type AS account_type, a.account_sub_type AS account_sub_type,
+               a.status AS status, a.avg_monthly_balance AS avg_monthly_balance,
+               a.min_balance_required AS min_balance_required, a.branch AS branch,
+               a.ifsc AS ifsc
+        """,
+        {"cid": customer_id},
+    )
+
+
+def get_credit_cards(client, customer_id: str) -> list[dict]:
+    return client.query(
+        """
+        MATCH (c:Customer {customer_id: $cid})-[:HAS_CREDIT_CARD]->(cc:CreditCard)
+        RETURN cc.card_id AS card_id, cc.card_network AS card_network,
+               cc.card_variant AS card_variant, cc.credit_limit AS credit_limit,
+               cc.balance_due AS balance_due, cc.min_amount_due AS min_amount_due,
+               cc.total_amount_due AS total_amount_due, cc.payment_due_date AS payment_due_date,
+               cc.dpd AS dpd, cc.penalty_details AS penalty_details,
+               cc.reward_points_balance AS reward_points_balance,
+               cc.chargeback_flag AS chargeback_flag, cc.fraud_flag AS fraud_flag,
+               cc.fraud_type AS fraud_type
+        """,
+        {"cid": customer_id},
+    )
+
+
+def get_fixed_deposits(client, customer_id: str) -> list[dict]:
+    return client.query(
+        """
+        MATCH (c:Customer {customer_id: $cid})-[:HAS_FD]->(fd:FixedDeposit)
+        RETURN fd.fd_id AS fd_id, fd.principal_amount AS principal_amount,
+               fd.interest_rate AS interest_rate, fd.tenure_months AS tenure_months,
+               fd.maturity_date AS maturity_date, fd.maturity_amount AS maturity_amount,
+               fd.status AS status
+        """,
+        {"cid": customer_id},
+    )
+
+
+def get_transactions(client, customer_id: str, limit: int = 20) -> list[dict]:
+    return client.query(
+        """
+        MATCH (c:Customer {customer_id: $cid})-[:HAS_TRANSACTION]->(t:Transaction)
+        RETURN t.txn_id AS txn_id, t.txn_date AS txn_date, t.amount AS amount,
+               t.txn_type AS txn_type, t.channel AS channel, t.status AS status,
+               t.beneficiary_name AS beneficiary_name, t.failure_reason AS failure_reason,
+               t.narration AS narration
+        ORDER BY t.txn_date DESC
+        LIMIT $limit
+        """,
+        {"cid": customer_id, "limit": limit},
+    )
+
+
+def get_charges(client, customer_id: str) -> list[dict]:
+    return client.query(
+        """
+        MATCH (c:Customer {customer_id: $cid})-[:HAS_CHARGE]->(ch:ChargePenalty)
+        RETURN ch.charge_id AS charge_id, ch.charge_type AS charge_type,
+               ch.amount AS amount, ch.charge_date AS charge_date,
+               ch.reason AS reason, ch.reversal_status AS reversal_status
+        """,
+        {"cid": customer_id},
+    )
+
+
 def get_claim_status(client, customer_id: str) -> list[dict]:
     return client.query(
         """
         MATCH (c:Customer {customer_id: $cid})-[:HAS_CLAIM]->(cl:Claim)
-        RETURN cl.claim_id AS claim_id, cl.policy_type AS policy_type,
+        OPTIONAL MATCH (p:Policy)-[:HAS_CLAIM]->(cl)
+        RETURN cl.claim_id AS claim_id, p.policy_type AS policy_type,
                cl.claim_type AS claim_type, cl.status AS status,
                cl.amount_claimed_inr AS amount_claimed,
                cl.amount_approved_inr AS amount_approved,

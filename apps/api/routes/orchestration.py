@@ -25,6 +25,11 @@ def workflow_definition() -> dict:
                 "execution": "groq_llm_with_neo4j_enrichment_and_rule_fallback",
             },
             {
+                "name": "customer_validation_agent",
+                "responsibility": "For account-specific intents (loan/claim/policy status, balance, cards, KYC, tickets), confirm the sender matches a real BFSI customer in Neo4j before proceeding. General/FAQ intents are never blocked.",
+                "execution": "neo4j_customer_graph_lookup",
+            },
+            {
                 "name": "query_resolution_agent",
                 "responsibility": "Route to Neo4j (transactional intents) or RAG/KB (policy and general). Return cited answers.",
                 "execution": "neo4j_graph_or_opensearch_rag_with_groq_generation",

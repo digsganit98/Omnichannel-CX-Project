@@ -17,3 +17,4 @@ neo4j>=5.0.0
 openpyxl>=3.1.0
 pypdf>=4.0.0
 PyJWT>=2.8.0
+Faker>=33.0.0

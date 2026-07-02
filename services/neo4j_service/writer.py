@@ -21,11 +21,12 @@ def seed_synthetic_bfsi_records(
 
     The generated nodes follow the same labels, properties, and relationships
     used by ``data/bfsi.xlsx`` loader rows: Customer has Loan, Claim, Policy,
-    KYC, and loan Product links. IDs are deterministic from customer_id so
-    repeated calls update records instead of duplicating them.
+    Account, CreditCard, FixedDeposit, and KYC. IDs are deterministic from
+    customer_id so repeated calls update records instead of duplicating them.
     """
     if client is None or not customer_id:
-        return {"loans": 0, "claims": 0, "policies": 0, "kyc": 0, "product_links": 0}
+        return {"loans": 0, "claims": 0, "policies": 0, "kyc": 0, "product_links": 0,
+                "accounts": 0, "credit_cards": 0, "fixed_deposits": 0}
 
     suffix = "".join(ch for ch in customer_id if ch.isdigit())[-6:] or "000000"
     last_updated = registration_date or ""
@@ -150,6 +151,62 @@ def seed_synthetic_bfsi_records(
                 },
             )
 
+        account_number = f"4090{suffix}00"
+        client.write(
+            """
+            MERGE (a:Account {account_number: $account_number})
+            SET a.account_category = 'Deposit',
+                a.account_type = 'SA',
+                a.account_sub_type = 'Regular',
+                a.opening_date = $registration_date,
+                a.status = 'Active',
+                a.avg_monthly_balance = 5000,
+                a.min_balance_required = 3000,
+                a.currency = 'INR'
+            WITH a
+            MATCH (c:Customer {customer_id: $customer_id})
+            MERGE (c)-[:HAS_ACCOUNT]->(a)
+            """,
+            {"account_number": account_number, "customer_id": customer_id, "registration_date": registration_date or ""},
+        )
+        client.write(
+            """
+            MERGE (cc:CreditCard {card_id: $card_id})
+            SET cc.account_number = $account_number,
+                cc.credit_limit = 200000,
+                cc.card_network = 'Visa',
+                cc.card_variant = 'Classic',
+                cc.balance_due = 0,
+                cc.min_amount_due = 0,
+                cc.total_amount_due = 0,
+                cc.dpd = 0,
+                cc.interest_rate = 38.0,
+                cc.penalty_details = 'None',
+                cc.reward_points_balance = 0,
+                cc.chargeback_flag = false,
+                cc.fraud_flag = false
+            WITH cc
+            MATCH (c:Customer {customer_id: $customer_id})
+            MERGE (c)-[:HAS_CREDIT_CARD]->(cc)
+            """,
+            {"card_id": f"CC{suffix}01", "account_number": account_number, "customer_id": customer_id},
+        )
+        client.write(
+            """
+            MERGE (fd:FixedDeposit {fd_id: $fd_id})
+            SET fd.account_number = $account_number,
+                fd.principal_amount = 100000,
+                fd.interest_rate = 7.0,
+                fd.tenure_months = 12,
+                fd.booking_date = $registration_date,
+                fd.status = 'Active'
+            WITH fd
+            MATCH (c:Customer {customer_id: $customer_id})
+            MERGE (c)-[:HAS_FD]->(fd)
+            """,
+            {"fd_id": f"FD{suffix}01", "account_number": account_number, "customer_id": customer_id, "registration_date": registration_date or ""},
+        )
+
         client.write(
             """
             MERGE (k:KYC {customer_id: $customer_id})
@@ -167,10 +224,14 @@ def seed_synthetic_bfsi_records(
             "policies": len(policy_types),
             "kyc": 1,
             "product_links": len(loans),
+            "accounts": 1,
+            "credit_cards": 1,
+            "fixed_deposits": 1,
         }
     except Exception:
         logger.warning("neo4j_seed_synthetic_bfsi_records_failed", extra={"customer_id": customer_id}, exc_info=True)
-        return {"loans": 0, "claims": 0, "policies": 0, "kyc": 0, "product_links": 0, "failed": True}
+        return {"loans": 0, "claims": 0, "policies": 0, "kyc": 0, "product_links": 0,
+                "accounts": 0, "credit_cards": 0, "fixed_deposits": 0, "failed": True}
 
 
 def upsert_customer(

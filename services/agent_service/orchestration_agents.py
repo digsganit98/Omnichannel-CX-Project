@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 
 from services.agent_service.cx_agent import CXAgent
 from services.channel_service.delivery import OutboundDeliveryService
+from services.pii_service.masker import mask_text
 from services.rag_service.groq_generator import GroqGenerator
 from services.rag_service.rag_pipeline import RAGPipeline
 from services.ticket_service.ticket_manager import TicketManager
@@ -34,6 +35,23 @@ INFORMATIONAL_INTENTS = {
     Intent.POLICY_STATUS,
 }
 
+# Intents that require access to the customer's own account/product data. A sender who
+# does not match a real BFSI customer record cannot be safely answered on these — general
+# FAQs (loan_application, general_inquiry, human_escalation, fraud_report, complaint, ...)
+# stay open to anyone since they don't expose or act on personal account data.
+ACCOUNT_VERIFICATION_REQUIRED_INTENTS = {
+    Intent.ACCOUNT_BALANCE_INQUIRY,
+    Intent.TRANSACTION_DISPUTE,
+    Intent.FUND_TRANSFER,
+    Intent.LOAN_STATUS,
+    Intent.LOAN_DEFAULT_NOTICE,
+    Intent.POLICY_STATUS,
+    Intent.CLAIM_STATUS,
+    Intent.CARD_MANAGEMENT,
+    Intent.KYC_UPDATE,
+    Intent.TICKET_STATUS,
+}
+
 
 class QueryResolution(BaseModel):
     answer: str
@@ -43,6 +61,10 @@ class QueryResolution(BaseModel):
     llm: dict = Field(default_factory=dict)
     retrieval_backend: str = "unknown"
     retrieval_error: str | None = None
+    # L1 (auto-resolvable) / L2 (assisted resolution) / L3 (critical escalation) decision
+    # from services.resolution_service — see QueryResolutionAgent._attach_resolution_decision
+    # and TicketCreationAgent._escalation_reason for how this drives ticket routing.
+    resolution_decision: dict | None = None
 
 
 class TicketDecision(BaseModel):
@@ -58,6 +80,44 @@ class TicketAction(StrEnum):
 class TicketActionDecision(BaseModel):
     action: TicketAction = TicketAction.NONE
     reason: str | None = None
+
+
+class CustomerValidationResult(BaseModel):
+    is_registered: bool = True
+    validation_required: bool = False
+    reason: str | None = None
+
+
+# ── Customer Validation ──────────────────────────────────────────────────────
+
+class CustomerValidationAgent:
+    """Confirms the sender is a known BFSI customer before account-specific intents proceed.
+
+    Runs after intent classification (so it knows whether the request actually needs
+    personal account data) and before query resolution / ticket creation. General intents
+    not in ACCOUNT_VERIFICATION_REQUIRED_INTENTS are always allowed through regardless of
+    registration status, so FAQs stay answerable by anyone.
+    """
+
+    name = "customer_validation_agent"
+
+    def __init__(self, neo4j_client=None) -> None:
+        self.neo4j_client = neo4j_client
+
+    def validate(self, intent: Intent | None, context: dict) -> CustomerValidationResult:
+        if intent is None or intent not in ACCOUNT_VERIFICATION_REQUIRED_INTENTS:
+            return CustomerValidationResult(is_registered=True, validation_required=False)
+        if not self.neo4j_client:
+            # No BFSI customer master reachable — fail open, we have no way to verify either way.
+            return CustomerValidationResult(
+                is_registered=True, validation_required=False, reason="neo4j_unavailable_skip_validation"
+            )
+        graph_ctx = context.get("graph_context") or {}
+        if graph_ctx.get("customer_id"):
+            return CustomerValidationResult(is_registered=True, validation_required=True)
+        return CustomerValidationResult(
+            is_registered=False, validation_required=True, reason="no_matching_bfsi_customer_record"
+        )
 
 
 # ── Agent 1: Intent Classification ──────────────────────────────────────────
@@ -121,11 +181,19 @@ class QueryResolutionAgent:
 
     name = "query_resolution_agent"
 
-    def __init__(self, rag: RAGPipeline | None = None, neo4j_client=None) -> None:
+    def __init__(self, rag: RAGPipeline | None = None, neo4j_client=None, resolution_engine=None) -> None:
         self.rag = rag or RAGPipeline()
         self.neo4j_client = neo4j_client
+        # Injectable like every other external dependency here (rag, neo4j_client) so tests
+        # can supply a stub instead of hitting real OpenSearch/Groq. None means "construct the
+        # real ResolutionDecisionEngine lazily on first use" via services.resolution_service.
+        self.resolution_engine = resolution_engine
 
     def run(self, message: InboundMessage, context: dict, intent: str | None = None) -> QueryResolution:
+        resolution = self._resolve(message, context, intent)
+        return self._attach_resolution_decision(message, context, intent, resolution)
+
+    def _resolve(self, message: InboundMessage, context: dict, intent: str | None = None) -> QueryResolution:
         channel = context.get("channel", "")
 
         # ── Priority 0: ResolutionMemory cache (agent-verified cross-customer answers) ──
@@ -234,6 +302,40 @@ class QueryResolutionAgent:
         rag_context = {**context, "neo4j_attempted": bool(intent and self.neo4j_client)}
         return QueryResolution(**self.rag.answer(message.text, rag_context))
 
+    def _attach_resolution_decision(
+        self,
+        message: InboundMessage,
+        context: dict,
+        intent: str | None,
+        resolution: QueryResolution,
+    ) -> QueryResolution:
+        """Attach the L1/L2/L3 resolution-level decision to every resolved query.
+
+        This runs regardless of which priority branch answered the query (cache, ticket
+        lookup, Neo4j, or RAG) so TicketCreationAgent can apply it uniformly downstream.
+        """
+        try:
+            if self.resolution_engine is not None:
+                decision = self.resolution_engine.resolve_query_level(
+                    message.text, intent or "unknown", context.get("sentiment", "neutral"),
+                )
+            else:
+                from services.resolution_service import resolve_query_level
+                decision = resolve_query_level(
+                    message.text, intent or "unknown", context.get("sentiment", "neutral"),
+                )
+            return resolution.model_copy(update={"resolution_decision": decision})
+        except Exception as exc:
+            return resolution.model_copy(update={
+                "resolution_decision": {
+                    "intent": intent or "unknown",
+                    "sentiment": context.get("sentiment", "neutral"),
+                    "resolution_level": "L2",
+                    "confidence": 0.35,
+                    "reason": f"Resolution decision engine unavailable; assisted review selected. {exc}",
+                }
+            })
+
 
 def _format_ticket_status(tickets: list[dict], channel: str = "") -> str:
     """Format open tickets as a natural-language status response."""
@@ -320,10 +422,11 @@ class TicketCreationAgent:
 
         # LLM fallback for ambiguous messages (e.g., "All good now", "Issue is sorted").
         try:
+            masked_text, _ = mask_text(message.text)
             result = self.generator._generate(
                 system_prompt="You are a resolution detector. Answer only YES or NO.",
                 user_prompt=(
-                    f"Customer message: \"{message.text}\"\n"
+                    f"Customer message: \"{masked_text}\"\n"
                     "Does this message indicate that the customer's issue has been resolved "
                     "and they no longer need support? Answer YES or NO only."
                 ),
@@ -360,6 +463,19 @@ class TicketCreationAgent:
 
     @staticmethod
     def _escalation_reason(analysis: IntentResult, resolution: QueryResolution, context: dict) -> str | None:
+        # Rule 0: L1/L2/L3 resolution-level decision — DELIBERATELY CHECKED FIRST, before every
+        # intent-based rule below (including ones that otherwise say "never escalate", such as
+        # Rule 3 ticket_status or Rule 3b informational intents). The resolution engine looks at
+        # the actual query content — not just the intent label — so a genuinely critical or
+        # customer-specific case must escalate even for an intent that's normally auto-answered.
+        # Only fall through to the intent-based rules below when the level is L1.
+        decision = resolution.resolution_decision or {}
+        level = str(decision.get("resolution_level", "")).upper()
+        if level == "L3":
+            return f"critical_escalation:{analysis.intent.value}"
+        if level == "L2":
+            return f"assisted_resolution_required:{analysis.intent.value}"
+
         # Rule 1: Customer explicitly asked for human
         if analysis.intent == Intent.HUMAN_ESCALATION:
             return "customer_requested_human"

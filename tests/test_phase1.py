@@ -80,6 +80,27 @@ class FakeRAG:
         }
 
 
+class FakeResolutionEngine:
+    """Deterministic L1/L2/L3 stub — avoids hitting real OpenSearch/Groq in tests.
+
+    Defaults to L1 (auto-resolvable), which preserves the pre-resolution-engine
+    intent-based escalation behavior exactly, since TicketCreationAgent only overrides
+    on L2/L3. Pass level="L2"/"L3" to test the new override behavior explicitly.
+    """
+
+    def __init__(self, level="L1"):
+        self.level = level
+
+    def resolve_query_level(self, query, intent, sentiment):
+        return {
+            "intent": intent,
+            "sentiment": sentiment,
+            "resolution_level": self.level,
+            "confidence": 0.9,
+            "reason": "Test stub decision.",
+        }
+
+
 class FakeNeo4j:
     """Stub Neo4j client that returns canned BFSI graph data."""
 
@@ -128,9 +149,10 @@ class WorkbookNeo4j:
         import openpyxl
 
         workbook = openpyxl.load_workbook("data/bfsi.xlsx", data_only=True)
-        self.customers = self._rows(workbook["Customer_data"])
-        self.loans = self._rows(workbook["Loan_Processing_data"])
-        self.claims = self._rows(workbook["Claim_data"])
+        self.customers = self._rows(workbook["Customer_Demographics"])
+        self.loans = self._rows(workbook["Loans"])
+        self.claims = self._rows(workbook["Claims"])
+        self.policies = self._rows(workbook["Policies"])
 
     @staticmethod
     def _rows(sheet):
@@ -143,17 +165,17 @@ class WorkbookNeo4j:
             identifiers = {str(params.get("id", "")), str(params.get("stripped", ""))}
             for row in self.customers:
                 values = {
-                    str(row.get("Phone") or ""),
-                    str(row.get("PrimaryEmail") or ""),
-                    str(row.get("SecondaryEmail") or ""),
+                    str(row.get("Mobile1") or ""),
+                    str(row.get("Email1") or ""),
+                    str(row.get("AlternateEmail") or ""),
                 }
                 if identifiers & values:
                     return [{
-                        "customer_id": str(row["CustomerID"]),
-                        "email": str(row.get("PrimaryEmail") or ""),
-                        "phone": str(row.get("Phone") or ""),
+                        "customer_id": str(row["CRN"]),
+                        "email": str(row.get("Email1") or ""),
+                        "phone": str(row.get("Mobile1") or ""),
                         "city": str(row.get("City") or ""),
-                        "registration_date": str(row.get("RegistrationDate") or ""),
+                        "registration_date": str(row.get("AccountOpeningDate") or ""),
                     }]
             return []
 
@@ -162,23 +184,24 @@ class WorkbookNeo4j:
             return [{
                 "loan_id": str(row["LoanID"]),
                 "loan_type": str(row["LoanType"]),
-                "status": str(row["LoanStatus"]),
-                "amount_inr": row["LoanAmount (INR)"],
-                "interest_rate": row["InterestRate (%)"],
+                "status": str(row["Status"]),
+                "amount_inr": row["BalanceDue"],
+                "interest_rate": row["InterestRate"],
                 "next_step": str(row["NextStep"]),
                 "last_updated": str(row["LastUpdatedDate"]),
-            } for row in self.loans if str(row["CustomerID"]) == customer_id]
+            } for row in self.loans if str(row["CRN"]) == customer_id]
         if "HAS_CLAIM" in cypher:
+            policy_type_by_id = {str(p["PolicyID"]): str(p.get("PolicyType") or "") for p in self.policies}
             return [{
                 "claim_id": str(row["ClaimID"]),
-                "policy_type": str(row["PolicyType"]),
+                "policy_type": policy_type_by_id.get(str(row.get("PolicyID") or ""), ""),
                 "claim_type": str(row["ClaimType"]),
                 "status": str(row["ClaimStatus"]),
-                "amount_claimed": row["AmountClaimed (INR)"],
-                "amount_approved": row["AmountApproved (INR)"],
+                "amount_claimed": row["AmountClaimed"],
+                "amount_approved": row["AmountApproved"],
                 "reason": str(row["ReasonForStatus"]),
                 "last_updated": str(row["LastUpdatedDate"]),
-            } for row in self.claims if str(row["CustomerID"]) == customer_id]
+            } for row in self.claims if str(row["CRN"]) == customer_id]
         return []
 
     def write(self, cypher, params=None):
@@ -200,7 +223,7 @@ class Recorder:
 _DEFAULT_TEST_NEO4J = object()
 
 
-def graph(repository, whatsapp=None, email=None, crm=None, neo4j_client=_DEFAULT_TEST_NEO4J):
+def graph(repository, whatsapp=None, email=None, crm=None, neo4j_client=_DEFAULT_TEST_NEO4J, resolution_engine=None):
     if neo4j_client is _DEFAULT_TEST_NEO4J:
         neo4j_client = EmptyNeo4j()
     return OrchestrationGraph(
@@ -210,6 +233,7 @@ def graph(repository, whatsapp=None, email=None, crm=None, neo4j_client=_DEFAULT
         delivery=OutboundDeliveryService(whatsapp=whatsapp, email=email),
         crm=crm,
         neo4j_client=neo4j_client,
+        resolution_engine=resolution_engine or FakeResolutionEngine(),
     )
 
 
@@ -241,7 +265,11 @@ def email_message(message_id="email-1", body="What is my loan EMI status?", meta
 def test_whatsapp_bfsi_query_resolves_with_citation_and_sends_reply():
     repo = SQLiteCXRepository(":memory:")
     sender = Recorder()
-    response = graph(repo, whatsapp=sender).run(whatsapp_message())
+    # Non-account-specific loan question (loan_application, not loan_status) so this
+    # message passes customer validation and exercises the RAG/KB fallback path.
+    response = graph(repo, whatsapp=sender).run(
+        whatsapp_message(text="What are the requirements for a personal loan?")
+    )
     assert response.resolved is False
     assert response.next_best_action == "answer_delivered"
     assert response.citations[0]["source"] == "InboxIQ_BFSI_KB.pdf:p3"
@@ -251,6 +279,133 @@ def test_whatsapp_bfsi_query_resolves_with_citation_and_sends_reply():
     assert ticket_step["details"]["skipped"] is True
     evidence = repo.list_retrieval_evidence()
     assert evidence[0]["source"] == "InboxIQ_BFSI_KB.pdf:p3"
+
+
+def test_unregistered_customer_blocked_from_account_specific_query():
+    """A loan_status question from a sender not found in the BFSI customer graph is
+    rejected before any KB/graph lookup or ticket creation, per the customer-validation gate."""
+    repo = SQLiteCXRepository(":memory:")
+    sender = Recorder()
+    response = graph(repo, whatsapp=sender).run(whatsapp_message(text="What is my loan status?"))
+    assert response.next_best_action == "customer_validation_required"
+    assert response.intent == "customer_not_registered"
+    assert response.ticket_id is None
+    assert response.outbound_status == "sent"
+    assert "registered" in response.message.lower()
+    reject_step = next(entry for entry in response.workflow_trace if entry["step"] == "reject_unregistered_customer")
+    assert reject_step["details"]["reason"] == "no_matching_bfsi_customer_record"
+
+
+def test_registered_customer_account_query_is_not_blocked():
+    """A loan_status question from a phone number that matches a real BFSI customer in
+    Neo4j proceeds through the normal pipeline instead of being rejected."""
+    repo = SQLiteCXRepository(":memory:")
+    sender = Recorder()
+    neo4j = WorkbookNeo4j()
+    message = WhatsAppAdapter().normalize(WhatsAppWebhookPayload(
+        from_="+917538870992",
+        text="What is the status of my personal loan?",
+        message_id="wamid-registered-loan",
+        metadata={"provider": "test"},
+    ))
+    workflow = OrchestrationGraph(
+        repo,
+        agent=CXAgent(NoLLM()),
+        rag=FakeRAG(),
+        delivery=OutboundDeliveryService(whatsapp=sender),
+        neo4j_client=neo4j,
+        resolution_engine=FakeResolutionEngine(),
+    )
+    response = workflow.run(message)
+    assert response.next_best_action != "customer_validation_required"
+    assert response.intent == "loan_status"
+    validate_step = next(entry for entry in response.workflow_trace if entry["step"] == "validate_customer")
+    assert validate_step["details"]["is_registered"] is True
+    assert response.outbound_status == "sent"
+
+
+def test_resolution_l3_overrides_never_escalate_intent():
+    """loan_status is an INFORMATIONAL_INTENT that normally never creates a ticket (Rule 3b).
+    An L3 resolution-level decision must override that and force escalation anyway — this is
+    the deliberate precedence documented in TicketCreationAgent._escalation_reason."""
+    repo = SQLiteCXRepository(":memory:")
+    sender = Recorder()
+    neo4j = WorkbookNeo4j()
+    message = WhatsAppAdapter().normalize(WhatsAppWebhookPayload(
+        from_="+917538870992",
+        text="What is the status of my personal loan?",
+        message_id="wamid-l3-override",
+        metadata={"provider": "test"},
+    ))
+    workflow = OrchestrationGraph(
+        repo,
+        agent=CXAgent(NoLLM()),
+        rag=FakeRAG(),
+        delivery=OutboundDeliveryService(whatsapp=sender),
+        neo4j_client=neo4j,
+        resolution_engine=FakeResolutionEngine(level="L3"),
+    )
+    response = workflow.run(message)
+    assert response.intent == "loan_status"
+    assert response.ticket_id is not None
+    ticket_step = next(entry for entry in response.workflow_trace if entry["step"] == "create_or_update_ticket")
+    assert "skipped" not in ticket_step["details"]
+    ticket = repo.get_ticket(response.ticket_id)
+    assert ticket["escalation_reason"].startswith("critical_escalation:")
+
+
+def test_resolution_l1_preserves_never_escalate_intent():
+    """The same loan_status query with an L1 decision falls through to the normal
+    intent-based rules, which never escalate INFORMATIONAL_INTENTS — confirming L1 doesn't
+    change existing behavior."""
+    repo = SQLiteCXRepository(":memory:")
+    sender = Recorder()
+    neo4j = WorkbookNeo4j()
+    message = WhatsAppAdapter().normalize(WhatsAppWebhookPayload(
+        from_="+917538870992",
+        text="What is the status of my personal loan?",
+        message_id="wamid-l1-no-override",
+        metadata={"provider": "test"},
+    ))
+    workflow = OrchestrationGraph(
+        repo,
+        agent=CXAgent(NoLLM()),
+        rag=FakeRAG(),
+        delivery=OutboundDeliveryService(whatsapp=sender),
+        neo4j_client=neo4j,
+        resolution_engine=FakeResolutionEngine(level="L1"),
+    )
+    response = workflow.run(message)
+    assert response.intent == "loan_status"
+    assert response.ticket_id is None
+
+
+def test_high_risk_keyword_forces_l3_before_llm_call():
+    """The deterministic safety net in services.resolution_service must force L3 for
+    credible-risk language even without a real LLM/OpenSearch, and that must override a
+    normally-never-escalate intent end to end."""
+    repo = SQLiteCXRepository(":memory:")
+    sender = Recorder()
+    neo4j = WorkbookNeo4j()
+    message = WhatsAppAdapter().normalize(WhatsAppWebhookPayload(
+        from_="+917538870992",
+        text="What is the status of my personal loan? Someone hacked my account without my permission.",
+        message_id="wamid-safety-net",
+        metadata={"provider": "test"},
+    ))
+    # No resolution_engine override here — exercises the REAL services.resolution_service
+    # safety-net keyword check (no injected fake), confirming it works end to end.
+    workflow = OrchestrationGraph(
+        repo,
+        agent=CXAgent(NoLLM()),
+        rag=FakeRAG(),
+        delivery=OutboundDeliveryService(whatsapp=sender),
+        neo4j_client=neo4j,
+    )
+    response = workflow.run(message)
+    assert response.ticket_id is not None
+    ticket = repo.get_ticket(response.ticket_id)
+    assert ticket["escalation_reason"].startswith("critical_escalation:")
 
 
 def test_email_complaint_escalates_and_sends_reply():
@@ -494,7 +649,7 @@ def test_query_resolution_agent_routes_transactional_intent_to_neo4j():
     from services.channel_service.adapters.whatsapp_adapter import WhatsAppAdapter
     from shared.schemas.messages import WhatsAppWebhookPayload
 
-    agent = QueryResolutionAgent(neo4j_client=FakeNeo4j())
+    agent = QueryResolutionAgent(neo4j_client=FakeNeo4j(), resolution_engine=FakeResolutionEngine())
     msg = WhatsAppAdapter().normalize(
         WhatsAppWebhookPayload(from_="+919999999999", text="What is my loan status?",
                                message_id="test-1", metadata={"provider": "test"})
@@ -511,7 +666,7 @@ def test_query_resolution_agent_routes_general_inquiry_to_rag():
     from shared.schemas.messages import WhatsAppWebhookPayload
 
     fake_rag = FakeRAG()
-    agent = QueryResolutionAgent(rag=fake_rag, neo4j_client=FakeNeo4j())
+    agent = QueryResolutionAgent(rag=fake_rag, neo4j_client=FakeNeo4j(), resolution_engine=FakeResolutionEngine())
     msg = WhatsAppAdapter().normalize(
         WhatsAppWebhookPayload(from_="+919999999999", text="What documents do I need for KYC?",
                                message_id="test-2", metadata={"provider": "test"})
@@ -525,7 +680,7 @@ def test_process_intents_never_route_to_customer_graph():
     from services.agent_service.orchestration_agents import QueryResolutionAgent
 
     fake_rag = FakeRAG()
-    agent = QueryResolutionAgent(rag=fake_rag, neo4j_client=FakeNeo4j())
+    agent = QueryResolutionAgent(rag=fake_rag, neo4j_client=FakeNeo4j(), resolution_engine=FakeResolutionEngine())
     context = {"graph_context": {"customer_id": "CUST-001"}}
 
     claim = agent.run(
@@ -641,6 +796,7 @@ def test_five_question_kb_and_graph_e2e_matrix():
             rag=rag,
             delivery=delivery,
             neo4j_client=neo4j,
+            resolution_engine=FakeResolutionEngine(),
         )
         response = workflow.run(case["message"])
 
@@ -1118,7 +1274,9 @@ def test_whatsapp_admin_status_reports_meta_readiness(monkeypatch):
 
 def test_orchestration_trace_records_explicit_agent_workflow():
     repo = SQLiteCXRepository(":memory:")
-    response = graph(repo).run(whatsapp_message())
+    # Non-account-specific loan question so this message passes customer validation and
+    # proceeds through the full agent chain instead of being rejected as unregistered.
+    response = graph(repo).run(whatsapp_message(text="What are the requirements for a personal loan?"))
     steps = [entry["step"] for entry in response.workflow_trace]
     assert steps == [
         "receive_message",
@@ -1126,6 +1284,7 @@ def test_orchestration_trace_records_explicit_agent_workflow():
         "load_conversation_context",
         "detect_ticket_action",
         "classify_intent",
+        "validate_customer",
         "retrieve_knowledge",
         "decide_resolution",
         "create_or_update_ticket",
@@ -1153,7 +1312,7 @@ def test_orchestration_workflow_definition_is_admin_protected(monkeypatch):
     assert response.status_code == 200
     assert response.json()["engine"] == "langgraph_state_graph"
     assert response.json()["framework"] == "LangGraph"
-    assert len(response.json()["agents"]) == 3
+    assert len(response.json()["agents"]) == 4
     assert response.json()["agents"][0]["name"] == "intent_classification_agent"
     assert "groq" in response.json()["agents"][0]["execution"]
 
@@ -1163,3 +1322,106 @@ def test_hashing_embeddings_are_an_explicit_fallback(monkeypatch):
     embeddings = SemanticEmbeddings()
     assert embeddings.status()["active_backend"] == "hashing_fallback"
     assert len(embeddings.embed_query("What is my loan balance?")) == 384
+
+
+# ── PII masking ────────────────────────────────────────────────────────────────
+
+def test_pii_masker_detects_pan_aadhar_phone_email():
+    from services.pii_service.masker import mask_text
+
+    masked, mapping = mask_text(
+        "My PAN is ABCDE1234F, Aadhar is 1234 5678 9012, "
+        "call me at 9876543210 or email test.user@example.com"
+    )
+    assert "ABCDE1234F" not in masked
+    assert "1234 5678 9012" not in masked
+    assert "9876543210" not in masked
+    assert "test.user@example.com" not in masked
+    assert set(mapping.values()) == {
+        "ABCDE1234F", "1234 5678 9012", "9876543210", "test.user@example.com",
+    }
+
+
+def test_pii_masker_detects_masked_aadhar_format():
+    from services.pii_service.masker import mask_text
+
+    masked, mapping = mask_text("Aadhar on file shows XXXX-XXXX-4321.")
+    assert "XXXX-XXXX-4321" not in masked
+    assert list(mapping.values()) == ["XXXX-XXXX-4321"]
+
+
+def test_pii_masker_luhn_valid_card_masked_but_internal_ids_are_not():
+    from services.pii_service.masker import mask_text
+
+    masked, mapping = mask_text(
+        "My card number is 4532015112830366. "
+        "My loan LN001002 balance is 500000, account 40900000100008."
+    )
+    assert "4532015112830366" not in masked
+    assert list(mapping.values()) == ["4532015112830366"]
+    # Internal reference IDs and amounts are NOT PII and must stay untouched — the LLM
+    # needs them to generate a useful answer.
+    assert "LN001002" in masked
+    assert "500000" in masked
+    assert "40900000100008" in masked
+
+
+def test_pii_masker_known_values_substitution_and_round_trip():
+    from services.pii_service.masker import mask_text, unmask_text
+
+    original = "Hi, this is Fathima Devasahayam, my phone is 7538870992."
+    masked, mapping = mask_text(
+        original, known_values={"name": "Fathima Devasahayam", "phone": "7538870992"}
+    )
+    assert "Fathima Devasahayam" not in masked
+    assert "7538870992" not in masked
+    assert unmask_text(masked, mapping) == original
+
+
+def test_pii_masker_toggle_disables_masking(monkeypatch):
+    from services.pii_service.masker import mask_text
+
+    monkeypatch.setenv("PII_MASKING_ENABLED", "false")
+    masked, mapping = mask_text("My PAN is ABCDE1234F")
+    assert masked == "My PAN is ABCDE1234F"
+    assert mapping == {}
+
+
+def test_generate_answer_masks_pii_before_sending_to_groq_and_restores_name():
+    from services.rag_service.groq_generator import GroqGenerator
+
+    captured = {}
+
+    class FakeGenerator(GroqGenerator):
+        def _generate(self, system_prompt, user_prompt):
+            captured["prompt"] = user_prompt
+            # Simulate the LLM using the masked name placeholder in a personalized greeting.
+            return {"text": "Hello [NAME_1], your loan LN001002 status is Active.",
+                    "model": "test", "llm_used": True}
+
+    ctx = {
+        "channel": "whatsapp",
+        "graph_context": {
+            "customer_id": "CRN00010005",
+            "name": "Fathima Devasahayam",
+            "phone": "7538870992",
+            "email": "fathimawork511@gmail.com",
+            "city": "Amritsar",
+            "loans": [{
+                "loan_id": "LN001002", "loan_type": "Personal Loan", "status": "Active",
+                "amount_inr": 17072.94, "next_step": "EMI overdue",
+            }],
+        },
+    }
+    result = FakeGenerator().generate_answer(
+        "My PAN is ABCDE1234F, what is my loan status?", [], ctx
+    )
+    prompt = captured["prompt"]
+    assert "ABCDE1234F" not in prompt
+    assert "Fathima Devasahayam" not in prompt
+    assert "[PAN_1]" in prompt
+    assert "[NAME_1]" in prompt
+    # Non-PII operational data the LLM needs must stay untouched.
+    assert "LN001002" in prompt
+    # The final answer shown to the customer has the real name restored.
+    assert result["text"] == "Hello Fathima Devasahayam, your loan LN001002 status is Active."
