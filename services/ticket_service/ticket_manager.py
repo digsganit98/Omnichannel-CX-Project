@@ -28,7 +28,7 @@ class TicketManager:
         escalation_reason: str | None = None,
         customer: dict | None = None,
     ) -> Ticket:
-        existing = self.repository.find_active_ticket(conversation_id)
+        existing = self.repository.find_active_ticket_for_intent(conversation_id, intent.value)
         if existing:
             return existing
         priority = TicketPriority.HIGH if urgency == Urgency.HIGH else TicketPriority.MEDIUM

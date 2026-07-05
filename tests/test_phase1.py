@@ -666,6 +666,34 @@ def test_low_confidence_retrieval_creates_ticket():
     assert repo.get_ticket(response.ticket_id)
 
 
+def test_distinct_bfsi_issues_create_distinct_team_tickets():
+    repo = SQLiteCXRepository(":memory:")
+    workflow = graph(repo)
+
+    kyc_response = workflow.run(
+        whatsapp_message(
+            message_id="distinct-team-kyc",
+            text="My KYC update documents are still not accepted, this is urgent.",
+        )
+    )
+    claim_response = workflow.run(
+        whatsapp_message(
+            message_id="distinct-team-claim",
+            text="I need to file a hospitalization reimbursement claim urgently.",
+        )
+    )
+
+    kyc_ticket = repo.get_ticket(kyc_response.ticket_id)
+    claim_ticket = repo.get_ticket(claim_response.ticket_id)
+
+    assert kyc_ticket["ticket_id"] != claim_ticket["ticket_id"]
+    assert kyc_ticket["intent"] == "kyc_update"
+    assert kyc_ticket["assigned_team"] == "compliance"
+    assert claim_ticket["intent"] == "insurance_claim"
+    assert claim_ticket["assigned_team"] == "claims"
+    assert "claims team" in claim_response.message.lower()
+
+
 def test_customer_answer_kb_documents_are_knowledge_base_type():
     """PDF KB docs should all have doc_type=knowledge_base."""
     documents = load_knowledge_documents()

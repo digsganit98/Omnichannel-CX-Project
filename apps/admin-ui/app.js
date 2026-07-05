@@ -689,7 +689,7 @@ function renderRight(conv, tickets) {
     return '<span class="cp ' + cm.pill + '" style="font-size:10px">' + cm.svg + cm.label + '</span>';
   }).join('');
 
-  var NEG_KW = ['angry','bad','terrible','frustrated','late','failed','problem','damaged','not received','not credited','charged twice','cancel','fraud','stolen','unauthorized','incorrect charge','overdue','default','claim rejected','policy lapsed','blocked account','money gone','wrong transfer','human agent','human representative'];
+  var NEG_KW = ['angry','bad','terrible','frustrated','late','failed','problem','damaged','not received','not credited','charged twice','cancel','fraud','hacked','phishing','scam','stolen','stole','unauthorized','not authorized','unknown transaction','incorrect charge','overdue','default','claim rejected','policy lapsed','blocked account','money gone','wrong transfer','human agent','human representative'];
   var POS_KW = ['thanks','thank you','great','good','helpful','resolved','approved','credited','disbursed','processed','excellent','perfect','awesome'];
   function clientSentiment(text) {
     var t = (text || '').toLowerCase();
@@ -698,18 +698,27 @@ function renderRight(conv, tickets) {
     return 'neutral';
   }
   var inbound = turns.filter(function(t) { return t.direction === 'inbound'; });
+  var sentimentWindow = inbound.slice(-5);
+  var latestInbound = inbound.length ? inbound[inbound.length - 1] : null;
   var sentCounts = { positive: 0, neutral: 0, negative: 0 };
-  inbound.forEach(function(t) {
+  sentimentWindow.forEach(function(t) {
     var s = (t.metadata && t.metadata.sentiment) ? t.metadata.sentiment.toLowerCase() : clientSentiment(t.text);
     if (sentCounts[s] !== undefined) sentCounts[s]++;  else sentCounts.neutral++;
   });
-  var total = inbound.length || 1;
+  var total = sentimentWindow.length || 1;
   var negPct = Math.round((sentCounts.negative / total) * 100);
   var posPct = Math.round((sentCounts.positive / total) * 100);
   var neuPct = Math.max(0, 100 - negPct - posPct);
-  var msgCount = Math.min(inbound.length, 5) || 1;
+  var msgCount = sentimentWindow.length || 1;
+  var latestSentiment = latestInbound
+    ? ((latestInbound.metadata && latestInbound.metadata.sentiment) ? latestInbound.metadata.sentiment.toLowerCase() : clientSentiment(latestInbound.text))
+    : 'neutral';
+  var latestUrgency = latestInbound ? ((latestInbound.urgency || '').toLowerCase()) : '';
   var sentLbl, sentClr, sentTrend;
-  if (negPct >= 60) {
+  if (latestSentiment === 'negative' || latestUrgency === 'high' || latestUrgency === 'critical') {
+    sentLbl = 'Negative'; sentClr = 'var(--red-t)';
+    sentTrend = 'Latest message needs attention';
+  } else if (negPct >= 60) {
     sentLbl = 'Very frustrated'; sentClr = '#dc2626';
     sentTrend = 'Sharply declining · last ' + Math.min(msgCount, 4) + ' messages';
   } else if (negPct >= 30) {
