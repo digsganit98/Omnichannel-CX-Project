@@ -16,6 +16,7 @@ from services.agent_service.orchestration_agents import (
 from services.channel_service.delivery import OutboundDeliveryService
 from services.crm_service.client import CRMClient
 from services.orchestration_service.state import OrchestrationState, WorkflowStep
+from services.observability_service import langfuse_workflow_trace, llm_observation_context
 from services.persistence_service.repository import CXRepository
 from services.rag_service.rag_pipeline import RAGPipeline
 from services.ticket_service.ticket_manager import TicketManager
@@ -104,9 +105,37 @@ class OrchestrationGraph:
             raise RuntimeError("Duplicate message is still being processed")
 
         try:
-            result = self.workflow.invoke({"runtime": state})
-            state = result["runtime"]
-            response = self._response(state)
+            with langfuse_workflow_trace(
+                name="omnichannel_message",
+                input_text=message.text,
+                tags=[message.channel.value],
+                metadata={
+                    "correlation_id": state.message.correlation_id,
+                    "message_id": state.message_id,
+                    "channel": message.channel.value,
+                    "provider": message.provider,
+                },
+            ) as trace:
+                result = self.workflow.invoke({"runtime": state})
+                state = result["runtime"]
+                response = self._response(state)
+                if trace:
+                    trace.update(
+                        output=response.message if _capture_langfuse_io() else None,
+                        metadata={
+                            "correlation_id": response.correlation_id,
+                            "conversation_id": response.conversation_id,
+                            "customer_id": response.customer_id,
+                            "channel": message.channel.value,
+                            "intent": response.intent,
+                            "sentiment": response.sentiment,
+                            "urgency": response.urgency,
+                            "ticket_id": response.ticket_id,
+                            "retrieval_backend": response.retrieval_backend,
+                            "llm_used": response.llm_used,
+                            "workflow_steps": [entry["step"] for entry in response.workflow_trace],
+                        },
+                    )
             self.repository.save_idempotent_response(message.provider, state.message_id, response.model_dump())
             logger.info(
                 "message_processed",
@@ -339,7 +368,8 @@ class OrchestrationGraph:
 
     def _classify_intent(self, graph_state: GraphState) -> dict:
         state = graph_state["runtime"]
-        state.analysis = self.intent_agent.run(state.message, state.context)
+        with llm_observation_context(**self._llm_context(state, "intent_classification_agent")):
+            state.analysis = self.intent_agent.run(state.message, state.context)
         if state.inbound_turn_id:
             self.repository.update_turn_metadata(state.inbound_turn_id, {"sentiment": state.analysis.sentiment})
             self.repository.update_turn_intent_urgency(
@@ -404,7 +434,8 @@ class OrchestrationGraph:
             **state.context,
             "language": state.analysis.language if state.analysis else "en",
         }
-        state.resolution = self.resolution_agent.run(state.message, enriched_context, intent=intent_str)
+        with llm_observation_context(**self._llm_context(state, "query_resolution_agent", intent=intent_str)):
+            state.resolution = self.resolution_agent.run(state.message, enriched_context, intent=intent_str)
         self._audit("retrieval_performed", state,
                     intent=intent_str or "unknown",
                     details={
@@ -632,6 +663,20 @@ class OrchestrationGraph:
             "channel": state.message.channel.value,
         }
 
+    def _llm_context(self, state: OrchestrationState, agent: str, intent: str | None = None) -> dict:
+        return {
+            **self._common(state),
+            "agent": agent,
+            "intent": intent or (state.analysis.intent.value if state.analysis else None),
+            "ticket_id": state.ticket.ticket_id if state.ticket else None,
+            "resolution_level": (
+                state.resolution.resolution_decision.get("resolution_level")
+                if state.resolution and state.resolution.resolution_decision
+                else None
+            ),
+            "retrieval_backend": state.resolution.retrieval_backend if state.resolution else None,
+        }
+
     @staticmethod
     def _intent(state: OrchestrationState) -> str:
         if state.ticket_action.action == TicketAction.RESOLVE:
@@ -700,3 +745,9 @@ def _extract_embedding(resolution) -> str:
                 return ",".join(str(round(float(v), 6)) for v in emb[:384])
             return str(emb)[:2000]
     return ""
+
+
+def _capture_langfuse_io() -> bool:
+    import os
+
+    return os.getenv("LANGFUSE_CAPTURE_IO", "false").lower() == "true"

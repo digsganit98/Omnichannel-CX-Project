@@ -16,3 +16,4 @@ data/uploaded_docs/*
 artifacts/*
 !artifacts/.gitkeep
 logs/*
+.claude/

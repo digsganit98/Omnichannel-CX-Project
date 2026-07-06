@@ -1,7 +1,9 @@
 import json
 import os
+import time
 from pathlib import Path
 
+from services.observability_service import record_llm_call
 from services.pii_service.masker import mask_text, unmask_text
 
 # Separator used to mask several text fragments in a single mask_text() call so
@@ -179,7 +181,12 @@ class GroqGenerator:
             f"Retrieved context:\n{sources or '(none)'}\n\n"
             "Answer (body only — no greeting, no sign-off):"
         )
-        result = self._generate(system_prompt=_system_prompt(), user_prompt=user_prompt)
+        result = self._generate(
+            system_prompt=_system_prompt(),
+            user_prompt=user_prompt,
+            operation="answer_generation",
+            metadata={"context_count": len(contexts), "channel": channel},
+        )
         if result.get("text"):
             # Restore the customer's own masked values (e.g. name) if the LLM echoed a
             # placeholder back — never send [NAME_1]-style tokens to the customer.
@@ -244,6 +251,8 @@ class GroqGenerator:
         result = self._generate(
             system_prompt="You are a BFSI intent classifier. Return ONLY valid JSON. Never explain or add markdown.",
             user_prompt=user_prompt,
+            operation="intent_classification",
+            metadata={"has_graph_context": bool(graph_text), "history_turns": len(history_lines)},
         )
         if not result["llm_used"]:
             return None
@@ -276,9 +285,27 @@ class GroqGenerator:
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
-    def _generate(self, system_prompt: str, user_prompt: str) -> dict:
+    def _generate(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        operation: str = "llm_generation",
+        metadata: dict | None = None,
+    ) -> dict:
         if not self.api_key:
-            return {"text": "", "model": self.model, "llm_used": False, "error": "GROQ_API_KEY not set"}
+            result = {"text": "", "model": self.model, "llm_used": False, "error": "GROQ_API_KEY not set"}
+            record_llm_call(
+                provider="groq",
+                model=self.model,
+                operation=operation,
+                llm_used=False,
+                latency_ms=0.0,
+                input_text=user_prompt,
+                error=result["error"],
+                metadata=metadata,
+            )
+            return result
+        started = time.perf_counter()
         try:
             response = self._groq.chat.completions.create(
                 model=self.model,
@@ -289,8 +316,32 @@ class GroqGenerator:
                 temperature=0.2,
                 timeout=self.timeout,
             )
-            return {"text": response.choices[0].message.content.strip(), "model": self.model, "llm_used": True}
+            text = response.choices[0].message.content.strip()
+            latency_ms = round((time.perf_counter() - started) * 1000, 2)
+            record_llm_call(
+                provider="groq",
+                model=self.model,
+                operation=operation,
+                llm_used=True,
+                latency_ms=latency_ms,
+                response=response,
+                input_text=user_prompt,
+                output_text=text,
+                metadata=metadata,
+            )
+            return {"text": text, "model": self.model, "llm_used": True}
         except Exception as exc:
+            latency_ms = round((time.perf_counter() - started) * 1000, 2)
+            record_llm_call(
+                provider="groq",
+                model=self.model,
+                operation=operation,
+                llm_used=False,
+                latency_ms=latency_ms,
+                input_text=user_prompt,
+                error=str(exc),
+                metadata=metadata,
+            )
             return {"text": "", "model": self.model, "llm_used": False, "error": str(exc)}
 
 

@@ -49,6 +49,9 @@ class CXRepository(Protocol):
     def list_whatsapp_delivery_statuses(self, provider_message_id: str | None = None, limit: int = 50) -> list[dict]: ...
     def add_audit_event(self, event_type: str, correlation_id: str, **values) -> None: ...
     def list_audit_events(self, correlation_id: str | None = None) -> list[dict]: ...
+    def add_llm_usage_event(self, event: dict) -> dict: ...
+    def list_llm_usage_events(self, limit: int = 100, correlation_id: str | None = None) -> list[dict]: ...
+    def get_llm_usage_summary(self, days: int = 7) -> dict: ...
     def get_conversation(self, conversation_id: str) -> dict | None: ...
     def list_conversations(self) -> list[dict]: ...
     def list_customer_identifiers(self, customer_id: str) -> list[dict]: ...
@@ -501,6 +504,167 @@ class SQLiteCXRepository:
             rows = conn.execute(query, args).fetchall()
         return [self._json_fields(dict(row), "details_json") for row in rows]
 
+    def add_llm_usage_event(self, event: dict) -> dict:
+        event_id = event.get("event_id") or new_id("llm")
+        created_at = event.get("created_at") or utc_now()
+        values = {
+            "event_id": event_id,
+            "correlation_id": event.get("correlation_id"),
+            "conversation_id": event.get("conversation_id"),
+            "customer_id": event.get("customer_id"),
+            "message_id": event.get("message_id"),
+            "channel": event.get("channel"),
+            "agent": event.get("agent"),
+            "operation": event.get("operation") or "unknown",
+            "provider": event.get("provider") or "unknown",
+            "model": event.get("model") or "unknown",
+            "llm_used": 1 if event.get("llm_used") else 0,
+            "prompt_tokens": int(event.get("prompt_tokens") or 0),
+            "completion_tokens": int(event.get("completion_tokens") or 0),
+            "total_tokens": int(event.get("total_tokens") or 0),
+            "estimated_cost_usd": float(event.get("estimated_cost_usd") or 0.0),
+            "latency_ms": event.get("latency_ms"),
+            "status": event.get("status") or "unknown",
+            "error": event.get("error"),
+            "intent": event.get("intent"),
+            "resolution_level": event.get("resolution_level"),
+            "ticket_id": event.get("ticket_id"),
+            "retrieval_backend": event.get("retrieval_backend"),
+            "metadata_json": json_text(event.get("metadata")),
+            "created_at": created_at,
+        }
+        with self.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO llm_usage_events(
+                    event_id, correlation_id, conversation_id, customer_id, message_id, channel,
+                    agent, operation, provider, model, llm_used, prompt_tokens, completion_tokens,
+                    total_tokens, estimated_cost_usd, latency_ms, status, error, intent,
+                    resolution_level, ticket_id, retrieval_backend, metadata_json, created_at
+                )
+                VALUES (
+                    :event_id, :correlation_id, :conversation_id, :customer_id, :message_id, :channel,
+                    :agent, :operation, :provider, :model, :llm_used, :prompt_tokens, :completion_tokens,
+                    :total_tokens, :estimated_cost_usd, :latency_ms, :status, :error, :intent,
+                    :resolution_level, :ticket_id, :retrieval_backend, :metadata_json, :created_at
+                )
+                """,
+                values,
+            )
+        return self.get_llm_usage_event(event_id) or {}
+
+    def get_llm_usage_event(self, event_id: str) -> dict | None:
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM llm_usage_events WHERE event_id = ?",
+                (event_id,),
+            ).fetchone()
+        return self._llm_usage_dict(row) if row else None
+
+    def list_llm_usage_events(self, limit: int = 100, correlation_id: str | None = None) -> list[dict]:
+        query = "SELECT * FROM llm_usage_events"
+        args: tuple = ()
+        if correlation_id:
+            query += " WHERE correlation_id = ?"
+            args = (correlation_id,)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        args = (*args, max(1, min(int(limit or 100), 500)))
+        with self.connection() as conn:
+            rows = conn.execute(query, args).fetchall()
+        return [self._llm_usage_dict(row) for row in rows]
+
+    def get_llm_usage_summary(self, days: int = 7) -> dict:
+        cutoff = None
+        if days and days > 0:
+            from datetime import timedelta
+
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+        where = "WHERE created_at >= ?" if cutoff else ""
+        args: tuple = (cutoff,) if cutoff else ()
+        with self.connection() as conn:
+            totals = conn.execute(
+                f"""
+                SELECT
+                    COUNT(*) AS calls,
+                    SUM(CASE WHEN llm_used = 1 THEN 1 ELSE 0 END) AS successful_calls,
+                    SUM(prompt_tokens) AS prompt_tokens,
+                    SUM(completion_tokens) AS completion_tokens,
+                    SUM(total_tokens) AS total_tokens,
+                    SUM(estimated_cost_usd) AS estimated_cost_usd,
+                    AVG(latency_ms) AS avg_latency_ms
+                FROM llm_usage_events
+                {where}
+                """,
+                args,
+            ).fetchone()
+
+            by_operation = conn.execute(
+                f"""
+                SELECT operation, COUNT(*) AS calls, SUM(total_tokens) AS total_tokens,
+                       SUM(estimated_cost_usd) AS estimated_cost_usd, AVG(latency_ms) AS avg_latency_ms
+                FROM llm_usage_events
+                {where}
+                GROUP BY operation
+                ORDER BY estimated_cost_usd DESC, total_tokens DESC
+                """,
+                args,
+            ).fetchall()
+
+            by_model = conn.execute(
+                f"""
+                SELECT model, COUNT(*) AS calls, SUM(total_tokens) AS total_tokens,
+                       SUM(estimated_cost_usd) AS estimated_cost_usd
+                FROM llm_usage_events
+                {where}
+                GROUP BY model
+                ORDER BY estimated_cost_usd DESC, total_tokens DESC
+                """,
+                args,
+            ).fetchall()
+
+            by_channel = conn.execute(
+                f"""
+                SELECT COALESCE(channel, 'unknown') AS channel, COUNT(*) AS calls,
+                       SUM(total_tokens) AS total_tokens, SUM(estimated_cost_usd) AS estimated_cost_usd
+                FROM llm_usage_events
+                {where}
+                GROUP BY COALESCE(channel, 'unknown')
+                ORDER BY estimated_cost_usd DESC, total_tokens DESC
+                """,
+                args,
+            ).fetchall()
+
+            by_intent = conn.execute(
+                f"""
+                SELECT COALESCE(intent, 'unknown') AS intent, COUNT(*) AS calls,
+                       SUM(total_tokens) AS total_tokens, SUM(estimated_cost_usd) AS estimated_cost_usd
+                FROM llm_usage_events
+                {where}
+                GROUP BY COALESCE(intent, 'unknown')
+                ORDER BY estimated_cost_usd DESC, total_tokens DESC
+                LIMIT 10
+                """,
+                args,
+            ).fetchall()
+
+        return {
+            "window_days": days,
+            "totals": {
+                "calls": totals["calls"] or 0,
+                "successful_calls": totals["successful_calls"] or 0,
+                "prompt_tokens": totals["prompt_tokens"] or 0,
+                "completion_tokens": totals["completion_tokens"] or 0,
+                "total_tokens": totals["total_tokens"] or 0,
+                "estimated_cost_usd": round(totals["estimated_cost_usd"] or 0.0, 6),
+                "avg_latency_ms": round(totals["avg_latency_ms"] or 0.0, 2),
+            },
+            "by_operation": [self._usage_group(row) for row in by_operation],
+            "by_model": [self._usage_group(row) for row in by_model],
+            "by_channel": [self._usage_group(row) for row in by_channel],
+            "by_intent": [self._usage_group(row) for row in by_intent],
+        }
+
     def get_conversation(self, conversation_id: str) -> dict | None:
         with self.connection() as conn:
             row = conn.execute("SELECT * FROM conversations WHERE conversation_id = ?", (conversation_id,)).fetchone()
@@ -605,6 +769,25 @@ class SQLiteCXRepository:
 
     def _turn_dict(self, row: sqlite3.Row) -> dict:
         return self._json_fields(dict(row), "metadata_json")
+
+    @staticmethod
+    def _usage_group(row: sqlite3.Row) -> dict:
+        value = dict(row)
+        if "estimated_cost_usd" in value:
+            value["estimated_cost_usd"] = round(value["estimated_cost_usd"] or 0.0, 6)
+        if "avg_latency_ms" in value:
+            value["avg_latency_ms"] = round(value["avg_latency_ms"] or 0.0, 2)
+        for key in ("calls", "total_tokens"):
+            if key in value:
+                value[key] = value[key] or 0
+        return value
+
+    @staticmethod
+    def _llm_usage_dict(row: sqlite3.Row) -> dict:
+        value = SQLiteCXRepository._json_fields(dict(row), "metadata_json")
+        value["llm_used"] = bool(value.get("llm_used"))
+        value["metadata"] = value.get("metadata") or {}
+        return value
 
     @staticmethod
     def _ticket(row: sqlite3.Row) -> Ticket:

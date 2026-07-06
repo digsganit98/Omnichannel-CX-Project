@@ -713,6 +713,80 @@ def test_llm_intent_result_accepts_model_reason():
     assert result.analysis_source == "groq_llm"
 
 
+def test_groq_generator_records_local_llm_usage(monkeypatch, tmp_path):
+    from services.observability_service import llm_observation_context
+    from services.rag_service.groq_generator import GroqGenerator
+
+    class Usage:
+        prompt_tokens = 120
+        completion_tokens = 30
+        total_tokens = 150
+
+    class Message:
+        content = "Observed answer"
+
+    class Choice:
+        message = Message()
+
+    class Response:
+        choices = [Choice()]
+        usage = Usage()
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            return Response()
+
+    class FakeChat:
+        completions = FakeCompletions()
+
+    class FakeGroq:
+        chat = FakeChat()
+
+    db_path = tmp_path / "llm_usage.db"
+    monkeypatch.setenv("DATABASE_PATH", str(db_path))
+    monkeypatch.setenv("LLM_OBSERVABILITY_ENABLED", "true")
+    monkeypatch.setenv("LANGFUSE_ENABLED", "false")
+    monkeypatch.setenv("LLM_COST_RATES_JSON", '{"llama-3.1-8b-instant":{"input":0.05,"output":0.08}}')
+
+    generator = GroqGenerator()
+    generator.api_key = "test-key"
+    generator._client = FakeGroq()
+
+    with llm_observation_context(
+        correlation_id="corr_llm_test",
+        conversation_id="conv_llm_test",
+        customer_id="cust_llm_test",
+        message_id="msg_llm_test",
+        channel="whatsapp",
+        agent="query_resolution_agent",
+        intent=Intent.GENERAL_INQUIRY.value,
+    ):
+        result = generator._generate(
+            system_prompt="system",
+            user_prompt="customer question",
+            operation="answer_generation",
+            metadata={"context_count": 2},
+        )
+
+    repo = SQLiteCXRepository(str(db_path))
+    events = repo.list_llm_usage_events()
+    summary = repo.get_llm_usage_summary(days=7)
+
+    assert result["text"] == "Observed answer"
+    assert len(events) == 1
+    assert events[0]["correlation_id"] == "corr_llm_test"
+    assert events[0]["operation"] == "answer_generation"
+    assert events[0]["agent"] == "query_resolution_agent"
+    assert events[0]["intent"] == Intent.GENERAL_INQUIRY.value
+    assert events[0]["prompt_tokens"] == 120
+    assert events[0]["completion_tokens"] == 30
+    assert events[0]["total_tokens"] == 150
+    assert events[0]["estimated_cost_usd"] > 0
+    assert events[0]["metadata"]["context_count"] == 2
+    assert summary["totals"]["calls"] == 1
+    assert summary["by_operation"][0]["operation"] == "answer_generation"
+
+
 def test_llm_intent_guardrails_raise_understated_sentiment_and_urgency():
     result = CXAgent(UnderstatedLLM()).analyze(
         "Someone hacked my account and stole all my money. This is fraud! Help immediately!"

@@ -99,7 +99,7 @@ class ResolutionDecisionEngine:
         examples = self.retrieve_similar_examples(clean_query, top_k=DEFAULT_TOP_K)
         masked_query, pii_mapping = mask_text(clean_query)
         prompt = build_resolution_prompt(masked_query, clean_intent, clean_sentiment, examples)
-        llm_result = self._call_llm(prompt)
+        llm_result = self._call_llm(prompt, clean_intent)
 
         if llm_result.get("llm_used") and llm_result.get("text"):
             unmasked_text = unmask_text(llm_result["text"], pii_mapping)
@@ -171,15 +171,19 @@ class ResolutionDecisionEngine:
             for example, vector in scored
         ]
 
-    def _call_llm(self, prompt: str) -> dict[str, Any]:
+    def _call_llm(self, prompt: str, intent: str = "unknown") -> dict[str, Any]:
         try:
             if isinstance(self.generator, GroqGenerator):
                 result = self.generator._generate(
                     system_prompt="You are a BFSI resolution classifier. Return ONLY valid JSON.",
                     user_prompt=prompt,
+                    operation="resolution_level_classification",
+                    metadata={"intent": intent},
                 )
             elif self.generator.__class__.__name__ == "OllamaGenerator":
-                result = self.generator._generate(prompt)
+                result = self.generator._generate(
+                    prompt, operation="resolution_level_classification", metadata={"intent": intent}
+                )
             elif hasattr(self.generator, "_generate"):
                 result = self.generator._generate(prompt)
             else:
@@ -193,10 +197,14 @@ class ResolutionDecisionEngine:
             return {"text": "", "llm_used": False, "error": "No fallback LLM generator configured."}
         try:
             if self.fallback_generator.__class__.__name__ == "OllamaGenerator":
-                return self.fallback_generator._generate(prompt)
+                return self.fallback_generator._generate(
+                    prompt, operation="resolution_level_classification", metadata={"intent": intent, "fallback": True}
+                )
             return self.fallback_generator._generate(
                 system_prompt="You are a BFSI resolution classifier. Return ONLY valid JSON.",
                 user_prompt=prompt,
+                operation="resolution_level_classification",
+                metadata={"intent": intent, "fallback": True},
             )
         except Exception as exc:
             return {"text": "", "llm_used": False, "error": str(exc)}

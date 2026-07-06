@@ -992,12 +992,14 @@ window.loadAnalytics = async function() {
       fetch('/analytics/intents',  { headers: adminHeaders() }).then(function(r){return r.json();}),
       fetch('/analytics/agents',   { headers: adminHeaders() }).then(function(r){return r.json();}),
       fetch('/admin/audit-events', { headers: adminHeaders() }).then(function(r){return r.json();}),
+      fetch('/admin/llm-observability/summary?days=7', { headers: adminHeaders() }).then(function(r){return r.json();}),
     ]);
     renderOverview(results[0]);
     renderChannelBars(results[1]);
     renderIntentBars(results[2]);
     renderAgentPanel(results[3]);
     renderFeedList(results[4], false);
+    renderLlmUsagePanel(results[5]);
   } catch(e) {
     console.error('Analytics load error:', e.message);
   } finally {
@@ -1050,6 +1052,40 @@ function renderIntentBars(data) {
   var items = (data.intents||[]).map(function(i){return {intent:i.intent.replace(/_/g,' '),count:i.count};});
   renderBars('intentBars', items, 'intent', 'count', null);
 }
+
+function renderLlmUsagePanel(data) {
+  var el = document.getElementById('llmUsagePanel');
+  if (!el) return;
+  var totals = (data && data.totals) || {};
+  var calls = totals.calls || 0;
+  if (!calls) {
+    el.innerHTML = '<div class="empty-state">No LLM usage recorded yet</div>';
+    return;
+  }
+  var cost = Number(totals.estimated_cost_usd || 0);
+  var avg = Number(totals.avg_latency_ms || 0);
+  var cards = [
+    { val: calls, lbl: 'LLM calls' },
+    { val: (totals.total_tokens || 0).toLocaleString(), lbl: 'Tokens' },
+    { val: '$' + cost.toFixed(6), lbl: 'Estimated cost' },
+    { val: avg.toFixed(0) + ' ms', lbl: 'Avg latency' },
+  ];
+  var opRows = (data.by_operation || []).map(function(row) {
+    return '<tr><td style="font-weight:500;color:var(--t1)">' + escH((row.operation || 'unknown').replace(/_/g, ' ')) + '</td>'
+      + '<td>' + (row.calls || 0) + '</td>'
+      + '<td>' + Number(row.total_tokens || 0).toLocaleString() + '</td>'
+      + '<td>$' + Number(row.estimated_cost_usd || 0).toFixed(6) + '</td></tr>';
+  }).join('');
+  el.innerHTML = '<div class="stat-grid" style="grid-template-columns:repeat(4,1fr);margin-bottom:12px">'
+    + cards.map(function(c) {
+      return '<div class="stat-card"><div class="stat-val">' + c.val + '</div><div class="stat-lbl">' + c.lbl + '</div></div>';
+    }).join('')
+    + '</div>'
+    + '<table class="mini-table"><thead><tr><th>Operation</th><th>Calls</th><th>Tokens</th><th>Cost</th></tr></thead><tbody>'
+    + (opRows || '<tr><td colspan="4">No operation breakdown yet</td></tr>')
+    + '</tbody></table>';
+}
+
 function renderSentimentPanel(data) {
   var el = document.getElementById('sentimentPanel');
   var total = data.total || 0;

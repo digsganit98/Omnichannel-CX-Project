@@ -30,6 +30,7 @@ from .routes.email import router as email_router
 from .routes.email_inbox import router as email_inbox_router, set_poller as set_inbox_poller
 from .routes.integrations_whatsapp import router as integrations_whatsapp_router
 from .routes.integrations import router as integrations_router
+from .routes.llm_observability import router as llm_observability_router
 from .routes.neo4j_admin import router as neo4j_admin_router
 from .routes.orchestration import router as orchestration_router
 from .routes.rag import router as rag_router
@@ -74,6 +75,15 @@ def _seed_neo4j() -> None:
         client.close()
     except Exception:
         logger.exception("neo4j_seed_failed")
+
+
+@app.on_event("shutdown")
+def _flush_langfuse_on_shutdown() -> None:
+    from services.observability_service import flush_langfuse
+    flush_langfuse()
+    logger.info("langfuse_flushed")
+
+
 app.include_router(admin_auth_router)
 app.include_router(auth_router)
 app.include_router(analytics_router)
@@ -89,6 +99,7 @@ app.include_router(neo4j_admin_router)
 app.include_router(orchestration_router)
 app.include_router(rag_router)
 app.include_router(audit_router)
+app.include_router(llm_observability_router)
 app.include_router(test_whatsapp_router)
 app.include_router(user_portal_router)
 app.include_router(whatsapp_router)

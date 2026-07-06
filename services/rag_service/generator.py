@@ -1,7 +1,9 @@
 import json
+import time
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
+from services.observability_service import record_llm_call
 from services.rag_service.config import ollama_base_url, ollama_enabled, ollama_model, ollama_timeout_seconds
 
 
@@ -23,7 +25,7 @@ class OllamaGenerator:
             f"Conversation context: {json.dumps(conversation_context or {}, default=str)}\n\n"
             f"Customer query: {query}\n\nRetrieved context:\n{sources}\n\nAnswer:"
         )
-        return self._generate(prompt)
+        return self._generate(prompt, operation="answer_generation", metadata={"context_count": len(contexts)})
 
     def classify_message(self, message: str, context: dict | None = None) -> dict | None:
         prompt = (
@@ -34,7 +36,7 @@ class OllamaGenerator:
             "Treat cancellation, refund problems, complaints, and requests for a human during a problem as negative sentiment. "
             f"Context: {json.dumps(context or {}, default=str)} Message: {message}"
         )
-        result = self._generate(prompt)
+        result = self._generate(prompt, operation="intent_classification")
         if not result["llm_used"]:
             return None
         try:
@@ -67,18 +69,59 @@ class OllamaGenerator:
             status["error"] = str(exc)
         return status
 
-    def _generate(self, prompt: str) -> dict:
+    def _generate(self, prompt: str, operation: str = "llm_generation", metadata: dict | None = None) -> dict:
         if not self.enabled:
-            return {"text": "", "model": self.model, "llm_used": False, "error": "OLLAMA_ENABLED=false"}
+            result = {"text": "", "model": self.model, "llm_used": False, "error": "OLLAMA_ENABLED=false"}
+            record_llm_call(
+                provider="ollama",
+                model=self.model,
+                operation=operation,
+                llm_used=False,
+                latency_ms=0.0,
+                input_text=prompt,
+                error=result["error"],
+                metadata=metadata,
+            )
+            return result
         request = Request(
             f"{self.base_url}/api/generate",
             method="POST",
             data=json.dumps({"model": self.model, "prompt": prompt, "stream": False, "options": {"temperature": 0.2}}).encode(),
             headers={"Content-Type": "application/json"},
         )
+        started = time.perf_counter()
         try:
             with urlopen(request, timeout=self.timeout) as response:
                 payload = json.loads(response.read().decode("utf-8"))
-                return {"text": payload.get("response", "").strip(), "model": self.model, "llm_used": True}
+            latency_ms = round((time.perf_counter() - started) * 1000, 2)
+            text = payload.get("response", "").strip()
+            record_llm_call(
+                provider="ollama",
+                model=self.model,
+                operation=operation,
+                llm_used=True,
+                latency_ms=latency_ms,
+                response={
+                    "usage": {
+                        "prompt_tokens": payload.get("prompt_eval_count", 0),
+                        "completion_tokens": payload.get("eval_count", 0),
+                    }
+                },
+                input_text=prompt,
+                output_text=text,
+                metadata=metadata,
+            )
+            return {"text": text, "model": self.model, "llm_used": True}
         except (URLError, TimeoutError, OSError) as exc:
+            latency_ms = round((time.perf_counter() - started) * 1000, 2)
+            record_llm_call(
+                provider="ollama",
+                model=self.model,
+                operation=operation,
+                llm_used=False,
+                latency_ms=latency_ms,
+                input_text=prompt,
+                error=str(exc),
+                metadata=metadata,
+            )
             return {"text": "", "model": self.model, "llm_used": False, "error": str(exc)}
