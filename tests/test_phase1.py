@@ -408,6 +408,95 @@ def test_high_risk_keyword_forces_l3_before_llm_call():
     assert ticket["escalation_reason"].startswith("critical_escalation:")
 
 
+def test_distinct_l3_intents_create_distinct_team_tickets():
+    repo = SQLiteCXRepository(":memory:")
+    sender = Recorder()
+    workflow = OrchestrationGraph(
+        repo,
+        agent=CXAgent(NoLLM()),
+        rag=FakeRAG(),
+        delivery=OutboundDeliveryService(whatsapp=sender),
+        neo4j_client=WorkbookNeo4j(),
+        resolution_engine=FakeResolutionEngine(level="L3"),
+    )
+
+    fraud = workflow.run(
+        WhatsAppAdapter().normalize(WhatsAppWebhookPayload(
+            from_="+917538870992",
+            text="Someone hacked my account and stole money. This is fraud, help immediately.",
+            message_id="l3-fraud-separate-ticket",
+            metadata={"provider": "whatsapp_cloud"},
+        ))
+    )
+    default = workflow.run(
+        WhatsAppAdapter().normalize(WhatsAppWebhookPayload(
+            from_="+917538870992",
+            text="I received a loan default notice but I already paid my EMI.",
+            message_id="l3-default-separate-ticket",
+            metadata={"provider": "whatsapp_cloud"},
+        ))
+    )
+
+    fraud_ticket = repo.get_ticket(fraud.ticket_id)
+    default_ticket = repo.get_ticket(default.ticket_id)
+
+    assert fraud_ticket["ticket_id"] != default_ticket["ticket_id"]
+    assert fraud_ticket["intent"] == "fraud_report"
+    assert fraud_ticket["assigned_team"] == "fraud_and_disputes"
+    assert default_ticket["intent"] == "loan_default_notice"
+    assert default_ticket["assigned_team"] == "collections"
+
+
+def test_distinct_l3_fraud_incidents_create_distinct_tickets():
+    repo = SQLiteCXRepository(":memory:")
+    sender = Recorder()
+    workflow = OrchestrationGraph(
+        repo,
+        agent=CXAgent(NoLLM()),
+        rag=FakeRAG(),
+        delivery=OutboundDeliveryService(whatsapp=sender),
+        neo4j_client=WorkbookNeo4j(),
+        resolution_engine=FakeResolutionEngine(level="L3"),
+    )
+
+    takeover = workflow.run(
+        WhatsAppAdapter().normalize(WhatsAppWebhookPayload(
+            from_="+917538870992",
+            text="Someone hacked my account and transferred money without my permission.",
+            message_id="l3-fraud-account-takeover",
+            metadata={"provider": "whatsapp_cloud"},
+        ))
+    )
+    phishing = workflow.run(
+        WhatsAppAdapter().normalize(WhatsAppWebhookPayload(
+            from_="+917538870992",
+            text="I got a phishing link, entered my banking details, and now I cannot access my account",
+            message_id="l3-fraud-phishing-compromise",
+            metadata={"provider": "whatsapp_cloud"},
+        ))
+    )
+    repeated_takeover = workflow.run(
+        WhatsAppAdapter().normalize(WhatsAppWebhookPayload(
+            from_="+917538870992",
+            text="Someone hacked my account and transferred money without my permission.",
+            message_id="l3-fraud-account-takeover-repeat",
+            metadata={"provider": "whatsapp_cloud"},
+        ))
+    )
+
+    takeover_ticket = repo.get_ticket(takeover.ticket_id)
+    phishing_ticket = repo.get_ticket(phishing.ticket_id)
+
+    assert takeover.ticket_id != phishing.ticket_id
+    assert repeated_takeover.ticket_id == takeover.ticket_id
+    assert takeover_ticket["intent"] == "fraud_report"
+    assert phishing_ticket["intent"] == "fraud_report"
+    assert takeover_ticket["assigned_team"] == "fraud_and_disputes"
+    assert phishing_ticket["assigned_team"] == "fraud_and_disputes"
+    assert takeover_ticket["metadata"]["ticket_scope"] == "fraud_report:account_takeover_funds_stolen"
+    assert phishing_ticket["metadata"]["ticket_scope"] == "fraud_report:phishing_credential_compromise"
+
+
 def test_email_complaint_escalates_and_sends_reply():
     repo = SQLiteCXRepository(":memory:")
     sender = Recorder()
@@ -612,6 +701,9 @@ def test_intent_classifier_supports_bfsi_intents():
     assert classify_intent("I need to file an insurance claim for my accident").intent == Intent.INSURANCE_CLAIM
     assert classify_intent("What is the status of my existing claim?").intent == Intent.CLAIM_STATUS
     assert classify_intent("How do I apply for a home loan?").intent == Intent.LOAN_APPLICATION
+    assert classify_intent("I received a loan default notice but I already paid my EMI").intent == Intent.LOAN_DEFAULT_NOTICE
+    assert classify_intent("What is SIP?").intent == Intent.GENERAL_INQUIRY
+    assert classify_intent("What is an ELSS scheme?").intent == Intent.GENERAL_INQUIRY
 
 
 def test_llm_intent_result_accepts_model_reason():
@@ -674,6 +766,35 @@ def test_query_resolution_agent_routes_general_inquiry_to_rag():
     resolution = agent.run(msg, {}, intent="kyc_update")
     # kyc_update is not a TRANSACTIONAL_INTENT → should use RAG
     assert resolution.retrieval_backend != "neo4j_graph"
+
+
+def test_general_inquiry_resolution_memory_does_not_override_kb_rag():
+    from services.agent_service.orchestration_agents import QueryResolutionAgent
+
+    class MemoryNeo4j(EmptyNeo4j):
+        def query(self, cypher, params=None):
+            if "ResolutionMemory" in cypher:
+                return [{
+                    "resolution": "Shared the latest account features and applicable charges for your reference.",
+                    "times_reused": 7,
+                    "verified": True,
+                    "query_pattern": "What are the current features and charges applicable on my account?",
+                }]
+            return super().query(cypher, params)
+
+    agent = QueryResolutionAgent(
+        rag=FakeRAG(),
+        neo4j_client=MemoryNeo4j(),
+        resolution_engine=FakeResolutionEngine(),
+    )
+    resolution = agent.run(
+        whatsapp_message(text="What is SIP?"),
+        {},
+        intent=Intent.GENERAL_INQUIRY.value,
+    )
+
+    assert resolution.retrieval_backend != "resolution_memory_cache"
+    assert "account features and applicable charges" not in resolution.answer.lower()
 
 
 def test_process_intents_never_route_to_customer_graph():
@@ -820,6 +941,38 @@ def test_low_confidence_retrieval_creates_ticket():
     response = graph(repo).run(whatsapp_message(text="unknown question xyz"))
     assert response.ticket_id
     assert repo.get_ticket(response.ticket_id)
+
+
+def test_investment_faqs_are_l1_kb_answers_without_tickets():
+    class EmptyStore:
+        def similarity_search(self, query, k):
+            return []
+
+    class NoGeneration:
+        model = "test"
+
+        def generate_answer(self, query, contexts, conversation_context):
+            return {"text": "", "model": self.model, "llm_used": False}
+
+    repo = SQLiteCXRepository(":memory:")
+    workflow = OrchestrationGraph(
+        repo,
+        agent=CXAgent(NoLLM()),
+        rag=RAGPipeline(store=EmptyStore(), generator=NoGeneration()),
+        delivery=OutboundDeliveryService(whatsapp=Recorder()),
+        neo4j_client=EmptyNeo4j(),
+        resolution_engine=FakeResolutionEngine(),
+    )
+
+    sip = workflow.run(whatsapp_message(message_id="sip-l1", text="What is SIP?"))
+    elss = workflow.run(whatsapp_message(message_id="elss-l1", text="What is an ELSS scheme?"))
+
+    assert sip.ticket_id is None
+    assert "systematic investment plan" in sip.message.lower()
+    assert sip.retrieval_backend == "keyword_fallback"
+    assert elss.ticket_id is None
+    assert "equity linked savings scheme" in elss.message.lower()
+    assert elss.retrieval_backend == "keyword_fallback"
 
 
 def test_customer_answer_kb_documents_are_knowledge_base_type():

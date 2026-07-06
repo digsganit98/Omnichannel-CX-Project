@@ -90,6 +90,18 @@
     "reason": "General product education."
   },
   {
+    "customer_query": "What is SIP or Systematic Investment Plan?",
+    "intent": "general_inquiry",
+    "resolution_level": "L1",
+    "reason": "General investment education answerable from the knowledge base."
+  },
+  {
+    "customer_query": "What is ELSS and what are its tax benefits?",
+    "intent": "general_inquiry",
+    "resolution_level": "L1",
+    "reason": "General tax-saving mutual fund FAQ, no customer-specific lookup required."
+  },
+  {
     "customer_query": "What factors affect my car insurance premium?",
     "intent": "general_inquiry",
     "resolution_level": "L1",

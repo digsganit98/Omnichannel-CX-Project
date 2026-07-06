@@ -198,16 +198,9 @@ class QueryResolutionAgent:
 
         # ── Priority 0: ResolutionMemory cache (agent-verified cross-customer answers) ──
         # Only for non-sensitive, non-ticket intents. Verified = human agent approved it.
-        memory_excluded_intents = {
-            Intent.TICKET_STATUS.value,
-            Intent.FRAUD_REPORT.value,
-            Intent.HUMAN_ESCALATION.value,
-            Intent.LOAN_STATUS.value,
-            Intent.LOAN_APPLICATION.value,
-            Intent.CLAIM_STATUS.value,
-            Intent.INSURANCE_CLAIM.value,
-            Intent.POLICY_STATUS.value,
-        }
+        # Broad ResolutionMemory keys are unsafe for customer-facing FAQs. Until memory
+        # hits are semantically validated, let KB/graph retrieval answer the live query.
+        memory_excluded_intents = {intent_item.value for intent_item in Intent}
         if intent and intent not in memory_excluded_intents and self.neo4j_client:
             try:
                 from services.neo4j_service.query_library import search_resolution_memory
@@ -490,6 +483,9 @@ class TicketCreationAgent:
         if analysis.intent in {Intent.ACCOUNT_BALANCE_INQUIRY, Intent.FUND_TRANSFER}:
             return "no_live_banking_data"
 
+        if _is_strong_l1_knowledge_answer(resolution):
+            return None
+
         # Rule 3: Ticket status is a lookup — never create a new ticket
         if analysis.intent == Intent.TICKET_STATUS:
             return None
@@ -549,6 +545,20 @@ class TicketCreationAgent:
 
 
 # ── Backwards-compatible aliases ─────────────────────────────────────────────
+def _is_strong_l1_knowledge_answer(resolution: QueryResolution) -> bool:
+    decision = resolution.resolution_decision or {}
+    if str(decision.get("resolution_level", "")).upper() != "L1":
+        return False
+    if resolution.retrieval_backend == "resolution_memory_cache":
+        return False
+    if resolution.confidence < 0.3:
+        return False
+    return any(
+        context.get("metadata", {}).get("doc_type") == "knowledge_base"
+        for context in (resolution.contexts or [])
+    )
+
+
 IntentDetectionAgent = IntentClassificationAgent
 TicketManagementAgent = TicketCreationAgent
 
