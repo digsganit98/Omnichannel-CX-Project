@@ -1,0 +1,140 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile.api
+    env_file:
+      - .env
+    environment:
+      DATABASE_PATH: /app/data/cx_phase1.db
+      SMTP_HOST: ${SMTP_HOST:-mailpit}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+      SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL:-support@example.com}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_USE_TLS: ${SMTP_USE_TLS:-false}
+      SMTP_USE_SSL: ${SMTP_USE_SSL:-false}
+      OPENSEARCH_URL: http://opensearch:9200
+      OLLAMA_BASE_URL: http://ollama:11434
+      OLLAMA_ENABLED: ${OLLAMA_ENABLED:-true}
+      OLLAMA_TIMEOUT_SECONDS: ${OLLAMA_TIMEOUT_SECONDS:-30}
+      EMBEDDING_BACKEND: ${EMBEDDING_BACKEND:-sentence_transformers}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-all-MiniLM-L6-v2}
+      ADMIN_API_KEY: ${ADMIN_API_KEY:-}
+      JWT_SECRET: ${JWT_SECRET:-local-demo-jwt-secret-change-me-32chars}
+      EMAIL_WEBHOOK_SECRET: ${EMAIL_WEBHOOK_SECRET:-}
+      WHATSAPP_VERIFY_TOKEN: ${WHATSAPP_VERIFY_TOKEN:-}
+      WHATSAPP_APP_SECRET: ${WHATSAPP_APP_SECRET:-}
+      WHATSAPP_LOCAL_TEST_MODE: ${WHATSAPP_LOCAL_TEST_MODE:-false}
+      WHATSAPP_TEST_SIGNATURE: ${WHATSAPP_TEST_SIGNATURE:-}
+      WHATSAPP_ACCESS_TOKEN: ${WHATSAPP_ACCESS_TOKEN:-}
+      WHATSAPP_PHONE_NUMBER_ID: ${WHATSAPP_PHONE_NUMBER_ID:-}
+      WHATSAPP_BUSINESS_ACCOUNT_ID: ${WHATSAPP_BUSINESS_ACCOUNT_ID:-}
+      OUTBOUND_DELIVERY_MODE: ${OUTBOUND_DELIVERY_MODE:-log}
+      IMAP_ENABLED: ${IMAP_ENABLED:-false}
+      IMAP_HOST: ${IMAP_HOST:-imap.gmail.com}
+      IMAP_PORT: ${IMAP_PORT:-993}
+      IMAP_USERNAME: ${IMAP_USERNAME:-}
+      IMAP_PASSWORD: ${IMAP_PASSWORD:-}
+      IMAP_POLL_INTERVAL_SECONDS: ${IMAP_POLL_INTERVAL_SECONDS:-30}
+      CRM_PROVIDER: ${CRM_PROVIDER:-disabled}
+      CRM_BASE_URL: ${CRM_BASE_URL:-}
+      CRM_API_TOKEN: ${CRM_API_TOKEN:-}
+      CRM_USER_EMAIL: ${CRM_USER_EMAIL:-}
+      CRM_PROJECT_KEY: ${CRM_PROJECT_KEY:-}
+      CRM_ISSUE_TYPE: ${CRM_ISSUE_TYPE:-Task}
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: ${NEO4J_USER:-neo4j}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-bfsi-password}
+      NEO4J_ENABLED: ${NEO4J_ENABLED:-true}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GROQ_MODEL: ${GROQ_MODEL:-llama-3.1-8b-instant}
+    command: >
+      sh -c "python -m services.persistence_service.migrate &&
+             uvicorn apps.api.main:app --host 0.0.0.0 --port 8000"
+    ports:
+      - "8888:8000"
+    volumes:
+      - cx-data:/app/data
+      - huggingface-cache:/root/.cache/huggingface
+      - ./apps/admin-ui:/app/apps/admin-ui
+    depends_on:
+      ollama:
+        condition: service_started
+      opensearch:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+
+  ngrok:
+    image: ngrok/ngrok:latest
+    environment:
+      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN:-}
+    command: http --url=${NGROK_DOMAIN:-https://smartly-shredder-overhang.ngrok-free.dev} --log=stdout api:8000
+    ports:
+      - "4040:4040"
+    depends_on:
+      api:
+        condition: service_started
+
+  opensearch:
+    image: opensearchproject/opensearch:2.17.1
+    environment:
+      - discovery.type=single-node
+      - DISABLE_SECURITY_PLUGIN=true
+      - OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m
+    ports:
+      - "9200:9200"
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+
+  ollama-pull:
+    image: ollama/ollama:latest
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+    entrypoint: ["/bin/sh"]
+    command: ["-c", "sleep 8 && ollama pull ${OLLAMA_MODEL:-qwen2.5:0.5b}"]
+    depends_on:
+      - ollama
+    profiles:
+      - setup
+
+  neo4j:
+    image: neo4j:5
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    environment:
+      - NEO4J_AUTH=${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-bfsi-password}
+    volumes:
+      - neo4j-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:7474 || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+
+  mailpit:
+    image: axllent/mailpit:v1.20
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+
+volumes:
+  cx-data:
+  opensearch-data:
+  ollama-data:
+  huggingface-cache:
+  neo4j-data:

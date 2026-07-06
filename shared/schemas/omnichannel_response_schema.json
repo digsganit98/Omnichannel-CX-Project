@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ExcelAlignedOmnichannelTicketRecord",
+  "description": "Consolidated omnichannel record aligned to the uploaded workbook sheets: Customers, Accounts, and Tickets. Enrichment fields are appended under AI_Enrichment.",
+  "type": "object",
+  "required": ["Customer", "Account", "Ticket", "AI_Enrichment"],
+  "properties": {
+    "Customer": {
+      "type": "object",
+      "required": ["Customer_ID", "Name", "City", "Email", "Phone", "Segment", "Language"],
+      "properties": {
+        "Customer_ID": { "type": "string" },
+        "Name": { "type": "string" },
+        "City": { "type": ["string", "null"] },
+        "Email": { "type": ["string", "null"] },
+        "Phone": { "type": ["string", "null"] },
+        "Segment": { "type": ["string", "null"] },
+        "Language": { "type": ["string", "null"] }
+      }
+    },
+    "Account": {
+      "type": "object",
+      "required": ["Account_ID", "Customer_ID", "Account_Type", "Total_Spent", "Status", "Join_Date"],
+      "properties": {
+        "Account_ID": { "type": ["string", "null"] },
+        "Customer_ID": { "type": "string" },
+        "Account_Type": { "type": ["string", "null"] },
+        "Total_Spent": { "type": ["number", "null"] },
+        "Status": { "type": ["string", "null"] },
+        "Join_Date": { "type": ["string", "null"] }
+      }
+    },
+    "Ticket": {
+      "type": "object",
+      "required": [
+        "Ticket_ID",
+        "Customer_ID",
+        "Channel",
+        "Issue_Type",
+        "Sentiment",
+        "Message",
+        "Order_ID",
+        "Resolution_Status",
+        "Timestamp"
+      ],
+      "properties": {
+        "Ticket_ID": { "type": "string" },
+        "Customer_ID": { "type": "string" },
+        "Channel": { "enum": ["Email", "WhatsApp", "Web", "App Chat", "Voice"] },
+        "Issue_Type": { "type": "string" },
+        "Sentiment": { "enum": ["Positive", "Neutral", "Negative"] },
+        "Message": { "type": "string" },
+        "Order_ID": { "type": ["string", "null"] },
+        "Resolution_Status": { "type": "string" },
+        "Timestamp": { "type": ["string", "null"] }
+      }
+    },
+    "AI_Enrichment": {
+      "type": "object",
+      "required": [
+        "Normalized_Channel",
+        "Normalized_Text",
+        "Intent",
+        "Detected_Sentiment",
+        "Urgency",
+        "Topic",
+        "Retrieval_Confidence",
+        "Knowledge_Source",
+        "Generated_Response",
+        "Ticket_Action",
+        "Assigned_Team",
+        "Priority",
+        "Next_Best_Action"
+      ],
+      "properties": {
+        "Normalized_Channel": { "enum": ["email", "whatsapp", "webchat", "voice"] },
+        "Normalized_Text": { "type": "string" },
+        "Intent": { "type": "string" },
+        "Detected_Sentiment": { "type": "string" },
+        "Urgency": { "type": "string" },
+        "Topic": { "type": "string" },
+        "Retrieval_Confidence": { "type": "number" },
+        "Knowledge_Source": { "type": ["string", "null"] },
+        "Generated_Response": { "type": "string" },
+        "Ticket_Action": { "enum": ["auto_resolved", "ticket_created"] },
+        "Assigned_Team": { "type": ["string", "null"] },
+        "Priority": { "type": ["string", "null"] },
+        "Next_Best_Action": { "type": "string" },
+        "Conversation_ID": { "type": "string" },
+        "Is_Cross_Channel": { "type": "boolean" },
+        "Previous_Channels": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "Processed_At": { "type": "string", "format": "date-time" }
+      }
+    }
+  }
+}

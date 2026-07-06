@@ -1,0 +1,135 @@
+[
+  {
+    "message_id": "wa_1001",
+    "channel": "whatsapp",
+    "customer": {
+      "customer_id": "cust_001",
+      "name": "Asha Mehta",
+      "phone": "919900001001",
+      "email": "asha.mehta@example.com",
+      "segment": "premium"
+    },
+    "payload": {
+      "from": "919900001001",
+      "text": "Hi, where is my order OD45821? It was supposed to arrive yesterday.",
+      "profile_name": "Asha"
+    },
+    "order": {
+      "order_id": "OD45821",
+      "category": "electronics",
+      "order_value": 45999,
+      "delivery_eta": "2026-05-28"
+    },
+    "created_at": "2026-05-29T09:05:00+05:30"
+  },
+  {
+    "message_id": "email_1002",
+    "channel": "email",
+    "customer": {
+      "customer_id": "cust_002",
+      "name": "Rohan Iyer",
+      "phone": "919900001002",
+      "email": "rohan.iyer@example.com",
+      "segment": "standard"
+    },
+    "payload": {
+      "from_email": "rohan.iyer@example.com",
+      "subject": "Refund not received",
+      "body": "I returned my shoes last week but the refund has not been credited. Please check order OD77210."
+    },
+    "order": {
+      "order_id": "OD77210",
+      "category": "fashion",
+      "order_value": 3499,
+      "return_id": "RET9981"
+    },
+    "created_at": "2026-05-29T09:42:00+05:30"
+  },
+  {
+    "message_id": "wa_1003",
+    "channel": "whatsapp",
+    "customer": {
+      "customer_id": "cust_003",
+      "name": "Neha Kapoor",
+      "phone": "919900001003",
+      "email": "neha.kapoor@example.com",
+      "segment": "standard"
+    },
+    "payload": {
+      "from": "919900001003",
+      "text": "I was charged twice for my grocery order OD88440. This is a payment issue.",
+      "profile_name": "Neha"
+    },
+    "order": {
+      "order_id": "OD88440",
+      "category": "grocery",
+      "order_value": 1875,
+      "payment_id": "PAY44291"
+    },
+    "created_at": "2026-05-29T10:15:00+05:30"
+  },
+  {
+    "message_id": "email_1004",
+    "channel": "email",
+    "customer": {
+      "customer_id": "cust_004",
+      "name": "Imran Shaikh",
+      "phone": "919900001004",
+      "email": "imran.shaikh@example.com",
+      "segment": "premium"
+    },
+    "payload": {
+      "from_email": "imran.shaikh@example.com",
+      "subject": "App login failed",
+      "body": "I cannot login to the app after the update. Password reset also failed and I need urgent help."
+    },
+    "order": null,
+    "created_at": "2026-05-29T11:02:00+05:30"
+  },
+  {
+    "message_id": "wa_1005",
+    "channel": "whatsapp",
+    "customer": {
+      "customer_id": "cust_005",
+      "name": "Meera Rao",
+      "phone": "919900001005",
+      "email": "meera.rao@example.com",
+      "segment": "standard"
+    },
+    "payload": {
+      "from": "919900001005",
+      "text": "The mixer I received in order OD99031 is damaged. I want to return it.",
+      "profile_name": "Meera"
+    },
+    "order": {
+      "order_id": "OD99031",
+      "category": "home_appliances",
+      "order_value": 5299,
+      "delivery_eta": "2026-05-27"
+    },
+    "created_at": "2026-05-29T11:26:00+05:30"
+  },
+  {
+    "message_id": "email_1006",
+    "channel": "email",
+    "customer": {
+      "customer_id": "cust_006",
+      "name": "Vikram Singh",
+      "phone": "919900001006",
+      "email": "vikram.singh@example.com",
+      "segment": "standard"
+    },
+    "payload": {
+      "from_email": "vikram.singh@example.com",
+      "subject": "Invoice copy needed",
+      "body": "Please send me the tax invoice for order OD33127. I need it for reimbursement."
+    },
+    "order": {
+      "order_id": "OD33127",
+      "category": "office_supplies",
+      "order_value": 7999,
+      "invoice_id": "INV55220"
+    },
+    "created_at": "2026-05-29T12:10:00+05:30"
+  }
+]

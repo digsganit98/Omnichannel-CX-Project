@@ -1,0 +1,18 @@
+INTENT_TO_TEAM = {
+    "account_balance_inquiry": "retail_banking",
+    "transaction_dispute":     "fraud_and_disputes",
+    "fund_transfer":           "payments",
+    "loan_status":             "loans",
+    "loan_application":        "loans",
+    "loan_default_notice":     "collections",
+    "policy_status":           "insurance_operations",
+    "claim_status":            "claims",
+    "insurance_claim":         "claims",
+    "card_management":         "card_services",
+    "kyc_update":              "compliance",
+    "fraud_report":            "fraud_and_disputes",
+    "complaint":               "customer_care",
+    "ticket_status":           "customer_care",
+    "general_inquiry":         "customer_care",
+    "human_escalation":        "customer_care",
+}
