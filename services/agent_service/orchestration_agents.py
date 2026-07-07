@@ -171,6 +171,20 @@ class IntentClassificationAgent:
                 status_keywords = {"status", "update", "what happened", "progress", "approved", "rejected", "decided", "paid", "settled"}
                 if any(kw in txt for kw in status_keywords):
                     result = result.model_copy(update={"intent": Intent.CLAIM_STATUS})
+        # Post-classification fix: customers checking on an existing ticket often use generic
+        # phrasing ("any pending status", "anything pending on my end") that doesn't hit the
+        # ticket_status keyword list and lands as a low-confidence general_inquiry. Rule 5
+        # (low_intent_confidence) then escalates that into a brand-new ticket instead of Rule 3
+        # answering from the ticket that already exists. If the customer already has an open
+        # ticket and uses generic status/pending wording, treat it as a ticket_status lookup.
+        if result.intent == Intent.GENERAL_INQUIRY and (context.get("active_ticket") or context.get("customer_tickets")):
+            txt = message.text.lower()
+            status_keywords = {
+                "pending", "status", "update", "follow up", "follow-up",
+                "ticket", "case", "reference", "outstanding", "in progress",
+            }
+            if any(kw in txt for kw in status_keywords):
+                result = result.model_copy(update={"intent": Intent.TICKET_STATUS})
         return result
 
 

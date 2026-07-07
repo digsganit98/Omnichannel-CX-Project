@@ -26,7 +26,9 @@ KEYWORDS = {
     Intent.TICKET_STATUS:           {"ticket status", "case status", "query status", "reference number",
                                      "status of my", "update on my", "what happened to my",
                                      "my complaint status", "follow up", "ticket number",
-                                     "is my request", "any update", "complaint reference"},
+                                     "is my request", "any update", "complaint reference",
+                                     "pending status", "pending ticket", "any pending",
+                                     "anything pending", "pending tickets"},
 }
 
 
