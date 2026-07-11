@@ -158,33 +158,22 @@
       <div>
         <div class="user-eyebrow">Customer support</div>
         <h1>User Tickets</h1>
-        <p>Send a support request through WhatsApp or email and track the latest response.</p>
+        <p>Chat with support directly, or track requests submitted via WhatsApp and email.</p>
       </div>
       <button class="user-refresh-btn" id="userRefreshBtn" onclick="loadUserTickets()">Refresh tickets</button>
     </section>
 
     <div class="user-grid">
-      <section class="user-card user-compose-card">
-        <div class="user-card-title">Create a support request</div>
-        <div class="user-card-sub">This simulates a real customer message through the existing channel workflow.</div>
-        <div class="user-field">
-          <label for="userChannel">Source channel</label>
-          <select id="userChannel">
-            <option value="whatsapp">WhatsApp</option>
-            <option value="email">Email</option>
-          </select>
+      <section class="user-card user-compose-card portal-chat-card">
+        <div class="user-card-title">Chat with support</div>
+        <div class="user-card-sub">Website chat — connected to your account, same as WhatsApp and email.</div>
+        <div class="portal-chat-messages" id="portalChatMessages">
+          <div class="user-empty">Loading conversation…</div>
         </div>
-        <div class="user-contact-highlight" id="userWhatsAppField">
-          <input id="userWhatsAppInput" type="tel" placeholder="WhatsApp number with country code" aria-label="WhatsApp number">
-        </div>
-        <div class="user-contact-highlight" id="userEmailField" style="display:none">
-          <input id="userEmailInput" type="email" value="customer@example.com" placeholder="Email address" aria-label="Email address">
-        </div>
-        <div class="user-field">
-          <label for="userMessage">Query or message</label>
-          <textarea id="userMessage" rows="7" placeholder="Describe how we can help..."></textarea>
-        </div>
-        <button class="modal-btn user-submit-btn" id="userSubmitBtn" onclick="submitUserTicket()">Submit request</button>
+        <form class="portal-chat-input-row" id="portalChatForm">
+          <input type="text" id="portalChatInput" placeholder="Type a message…" autocomplete="off" aria-label="Chat message">
+          <button type="submit" class="modal-btn portal-chat-send-btn" id="portalChatSendBtn">Send</button>
+        </form>
         <div class="sim-status" id="userSubmitStatus"></div>
       </section>
 
@@ -331,7 +320,6 @@
             <svg viewBox="0 0 24 24"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
             Conversation resolved. Customer has been notified.
           </div>
-          <div id="aipanelwrap"></div>
           <div class="compose" id="compwrap" style="display:none">
             <div class="compose-hdr">
               <span class="compose-ch-label">Reply via:</span>

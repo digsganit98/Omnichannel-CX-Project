@@ -457,6 +457,7 @@ class TicketCreationAgent:
         analysis: IntentResult,
         decision: TicketDecision,
         customer: dict,
+        graph_context: dict | None = None,
     ) -> Ticket:
         return self.tickets.create_or_get_ticket(
             conversation_id,
@@ -466,6 +467,8 @@ class TicketCreationAgent:
             analysis.urgency,
             escalation_reason=decision.reason,
             customer=customer,
+            sentiment=analysis.sentiment,
+            graph_context=graph_context,
         )
 
     @staticmethod

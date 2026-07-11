@@ -469,6 +469,7 @@ class OrchestrationGraph:
         state.ticket = self.ticket_agent.create_or_get(
             state.conversation_id, state.customer_id, state.message,
             state.analysis, state.ticket_decision, state.customer,
+            graph_context=state.context.get("graph_context", {}) if state.context else {},
         )
         self._audit("ticket_created", state, intent=state.analysis.intent.value,
                     ticket_id=state.ticket.ticket_id)
@@ -526,6 +527,7 @@ class OrchestrationGraph:
                     sec_ticket = self.ticket_agent.create_or_get(
                         state.conversation_id, state.customer_id, state.message,
                         sec_analysis, sec_decision, state.customer,
+                        graph_context=state.context.get("graph_context", {}) if state.context else {},
                     )
                     team = sec_ticket.assigned_team.replace("_", " ")
                     ref = (
@@ -620,7 +622,7 @@ class OrchestrationGraph:
             urgency=state.analysis.urgency.value if state.analysis else "low",
             confidence=state.resolution.confidence if state.resolution else 1.0,
             ticket_id=state.ticket.ticket_id if state.ticket else None,
-            next_best_action=(
+            workflow_status=(
                 "ticket_closed" if state.ticket_action.action == TicketAction.RESOLVE else
                 "customer_validation_required" if (
                     state.customer_validation.validation_required and not state.customer_validation.is_registered

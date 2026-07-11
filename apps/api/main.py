@@ -20,6 +20,7 @@ from shared.schemas.messages import EmailWebhookPayload
 from shared.schemas.responses import ChannelResponse
 
 from .routes.admin_auth import router as admin_auth_router
+from .routes.agent_assist import router as agent_assist_router
 from .routes.analytics import router as analytics_router
 from .routes.audit import router as audit_router
 from .routes.auth import router as auth_router
@@ -85,6 +86,7 @@ def _flush_langfuse_on_shutdown() -> None:
 
 
 app.include_router(admin_auth_router)
+app.include_router(agent_assist_router)
 app.include_router(auth_router)
 app.include_router(analytics_router)
 app.include_router(conversations_router)
@@ -126,7 +128,7 @@ def root() -> dict:
         "name": "Omnichannel CX Accelerator",
         "phase": 2,
         "implemented_phases": [1, 2],
-        "channels": ["whatsapp", "email"],
+        "channels": ["whatsapp", "email", "web_chat"],
         "health": "/health",
         "admin_ui": "/admin-ui",
     }
@@ -140,7 +142,6 @@ def health() -> dict[str, str]:
 @app.get("/admin-ui", include_in_schema=False)
 def admin_ui() -> FileResponse:
     return FileResponse(ADMIN_UI_ROOT / "index.html")
-
 
 
 @app.post("/webhooks/email", response_model=ChannelResponse)

@@ -9,6 +9,8 @@ var CH = {
     svg:'<svg viewBox="0 0 24 24"><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/></svg>' },
   phone:    { label:'Phone', pill:'pcl', stripe:'ccl', bg:'#fffbeb', bd:'#fde68a', clr:'#d97706',
     svg:'<svg viewBox="0 0 24 24"><path d="M6.62 10.79c1.44 2.83 3.76 5.14 6.59 6.59l2.2-2.2c.27-.27.67-.36 1.02-.24 1.12.37 2.33.57 3.57.57.55 0 1 .45 1 1V20c0 .55-.45 1-1 1-9.39 0-17-7.61-17-17 0-.55.45-1 1-1h3.5c.55 0 1 .45 1 1 0 1.25.2 2.45.57 3.57.11.35.03.74-.25 1.02l-2.2 2.2z"/></svg>' },
+  web_chat: { label:'Web Chat', pill:'pwc', stripe:'cwc', bg:'#f5f3ff', bd:'#ddd6fe', clr:'#6d28d9',
+    svg:'<svg viewBox="0 0 24 24"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2z"/></svg>' },
 };
 function chMeta(ch) { return CH[(ch||'').toLowerCase()] || { label: ch||'?', pill:'pdef', stripe:'cdef', bg:'#f2f4f7', bd:'#e4e7ec', clr:'#98a2b3', svg:'' }; }
 
@@ -454,7 +456,6 @@ async function selectConv(convId) {
   var msgsEl = document.getElementById('msgs');
   msgsEl.className = 'msgs';
   msgsEl.innerHTML = '<div style="padding:20px;text-align:center;color:var(--t3);font-size:12px">Loading…</div>';
-  document.getElementById('aipanelwrap').innerHTML = '';
   document.getElementById('compwrap').style.display = 'none';
   document.getElementById('resbanner').style.display = 'none';
   try {
@@ -639,10 +640,8 @@ function renderCentre(conv) {
     state.highlightTicketId = null;
   }
 
-  // Compose + AI panel
-  if (isDone) {
-    document.getElementById('aipanelwrap').innerHTML = '';
-  } else {
+  // Compose
+  if (!isDone) {
     var compBtns = document.getElementById('compChBtns');
     compBtns.innerHTML = '';
     var activeChans = Object.keys(seenChs);
@@ -655,19 +654,6 @@ function renderCentre(conv) {
       compBtns.appendChild(btn);
     });
     document.getElementById('cinput').placeholder = 'Reply to ' + nm + '…';
-
-    var wrap = document.getElementById('aipanelwrap');
-    var lastIntent = conv_meta.last_intent || '';
-    var suggestion = lastIntent
-      ? 'I can see you have a ' + lastIntent.replace(/_/g,' ') + ' inquiry. Let me pull up the details for you — could you please confirm your account number or registered phone number?'
-      : 'Thank you for contacting us. I can see your conversation history. How can I help you today?';
-    wrap.innerHTML = '<div class="aipanel"><div class="airbox">'
-      + '<div class="aihdr"><div class="aititle"><svg width="12" height="12" viewBox="0 0 24 24" fill="var(--pur)"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>AI suggested response</div>'
-      + '<span class="aibadge">Editable · Sendable</span></div>'
-      + '<textarea class="aita" id="aiSuggestion">' + escH(suggestion) + '</textarea>'
-      + '<div class="aibtns"><button class="aibtn send" onclick="sendAISuggestion()">Send</button>'
-      + '<button class="aibtn" onclick="toast(\'Translated\')">Translate</button></div>'
-      + '</div></div>';
   }
 }
 
@@ -843,19 +829,64 @@ function renderRight(conv, tickets) {
     }).join('');
     body.innerHTML += '<div class="rpcard"><div class="rplbl">Tickets (' + convTickets.length + ')</div>' + tktHtml + '</div>';
   }
+
+  body.innerHTML += '<div class="rpcard" id="rpNbaCard"><div class="rplbl">Recommended actions</div>'
+    + '<div id="rpNbaBody" style="font-size:11px;color:var(--t3)">Checking…</div></div>';
+  var nbaTicketId = convTickets.length ? convTickets[0].ticket_id : '';
+  var nbaUrl = '/admin/agent-assist/next-best-actions?conversation_id=' + encodeURIComponent(conv.conversation_id)
+    + (nbaTicketId ? '&ticket_id=' + encodeURIComponent(nbaTicketId) : '');
+  api(nbaUrl).then(function(result) {
+    renderNbaActions(result.actions || []);
+  }).catch(function() {
+    var el = document.getElementById('rpNbaBody');
+    if (el) el.textContent = 'Unavailable';
+  });
 }
+
+function renderNbaActions(actions) {
+  var el = document.getElementById('rpNbaBody');
+  if (!el) return;
+  if (!actions.length) {
+    el.textContent = 'No recommendations right now.';
+    return;
+  }
+  el.innerHTML = actions.map(function(a) {
+    var isCrossSell = a.action_type === 'cross_sell';
+    var badge = isCrossSell
+      ? '<span class="nba-badge nba-badge-crosssell">Cross-sell</span>'
+      : '<span class="nba-badge">' + escH(a.action_type.replace(/_/g,' ')) + '</span>';
+    return '<div class="nba-item" data-rec-id="' + escH(a.recommendation_id) + '">'
+      + badge
+      + '<div class="nba-reason">' + escH(a.reason) + '</div>'
+      + '<div class="nba-actions">'
+      + '<button class="nba-approve-btn" onclick="decideNba(this,\'approved\')">Approve</button>'
+      + '<button class="nba-dismiss-btn" onclick="decideNba(this,\'dismissed\')">Dismiss</button>'
+      + '</div></div>';
+  }).join('');
+}
+
+window.decideNba = function(btn, status) {
+  var item = btn.closest('.nba-item');
+  var recId = item ? item.getAttribute('data-rec-id') : null;
+  if (!recId) return;
+  btn.parentElement.querySelectorAll('button').forEach(function(b) { b.disabled = true; });
+  api('/admin/agent-assist/recommendations/' + encodeURIComponent(recId) + '/decision', {
+    method: 'POST',
+    body: JSON.stringify({ status: status }),
+  }).then(function() {
+    toast(status === 'approved' ? 'Recommendation approved' : 'Recommendation dismissed');
+    if (item) item.style.opacity = '0.4';
+  }).catch(function(err) {
+    toast('Failed: ' + err.message);
+    btn.parentElement.querySelectorAll('button').forEach(function(b) { b.disabled = false; });
+  });
+};
 
 window.doSend = function() {
   var txt = document.getElementById('cinput').value.trim();
   if (!txt || !state.convDetail) return;
   toast('Reply queued (simulation mode) · ' + txt.slice(0,30));
   document.getElementById('cinput').value = '';
-};
-
-window.sendAISuggestion = function() {
-  var ta = document.getElementById('aiSuggestion');
-  if (!ta) return;
-  toast('AI suggestion sent');
 };
 
 // ── Confirmation modal ────────────────────────────────────────────────────────
@@ -1391,7 +1422,6 @@ window.loadAudit = async function() {
 };
 
 // ── TICKETS ──────────────────────────────────────────────────────────────────
-var PRIORITY_ORDER = { critical: 0, high: 1, medium: 2, low: 3 };
 var _allTickets = { open: [], closed: [] };
 var _convMap = {};
 
@@ -1407,7 +1437,7 @@ window.loadTickets = async function() {
 
     var open   = tickets.filter(function(t) { return t.status === 'open' || t.status === 'in_progress'; });
     var closed = tickets.filter(function(t) { return t.status === 'resolved' || t.status === 'closed'; });
-    open.sort(function(a, b) { return (PRIORITY_ORDER[a.priority] || 9) - (PRIORITY_ORDER[b.priority] || 9); });
+    open.sort(function(a, b) { return (b.priority_score || 0) - (a.priority_score || 0); });
     closed.sort(function(a, b) { return new Date(b.updated_at) - new Date(a.updated_at); });
 
     _allTickets.open   = open;
@@ -1599,62 +1629,78 @@ function showUserLatest(item) {
   document.getElementById('userLatestResponse').textContent = item.latest_response || item.message || 'Response pending';
 }
 
-function updateUserContactField() {
-  var channel = document.getElementById('userChannel').value;
-  document.getElementById('userWhatsAppField').style.display = channel === 'whatsapp' ? 'block' : 'none';
-  document.getElementById('userEmailField').style.display = channel === 'email' ? 'block' : 'none';
+function renderPortalChatTurns(turns) {
+  var el = document.getElementById('portalChatMessages');
+  if (!turns.length) {
+    el.innerHTML = '<div class="user-empty">No messages yet — say hello!</div>';
+    return;
+  }
+  el.innerHTML = turns.map(function(t) {
+    var dir = t.direction === 'outbound' ? 'outbound' : 'inbound';
+    return '<div class="portal-chat-msg ' + dir + '">' + escH(t.text || '') + '</div>';
+  }).join('');
+  el.scrollTop = el.scrollHeight;
 }
-document.getElementById('userChannel').addEventListener('change', updateUserContactField);
 
-window.submitUserTicket = async function() {
-  var message = document.getElementById('userMessage').value.trim();
-  var channel = document.getElementById('userChannel').value;
-  var contactIdentifier = channel === 'email'
-    ? document.getElementById('userEmailInput').value.trim()
-    : document.getElementById('userWhatsAppInput').value.trim();
-  if (!message) {
-    setUserStatus('Please enter a query or message.', 'error');
-    return;
-  }
-  if (!contactIdentifier) {
-    setUserStatus(channel === 'email' ? 'Please enter an email address.' : 'Please enter a WhatsApp number.', 'error');
-    return;
-  }
-  var btn = document.getElementById('userSubmitBtn');
-  btn.disabled = true;
-  btn.textContent = 'Submitting...';
-  setUserStatus('Processing your request...', '');
+window.loadPortalChat = async function() {
   try {
-    var data = await userApi('/user/messages', {
+    var data = await userApi('/user/chat/messages');
+    renderPortalChatTurns(data.turns || []);
+  } catch(e) {
+    document.getElementById('portalChatMessages').innerHTML =
+      '<div class="user-empty" style="color:var(--red-t)">' + escH(e.message) + '</div>';
+  }
+};
+
+document.getElementById('portalChatForm').addEventListener('submit', async function(e) {
+  e.preventDefault();
+  var input = document.getElementById('portalChatInput');
+  var text = input.value.trim();
+  if (!text) return;
+  var btn = document.getElementById('portalChatSendBtn');
+  var messagesEl = document.getElementById('portalChatMessages');
+  var emptyState = messagesEl.querySelector('.user-empty');
+  if (emptyState) messagesEl.innerHTML = '';
+  var bubble = document.createElement('div');
+  bubble.className = 'portal-chat-msg outbound';
+  bubble.textContent = text;
+  messagesEl.appendChild(bubble);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+  input.value = '';
+  input.disabled = true;
+  btn.disabled = true;
+  try {
+    var data = await userApi('/user/chat/messages', {
       method: 'POST',
-      body: JSON.stringify({
-        channel: channel,
-        message: message,
-        contact_identifier: contactIdentifier
-      })
+      body: JSON.stringify({ text: text })
     });
+    var reply = document.createElement('div');
+    reply.className = 'portal-chat-msg inbound';
+    reply.textContent = data.message || '...';
+    messagesEl.appendChild(reply);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
     showUserLatest({
       conversation_id: data.conversation_id,
       ticket_id: data.ticket_id,
       status: data.resolved ? 'resolved' : (data.ticket_id ? 'open' : 'active'),
-      channel: channel,
-      contact_identifier: data.contact_identifier || contactIdentifier,
+      channel: 'web_chat',
+      contact_identifier: data.contact_identifier,
       latest_response: data.message
     });
-    document.getElementById('userMessage').value = '';
     if (data.outbound_status === 'failed') {
-      setUserStatus('Request processed, but delivery failed: ' + (data.outbound_error || 'provider rejected the message'), 'error');
+      setUserStatus('Message processed, but delivery failed: ' + (data.outbound_error || 'provider rejected the message'), 'error');
     } else {
-      setUserStatus('Request submitted successfully.', 'success');
+      setUserStatus('', '');
     }
     await loadUserTickets();
   } catch(e) {
     setUserStatus(e.message, 'error');
   } finally {
+    input.disabled = false;
     btn.disabled = false;
-    btn.textContent = 'Submit request';
+    input.focus();
   }
-};
+});
 
 window.loadUserTickets = async function() {
   var list = document.getElementById('userTicketList');
@@ -1715,7 +1761,7 @@ function bootUserPortal() {
   var userId = portalUser && portalUser.user_id ? portalUser.user_id : 'Customer';
   document.getElementById('portalUserName').textContent = userId;
   document.getElementById('portalUserAv').textContent = userId.slice(0, 2).toUpperCase();
-  updateUserContactField();
+  loadPortalChat();
   loadUserTickets();
 }
 

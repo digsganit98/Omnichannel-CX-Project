@@ -10,8 +10,9 @@ import jwt
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
 
-from apps.api.dependencies.runtime import get_repository
-from shared.schemas.messages import EmailWebhookPayload, WhatsAppWebhookPayload
+from apps.api.dependencies.runtime import get_repository, get_router
+from services.channel_service.adapters.web_chat_adapter import WebChatAdapter
+from shared.schemas.messages import EmailWebhookPayload, WebChatWebhookPayload, WhatsAppWebhookPayload
 from shared.utils.ids import new_id
 
 from .webhooks import handle_email_message, handle_whatsapp_message
@@ -37,6 +38,10 @@ class UserMessageRequest(BaseModel):
     channel: str
     message: str = Field(min_length=1, max_length=5000)
     contact_identifier: str | None = Field(default=None, max_length=320)
+
+
+class UserChatMessageRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=5000)
 
 
 def _make_token(user_id: str) -> str:
@@ -286,6 +291,65 @@ def submit_user_message(
     return {
         **response.model_dump(mode="json"),
         "contact_identifier": email if channel == "email" else phone,
+        "graph": graph_status,
+    }
+
+
+def _web_chat_identity(user_id: str, user: dict) -> tuple[dict, str]:
+    """Metadata that ties a web-chat message to the SAME customer as this user's
+    other portal channels (see resolve_customer's portal/graph identifier priority
+    in services/persistence_service/repository.py)."""
+    email = str(user.get("email") or _portal_email(user_id)).strip().lower()
+    metadata = {
+        "portal_user_id": user_id,
+        "portal_graph_customer_id": _graph_customer_id(user_id),
+        "portal_contact_identifier": email,
+        "source": "user_portal",
+        "provider": "web_chat_portal",
+    }
+    return metadata, email
+
+
+@router.get("/chat/messages")
+def get_user_chat_messages(authorization: str | None = Header(default=None)) -> dict:
+    user_id = _require_user(authorization)
+    repo = get_repository()
+    user = repo.get_customer_user_by_id(user_id)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid user session")
+    metadata, _ = _web_chat_identity(user_id, user)
+    lookup_message = WebChatAdapter().normalize(
+        WebChatWebhookPayload(session_id=user_id, text="", metadata=metadata)
+    )
+    customer = repo.resolve_customer(lookup_message)
+    conversation = repo.get_or_create_conversation(customer["customer_id"])
+    turns = repo.list_recent_turns(conversation["conversation_id"], limit=50)
+    return {"conversation_id": conversation["conversation_id"], "turns": turns}
+
+
+@router.post("/chat/messages")
+def send_user_chat_message(
+    request: UserChatMessageRequest,
+    authorization: str | None = Header(default=None),
+) -> dict:
+    user_id = _require_user(authorization)
+    repo = get_repository()
+    user = repo.get_customer_user_by_id(user_id)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid user session")
+    metadata, email = _web_chat_identity(user_id, user)
+    graph_status = _upsert_customer_graph_user(user_id, email, "", "web_chat")
+    payload = WebChatWebhookPayload(
+        session_id=user_id,
+        text=request.text.strip(),
+        display_name=user_id,
+        message_id=new_id("portal_webchat"),
+        metadata=metadata,
+    )
+    response = get_router().handle(WebChatAdapter().normalize(payload))
+    return {
+        **response.model_dump(mode="json"),
+        "contact_identifier": email,
         "graph": graph_status,
     }
 

@@ -6,11 +6,12 @@ import re
 from services.crm_service.client import CRMClient
 from services.persistence_service.repository import CXRepository
 from services.ticket_service.assignment import assign_team
+from services.ticket_service.priority_scoring import score_priority
 from services.workflow_service.approvals import requires_approval
 from services.workflow_service.sla import sla_hours
 from shared.schemas.intents import Intent, Urgency
 from shared.schemas.messages import InboundMessage
-from shared.schemas.tickets import Ticket, TicketPriority, TicketStatus
+from shared.schemas.tickets import Ticket, TicketStatus
 from shared.utils.ids import new_id
 
 
@@ -28,6 +29,8 @@ class TicketManager:
         urgency: Urgency,
         escalation_reason: str | None = None,
         customer: dict | None = None,
+        sentiment: str = "neutral",
+        graph_context: dict | None = None,
     ) -> Ticket:
         ticket_scope = _ticket_scope(intent.value, message.text, escalation_reason)
         existing = (
@@ -37,7 +40,7 @@ class TicketManager:
         )
         if existing:
             return existing
-        priority = TicketPriority.HIGH if urgency == Urgency.HIGH else TicketPriority.MEDIUM
+        priority, breakdown = score_priority(intent, urgency, sentiment, graph_context)
         ticket = Ticket(
             ticket_id=new_id("tkt"),
             conversation_id=conversation_id,
@@ -50,6 +53,8 @@ class TicketManager:
             approval_status="pending" if requires_approval(intent.value) else "not_required",
             escalation_reason=escalation_reason,
             sla_due_at=datetime.now(timezone.utc) + timedelta(hours=sla_hours(priority.value)),
+            priority_score=breakdown.total,
+            priority_breakdown=breakdown.model_dump(),
             metadata={
                 "channel": message.channel.value,
                 "provider": message.provider,

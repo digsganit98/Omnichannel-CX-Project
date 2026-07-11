@@ -16,7 +16,7 @@ def _response(channel: str) -> ChannelResponse:
         urgency="high",
         confidence=0.9,
         ticket_id="tkt-1",
-        next_best_action="human_follow_up",
+        workflow_status="human_follow_up",
     )
 
 
@@ -325,6 +325,110 @@ def test_customer_signup_and_contact_updates_are_written_to_neo4j(monkeypatch):
         "email": "graph.customer@example.com",
         "phone": "917700920746",
     }
+
+
+def test_web_chat_message_tags_portal_identity(monkeypatch):
+    """POST /user/chat/messages must route through the SAME identity mechanism as the
+    existing whatsapp/email portal messages (portal_user_id/portal_graph_customer_id in
+    metadata), not an anonymous session — this is what ties web chat to the real customer."""
+    monkeypatch.setenv("JWT_SECRET", "user-portal-test-secret")
+    monkeypatch.setenv("NEO4J_ENABLED", "false")
+    from services.persistence_service.repository import SQLiteCXRepository
+
+    repo = SQLiteCXRepository(":memory:")
+    monkeypatch.setattr(user_portal, "get_repository", lambda: repo)
+    user_portal.user_signup(
+        user_portal.UserSignupRequest(
+            user_id="customer-3001",
+            email="customer3001@example.com",
+            password="portal-password",
+        )
+    )
+    token = user_portal._make_token("customer-3001")
+    captured = {}
+
+    class CapturingRouter:
+        def handle(self, message):
+            captured["message"] = message
+            return _response("web_chat")
+
+    monkeypatch.setattr(user_portal, "get_router", lambda: CapturingRouter())
+
+    result = user_portal.send_user_chat_message(
+        user_portal.UserChatMessageRequest(text="Hello there"),
+        authorization=f"Bearer {token}",
+    )
+
+    message = captured["message"]
+    assert message.channel.value == "web_chat"
+    assert message.text == "Hello there"
+    assert message.metadata["portal_user_id"] == "customer-3001"
+    assert message.metadata["source"] == "user_portal"
+    assert message.metadata["provider"] == "web_chat_portal"
+    assert result["contact_identifier"] == "customer3001@example.com"
+
+
+def test_web_chat_message_and_history_round_trip(monkeypatch):
+    monkeypatch.setenv("JWT_SECRET", "user-portal-test-secret")
+    monkeypatch.setenv("NEO4J_ENABLED", "false")
+    from services.persistence_service.repository import SQLiteCXRepository
+
+    repo = SQLiteCXRepository(":memory:")
+    monkeypatch.setattr(user_portal, "get_repository", lambda: repo)
+    user_portal.user_signup(
+        user_portal.UserSignupRequest(
+            user_id="customer-2001",
+            email="customer2001@example.com",
+            password="portal-password",
+        )
+    )
+    token = user_portal._make_token("customer-2001")
+
+    class FakeRouter:
+        """Minimal stand-in for OmnichannelRouter that persists turns like the real
+        orchestration graph does, so the history endpoint has something to read back."""
+
+        def handle(self, message):
+            customer = repo.resolve_customer(message)
+            conversation = repo.get_or_create_conversation(customer["customer_id"])
+            repo.append_turn(
+                conversation_id=conversation["conversation_id"], customer_id=customer["customer_id"],
+                channel=message.channel.value, direction="inbound", text=message.text,
+                metadata=message.metadata,
+            )
+            repo.append_turn(
+                conversation_id=conversation["conversation_id"], customer_id=customer["customer_id"],
+                channel=message.channel.value, direction="outbound", text="Thanks, we'll help with that.",
+                metadata={},
+            )
+            return _response("web_chat").model_copy(update={
+                "conversation_id": conversation["conversation_id"],
+                "customer_id": customer["customer_id"],
+                "message": "Thanks, we'll help with that.",
+            })
+
+    monkeypatch.setattr(user_portal, "get_router", lambda: FakeRouter())
+
+    sent = user_portal.send_user_chat_message(
+        user_portal.UserChatMessageRequest(text="Hi, I need help with my loan."),
+        authorization=f"Bearer {token}",
+    )
+    assert sent["message"] == "Thanks, we'll help with that."
+
+    history = user_portal.get_user_chat_messages(authorization=f"Bearer {token}")
+    texts = [turn["text"] for turn in history["turns"]]
+    assert "Hi, I need help with my loan." in texts
+    assert "Thanks, we'll help with that." in texts
+    assert history["conversation_id"] == sent["conversation_id"]
+
+
+def test_chat_endpoints_require_login():
+    try:
+        user_portal.get_user_chat_messages(authorization=None)
+    except HTTPException as exc:
+        assert exc.status_code == 401
+    else:
+        raise AssertionError("Expected missing auth to be rejected")
 
 
 def test_user_ticket_list_is_scoped_to_portal_user(monkeypatch):

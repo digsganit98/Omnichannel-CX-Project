@@ -198,6 +198,7 @@ def get_customer_context_for_customer(client, customer: dict | None) -> dict:
         "email": customer.get("email"),
         "phone": customer.get("phone"),
         "city": customer.get("city"),
+        "segment": customer.get("segment"),
         "loans": loans,
         "claims": claims,
         "policies": policies,

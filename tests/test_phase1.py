@@ -271,7 +271,7 @@ def test_whatsapp_bfsi_query_resolves_with_citation_and_sends_reply():
         whatsapp_message(text="What are the requirements for a personal loan?")
     )
     assert response.resolved is False
-    assert response.next_best_action == "answer_delivered"
+    assert response.workflow_status == "answer_delivered"
     assert response.citations[0]["source"] == "InboxIQ_BFSI_KB.pdf:p3"
     assert response.outbound_status == "sent"
     assert sender.sent
@@ -287,7 +287,7 @@ def test_unregistered_customer_blocked_from_account_specific_query():
     repo = SQLiteCXRepository(":memory:")
     sender = Recorder()
     response = graph(repo, whatsapp=sender).run(whatsapp_message(text="What is my loan status?"))
-    assert response.next_best_action == "customer_validation_required"
+    assert response.workflow_status == "customer_validation_required"
     assert response.intent == "customer_not_registered"
     assert response.ticket_id is None
     assert response.outbound_status == "sent"
@@ -317,7 +317,7 @@ def test_registered_customer_account_query_is_not_blocked():
         resolution_engine=FakeResolutionEngine(),
     )
     response = workflow.run(message)
-    assert response.next_best_action != "customer_validation_required"
+    assert response.workflow_status != "customer_validation_required"
     assert response.intent == "loan_status"
     validate_step = next(entry for entry in response.workflow_trace if entry["step"] == "validate_customer")
     assert validate_step["details"]["is_registered"] is True
@@ -569,7 +569,7 @@ def test_customer_message_can_resolve_active_ticket_without_rag():
     assert closed.ticket_id == opened.ticket_id
     assert closed.intent == "ticket_resolution"
     assert closed.resolved is True
-    assert closed.next_best_action == "ticket_closed"
+    assert closed.workflow_status == "ticket_closed"
     assert closed.retrieval_backend == "not_required"
     assert closed.rag_contexts == []
     assert repo.get_ticket(opened.ticket_id)["status"] == TicketStatus.RESOLVED.value
@@ -682,7 +682,7 @@ def test_email_webhook_e2e_preserves_channel_creates_ticket_and_sends_reply(monk
     result = response.json()
     assert result["outbound_status"] == "sent"
     assert result["ticket_id"]
-    assert result["next_best_action"] == "human_follow_up"
+    assert result["workflow_status"] == "human_follow_up"
     assert sender.sent[0][0] == "customer@example.com"
 
     conversation = repo.get_conversation(result["conversation_id"])
@@ -1442,6 +1442,25 @@ def test_ticket_jira_sync_and_lifecycle():
         "comment_added",
         "status_updated",
     ]
+
+
+def test_ticket_priority_score_round_trips_and_never_leaks_to_customer_reply():
+    """Phase 1: smart case prioritization. A negative-sentiment complaint should produce
+    a non-zero priority score that survives persistence, and the internal scoring
+    rationale must never appear in the customer-facing reply text (compliance guard)."""
+    repo = SQLiteCXRepository(":memory:")
+    workflow = graph(repo, crm=FakeCRM())
+    response = workflow.run(
+        email_message(body="This is a terrible complaint. The service is unacceptable and I am extremely frustrated.")
+    )
+    ticket = repo.get_ticket(response.ticket_id)
+    assert ticket["priority_score"] > 0
+    assert isinstance(ticket["priority_breakdown"], dict)
+    assert ticket["priority_breakdown"]["total"] == ticket["priority_score"]
+
+    assert "priority_score" not in response.message
+    assert "priority_breakdown" not in response.message
+    assert str(ticket["priority_score"]) not in response.message
 
 
 # ── Admin / infrastructure tests ──────────────────────────────────────────────

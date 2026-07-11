@@ -14,6 +14,7 @@ class TicketPriority(StrEnum):
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
+    CRITICAL = "critical"
 
 
 class Ticket(BaseModel):
@@ -33,6 +34,8 @@ class Ticket(BaseModel):
     approval_status: str = "not_required"
     escalation_reason: str | None = None
     sla_due_at: datetime | None = None
+    priority_score: float = 0.0
+    priority_breakdown: dict = Field(default_factory=dict)
     metadata: dict = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

@@ -62,6 +62,13 @@ class CXRepository(Protocol):
     def create_customer_user(self, user_id: str, email: str, password_hash: str) -> dict: ...
     def get_customer_user_by_id(self, user_id: str) -> dict | None: ...
     def get_customer_user_by_email(self, email: str) -> dict | None: ...
+    def add_agent_assist_recommendation(self, conversation_id: str, customer_id: str, ticket_id: str | None,
+                                         action_type: str, reason: str, confidence: float, priority: int = 0,
+                                         metadata: dict | None = None) -> dict: ...
+    def list_agent_assist_recommendations(self, conversation_id: str | None = None,
+                                           ticket_id: str | None = None,
+                                           status: str | None = None) -> list[dict]: ...
+    def update_agent_assist_recommendation(self, recommendation_id: str, status: str, actor: str) -> dict | None: ...
 
 
 class SQLiteCXRepository:
@@ -295,14 +302,16 @@ class SQLiteCXRepository:
             conn.execute(
                 "INSERT INTO tickets(ticket_id, conversation_id, customer_id, title, description, intent, priority, "
                 "assigned_team, status, external_ticket_id, external_ticket_url, crm_sync_status, crm_sync_error, "
-                "approval_status, escalation_reason, sla_due_at, metadata_json, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "approval_status, escalation_reason, sla_due_at, priority_score, priority_breakdown_json, "
+                "metadata_json, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     ticket.ticket_id, ticket.conversation_id, ticket.customer_id, ticket.title, ticket.description,
                     ticket.intent, ticket.priority.value, ticket.assigned_team, ticket.status.value,
                     ticket.external_ticket_id, ticket.external_ticket_url, ticket.crm_sync_status,
                     ticket.crm_sync_error, ticket.approval_status, ticket.escalation_reason,
-                    ticket.sla_due_at.isoformat() if ticket.sla_due_at else None, json_text(ticket.metadata),
+                    ticket.sla_due_at.isoformat() if ticket.sla_due_at else None,
+                    ticket.priority_score, json_text(ticket.priority_breakdown), json_text(ticket.metadata),
                     ticket.created_at.isoformat(), ticket.updated_at.isoformat(),
                 ),
             )
@@ -310,8 +319,9 @@ class SQLiteCXRepository:
 
     def update_ticket(self, ticket_id: str, **values) -> dict | None:
         allowed = {
-            "status", "external_ticket_id", "external_ticket_url", "crm_sync_status", "crm_sync_error",
-            "approval_status", "escalation_reason", "sla_due_at", "metadata_json",
+            "status", "priority", "external_ticket_id", "external_ticket_url", "crm_sync_status", "crm_sync_error",
+            "approval_status", "escalation_reason", "sla_due_at", "priority_score", "priority_breakdown_json",
+            "metadata_json",
         }
         updates = {key: value for key, value in values.items() if key in allowed}
         if not updates:
@@ -393,6 +403,67 @@ class SQLiteCXRepository:
                 "SELECT * FROM ticket_events WHERE ticket_id = ? ORDER BY created_at", (ticket_id,)
             ).fetchall()
         return [self._json_fields(dict(row), "details_json") for row in rows]
+
+    def add_agent_assist_recommendation(
+        self,
+        conversation_id: str,
+        customer_id: str,
+        ticket_id: str | None,
+        action_type: str,
+        reason: str,
+        confidence: float,
+        priority: int = 0,
+        metadata: dict | None = None,
+    ) -> dict:
+        recommendation_id = new_id("nba")
+        with self.connection() as conn:
+            conn.execute(
+                "INSERT INTO agent_assist_recommendations(recommendation_id, conversation_id, ticket_id, "
+                "customer_id, action_type, reason, confidence, priority, metadata_json, status, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
+                (
+                    recommendation_id, conversation_id, ticket_id, customer_id, action_type, reason,
+                    confidence, priority, json_text(metadata), utc_now(),
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM agent_assist_recommendations WHERE recommendation_id = ?", (recommendation_id,)
+            ).fetchone()
+        return self._json_fields(dict(row), "metadata_json")
+
+    def list_agent_assist_recommendations(
+        self,
+        conversation_id: str | None = None,
+        ticket_id: str | None = None,
+        status: str | None = None,
+    ) -> list[dict]:
+        query = "SELECT * FROM agent_assist_recommendations WHERE 1=1"
+        args: list = []
+        if conversation_id:
+            query += " AND conversation_id = ?"
+            args.append(conversation_id)
+        if ticket_id:
+            query += " AND ticket_id = ?"
+            args.append(ticket_id)
+        if status:
+            query += " AND status = ?"
+            args.append(status)
+        query += " ORDER BY confidence DESC, created_at DESC"
+        with self.connection() as conn:
+            rows = conn.execute(query, args).fetchall()
+        return [self._json_fields(dict(row), "metadata_json") for row in rows]
+
+    def update_agent_assist_recommendation(self, recommendation_id: str, status: str, actor: str) -> dict | None:
+        with self.connection() as conn:
+            conn.execute(
+                "UPDATE agent_assist_recommendations SET status = ?, decided_by = ?, decided_at = ? "
+                "WHERE recommendation_id = ?",
+                (status, actor, utc_now(), recommendation_id),
+            )
+            row = conn.execute(
+                "SELECT * FROM agent_assist_recommendations WHERE recommendation_id = ?", (recommendation_id,)
+            ).fetchone()
+        return self._json_fields(dict(row), "metadata_json") if row else None
 
     def add_retrieval_evidence(self, turn_id: str, contexts: list[dict]) -> None:
         with self.connection() as conn:
@@ -801,4 +872,6 @@ class SQLiteCXRepository:
         value = dict(row)
         if "metadata_json" in value:
             value["metadata"] = json.loads(value.pop("metadata_json") or "{}")
+        if "priority_breakdown_json" in value:
+            value["priority_breakdown"] = json.loads(value.pop("priority_breakdown_json") or "{}")
         return value
