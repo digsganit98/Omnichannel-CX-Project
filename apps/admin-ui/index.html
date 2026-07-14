@@ -157,7 +157,7 @@
     <section class="user-hero">
       <div>
         <div class="user-eyebrow">Customer support</div>
-        <h1>User Tickets</h1>
+        <h1>Support Center</h1>
         <p>Chat with support directly, or track requests submitted via WhatsApp and email.</p>
       </div>
       <button class="user-refresh-btn" id="userRefreshBtn" onclick="loadUserTickets()">Refresh tickets</button>
@@ -177,35 +177,35 @@
         <div class="sim-status" id="userSubmitStatus"></div>
       </section>
 
-      <section class="user-card user-result-card">
-        <div class="user-card-title">Latest submission</div>
-        <div class="user-empty" id="userLatestEmpty">Your latest ticket or conversation details will appear here.</div>
-        <div id="userLatestResult" style="display:none">
-          <div class="user-result-grid">
-            <div class="user-result-item"><span>Conversation ID</span><strong id="userConversationId">-</strong></div>
-            <div class="user-result-item"><span>Ticket ID</span><strong id="userTicketId">-</strong></div>
-            <div class="user-result-item"><span>Status</span><strong id="userTicketStatus">-</strong></div>
-            <div class="user-result-item"><span>Channel</span><strong id="userResultChannel">-</strong></div>
-            <div class="user-result-item user-result-contact"><span>Phone / Email used</span><strong id="userResultContact">-</strong></div>
+      <section class="user-card user-list-card">
+        <div class="user-list-heading">
+          <div>
+            <div class="user-card-title">My submitted tickets</div>
+            <div class="user-card-sub">Requests associated with this user account.</div>
           </div>
-          <div class="user-response-box">
-            <span>Latest response</span>
-            <p id="userLatestResponse">-</p>
-          </div>
+          <span class="q-cnt" id="userTicketCount">0 tickets</span>
+        </div>
+        <div class="user-ticket-list" id="userTicketList">
+          <div class="user-empty">No requests submitted yet.</div>
         </div>
       </section>
     </div>
 
-    <section class="user-card user-list-card">
-      <div class="user-list-heading">
-        <div>
-          <div class="user-card-title">My submitted tickets</div>
-          <div class="user-card-sub">Requests associated with this user account.</div>
+    <section class="user-card user-result-card">
+      <div class="user-card-title">Latest submission</div>
+      <div class="user-empty" id="userLatestEmpty">Your latest ticket or conversation details will appear here.</div>
+      <div id="userLatestResult" style="display:none">
+        <div class="user-result-grid">
+          <div class="user-result-item"><span>Conversation ID</span><strong id="userConversationId">-</strong></div>
+          <div class="user-result-item"><span>Ticket ID</span><strong id="userTicketId">-</strong></div>
+          <div class="user-result-item"><span>Status</span><strong id="userTicketStatus">-</strong></div>
+          <div class="user-result-item"><span>Channel</span><strong id="userResultChannel">-</strong></div>
+          <div class="user-result-item user-result-contact"><span>Phone / Email used</span><strong id="userResultContact">-</strong></div>
         </div>
-        <span class="q-cnt" id="userTicketCount">0 tickets</span>
-      </div>
-      <div class="user-ticket-list" id="userTicketList">
-        <div class="user-empty">No requests submitted yet.</div>
+        <div class="user-response-box">
+          <span>Latest response</span>
+          <p id="userLatestResponse">-</p>
+        </div>
       </div>
     </section>
   </main>

@@ -248,6 +248,23 @@ class OrchestrationGraph:
                         message.metadata["linked_phone"] = neo4j_profile["phone"]
             except Exception:
                 logger.exception("neo4j_cross_channel_lookup_failed")
+
+        # Portal/web-chat messages carry portal_graph_customer_id but skip the block above.
+        # Pull the matched customer's real name from Neo4j so the SQLite display_name (and
+        # therefore the admin inbox) shows "Sayantini Sarkar" instead of the raw portal
+        # username ("sayantini_v2"). Only override a username-style/generic display_name.
+        if self.neo4j_client and is_portal_message:
+            try:
+                from services.neo4j_service.queries import get_customer_by_id
+                graph_id = message.metadata.get("portal_graph_customer_id")
+                neo4j_profile = get_customer_by_id(self.neo4j_client, str(graph_id)) if graph_id else None
+                if neo4j_profile and neo4j_profile.get("name"):
+                    portal_user = str(message.metadata.get("portal_user_id", "")).lower()
+                    current = (message.display_name or "").lower()
+                    if not current or current == portal_user:
+                        message.display_name = neo4j_profile["name"]
+            except Exception:
+                logger.exception("neo4j_portal_name_lookup_failed")
         crm_profile = self.crm.lookup_customer(message.channel.value, message.channel_identifier)
         if crm_profile.status == "synced":
             message.profile_metadata["crm"] = crm_profile.data
@@ -266,14 +283,41 @@ class OrchestrationGraph:
 
         state.customer = self.repository.resolve_customer(message)
         state.conversation = self.repository.get_or_create_conversation(state.customer_id)
-        if neo4j_writer and self.neo4j_client:
+        # For a portal message whose graph id does NOT match a real seeded BFSI customer,
+        # skip ALL Neo4j customer/interaction writes. Writing a bare node would make an
+        # unknown user look "registered" (with no data) and bypass the reject-unregistered
+        # flow. Non-portal (whatsapp/email) messages are unaffected. Cached per-request.
+        graph_customer_id = _neo4j_customer_id(state)
+        neo4j_customer_exists = True
+        if is_portal_message and self.neo4j_client:
+            try:
+                from services.neo4j_service.queries import get_customer_by_id
+                neo4j_customer_exists = bool(get_customer_by_id(self.neo4j_client, graph_customer_id))
+            except Exception:
+                neo4j_customer_exists = False
+        write_neo4j = bool(neo4j_writer and self.neo4j_client and neo4j_customer_exists)
+        if write_neo4j:
+            # Only write a real email. For email-channel messages the channel_identifier
+            # IS the email; for whatsapp/web_chat it is a phone/session id, so fall back to
+            # linked_email (or portal contact) and never write the raw identifier — otherwise
+            # a value like "web_session:<user>" would overwrite the real customer's email.
+            linked_email = message.metadata.get("linked_email", "")
+            portal_contact = message.metadata.get("portal_contact_identifier", "")
+            if message.channel.value == "email":
+                neo4j_email = message.channel_identifier
+            elif "@" in str(linked_email):
+                neo4j_email = linked_email
+            elif "@" in str(portal_contact):
+                neo4j_email = portal_contact
+            else:
+                neo4j_email = ""
             neo4j_writer.upsert_customer(
                 self.neo4j_client,
-                customer_id=_neo4j_customer_id(state),
+                customer_id=graph_customer_id,
                 phone=message.channel_identifier if message.channel.value == "whatsapp" else "",
                 name=state.customer.get("display_name", ""),
                 channel=message.channel.value,
-                email=message.metadata.get("linked_email", "") if message.channel.value == "whatsapp" else message.channel_identifier,
+                email=neo4j_email,
             )
         self._audit("inbound_received", state, details={"provider": message.provider})
         if crm_profile.status != "not_configured":
@@ -290,12 +334,13 @@ class OrchestrationGraph:
             metadata=message.metadata,
         )
         # Phase 1 of 2-phase Neo4j write: create Interaction node immediately ("open")
-        # so the graph always has a record even if the AI pipeline fails.
-        if neo4j_writer and self.neo4j_client:
+        # so the graph always has a record even if the AI pipeline fails. Skipped for
+        # unregistered portal users (write_neo4j is False) — no customer node to link to.
+        if write_neo4j:
             neo4j_writer.write_incoming_interaction(
                 self.neo4j_client,
                 conversation_id=state.conversation_id,
-                customer_id=_neo4j_customer_id(state),
+                customer_id=graph_customer_id,
                 channel=message.channel.value,
                 message_text=message.text,
                 timestamp=datetime.now(timezone.utc).isoformat(),
@@ -579,7 +624,17 @@ class OrchestrationGraph:
         if state.resolution:
             self.repository.add_retrieval_evidence(outbound_turn["turn_id"], state.resolution.contexts)
         self.repository.update_conversation_summary(state.conversation_id, self._summary(state.conversation_id))
-        if neo4j_writer and self.neo4j_client and state.analysis:
+        # Skip Phase-2 Neo4j writes for unregistered portal users (no real customer node),
+        # so we don't leave orphan Interaction/Ticket nodes for senders we rejected.
+        is_portal_message = bool(state.message.metadata.get("portal_graph_customer_id"))
+        neo4j_customer_exists = True
+        if is_portal_message and self.neo4j_client:
+            try:
+                from services.neo4j_service.queries import get_customer_by_id
+                neo4j_customer_exists = bool(get_customer_by_id(self.neo4j_client, _neo4j_customer_id(state)))
+            except Exception:
+                neo4j_customer_exists = False
+        if neo4j_writer and self.neo4j_client and state.analysis and neo4j_customer_exists:
             # Phase 2 of 2-phase write: close the Interaction node and create ResolutionMemory.
             neo4j_writer.update_interaction_resolution(
                 self.neo4j_client,

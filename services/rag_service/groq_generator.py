@@ -170,7 +170,10 @@ class GroqGenerator:
             "- When account data is provided, present it in natural sentences as a human CS agent would. "
             "Do NOT write 'Status: X' or 'Amount: Y' — say 'Your car loan has been approved' instead.\n"
             "- Address the customer's concern first — acknowledge worry or frustration before giving data.\n"
-            "- If context is insufficient, say: 'I need to escalate this to our support team.'\n"
+            "- If you cannot fully answer from the data below, give what you can and then say a "
+            "support specialist can help further with the rest. Do NOT promise that you are "
+            "escalating, raising, or logging anything — the system decides separately whether a "
+            "ticket is created, so never state or imply that an escalation/ticket has happened.\n"
             "- Never mention internal system names like OpenSearch, Neo4j, or RAG.\n"
             + no_data_note
             + "\n"
@@ -468,5 +471,38 @@ def _format_graph_context(graph_ctx: dict | None) -> str:
                 f"Coverage: {_safe_amount(p.get('coverage_inr', 0))} | "
                 f"Premium: {_safe_amount(p.get('premium_inr', 0))}"
                 f"{maturity}{next_due}"
+            )
+    credit_cards = graph_ctx.get("credit_cards") or []
+    if credit_cards:
+        lines.append("Credit Cards:")
+        for cc in credit_cards:
+            lines.append(
+                f"  - {cc.get('card_network', 'Card')} {cc.get('card_variant', '')} "
+                f"(ID: {cc.get('card_id', '')}) | "
+                f"Credit limit: {_safe_amount(cc.get('credit_limit', 0))} | "
+                f"Balance due: {_safe_amount(cc.get('balance_due', 0))}"
+            )
+    accounts = graph_ctx.get("accounts") or []
+    if accounts:
+        lines.append("Accounts:")
+        for a in accounts:
+            lines.append(
+                f"  - {a.get('account_type', 'Account')} {a.get('account_sub_type', '')} "
+                f"(No: {a.get('account_number', '')}) | "
+                f"Status: {a.get('status', '')} | "
+                f"Avg monthly balance: {_safe_amount(a.get('avg_monthly_balance', 0))}"
+            )
+    fixed_deposits = graph_ctx.get("fixed_deposits") or []
+    if fixed_deposits:
+        lines.append("Fixed Deposits:")
+        for fd in fixed_deposits:
+            maturity = f" | Maturity: {fd['maturity_date']}" if fd.get("maturity_date") else ""
+            lines.append(
+                f"  - FD {fd.get('fd_id', '')} | "
+                f"Principal: {_safe_amount(fd.get('principal_amount', 0))} | "
+                f"Rate: {fd.get('interest_rate', 'N/A')}% | "
+                f"Tenure: {fd.get('tenure_months', 'N/A')} months | "
+                f"Status: {fd.get('status', '')}"
+                f"{maturity}"
             )
     return "\n".join(lines)

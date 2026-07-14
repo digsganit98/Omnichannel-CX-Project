@@ -232,10 +232,14 @@ def test_portal_identity_prevents_shared_phone_from_reusing_previous_customer(mo
     assert {"channel": "email", "identifier": "sayantini.s.55@gmail.com"} in second_ids
 
 
-def test_customer_signup_and_contact_updates_are_written_to_neo4j(monkeypatch):
+def test_unknown_signup_creates_no_synthetic_neo4j_customer(monkeypatch):
+    """A signup whose email/phone matches no seeded BFSI customer must NOT fabricate a
+    Neo4j customer node or synthetic records. It returns 'unregistered' so account-specific
+    intents route to the reject-unregistered flow instead of returning fake data."""
     monkeypatch.setenv("JWT_SECRET", "user-portal-test-secret")
     monkeypatch.setenv("NEO4J_ENABLED", "true")
     from services.neo4j_service import client as client_module
+    from services.neo4j_service import queries as queries_module
     from services.neo4j_service import writer as writer_module
     from services.persistence_service.repository import SQLiteCXRepository
 
@@ -256,9 +260,10 @@ def test_customer_signup_and_contact_updates_are_written_to_neo4j(monkeypatch):
         return {"loans": 2, "claims": 2, "policies": 2, "kyc": 1, "product_links": 2}
 
     monkeypatch.setattr(client_module, "Neo4jClient", FakeNeo4jClient)
+    # No existing BFSI customer matches this email/phone.
+    monkeypatch.setattr(queries_module, "get_customer_by_identifier", lambda client, ident: None)
     monkeypatch.setattr(writer_module, "upsert_customer", fake_upsert)
     monkeypatch.setattr(writer_module, "seed_synthetic_bfsi_records", fake_seed)
-    monkeypatch.setattr(user_portal, "handle_whatsapp_message", lambda payload: _response("whatsapp"))
 
     signup = user_portal.user_signup(
         user_portal.UserSignupRequest(
@@ -267,64 +272,54 @@ def test_customer_signup_and_contact_updates_are_written_to_neo4j(monkeypatch):
             password="portal-password",
         )
     )
-    result = user_portal.submit_user_message(
-        user_portal.UserMessageRequest(
-            channel="whatsapp",
-            message="Please help with my claim.",
-            contact_identifier="+91 77009 20746",
-        ),
-        authorization=f"Bearer {signup['token']}",
+
+    assert signup["graph"]["status"] == "unregistered"
+    assert "synthetic_records" not in signup["graph"]
+    assert customer_calls == []  # no customer node written
+    assert seed_calls == []  # no synthetic BFSI records seeded
+
+
+def test_matched_signup_refreshes_but_does_not_seed(monkeypatch):
+    """A signup whose email matches a seeded BFSI customer reuses that customer_id and
+    refreshes runtime fields, but never seeds synthetic records over real data."""
+    monkeypatch.setenv("JWT_SECRET", "user-portal-test-secret")
+    monkeypatch.setenv("NEO4J_ENABLED", "true")
+    from services.neo4j_service import client as client_module
+    from services.neo4j_service import queries as queries_module
+    from services.neo4j_service import writer as writer_module
+    from services.persistence_service.repository import SQLiteCXRepository
+
+    repo = SQLiteCXRepository(":memory:")
+    monkeypatch.setattr(user_portal, "get_repository", lambda: repo)
+    customer_calls = []
+    seed_calls = []
+
+    class FakeNeo4jClient:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(client_module, "Neo4jClient", FakeNeo4jClient)
+    monkeypatch.setattr(
+        queries_module,
+        "get_customer_by_identifier",
+        lambda client, ident: {"customer_id": "CRN00010001", "name": "Sayantini Sarkar"},
+    )
+    monkeypatch.setattr(writer_module, "upsert_customer", lambda client, **kwargs: customer_calls.append(kwargs))
+    monkeypatch.setattr(writer_module, "seed_synthetic_bfsi_records", lambda client, **kwargs: seed_calls.append(kwargs))
+
+    signup = user_portal.user_signup(
+        user_portal.UserSignupRequest(
+            user_id="customer-graph-1",
+            email="graph.customer@example.com",
+            password="portal-password",
+        )
     )
 
-    assert signup["graph"]["status"] == "upserted"
-    assert result["graph"]["status"] == "upserted"
-    assert signup["graph"]["synthetic_records"] == {
-        "loans": 2,
-        "claims": 2,
-        "policies": 2,
-        "kyc": 1,
-        "product_links": 2,
-    }
-    assert customer_calls[0]["customer_id"].startswith("CUST")
-    assert customer_calls[0]["customer_id"][4:].isdigit()
-    assert customer_calls[0] == {
-        "customer_id": customer_calls[0]["customer_id"],
-        "phone": "",
-        "email": "graph.customer@example.com",
-        "secondary_email": "",
-        "city": "",
-        "country": "India",
-        "registration_date": customer_calls[0]["registration_date"],
-        "last_activity_date": customer_calls[0]["last_activity_date"],
-        "name": "customer-graph-1",
-        "channel": "portal",
-    }
-    assert seed_calls[0] == {
-        "customer_id": customer_calls[0]["customer_id"],
-        "registration_date": customer_calls[0]["registration_date"],
-        "email": "graph.customer@example.com",
-        "phone": "",
-    }
-    assert customer_calls[0]["registration_date"].count("/") == 2
-    assert customer_calls[0]["last_activity_date"].count("/") == 2
-    assert customer_calls[1] == {
-        "customer_id": customer_calls[0]["customer_id"],
-        "phone": "917700920746",
-        "email": "graph.customer@example.com",
-        "secondary_email": "",
-        "city": "",
-        "country": "India",
-        "registration_date": customer_calls[1]["registration_date"],
-        "last_activity_date": customer_calls[1]["last_activity_date"],
-        "name": "customer-graph-1",
-        "channel": "whatsapp",
-    }
-    assert seed_calls[1] == {
-        "customer_id": customer_calls[0]["customer_id"],
-        "registration_date": customer_calls[1]["registration_date"],
-        "email": "graph.customer@example.com",
-        "phone": "917700920746",
-    }
+    assert signup["graph"]["status"] == "matched_existing"
+    assert signup["graph"]["customer_id"] == "CRN00010001"
+    assert customer_calls[0]["customer_id"] == "CRN00010001"
+    assert customer_calls[0]["name"] == "Sayantini Sarkar"
+    assert seed_calls == []  # never seed over a real customer's data
 
 
 def test_web_chat_message_tags_portal_identity(monkeypatch):

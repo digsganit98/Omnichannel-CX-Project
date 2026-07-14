@@ -1,14 +1,18 @@
 """Intent-routed Neo4j query helpers for BFSI customer data."""
 
 # Intents where Neo4j has real customer data to return.
-# account_balance_inquiry and fund_transfer excluded: no live banking integration.
+# fund_transfer excluded: no live payments integration.
 # transaction_dispute excluded: no transactions table — neo4j_answer() always returned None
 # for it, wasting a Neo4j round-trip before falling to RAG + MANUAL_REVIEW escalation.
+# account_balance_inquiry answers from the graph's account/FD records (demo data, not a
+# live banking feed) so card/account/FD questions return real figures instead of escalating.
 TRANSACTIONAL_INTENTS = {
     "loan_status",
     "loan_default_notice",
     "claim_status",
     "policy_status",
+    "card_management",
+    "account_balance_inquiry",
 }
 
 
@@ -193,8 +197,12 @@ def get_customer_context_for_customer(client, customer: dict | None) -> dict:
     loans = get_loan_status(client, cid)
     claims = get_claim_status(client, cid)
     policies = get_policy_status(client, cid)
+    credit_cards = get_credit_cards(client, cid)
+    accounts = get_accounts(client, cid)
+    fixed_deposits = get_fixed_deposits(client, cid)
     return {
         "customer_id": cid,
+        "name": customer.get("name"),
         "email": customer.get("email"),
         "phone": customer.get("phone"),
         "city": customer.get("city"),
@@ -202,6 +210,9 @@ def get_customer_context_for_customer(client, customer: dict | None) -> dict:
         "loans": loans,
         "claims": claims,
         "policies": policies,
+        "credit_cards": credit_cards,
+        "accounts": accounts,
+        "fixed_deposits": fixed_deposits,
     }
 
 
@@ -280,6 +291,57 @@ def neo4j_answer(client, intent: str, customer_id: str) -> str | None:
                 )
             return "\n".join(lines)
         return None  # Fall through to RAG
+
+    if intent == "card_management":
+        cards = get_credit_cards(client, customer_id)
+        if not cards:
+            return None  # Fall through to RAG
+        lines = ["Credit card records:"]
+        for cc in cards:
+            due = f", Total due: {_fmt_amount(cc['total_amount_due'])}" if cc.get("total_amount_due") not in (None, "") else ""
+            min_due = f", Min due: {_fmt_amount(cc['min_amount_due'])}" if cc.get("min_amount_due") not in (None, "") else ""
+            due_date = f", Payment due date: {cc['payment_due_date']}" if cc.get("payment_due_date") else ""
+            lines.append(
+                f"  - {cc.get('card_network', 'Card')} {cc.get('card_variant', '')} "
+                f"(ID: {cc.get('card_id', '')}): "
+                f"Credit limit: {_fmt_amount(cc.get('credit_limit'))}, "
+                f"Balance due: {_fmt_amount(cc.get('balance_due'))}"
+                f"{min_due}{due}{due_date}"
+            )
+        return "\n".join(lines)
+
+    if intent == "account_balance_inquiry":
+        # Surface both deposit accounts and fixed deposits — "balance" and
+        # "FD details" questions both land on this intent.
+        accounts = get_accounts(client, customer_id)
+        fds = get_fixed_deposits(client, customer_id)
+        if not accounts and not fds:
+            return None  # Fall through to RAG
+        lines = []
+        if accounts:
+            lines.append("Account records:")
+            for a in accounts:
+                lines.append(
+                    f"  - {a.get('account_type', 'Account')} {a.get('account_sub_type', '')} "
+                    f"(No: {a.get('account_number', '')}): "
+                    f"Status: {a.get('status', 'Unknown')}, "
+                    f"Avg monthly balance: {_fmt_amount(a.get('avg_monthly_balance'))}, "
+                    f"Min balance required: {_fmt_amount(a.get('min_balance_required'))}"
+                )
+        if fds:
+            lines.append("Fixed deposit records:")
+            for fd in fds:
+                maturity = f", Maturity date: {fd['maturity_date']}" if fd.get("maturity_date") else ""
+                maturity_amt = f", Maturity amount: {_fmt_amount(fd['maturity_amount'])}" if fd.get("maturity_amount") not in (None, "") else ""
+                lines.append(
+                    f"  - FD {fd.get('fd_id', '')}: "
+                    f"Principal: {_fmt_amount(fd.get('principal_amount'))}, "
+                    f"Rate: {fd.get('interest_rate', 'N/A')}%, "
+                    f"Tenure: {fd.get('tenure_months', 'N/A')} months, "
+                    f"Status: {fd.get('status', 'Unknown')}"
+                    f"{maturity}{maturity_amt}"
+                )
+        return "\n".join(lines)
 
     # transaction_dispute → no transaction table; returns None → RAG → Rule 2 still fires (MANUAL_REVIEW)
     return None

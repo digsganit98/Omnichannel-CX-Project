@@ -1636,8 +1636,11 @@ function renderPortalChatTurns(turns) {
     return;
   }
   el.innerHTML = turns.map(function(t) {
-    var dir = t.direction === 'outbound' ? 'outbound' : 'inbound';
-    return '<div class="portal-chat-msg ' + dir + '">' + escH(t.text || '') + '</div>';
+    // In the customer portal the CUSTOMER'S own message (stored as 'inbound')
+    // belongs on the right (blue "you" bubble), and the AI reply (stored as
+    // 'outbound') on the left. This is inverted vs. the admin inbox.
+    var side = t.direction === 'inbound' ? 'outbound' : 'inbound';
+    return '<div class="portal-chat-msg ' + side + '">' + escH(t.text || '') + '</div>';
   }).join('');
   el.scrollTop = el.scrollHeight;
 }

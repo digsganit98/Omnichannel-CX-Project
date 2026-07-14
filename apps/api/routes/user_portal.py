@@ -106,6 +106,35 @@ def _graph_customer_id(user_id: str) -> str:
     return "CUST" + digits
 
 
+def _resolve_graph_customer_id(user_id: str, email: str = "", phone: str = "") -> str:
+    """Return the graph customer_id to use in message metadata.
+
+    Prefers an EXISTING BFSI customer matched by email/phone (so account queries
+    find real loans/cards/FD). Falls back to the deterministic hash id for
+    brand-new portal users who aren't in the BFSI dataset. Deterministic for a
+    given (email/phone), so the GET history path and the POST send path always
+    resolve to the SAME customer_id — avoiding split conversations.
+    """
+    if os.getenv("NEO4J_ENABLED", "true").lower() == "true":
+        client = None
+        try:
+            from services.neo4j_service.client import Neo4jClient
+            from services.neo4j_service.queries import get_customer_by_identifier
+
+            client = Neo4jClient()
+            for candidate in (email, phone):
+                if candidate:
+                    existing = get_customer_by_identifier(client, candidate)
+                    if existing and existing.get("customer_id"):
+                        return str(existing["customer_id"])
+        except Exception:
+            logger.warning("portal_resolve_graph_customer_id_failed", extra={"user_id": user_id}, exc_info=True)
+        finally:
+            if client is not None:
+                client.close()
+    return _graph_customer_id(user_id)
+
+
 def _xlsx_date_today() -> str:
     today = datetime.now()
     return f"{today.month}/{today.day}/{str(today.year)[-2:]}"
@@ -117,36 +146,55 @@ def _upsert_customer_graph_user(user_id: str, email: str, phone: str = "", chann
     client = None
     try:
         from services.neo4j_service.client import Neo4jClient
-        from services.neo4j_service.writer import seed_synthetic_bfsi_records, upsert_customer
+        from services.neo4j_service.queries import get_customer_by_identifier
+        from services.neo4j_service.writer import upsert_customer
 
         client = Neo4jClient()
-        graph_customer_id = _graph_customer_id(user_id)
         today = _xlsx_date_today()
-        upsert_customer(
-            client,
-            customer_id=graph_customer_id,
-            phone=phone,
-            email=email,
-            secondary_email="",
-            city="",
-            country="India",
-            registration_date=today,
-            last_activity_date=today,
-            name=user_id,
-            channel=channel,
-        )
-        synthetic = seed_synthetic_bfsi_records(
-            client,
-            customer_id=graph_customer_id,
-            registration_date=today,
-            email=email,
-            phone=phone,
-        )
+
+        # Match an EXISTING BFSI customer (loaded from the dataset) by email/phone
+        # before minting a synthetic hash-based id. Otherwise the portal creates a
+        # phantom Customer node with no loans/cards/FD, and account-specific queries
+        # falsely escalate ("no details found") even though the real customer has data.
+        existing = None
+        for candidate in (email, phone):
+            if candidate:
+                existing = get_customer_by_identifier(client, candidate)
+                if existing:
+                    break
+
+        if existing and existing.get("customer_id"):
+            graph_customer_id = str(existing["customer_id"])
+            # Refresh only runtime fields; do NOT seed synthetic records over the
+            # real customer's existing BFSI data.
+            upsert_customer(
+                client,
+                customer_id=graph_customer_id,
+                phone=phone,
+                email=email,
+                secondary_email="",
+                city="",
+                country="India",
+                registration_date="",
+                last_activity_date=today,
+                name=existing.get("name") or user_id,
+                channel=channel,
+            )
+            return {
+                "enabled": True,
+                "status": "matched_existing",
+                "customer_id": graph_customer_id,
+            }
+
+        # No existing BFSI customer matched this email/phone. Do NOT fabricate a
+        # customer node or synthetic loans/cards/FD — that would make an unknown user
+        # look "registered" (with fake data) and bypass CustomerValidationAgent's
+        # reject-unregistered flow. Leaving no node means account-specific intents are
+        # correctly routed to _reject_unregistered_customer; general FAQs still work.
         return {
             "enabled": True,
-            "status": "upserted",
-            "customer_id": graph_customer_id,
-            "synthetic_records": synthetic,
+            "status": "unregistered",
+            "customer_id": _graph_customer_id(user_id),
         }
     except Exception as exc:
         logger.warning("portal_customer_graph_upsert_failed", extra={"user_id": user_id}, exc_info=True)
@@ -254,7 +302,7 @@ def submit_user_message(
             raise HTTPException(status_code=400, detail="Enter a valid WhatsApp number with country code")
     metadata = {
         "portal_user_id": user_id,
-        "portal_graph_customer_id": _graph_customer_id(user_id),
+        "portal_graph_customer_id": _resolve_graph_customer_id(user_id, email, phone),
         "portal_contact_identifier": email if channel == "email" else phone,
         "source": "user_portal",
         "provider": "whatsapp_cloud" if channel == "whatsapp" else "email_user_portal",
@@ -302,8 +350,9 @@ def _web_chat_identity(user_id: str, user: dict) -> tuple[dict, str]:
     email = str(user.get("email") or _portal_email(user_id)).strip().lower()
     metadata = {
         "portal_user_id": user_id,
-        "portal_graph_customer_id": _graph_customer_id(user_id),
+        "portal_graph_customer_id": _resolve_graph_customer_id(user_id, email, _portal_phone(user_id)),
         "portal_contact_identifier": email,
+        "linked_email": email,
         "source": "user_portal",
         "provider": "web_chat_portal",
     }
