@@ -54,13 +54,23 @@ def send_draft(draft_id: str, payload: SendDraftRequest) -> dict:
         channel = Channel(draft["channel"])
     except ValueError:
         channel = Channel.WEB_CHAT
+
+    # Thread the reply into the original conversation. For email, delivery.send() sets the
+    # In-Reply-To/References headers from external_message_id and the "Re: <subject>" from
+    # subject — so carry the ORIGINAL inbound email's real Message-ID + subject here (not the
+    # internal turn id), otherwise Gmail shows the agent's reply as a separate mail.
+    inbound_turn = repository.get_turn(draft["inbound_turn_id"]) if draft.get("inbound_turn_id") else None
+    reply_subject = (inbound_turn or {}).get("subject")
+    reply_to_message_id = (inbound_turn or {}).get("external_message_id") or draft.get("inbound_turn_id")
+
     outbound_message = InboundMessage(
         channel=channel,
         channel_identifier=draft.get("channel_identifier") or "",
         text="",
         provider=draft.get("provider") or "manual_agent_reply",
+        subject=reply_subject,
         correlation_id=draft_id,
-        external_message_id=draft.get("inbound_turn_id"),
+        external_message_id=reply_to_message_id,
     )
     delivery = OutboundDeliveryService().send(outbound_message, text)
 

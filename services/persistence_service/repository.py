@@ -29,6 +29,8 @@ class CXRepository(Protocol):
     def resolve_customer(self, message: InboundMessage) -> dict: ...
     def get_or_create_conversation(self, customer_id: str) -> dict: ...
     def list_recent_turns(self, conversation_id: str, limit: int = 8, channel: str | None = None) -> list[dict]: ...
+    def get_turn(self, turn_id: str) -> dict | None: ...
+    def get_ticket_reply(self, ticket_id: str) -> str | None: ...
     def append_turn(self, **values) -> dict: ...
     def update_turn_metadata(self, turn_id: str, extra: dict) -> None: ...
     def update_turn_intent_urgency(self, turn_id: str, intent: str, urgency: str) -> None: ...
@@ -257,6 +259,28 @@ class SQLiteCXRepository:
                     (conversation_id, limit),
                 ).fetchall()
         return [self._turn_dict(row) for row in reversed(rows)]
+
+    def get_turn(self, turn_id: str) -> dict | None:
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM conversation_turns WHERE turn_id = ?", (turn_id,)
+            ).fetchone()
+        return self._turn_dict(row) if row else None
+
+    def get_ticket_reply(self, ticket_id: str) -> str | None:
+        """Latest real outbound reply for a ticket — skips the interim 'holding' message so
+        the ticket detail shows the actual answer, not 'a support agent will help you...'."""
+        with self.connection() as conn:
+            rows = conn.execute(
+                "SELECT text FROM conversation_turns WHERE ticket_id = ? AND direction = 'outbound' "
+                "ORDER BY created_at DESC",
+                (ticket_id,),
+            ).fetchall()
+        for row in rows:
+            text = row["text"] or ""
+            if "will help you with this shortly" not in text:
+                return text
+        return rows[0]["text"] if rows else None
 
     def update_turn_metadata(self, turn_id: str, extra: dict) -> None:
         with self.connection() as conn:

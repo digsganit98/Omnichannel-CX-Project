@@ -338,6 +338,10 @@ class OrchestrationGraph:
             subject=message.subject,
             metadata=message.metadata,
         )
+        # Remember the inbound turn so later steps can reference it (sentiment metadata, and
+        # the held-draft's inbound_turn_id used to thread the manual email reply — see
+        # apps/api/routes/reply_drafts.py). Previously unset, leaving inbound_turn_id None.
+        state.inbound_turn_id = inbound_turn["turn_id"]
         # Phase 1 of 2-phase Neo4j write: create Interaction node immediately ("open")
         # so the graph always has a record even if the AI pipeline fails. Skipped for
         # unregistered portal users (write_neo4j is False) — no customer node to link to.

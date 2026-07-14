@@ -511,8 +511,6 @@ function renderCentre(conv) {
   document.getElementById('convName').textContent = nm;
 
   var isDone = urgencyToStatus(conv_meta) === 'resolved';
-  document.getElementById('btnResolve').disabled = isDone;
-  document.getElementById('btnEsc').disabled = isDone;
   document.getElementById('resbanner').style.display = isDone ? 'flex' : 'none';
   document.getElementById('compwrap').style.display = isDone ? 'none' : 'block';
 
@@ -691,7 +689,14 @@ function renderDraftCard(conv) {
   var mount = document.getElementById('draftMount');
   if (!mount) return;
   var draft = state.pendingDrafts[conv.conversation_id];
-  if (!draft) { mount.innerHTML = ''; return; }
+  var compose = document.getElementById('compwrap');
+  if (!draft) {
+    mount.innerHTML = '';
+    return;  // no draft: leave the compose box as renderCentre() set it
+  }
+  // A held draft IS the reply surface — hide the generic compose box so there is only one
+  // (and the real one). renderCentre() runs before this and may have shown compwrap.
+  if (compose) compose.style.display = 'none';
   mount.innerHTML =
     '<div class="draft-card" data-draft-id="' + escH(draft.draft_id) + '">'
     + '<div class="draft-hdr"><span>✋ Held for review — edit &amp; send manually</span>'
@@ -716,8 +721,10 @@ window.sendDraft = function(btn) {
     body: JSON.stringify({ text: text }),
   }).then(function() {
     toast('Reply sent to customer');
-    if (state.convDetail) delete state.pendingDrafts[state.convDetail.conversation_id];
-    document.getElementById('draftMount').innerHTML = '';
+    if (state.convDetail) {
+      delete state.pendingDrafts[state.convDetail.conversation_id];
+      renderCentre(state.convDetail);  // clears the card + restores the compose box
+    }
     refreshSelectedConv();
     loadConversations();
   }).catch(function(err) {
@@ -736,8 +743,10 @@ window.discardDraft = function(btn) {
     body: JSON.stringify({}),
   }).then(function() {
     toast('Draft discarded');
-    if (state.convDetail) delete state.pendingDrafts[state.convDetail.conversation_id];
-    document.getElementById('draftMount').innerHTML = '';
+    if (state.convDetail) {
+      delete state.pendingDrafts[state.convDetail.conversation_id];
+      renderCentre(state.convDetail);  // clears the card + restores the compose box
+    }
     loadConversations();
   }).catch(function(err) {
     toast('Failed: ' + err.message);
@@ -906,16 +915,21 @@ function renderRight(conv, tickets) {
   var allTickets = tickets || [].concat(_allTickets.open, _allTickets.closed);
   var convTickets = allTickets.filter(function(t) { return t.conversation_id === conv.conversation_id; });
   if (convTickets.length) {
-    var tktHtml = convTickets.slice(0,4).map(function(t) {
+    var tktHtml = convTickets.map(function(t) {
+      var isOpen = t.status === 'open' || t.status === 'in_progress';
       var stBg = t.status === 'resolved' ? 'background:var(--grn-bg);border-color:var(--grn-bd);color:var(--grn-t)' :
-                 t.status === 'open' || t.status === 'in_progress' ? 'background:var(--amb-bg);border-color:var(--amb-bd);color:var(--amb-t)' :
+                 isOpen ? 'background:var(--amb-bg);border-color:var(--amb-bd);color:var(--amb-t)' :
                  'background:var(--surf2);border-color:var(--bdr);color:var(--t3)';
-      return '<div class="tkt-item"><div class="tkt-head">'
+      return '<div class="tkt-item tkt-item--clickable" onclick="goToConversation(\'' + escH(conv.conversation_id) + '\',\'' + escH(t.ticket_id) + '\')"><div class="tkt-head">'
         + '<span class="tkt-id">' + escH(t.ticket_id.slice(0,16)) + '</span>'
         + '<span class="tkt-st" style="' + stBg + '">' + escH(t.status) + '</span>'
-        + '</div><div class="tkt-desc">' + escH((t.title||t.intent||'').slice(0,60)) + '</div></div>';
+        + '</div><div class="tkt-desc">' + escH((t.title||t.intent||'').slice(0,60)) + '</div>'
+        + '<div class="tkt-created">Created: ' + escH(fmtDateTime(t.created_at)) + '</div>'
+        + (isOpen ? '<button class="tkt-resolve-btn" onclick="event.stopPropagation();resolveTicket(this,\'' + escH(t.ticket_id) + '\')">Resolve ticket</button>' : '')
+        + '</div>';
     }).join('');
-    body.innerHTML += '<div class="rpcard"><div class="rplbl">Tickets (' + convTickets.length + ')</div>' + tktHtml + '</div>';
+    body.innerHTML += '<div class="rpcard"><div class="rplbl">Tickets (' + convTickets.length + ')</div>'
+      + '<div class="tkt-scroll">' + tktHtml + '</div></div>';
   }
 
   body.innerHTML += '<div class="rpcard" id="rpNbaCard"><div class="rplbl">Recommended actions</div>'
@@ -1011,82 +1025,45 @@ window.confirmOk = async function() {
   }
 };
 
-window.doResolve = function() {
-  if (!state.convDetail) return;
-  if (state.convDetail.status === 'closed' || state.convDetail.status === 'resolved') return;
-  showConfirm({
-    icon: '<svg viewBox="0 0 24 24" width="36" height="36" fill="var(--grn)"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z"/></svg>',
-    title: 'Resolve conversation',
-    msg: 'This will close the latest open ticket and mark the conversation as resolved. This action cannot be undone.',
-    okLabel: 'Resolve',
-    okColor: 'var(--grn)',
-    onConfirm: execResolve
-  });
-};
+// Conversation-level Resolve/Escalate buttons were removed: resolution is per-ticket (see the
+// per-ticket Resolve control in renderRight), and conversation "resolved" is derived from having
+// no open tickets. The old Escalate was a non-functional UI stub (no backend action).
 
-async function execResolve() {
-  try {
-    var convId = state.convDetail.conversation_id;
-    var adminUser = currentUser ? currentUser.username : 'admin';
-
-    // Find the latest open ticket for this conversation
-    var tickets = await api('/admin/tickets');
-    var openTicket = tickets.filter(function(t) {
-      return t.conversation_id === convId && (t.status === 'open' || t.status === 'in_progress');
-    }).sort(function(a, b) { return new Date(b.created_at) - new Date(a.created_at); })[0];
-
-    if (openTicket) {
-      await api('/admin/tickets/' + openTicket.ticket_id + '/status', {
-        method: 'PATCH',
-        body: JSON.stringify({ status: 'resolved', actor: adminUser })
+// Resolve a single ticket from the Tickets panel, then refresh so the conversation-resolved
+// state is re-derived (a conversation is done only when it has no open tickets left).
+window.resolveTicket = function(btn, ticketId) {
+  if (!ticketId) return;
+  var adminUser = currentUser ? currentUser.username : 'admin';
+  btn.disabled = true;
+  api('/admin/tickets/' + encodeURIComponent(ticketId) + '/status', {
+    method: 'PATCH',
+    body: JSON.stringify({ status: 'resolved', actor: adminUser })
+  }).then(function() {
+    toast('Ticket ' + ticketId.slice(0,16) + ' resolved ✓');
+    return loadTickets ? loadTickets() : null;
+  }).then(function() {
+    // Re-derive: refresh conversations + tickets and re-render the open conversation.
+    return loadConversations();
+  }).then(function() {
+    if (state.convDetail) {
+      var all = [].concat(_allTickets.open, _allTickets.closed);
+      var stillOpen = all.some(function(t) {
+        return t.conversation_id === state.convDetail.conversation_id
+          && (t.status === 'open' || t.status === 'in_progress');
       });
-      // Update cached ticket lists immediately so right panel reflects the change
-      _allTickets.open = _allTickets.open.filter(function(t) { return t.ticket_id !== openTicket.ticket_id; });
-      openTicket.status = 'resolved';
-      _allTickets.closed = [openTicket].concat(_allTickets.closed);
+      state.convDetail.status = stillOpen ? 'active' : 'resolved';
+      state.convs.forEach(function(c) {
+        if (c.conversation_id === state.convDetail.conversation_id) c.status = state.convDetail.status;
+      });
+      renderCentre(state.convDetail);
+      renderRight(state.convDetail, all);
+      renderQueue();
     }
-
-    // Update local state
-    state.convDetail.status = 'resolved';
-    state.convs.forEach(function(c) { if (c.conversation_id === convId) c.status = 'resolved'; });
-    renderQueue();
-    renderCentre(state.convDetail);
-    renderRight(state.convDetail, [].concat(_allTickets.open, _allTickets.closed));
-
-    // Refresh tickets panel badge/table
-    api('/admin/tickets').then(function(tks) {
-      var open = tks.filter(function(t) { return t.status === 'open' || t.status === 'in_progress'; });
-      var badge = document.getElementById('ticketsBadge');
-      if (open.length > 0) { badge.style.display = 'flex'; badge.textContent = open.length > 9 ? '9+' : open.length; }
-      else { badge.style.display = 'none'; }
-      if (activePage === 'tickets') { _allTickets.open = open; _allTickets.closed = tks.filter(function(t) { return t.status === 'resolved' || t.status === 'closed'; }); filterTickets(); }
-    }).catch(function(){});
-
-    toast('Conversation resolved · ticket closed ✓');
-  } catch(e) {
+  }).catch(function(e) {
     toast('Error: ' + e.message);
-  }
-}
-
-window.doEscalate = function() {
-  if (!state.convDetail) return;
-  if (state.convDetail.status === 'closed' || state.convDetail.status === 'resolved') return;
-  showConfirm({
-    icon: '<svg viewBox="0 0 24 24" width="36" height="36" fill="var(--red)"><path d="M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z"/></svg>',
-    title: 'Escalate to senior support',
-    msg: 'This will escalate the conversation to the senior support team and add an escalation note to the chat.',
-    okLabel: 'Escalate',
-    okColor: 'var(--red)',
-    onConfirm: execEscalate
+    btn.disabled = false;
   });
 };
-
-function execEscalate() {
-  var turns = state.convDetail.turns || [];
-  turns.push({ direction: 'outbound', channel: null, text: '[Escalated to senior support team]', created_at: new Date().toISOString() });
-  renderCentre(state.convDetail);
-  toast('Escalated to senior support');
-}
 
 document.getElementById('ftags').addEventListener('click', function(e) {
   if (!e.target.dataset.f) return;
@@ -1676,12 +1653,14 @@ function fmtDateTime(iso) {
     + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
-function goToConversation(conversationId, ticketId) {
+// Exposed on window so inline onclick= (Tickets panel rows) can reach it — the file is
+// wrapped in an IIFE, so a plain function declaration is NOT in global scope.
+window.goToConversation = function(conversationId, ticketId) {
   if (!conversationId) return;
   state.highlightTicketId = ticketId || null;
   switchPage('inbox');
   selectConv(conversationId);
-}
+};
 
 // ── SETTINGS (admin account) ──────────────────────────────────────────────────
 function userHeaders() {
@@ -1787,55 +1766,83 @@ window.loadUserTickets = async function() {
       return;
     }
     list.innerHTML = '';
-    tickets.forEach(function(ticket) {
-      var item = document.createElement('div');
-      item.className = 'user-ticket-item';
-      var row = document.createElement('div');
-      row.className = 'user-ticket-row';
-      row.innerHTML =
-        '<div class="user-ticket-main"><strong>' + escH(ticket.ticket_id || ticket.conversation_id) + '</strong>'
-        + '<span>' + escH((ticket.message || '').replace('Customer portal request\\n\\n', '')) + '</span></div>'
-        + '<div class="user-ticket-meta">' + escH(ticket.channel || '-') + '</div>'
-        + '<div><span class="user-status-pill">' + escH(ticket.status || 'active') + '</span></div>'
-        + '<div class="user-ticket-meta">' + escH(fmtDateTime(ticket.updated_at)) + '</div>';
-      var detail = document.createElement('div');
-      detail.className = 'user-ticket-detail';
-      detail.style.display = 'none';
-      item.appendChild(row);
-      item.appendChild(detail);
-      row.addEventListener('click', function() { toggleUserTicket(item, detail, ticket.conversation_id); });
-      list.appendChild(item);
-    });
+    var isOpen = function(t) { return t.status === 'open' || t.status === 'in_progress'; };
+    var openTickets = tickets.filter(isOpen);
+    var closedTickets = tickets.filter(function(t) { return !isOpen(t); });
+
+    function renderGroup(heading, group) {
+      if (!group.length) return;
+      var hdr = document.createElement('div');
+      hdr.className = 'user-ticket-group';
+      hdr.textContent = heading + ' (' + group.length + ')';
+      list.appendChild(hdr);
+      group.forEach(function(ticket) {
+        var item = document.createElement('div');
+        item.className = 'user-ticket-item';
+        var row = document.createElement('div');
+        row.className = 'user-ticket-row';
+        var cm = chMeta(ticket.channel);
+        var chStyle = 'background:' + cm.bg + ';border-color:' + cm.bd + ';color:' + cm.clr;
+        var st = (ticket.status || 'active').toLowerCase();
+        var isResolvedSt = st === 'resolved' || st === 'closed';
+        var stCls = isResolvedSt ? 'user-status-pill user-status-pill--resolved' : 'user-status-pill';
+        row.innerHTML =
+          '<div class="user-ticket-main"><strong>' + escH(ticket.ticket_id || ticket.conversation_id) + '</strong>'
+          + '<span>' + escH((ticket.message || '').replace('Customer portal request\\n\\n', '')) + '</span>'
+          + '<span class="user-ticket-date">Created: ' + escH(fmtDateTime(ticket.created_at)) + '</span></div>'
+          + '<div class="user-ticket-pills">'
+          + '<span class="user-ch-pill" style="' + chStyle + '">' + escH(cm.label) + '</span>'
+          + '<span class="' + stCls + '">' + escH(ticket.status || 'active') + '</span>'
+          + '</div>';
+        item.appendChild(row);
+        row.addEventListener('click', function() { openTicketModal(ticket); });
+        list.appendChild(item);
+      });
+    }
+    renderGroup('Open', openTickets);
+    renderGroup('Resolved', closedTickets);
   } catch(e) {
     list.innerHTML = '<div class="user-empty" style="color:var(--red-t)">' + escH(e.message) + '</div>';
   } finally {
     refresh.disabled = false;
-    refresh.textContent = 'Refresh tickets';
+    refresh.textContent = 'Refresh';
   }
 };
 
-async function toggleUserTicket(item, detail, conversationId) {
-  // Collapse if already open
-  if (item.classList.contains('open')) {
-    item.classList.remove('open');
-    detail.style.display = 'none';
-    return;
+window.closeTicketModal = function() {
+  document.getElementById('ticketModal').classList.add('hidden');
+};
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'Escape') {
+    var tm = document.getElementById('ticketModal');
+    if (tm && !tm.classList.contains('hidden')) closeTicketModal();
   }
-  item.classList.add('open');
-  detail.style.display = 'block';
-  // Lazy-load full detail once; cache in the element so re-open is instant
-  if (detail.dataset.loaded === '1') return;
-  detail.innerHTML = '<span class="utd-loading">Loading…</span>';
+});
+
+// Open a ticket's full detail (its own message + reply) in a roomy modal. Keyed on ticket_id
+// (many tickets share one conversation), fetched from /user/ticket-detail/{ticket_id}.
+async function openTicketModal(ticket) {
+  var modal = document.getElementById('ticketModal');
+  var cm = chMeta(ticket.channel);
+  document.getElementById('ticketModalId').textContent = ticket.ticket_id || ticket.conversation_id || 'Ticket';
+  var st = (ticket.status || 'active').toLowerCase();
+  var stCls = (st === 'resolved' || st === 'closed') ? 'user-status-pill user-status-pill--resolved' : 'user-status-pill';
+  document.getElementById('ticketModalMeta').innerHTML =
+    '<span class="user-ch-pill" style="background:' + cm.bg + ';border-color:' + cm.bd + ';color:' + cm.clr + '">' + escH(cm.label) + '</span>'
+    + '<span class="' + stCls + '">' + escH(ticket.status || 'active') + '</span>'
+    + '<span class="ticket-modal-date" style="font-size:10px;color:var(--t3)">Created: ' + escH(fmtDateTime(ticket.created_at)) + '</span>';
+  var body = document.getElementById('ticketModalBody');
+  body.innerHTML = '<span class="utd-loading">Loading…</span>';
+  modal.classList.remove('hidden');
   try {
-    var ticket = await userApi('/user/tickets/' + encodeURIComponent(conversationId));
-    var msg = (ticket.message || '').replace('Customer portal request\\n\\n', '') || '—';
-    var resp = ticket.latest_response || 'Response pending';
-    detail.innerHTML =
+    var detail = await userApi('/user/ticket-detail/' + encodeURIComponent(ticket.ticket_id));
+    var msg = (detail.message || '').replace('Customer portal request\\n\\n', '') || '—';
+    var resp = detail.latest_response || 'Response pending';
+    body.innerHTML =
       '<span class="utd-label">Your message</span><p class="utd-msg">' + escH(msg) + '</p>'
       + '<span class="utd-label">Latest response</span><p class="utd-resp">' + escH(resp) + '</p>';
-    detail.dataset.loaded = '1';
   } catch(e) {
-    detail.innerHTML = '<span class="utd-loading" style="color:var(--red-t)">' + escH(e.message) + '</span>';
+    body.innerHTML = '<span class="utd-loading" style="color:var(--red-t)">' + escH(e.message) + '</span>';
   }
 }
 

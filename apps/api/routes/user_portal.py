@@ -403,17 +403,40 @@ def send_user_chat_message(
     }
 
 
+def _ticket_summary(ticket: dict) -> dict:
+    """One row per ticket for the customer portal — across all channels, open + closed.
+    Channel is read from ticket metadata (the tickets table has no channel column)."""
+    metadata = ticket.get("metadata") or {}
+    return {
+        "ticket_id": ticket.get("ticket_id"),
+        "conversation_id": ticket.get("conversation_id"),
+        "status": ticket.get("status") or "open",
+        "channel": metadata.get("channel") or "-",
+        "message": ticket.get("title") or (ticket.get("intent") or "").replace("_", " "),
+        "created_at": ticket.get("created_at"),
+        "updated_at": ticket.get("updated_at"),
+    }
+
+
 @router.get("/tickets")
 def list_user_tickets(authorization: str | None = Header(default=None)) -> list[dict]:
     user_id = _require_user(authorization)
     repo = get_repository()
     tickets = repo.list_tickets()
-    results = []
+
+    # Conversation ids this portal user owns (a turn tagged with their portal_user_id).
+    owned_conversation_ids = set()
     for summary in repo.list_conversations():
         conversation = repo.get_conversation(summary["conversation_id"])
         if conversation and _owns_conversation(conversation, user_id):
-            results.append(_ticket_view(conversation, tickets))
-    return results
+            owned_conversation_ids.add(conversation["conversation_id"])
+
+    # One row per ticket across ALL channels (open + closed): open group first, newest within.
+    open_states = {"open", "in_progress"}
+    owned_tickets = [t for t in tickets if t.get("conversation_id") in owned_conversation_ids]
+    owned_tickets.sort(key=lambda t: t.get("created_at") or "", reverse=True)  # newest first
+    owned_tickets.sort(key=lambda t: t.get("status") not in open_states)       # then open group first (stable)
+    return [_ticket_summary(t) for t in owned_tickets]
 
 
 @router.get("/tickets/{conversation_id}")
@@ -427,3 +450,32 @@ def get_user_ticket(
     if not conversation or not _owns_conversation(conversation, user_id):
         raise HTTPException(status_code=404, detail="Ticket conversation not found")
     return _ticket_view(conversation, repo.list_tickets())
+
+
+@router.get("/ticket-detail/{ticket_id}")
+def get_user_ticket_detail(
+    ticket_id: str,
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """Per-ticket detail (this ticket's own message + reply), not the conversation's latest.
+    Multiple tickets share one conversation, so keying detail on ticket_id is required."""
+    user_id = _require_user(authorization)
+    repo = get_repository()
+    ticket = repo.get_ticket(ticket_id)
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    conversation = repo.get_conversation(ticket.get("conversation_id"))
+    if not conversation or not _owns_conversation(conversation, user_id):
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    # The ticket's own originating message is stored in its description/title.
+    message = (ticket.get("description") or ticket.get("title") or "").replace(
+        "Customer portal request\n\n", ""
+    )
+    return {
+        "ticket_id": ticket_id,
+        "status": ticket.get("status"),
+        "channel": (ticket.get("metadata") or {}).get("channel"),
+        "message": message,
+        "latest_response": repo.get_ticket_reply(ticket_id),
+        "created_at": ticket.get("created_at"),
+    }

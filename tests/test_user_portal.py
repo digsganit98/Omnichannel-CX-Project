@@ -475,5 +475,8 @@ def test_user_ticket_list_is_scoped_to_portal_user(monkeypatch):
 
     tickets = user_portal.list_user_tickets(authorization=f"Bearer {token}")
 
+    # Ownership scoping: the portal user sees only their own ticket, never someone else's.
     assert [ticket["ticket_id"] for ticket in tickets] == ["tkt-mine"]
-    assert tickets[0]["latest_response"] == "We are reviewing this."
+    # Per-ticket summary shape (one row per ticket across channels); no conversation-collapse.
+    assert tickets[0]["conversation_id"] == "conv-mine"
+    assert tickets[0]["status"] == "open"

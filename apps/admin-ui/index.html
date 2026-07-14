@@ -157,10 +157,9 @@
     <section class="user-hero">
       <div>
         <div class="user-eyebrow">Customer support</div>
-        <h1>Support Center</h1>
-        <p>Chat with support directly, or track requests submitted via WhatsApp and email.</p>
+        <p>Chat with customer support directly, or track requests submitted via WhatsApp or Email or Web App.</p>
       </div>
-      <button class="user-refresh-btn" id="userRefreshBtn" onclick="loadUserTickets()">Refresh tickets</button>
+      <button class="user-refresh-btn" id="userRefreshBtn" onclick="loadUserTickets()">Refresh</button>
     </section>
 
     <div class="user-grid">
@@ -180,7 +179,7 @@
       <section class="user-card user-list-card">
         <div class="user-list-heading">
           <div>
-            <div class="user-card-title">My submitted tickets</div>
+            <div class="user-card-title">My Tickets</div>
             <div class="user-card-sub">Requests associated with this user account.</div>
           </div>
           <span class="q-cnt" id="userTicketCount">0 tickets</span>
@@ -192,6 +191,20 @@
     </div>
 
   </main>
+</div>
+
+<!-- Customer ticket detail modal -->
+<div class="modal-overlay hidden" id="ticketModal" onclick="if(event.target===this)closeTicketModal()">
+  <div class="modal-card ticket-modal-card">
+    <div class="ticket-modal-head">
+      <div>
+        <div class="ticket-modal-id" id="ticketModalId">—</div>
+        <div class="ticket-modal-meta" id="ticketModalMeta"></div>
+      </div>
+      <button class="ticket-modal-close" onclick="closeTicketModal()" aria-label="Close">&times;</button>
+    </div>
+    <div class="ticket-modal-body" id="ticketModalBody">Loading…</div>
+  </div>
 </div>
 
 <!-- STAGE 3: MAIN SHELL -->
@@ -285,10 +298,7 @@
             <div class="cnfo">
               <div class="cnm" id="convName">Select a conversation</div>
             </div>
-            <div class="hbtns">
-              <button class="hbtn wrn" id="btnEsc" onclick="doEscalate()">Escalate</button>
-              <button class="hbtn prim" id="btnResolve" onclick="doResolve()">Resolve</button>
-            </div>
+            <div class="hbtns"></div>
           </div>
           <div class="chbar" id="chbar">
             <span class="chbar-label">View:</span>
