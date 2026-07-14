@@ -22,4 +22,5 @@ class ChannelResponse(BaseModel):
     outbound_status: str = "pending"
     outbound_error: str | None = None
     duplicate: bool = False
+    held_for_review: bool = False
     workflow_trace: list[dict] = Field(default_factory=list)

@@ -19,6 +19,11 @@ Keep this list updated: add a one-sentence entry here for every fix/change made 
 - **Fix 6 — Inbox real name:** Propagate the real Neo4j customer name into the SQLite `display_name` so the inbox shows "Sayantini Sarkar" instead of the portal username.
 - **Fix 7 — No fake data for unknown signups:** New signups with no seeded match create no Neo4j node/synthetic data, so the existing `CustomerValidationAgent` correctly rejects their account-specific queries.
 - **Fix 8 — No false escalation promise:** Soften the LLM prompt so replies don't claim "I need to escalate" when no ticket is actually created (prompt-only; non-deterministic limitation noted).
+- **Fix 9 — Portal chat shows web-chat turns only:** The customer portal chat window was replaying the customer's WhatsApp/email turns (history was keyed by `customer_id` with no channel filter). Now the portal history is scoped to `channel="web_chat"`; the admin inbox's unified cross-channel view and the pipeline context are unchanged.
+- **Fix 12 — Removed the portal "Latest submission" panel:** It duplicated the chat window + My Tickets and exposed internal fields (Conversation ID, Channel) plus an often-empty "Phone/Email used". Removed the section + `showUserLatest` and all its callers entirely (no dead code). Portal-only, no rebuild (bind-mounted UI).
+- **Fix 13 — Portal layout: wider chat + expandable tickets:** Made the chat column wider than the tickets column (`1.35fr` vs `.9fr`, was `.9fr`/`1.1fr`). Ticket rows are now inline expand/collapse: clicking a ticket expands it in place to show the full message + latest response (lazy-loaded from `/user/tickets/{id}`, cached), clicking again collapses. Replaced the now-dead `refreshUserTicket` (which fed the removed panel) with `toggleUserTicket`.
+- **Fix 11 — Recommended Actions no longer linger on resolved tickets:** The agent-assist NBA panel kept showing an "Escalate to Senior" card after a ticket was resolved. Fix A (read filter): the `/next-best-actions` endpoint now drops pending recommendations tied to a resolved/closed ticket. Fix B (rule guard): the SLA-escalate rule uses a positive allow-list (only `open`/`in_progress`) so it never generates an escalate suggestion for a terminal ticket. Verified: near-due open ticket shows escalate → after resolve, 0 actions.
+- **Fix 10 — Human-in-the-loop reply drafts:** When the review gate holds an AI reply (any query that requires a ticket — L2/L3/escalation), the customer now receives a holding message ("Support Agent will help you with this shortly ...") and the AI's real answer is stored as an editable draft. An admin sees a "Needs Review" badge/filter + an editable draft card in the inbox, corrects the text, and sends it manually (delivered + persisted as an outbound turn). The portal chat polls so web-chat customers see the agent's reply without refreshing.
 
 Also this session: corrected an earlier wrong claim about L1/L2/L3 ticketing (see "Correction" section — the level is decided per-query by an LLM, not fixed per intent).
 
@@ -145,6 +150,107 @@ query now answers with the real FD data and a natural next step, no false escala
 **Known limitation:** LLM wording is non-deterministic, so this prompt-only fix reduces but does
 not 100% guarantee the mismatch is gone. A deterministic post-process (strip the escalation
 sentence when `ticket_decision.required is False`) was proposed but NOT implemented this round.
+
+### Fix 9 — Portal chat window now shows web-chat turns only (not WhatsApp/email)
+**Problem:** In the customer portal ("Support Center"), the website chat window replayed the
+customer's WhatsApp and email messages too. Root cause: the portal history path
+(`GET /user/chat/messages`) keys on `customer_id` — `get_or_create_conversation(customer_id)`
+returns one conversation per customer (no channel column), and `list_recent_turns(conversation_id)`
+returned every turn with no channel filter. So the unified cross-channel history rendered inside the
+web-chat box.
+
+**Fix (SQL-level channel filter, scoped to the portal — admin inbox/pipeline unchanged):**
+- `services/persistence_service/repository.py` — `list_recent_turns` gained an optional
+  `channel: str | None = None` param (defaults to current behavior; when set, adds
+  `AND channel = ?` so the `LIMIT` applies to already-filtered rows — no truncation bug). The
+  abstract stub signature was updated to match.
+- `apps/api/routes/user_portal.py` — `get_user_chat_messages` now calls
+  `list_recent_turns(..., channel="web_chat")`, so the portal chat shows only website-typed turns.
+  WhatsApp/email turns remain in the DB and in the admin inbox's unified view; the cross-channel
+  "connected account" story stays intact via the portal's My Tickets panel.
+
+**Chosen over** a post-fetch Python filter in the endpoint, which would have filtered *after* the
+DB `LIMIT 50` and could truncate web-chat turns behind older WhatsApp/email ones. Verified both
+changed files byte-compile.
+
+### Fix 10 — Human-in-the-loop reply drafts (escalation held for agent review)
+**Goal:** For any query that requires a ticket (escalation / L2 / L3 / L1-via-intent-rule), do NOT
+auto-send the AI's answer. Send the customer a holding message, and hold the AI answer as an
+editable draft that a human agent reviews, corrects, and sends manually.
+
+**The gate rule** (`services/workflow_service/review_gate.py`, new): `should_hold_for_review(ticket_decision, resolution)`
+holds **iff `ticket_decision.required` is True**. That one boolean is already the single source of
+truth for escalation (folds in L3, L2, and every L1 intent-rule escalation), so the hold decision
+can never drift from the ticketing logic. The resolution level / ticket reason are read only to
+build a friendly UI label ("Critical escalation (L3)", "Assisted resolution (L2)", ...). Low-confidence
+was deliberately NOT added as a separate trigger: anchoring it to the existing code threshold (0.3)
+made it fully redundant with the ticket path (Rule 8 already escalates below 0.3), and a meaningful
+higher threshold would have been an ungrounded guess (user chose "escalation only").
+
+**Files:**
+- `services/workflow_service/review_gate.py` (new) — the pure rule + `ReviewGateResult`.
+- `services/persistence_service/migrations/009_reply_drafts.sql` (new) — `reply_drafts` table
+  (draft_text, hold_reason, reason_code, channel, channel_identifier, provider, inbound_turn_id,
+  status pending→sent/discarded, sent_text, audit fields). Mirrors the agent_assist pattern.
+- `services/persistence_service/repository.py` — `add_reply_draft` / `list_reply_drafts` /
+  `get_reply_draft` / `update_reply_draft` (+ Protocol stubs).
+- `services/orchestration_service/state.py` — added `held_for_review: bool` and `draft_id`.
+- `services/orchestration_service/graph.py` — in `_generate_and_send_reply`, after the answer is
+  composed and BEFORE sending: if the gate holds, store the AI answer as a draft, then REPLACE
+  `state.answer` with the `HOLDING_MESSAGE` so the holding message is what actually gets delivered
+  AND persisted as the outbound turn (existing persist path unchanged). Wrapped so a draft-write
+  failure falls back to the original auto-send rather than dropping the reply. Emits a
+  `reply_held_for_review` audit event.
+- `shared/schemas/responses.py` — added `held_for_review` to `ChannelResponse` (surfaced by `_response`).
+- `apps/api/routes/reply_drafts.py` (new) + registered in `apps/api/main.py` — admin routes
+  (`require_admin_key`): `GET /admin/reply-drafts`, `POST /admin/reply-drafts/{id}/send`
+  (delivers via `OutboundDeliveryService`, appends outbound turn, marks sent, audits),
+  `POST /admin/reply-drafts/{id}/discard`.
+- `apps/admin-ui/` — `loadPendingDrafts()` indexes pending drafts by conversation; a **"Needs
+  Review"** ftag filter + amber count badge (separate from Urgent, which is unchanged); a queue-row
+  amber dot; an editable **draft card** (`renderDraftCard`) above the compose box with Send/Discard
+  (`sendDraft`/`discardDraft`). Plus a portal-chat poll (`bootUserPortal`, 8s) so web-chat customers
+  see the agent's manually-sent reply without refreshing (cleared on logout).
+
+**Verified live (rebuilt api image; migration 009 applied):**
+- Escalation (L3 fraud): `held_for_review=True`, customer got the holding message, pending draft
+  created with the AI's real answer + reason "Critical escalation (L3)" + channel/identifier/provider.
+- Admin `POST …/send` with EDITED text: draft→sent, edited text delivered (`sent`), outbound turn
+  persisted, pending count →0.
+- Non-escalation (FAQ): `held_for_review=False`, real answer auto-sent, 0 drafts (unchanged behavior).
+- Web-chat cycle: portal history (web_chat-only) shows the holding message, then after agent-send
+  shows the agent's real reply — i.e. exactly what the portal poll renders. UI data endpoints all
+  return the expected shapes; **DOM rendering not yet clicked through in a browser** (pending manual check).
+
+**Known/open:**
+- The gate holds on *ticket required*; low-confidence-without-ticket is intentionally NOT held.
+- Admin-UI DOM not browser-verified this session (data paths were verified via the live API).
+- Pre-existing CRM/JIRA 400 ("Specify a valid issue type") is unrelated to this change.
+
+### Fix 11 — Recommended Actions (agent-assist NBA) no longer linger on resolved tickets
+**Problem:** After a ticket was resolved (top "Resolve" button), the right-panel "Recommended
+Actions" still showed an "Escalate to Senior — nearing SLA deadline" card. Root cause is a
+*persistence* leak, not the rule: when the suggestion fires on an open ticket, a `pending` row is
+written to `agent_assist_recommendations`; the GET `/admin/agent-assist/next-best-actions` endpoint
+returns ALL pending rows, and nothing retires that row when the ticket resolves. (The generating
+rule's guard was also narrow — it only excluded `resolved`, not `closed`.)
+
+**Fix (A + B, no migration):**
+- **A (read filter)** `apps/api/routes/agent_assist.py` — before returning, drop any pending
+  recommendation whose `ticket_id` maps to a `resolved`/`closed` ticket (looked up via
+  `get_ticket`, memoized). Conversation-level rows (no ticket_id) are unaffected.
+- **B (rule guard)** `services/agent_assist_service/next_best_action.py` —
+  `_rule_escalate_aging_high_priority` now uses a positive allow-list (`open`/`in_progress`) so an
+  SLA-escalate is never generated for any terminal status.
+
+**Verified live (rebuilt api):** the exact screenshot ticket `tkt_080526d25b41` (resolved) → 0
+actions; a forced near-due OPEN critical ticket → shows escalate; after resolving it → 0 actions.
+`tests/test_agent_assist.py` 18/18 pass.
+
+**Not changed (design, flagged to user):** the top **Escalate** button's `execEscalate` is a UI-only
+stub (appends a local "[Escalated…]" turn, no backend escalate action), and NBA **Approve** only
+records a decision + audit event (does not perform the escalation). The Escalate-vs-Approve overlap
+and whether Escalate should trigger a real action are left as open product decisions.
 
 ### Decisions deliberately NOT changed (by user's choice)
 - **SQLite `cust_...` ID vs Neo4j `CRN...` ID in the inbox:** Separate id namespaces by design;

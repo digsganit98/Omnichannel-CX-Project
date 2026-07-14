@@ -21,6 +21,7 @@ from shared.schemas.responses import ChannelResponse
 
 from .routes.admin_auth import router as admin_auth_router
 from .routes.agent_assist import router as agent_assist_router
+from .routes.reply_drafts import router as reply_drafts_router
 from .routes.analytics import router as analytics_router
 from .routes.audit import router as audit_router
 from .routes.auth import router as auth_router
@@ -87,6 +88,7 @@ def _flush_langfuse_on_shutdown() -> None:
 
 app.include_router(admin_auth_router)
 app.include_router(agent_assist_router)
+app.include_router(reply_drafts_router)
 app.include_router(auth_router)
 app.include_router(analytics_router)
 app.include_router(conversations_router)

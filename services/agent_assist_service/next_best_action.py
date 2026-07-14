@@ -88,7 +88,11 @@ class NextBestActionEngine:
 
     @staticmethod
     def _rule_escalate_aging_high_priority(ticket: dict | None) -> NextBestAction | None:
-        if not ticket or ticket.get("status") == TicketStatus.RESOLVED.value:
+        # Only an actively-open ticket has a live SLA that can be breached. Guard with a
+        # positive allow-list so any terminal status (resolved, closed, or a future one)
+        # never generates an SLA-escalate suggestion.
+        active_statuses = {TicketStatus.OPEN.value, TicketStatus.IN_PROGRESS.value}
+        if not ticket or ticket.get("status") not in active_statuses:
             return None
         if ticket.get("priority") not in {TicketPriority.CRITICAL.value, TicketPriority.HIGH.value}:
             return None

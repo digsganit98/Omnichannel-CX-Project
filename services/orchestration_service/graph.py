@@ -20,6 +20,7 @@ from services.observability_service import langfuse_workflow_trace, llm_observat
 from services.persistence_service.repository import CXRepository
 from services.rag_service.rag_pipeline import RAGPipeline
 from services.ticket_service.ticket_manager import TicketManager
+from services.workflow_service.review_gate import should_hold_for_review
 from shared.schemas.messages import InboundMessage
 from shared.schemas.responses import ChannelResponse
 
@@ -31,6 +32,10 @@ except Exception:
 logger = logging.getLogger(__name__)
 
 ORCHESTRATION_ENGINE = "langgraph_state_graph"
+
+# Human-in-the-loop: customer-facing message sent when the review gate HOLDS the AI reply
+# for a human agent to review. The AI's real answer is kept as an editable reply_draft.
+HOLDING_MESSAGE = "Support Agent will help you with this shortly ..."
 
 # Human-readable edge map shown in /admin/orchestration/definition
 WORKFLOW_EDGES = [
@@ -589,6 +594,42 @@ class OrchestrationGraph:
                 pass
         self._audit("answer_generated", state, intent=self._intent(state),
                     ticket_id=state.ticket.ticket_id if state.ticket else None)
+
+        # ── Human-in-the-loop review gate ──────────────────────────────────────
+        # If a ticket is required (escalation / L2 / L3 / L1-via-rule), HOLD the AI answer as
+        # an editable draft for a human agent instead of auto-delivering it. The customer
+        # receives a holding message now; the agent edits + sends the real answer manually
+        # (see services/workflow_service/review_gate.py and apps/api/routes/reply_drafts.py).
+        gate = should_hold_for_review(state.ticket_decision, state.resolution)
+        if gate.hold and state.answer:
+            try:
+                draft = self.repository.add_reply_draft(
+                    conversation_id=state.conversation_id,
+                    customer_id=state.customer_id,
+                    channel=state.message.channel.value,
+                    draft_text=state.answer,
+                    ticket_id=state.ticket.ticket_id if state.ticket else None,
+                    inbound_turn_id=state.inbound_turn_id,
+                    hold_reason=gate.reason,
+                    reason_code=gate.reason_code,
+                    channel_identifier=state.message.channel_identifier,
+                    provider=state.message.provider,
+                )
+                state.held_for_review = True
+                state.draft_id = draft["draft_id"]
+                # Replace the outbound text with the holding message: this is what actually
+                # gets delivered to the customer AND persisted as the outbound turn.
+                state.answer = HOLDING_MESSAGE
+                self._audit("reply_held_for_review", state, intent=self._intent(state),
+                            ticket_id=state.ticket.ticket_id if state.ticket else None,
+                            details={"draft_id": draft["draft_id"], "hold_reason": gate.reason,
+                                     "reason_code": gate.reason_code})
+            except Exception:
+                # If draft persistence fails, fall back to the original auto-send behavior
+                # rather than dropping the customer's reply entirely.
+                logger.exception("reply_draft_hold_failed", extra={"conversation_id": state.conversation_id})
+                state.held_for_review = False
+
         state.delivery = self.workflow_automation_agent.send_reply(state.message, state.answer)
         self._audit(
             "outbound_sent" if state.delivery["status"] == "sent" else "outbound_failed",
@@ -692,6 +733,7 @@ class OrchestrationGraph:
             llm_used=state.resolution.llm.get("llm_used", False) if state.resolution else False,
             outbound_status=state.delivery["status"],
             outbound_error=state.delivery.get("error"),
+            held_for_review=state.held_for_review,
             workflow_trace=[entry.model_dump(mode="json") for entry in state.workflow_trace],
         )
 

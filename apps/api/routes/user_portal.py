@@ -372,7 +372,7 @@ def get_user_chat_messages(authorization: str | None = Header(default=None)) -> 
     )
     customer = repo.resolve_customer(lookup_message)
     conversation = repo.get_or_create_conversation(customer["customer_id"])
-    turns = repo.list_recent_turns(conversation["conversation_id"], limit=50)
+    turns = repo.list_recent_turns(conversation["conversation_id"], limit=50, channel="web_chat")
     return {"conversation_id": conversation["conversation_id"], "turns": turns}
 
 

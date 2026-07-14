@@ -191,23 +191,6 @@
       </section>
     </div>
 
-    <section class="user-card user-result-card">
-      <div class="user-card-title">Latest submission</div>
-      <div class="user-empty" id="userLatestEmpty">Your latest ticket or conversation details will appear here.</div>
-      <div id="userLatestResult" style="display:none">
-        <div class="user-result-grid">
-          <div class="user-result-item"><span>Conversation ID</span><strong id="userConversationId">-</strong></div>
-          <div class="user-result-item"><span>Ticket ID</span><strong id="userTicketId">-</strong></div>
-          <div class="user-result-item"><span>Status</span><strong id="userTicketStatus">-</strong></div>
-          <div class="user-result-item"><span>Channel</span><strong id="userResultChannel">-</strong></div>
-          <div class="user-result-item user-result-contact"><span>Phone / Email used</span><strong id="userResultContact">-</strong></div>
-        </div>
-        <div class="user-response-box">
-          <span>Latest response</span>
-          <p id="userLatestResponse">-</p>
-        </div>
-      </div>
-    </section>
   </main>
 </div>
 
@@ -288,6 +271,7 @@
             <div class="ftags" id="ftags">
               <button class="ftag on" data-f="all">All</button>
               <button class="ftag" data-f="urgent">Urgent</button>
+              <button class="ftag ftag-review" data-f="review">Needs Review<span class="review-badge" id="reviewBadge" style="display:none">0</span></button>
             </div>
           </div>
           <div class="q-list" id="qlist">
@@ -320,6 +304,7 @@
             <svg viewBox="0 0 24 24"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
             Conversation resolved. Customer has been notified.
           </div>
+          <div id="draftMount"></div>
           <div class="compose" id="compwrap" style="display:none">
             <div class="compose-hdr">
               <span class="compose-ch-label">Reply via:</span>

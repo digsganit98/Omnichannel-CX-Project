@@ -48,6 +48,24 @@ def get_next_best_actions(conversation_id: str, ticket_id: str | None = None) ->
             priority=action.priority,
             metadata=action.metadata,
         ))
+
+    # Do not surface recommendations tied to a ticket that is no longer active (resolved/
+    # closed). A previously-saved 'pending' row lingers after its ticket is resolved; a done
+    # ticket has no live action to take, so hide it. Conversation-level rows (no ticket_id)
+    # are unaffected.
+    _terminal = {"resolved", "closed"}
+    _ticket_status: dict[str, str | None] = {}
+
+    def _is_active(ticket_id: str | None) -> bool:
+        if not ticket_id:
+            return True
+        if ticket_id not in _ticket_status:
+            t = repository.get_ticket(ticket_id)
+            _ticket_status[ticket_id] = (t or {}).get("status")
+        return _ticket_status[ticket_id] not in _terminal
+
+    pending = [row for row in pending if _is_active(row.get("ticket_id"))]
+
     return {
         "conversation_id": result.conversation_id,
         "customer_id": result.customer_id,

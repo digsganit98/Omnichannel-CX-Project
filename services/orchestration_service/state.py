@@ -52,6 +52,10 @@ class OrchestrationState(BaseModel):
     delivery: dict = Field(default_factory=dict)
     workflow_trace: list[WorkflowTraceEntry] = Field(default_factory=list)
     inbound_turn_id: str | None = None
+    # Human-in-the-loop: when the review gate holds the AI reply, ``answer`` is replaced by
+    # the customer-facing holding message and the AI's real answer is stored as a reply_draft.
+    held_for_review: bool = False
+    draft_id: str | None = None
 
     @property
     def customer_id(self) -> str | None:

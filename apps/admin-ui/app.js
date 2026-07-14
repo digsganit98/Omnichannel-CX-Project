@@ -30,7 +30,7 @@ try {
   if (savedPortalUser) portalUser = JSON.parse(savedPortalUser);
 } catch(e) {}
 
-var state = { convs: [], selectedConvId: null, convDetail: null, simTimer: null, sseSource: null };
+var state = { convs: [], selectedConvId: null, convDetail: null, simTimer: null, sseSource: null, pendingDrafts: {} };
 var rtTimers = [];
 
 function isTokenExpired(token) {
@@ -380,9 +380,24 @@ function urgencyToStatus(conv) {
   return conv.status || 'open';
 }
 
+// Fetch all pending held drafts and index them by conversation_id (one card per conv;
+// if multiple drafts exist for a conv we surface the most recent, which sorts first).
+async function loadPendingDrafts() {
+  try {
+    var drafts = await api('/admin/reply-drafts?status=pending');
+    var byConv = {};
+    (drafts || []).forEach(function(d) {
+      if (!byConv[d.conversation_id]) byConv[d.conversation_id] = d;
+    });
+    state.pendingDrafts = byConv;
+  } catch(e) {
+    state.pendingDrafts = state.pendingDrafts || {};
+  }
+}
+
 window.loadConversations = async function() {
   try {
-    var results = await Promise.all([api('/admin/conversations'), api('/admin/tickets')]);
+    var results = await Promise.all([api('/admin/conversations'), api('/admin/tickets'), loadPendingDrafts()]);
     var convs = results[0], tks = results[1];
     _allTickets.open   = tks.filter(function(t) { return t.status === 'open' || t.status === 'in_progress'; });
     _allTickets.closed = tks.filter(function(t) { return t.status === 'resolved' || t.status === 'closed'; });
@@ -396,6 +411,13 @@ window.loadConversations = async function() {
     if (urgent.length > 0) { badge.style.display='flex'; badge.textContent = urgent.length > 9 ? '9+' : urgent.length; }
     else { badge.style.display = 'none'; }
     document.getElementById('qcnt').textContent = urgent.length + ' urgent';
+    // Needs Review badge: number of conversations with a pending held draft
+    var nrCount = Object.keys(state.pendingDrafts).length;
+    var nrBadge = document.getElementById('reviewBadge');
+    if (nrBadge) {
+      if (nrCount > 0) { nrBadge.style.display='flex'; nrBadge.textContent = nrCount > 9 ? '9+' : nrCount; }
+      else { nrBadge.style.display = 'none'; }
+    }
     if (hasNew && state.selectedConvId) refreshSelectedConv();
   } catch(e) {
     document.getElementById('qlist').innerHTML = '<div style="padding:20px;text-align:center;color:var(--red-t);font-size:12px">' + escH(e.message) + '</div>';
@@ -423,6 +445,7 @@ function renderQueue() {
   var filtered = state.convs.filter(function(c) {
     if (search && !customerLabel(c).toLowerCase().includes(search) && !(c.last_message||'').toLowerCase().includes(search)) return false;
     if (activeFilter === 'urgent' && urgencyToStatus(c) !== 'urgent') return false;
+    if (activeFilter === 'review' && !state.pendingDrafts[c.conversation_id]) return false;
     return true;
   });
   if (!filtered.length) {
@@ -444,6 +467,7 @@ function renderQueue() {
       + '<div class="qf">'
       + (c.last_channel ? '<span class="cp ' + ch.pill + '">' + ch.svg + ch.label + '</span>' : '<span class="cp pdef">Unknown</span>')
       + '<span class="sl"><span class="sd ' + stDot + '"></span>' + stLabel + '</span>'
+      + (state.pendingDrafts[c.conversation_id] ? '<span class="qi-review-dot" title="Held reply needs review"></span>' : '')
       + '</div></div>';
     div.addEventListener('click', function() { selectConv(c.conversation_id); });
     list.appendChild(div);
@@ -464,7 +488,8 @@ async function selectConv(convId) {
       : api('/admin/tickets');
     var results = await Promise.all([
       api('/admin/conversations/' + encodeURIComponent(convId)),
-      cachedTickets
+      cachedTickets,
+      loadPendingDrafts()
     ]);
     var detail = results[0], tickets = results[1];
     state.convDetail = detail;
@@ -655,7 +680,70 @@ function renderCentre(conv) {
     });
     document.getElementById('cinput').placeholder = 'Reply to ' + nm + '…';
   }
+
+  renderDraftCard(conv);
 }
+
+// Render the human-in-the-loop editable draft card if this conversation has a pending
+// held reply. The AI's proposed answer is shown in an editable box; the agent can correct
+// it and Send (delivers to the customer + persists the outbound turn), or Discard it.
+function renderDraftCard(conv) {
+  var mount = document.getElementById('draftMount');
+  if (!mount) return;
+  var draft = state.pendingDrafts[conv.conversation_id];
+  if (!draft) { mount.innerHTML = ''; return; }
+  mount.innerHTML =
+    '<div class="draft-card" data-draft-id="' + escH(draft.draft_id) + '">'
+    + '<div class="draft-hdr"><span>✋ Held for review — edit &amp; send manually</span>'
+    + '<span class="draft-reason">' + escH(draft.hold_reason || 'Escalated') + '</span></div>'
+    + '<div class="draft-body">'
+    + '<div class="draft-label">AI-proposed reply (editable)</div>'
+    + '<textarea class="draft-textarea" id="draftText">' + escH(draft.draft_text || '') + '</textarea>'
+    + '<div class="draft-actions">'
+    + '<button class="draft-send-btn" onclick="sendDraft(this)">Send reply</button>'
+    + '<button class="draft-discard-btn" onclick="discardDraft(this)">Discard</button>'
+    + '</div></div></div>';
+}
+
+window.sendDraft = function(btn) {
+  var card = btn.closest('.draft-card');
+  var draftId = card && card.getAttribute('data-draft-id');
+  var text = (document.getElementById('draftText').value || '').trim();
+  if (!draftId || !text) { toast('Reply text is required'); return; }
+  card.querySelectorAll('button').forEach(function(b){ b.disabled = true; });
+  api('/admin/reply-drafts/' + encodeURIComponent(draftId) + '/send', {
+    method: 'POST',
+    body: JSON.stringify({ text: text }),
+  }).then(function() {
+    toast('Reply sent to customer');
+    if (state.convDetail) delete state.pendingDrafts[state.convDetail.conversation_id];
+    document.getElementById('draftMount').innerHTML = '';
+    refreshSelectedConv();
+    loadConversations();
+  }).catch(function(err) {
+    toast('Failed: ' + err.message);
+    card.querySelectorAll('button').forEach(function(b){ b.disabled = false; });
+  });
+};
+
+window.discardDraft = function(btn) {
+  var card = btn.closest('.draft-card');
+  var draftId = card && card.getAttribute('data-draft-id');
+  if (!draftId) return;
+  card.querySelectorAll('button').forEach(function(b){ b.disabled = true; });
+  api('/admin/reply-drafts/' + encodeURIComponent(draftId) + '/discard', {
+    method: 'POST',
+    body: JSON.stringify({}),
+  }).then(function() {
+    toast('Draft discarded');
+    if (state.convDetail) delete state.pendingDrafts[state.convDetail.conversation_id];
+    document.getElementById('draftMount').innerHTML = '';
+    loadConversations();
+  }).catch(function(err) {
+    toast('Failed: ' + err.message);
+    card.querySelectorAll('button').forEach(function(b){ b.disabled = false; });
+  });
+};
 
 function renderRight(conv, tickets) {
   var conv_meta = state.convs.find(function(c) { return c.conversation_id === conv.conversation_id; }) || conv;
@@ -1617,18 +1705,6 @@ function setUserStatus(message, type) {
   el.style.display = message ? 'block' : 'none';
 }
 
-function showUserLatest(item) {
-  if (!item) return;
-  document.getElementById('userLatestEmpty').style.display = 'none';
-  document.getElementById('userLatestResult').style.display = 'block';
-  document.getElementById('userConversationId').textContent = item.conversation_id || '-';
-  document.getElementById('userTicketId').textContent = item.ticket_id || 'Not required';
-  document.getElementById('userTicketStatus').textContent = item.status || 'active';
-  document.getElementById('userResultChannel').textContent = item.channel || '-';
-  document.getElementById('userResultContact').textContent = item.contact_identifier || '-';
-  document.getElementById('userLatestResponse').textContent = item.latest_response || item.message || 'Response pending';
-}
-
 function renderPortalChatTurns(turns) {
   var el = document.getElementById('portalChatMessages');
   if (!turns.length) {
@@ -1682,14 +1758,6 @@ document.getElementById('portalChatForm').addEventListener('submit', async funct
     reply.textContent = data.message || '...';
     messagesEl.appendChild(reply);
     messagesEl.scrollTop = messagesEl.scrollHeight;
-    showUserLatest({
-      conversation_id: data.conversation_id,
-      ticket_id: data.ticket_id,
-      status: data.resolved ? 'resolved' : (data.ticket_id ? 'open' : 'active'),
-      channel: 'web_chat',
-      contact_identifier: data.contact_identifier,
-      latest_response: data.message
-    });
     if (data.outbound_status === 'failed') {
       setUserStatus('Message processed, but delivery failed: ' + (data.outbound_error || 'provider rejected the message'), 'error');
     } else {
@@ -1720,6 +1788,8 @@ window.loadUserTickets = async function() {
     }
     list.innerHTML = '';
     tickets.forEach(function(ticket) {
+      var item = document.createElement('div');
+      item.className = 'user-ticket-item';
       var row = document.createElement('div');
       row.className = 'user-ticket-row';
       row.innerHTML =
@@ -1728,10 +1798,14 @@ window.loadUserTickets = async function() {
         + '<div class="user-ticket-meta">' + escH(ticket.channel || '-') + '</div>'
         + '<div><span class="user-status-pill">' + escH(ticket.status || 'active') + '</span></div>'
         + '<div class="user-ticket-meta">' + escH(fmtDateTime(ticket.updated_at)) + '</div>';
-      row.addEventListener('click', function() { refreshUserTicket(ticket.conversation_id); });
-      list.appendChild(row);
+      var detail = document.createElement('div');
+      detail.className = 'user-ticket-detail';
+      detail.style.display = 'none';
+      item.appendChild(row);
+      item.appendChild(detail);
+      row.addEventListener('click', function() { toggleUserTicket(item, detail, ticket.conversation_id); });
+      list.appendChild(item);
     });
-    showUserLatest(tickets[0]);
   } catch(e) {
     list.innerHTML = '<div class="user-empty" style="color:var(--red-t)">' + escH(e.message) + '</div>';
   } finally {
@@ -1740,18 +1814,35 @@ window.loadUserTickets = async function() {
   }
 };
 
-async function refreshUserTicket(conversationId) {
+async function toggleUserTicket(item, detail, conversationId) {
+  // Collapse if already open
+  if (item.classList.contains('open')) {
+    item.classList.remove('open');
+    detail.style.display = 'none';
+    return;
+  }
+  item.classList.add('open');
+  detail.style.display = 'block';
+  // Lazy-load full detail once; cache in the element so re-open is instant
+  if (detail.dataset.loaded === '1') return;
+  detail.innerHTML = '<span class="utd-loading">Loading…</span>';
   try {
     var ticket = await userApi('/user/tickets/' + encodeURIComponent(conversationId));
-    showUserLatest(ticket);
+    var msg = (ticket.message || '').replace('Customer portal request\\n\\n', '') || '—';
+    var resp = ticket.latest_response || 'Response pending';
+    detail.innerHTML =
+      '<span class="utd-label">Your message</span><p class="utd-msg">' + escH(msg) + '</p>'
+      + '<span class="utd-label">Latest response</span><p class="utd-resp">' + escH(resp) + '</p>';
+    detail.dataset.loaded = '1';
   } catch(e) {
-    setUserStatus(e.message, 'error');
+    detail.innerHTML = '<span class="utd-loading" style="color:var(--red-t)">' + escH(e.message) + '</span>';
   }
 }
 
 window.doUserLogout = function() {
   userToken = '';
   portalUser = null;
+  if (portalChatTimer) { clearInterval(portalChatTimer); portalChatTimer = null; }
   sessionStorage.removeItem('cx-user-jwt');
   sessionStorage.removeItem('cx-user-account');
   document.getElementById('userIdInput').value = '';
@@ -1760,12 +1851,22 @@ window.doUserLogout = function() {
   showStage('apikey');
 };
 
+var portalChatTimer = null;
+
 function bootUserPortal() {
   var userId = portalUser && portalUser.user_id ? portalUser.user_id : 'Customer';
   document.getElementById('portalUserName').textContent = userId;
   document.getElementById('portalUserAv').textContent = userId.slice(0, 2).toUpperCase();
   loadPortalChat();
   loadUserTickets();
+  // Poll chat history so a support agent's manually-sent reply (held-draft flow) appears
+  // for the customer without a page refresh. loadPortalChat() re-renders the whole thread
+  // from the server (the source of truth), so this cannot duplicate optimistic bubbles.
+  if (portalChatTimer) clearInterval(portalChatTimer);
+  portalChatTimer = setInterval(function() {
+    if (userToken) loadPortalChat();
+    else { clearInterval(portalChatTimer); portalChatTimer = null; }
+  }, 8000);
 }
 
 function loadSettings() {

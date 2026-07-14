@@ -28,7 +28,7 @@ class CXRepository(Protocol):
     def get_idempotent_response(self, provider: str, external_message_id: str) -> dict | None: ...
     def resolve_customer(self, message: InboundMessage) -> dict: ...
     def get_or_create_conversation(self, customer_id: str) -> dict: ...
-    def list_recent_turns(self, conversation_id: str, limit: int = 8) -> list[dict]: ...
+    def list_recent_turns(self, conversation_id: str, limit: int = 8, channel: str | None = None) -> list[dict]: ...
     def append_turn(self, **values) -> dict: ...
     def update_turn_metadata(self, turn_id: str, extra: dict) -> None: ...
     def update_turn_intent_urgency(self, turn_id: str, intent: str, urgency: str) -> None: ...
@@ -69,6 +69,14 @@ class CXRepository(Protocol):
                                            ticket_id: str | None = None,
                                            status: str | None = None) -> list[dict]: ...
     def update_agent_assist_recommendation(self, recommendation_id: str, status: str, actor: str) -> dict | None: ...
+    def add_reply_draft(self, conversation_id: str, customer_id: str, channel: str, draft_text: str,
+                        ticket_id: str | None = None, inbound_turn_id: str | None = None,
+                        hold_reason: str = "", reason_code: str = "",
+                        channel_identifier: str | None = None, provider: str | None = None) -> dict: ...
+    def list_reply_drafts(self, conversation_id: str | None = None, status: str | None = None) -> list[dict]: ...
+    def get_reply_draft(self, draft_id: str) -> dict | None: ...
+    def update_reply_draft(self, draft_id: str, status: str, actor: str,
+                           sent_text: str | None = None) -> dict | None: ...
 
 
 class SQLiteCXRepository:
@@ -235,12 +243,19 @@ class SQLiteCXRepository:
                 ).fetchone()
         return dict(row)
 
-    def list_recent_turns(self, conversation_id: str, limit: int = 8) -> list[dict]:
+    def list_recent_turns(self, conversation_id: str, limit: int = 8, channel: str | None = None) -> list[dict]:
         with self.connection() as conn:
-            rows = conn.execute(
-                "SELECT * FROM conversation_turns WHERE conversation_id = ? ORDER BY created_at DESC LIMIT ?",
-                (conversation_id, limit),
-            ).fetchall()
+            if channel:
+                rows = conn.execute(
+                    "SELECT * FROM conversation_turns WHERE conversation_id = ? AND channel = ? "
+                    "ORDER BY created_at DESC LIMIT ?",
+                    (conversation_id, channel, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM conversation_turns WHERE conversation_id = ? ORDER BY created_at DESC LIMIT ?",
+                    (conversation_id, limit),
+                ).fetchall()
         return [self._turn_dict(row) for row in reversed(rows)]
 
     def update_turn_metadata(self, turn_id: str, extra: dict) -> None:
@@ -464,6 +479,68 @@ class SQLiteCXRepository:
                 "SELECT * FROM agent_assist_recommendations WHERE recommendation_id = ?", (recommendation_id,)
             ).fetchone()
         return self._json_fields(dict(row), "metadata_json") if row else None
+
+    # ── Human-in-the-loop reply drafts ────────────────────────────────────────
+    def add_reply_draft(
+        self,
+        conversation_id: str,
+        customer_id: str,
+        channel: str,
+        draft_text: str,
+        ticket_id: str | None = None,
+        inbound_turn_id: str | None = None,
+        hold_reason: str = "",
+        reason_code: str = "",
+        channel_identifier: str | None = None,
+        provider: str | None = None,
+    ) -> dict:
+        draft_id = new_id("draft")
+        with self.connection() as conn:
+            conn.execute(
+                "INSERT INTO reply_drafts(draft_id, conversation_id, customer_id, ticket_id, channel, "
+                "channel_identifier, provider, inbound_turn_id, draft_text, hold_reason, reason_code, "
+                "status, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
+                (
+                    draft_id, conversation_id, customer_id, ticket_id, channel, channel_identifier,
+                    provider, inbound_turn_id, draft_text, hold_reason, reason_code, utc_now(),
+                ),
+            )
+            row = conn.execute("SELECT * FROM reply_drafts WHERE draft_id = ?", (draft_id,)).fetchone()
+        return dict(row)
+
+    def list_reply_drafts(
+        self, conversation_id: str | None = None, status: str | None = None
+    ) -> list[dict]:
+        query = "SELECT * FROM reply_drafts WHERE 1=1"
+        args: list = []
+        if conversation_id:
+            query += " AND conversation_id = ?"
+            args.append(conversation_id)
+        if status:
+            query += " AND status = ?"
+            args.append(status)
+        query += " ORDER BY created_at DESC"
+        with self.connection() as conn:
+            rows = conn.execute(query, args).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_reply_draft(self, draft_id: str) -> dict | None:
+        with self.connection() as conn:
+            row = conn.execute("SELECT * FROM reply_drafts WHERE draft_id = ?", (draft_id,)).fetchone()
+        return dict(row) if row else None
+
+    def update_reply_draft(
+        self, draft_id: str, status: str, actor: str, sent_text: str | None = None
+    ) -> dict | None:
+        with self.connection() as conn:
+            conn.execute(
+                "UPDATE reply_drafts SET status = ?, decided_by = ?, decided_at = ?, "
+                "sent_text = COALESCE(?, sent_text) WHERE draft_id = ?",
+                (status, actor, utc_now(), sent_text, draft_id),
+            )
+            row = conn.execute("SELECT * FROM reply_drafts WHERE draft_id = ?", (draft_id,)).fetchone()
+        return dict(row) if row else None
 
     def add_retrieval_evidence(self, turn_id: str, contexts: list[dict]) -> None:
         with self.connection() as conn:
