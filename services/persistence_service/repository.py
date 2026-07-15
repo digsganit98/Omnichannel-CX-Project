@@ -29,6 +29,9 @@ class CXRepository(Protocol):
     def resolve_customer(self, message: InboundMessage) -> dict: ...
     def get_or_create_conversation(self, customer_id: str) -> dict: ...
     def list_recent_turns(self, conversation_id: str, limit: int = 8, channel: str | None = None) -> list[dict]: ...
+    def list_conversation_turns(self, conversation_id: str) -> list[dict]: ...
+    def count_recent_inbound(self, customer_id: str, since_iso: str) -> int: ...
+    def list_customer_turns(self, customer_id: str, limit: int = 40) -> list[dict]: ...
     def get_turn(self, turn_id: str) -> dict | None: ...
     def get_ticket_reply(self, ticket_id: str) -> str | None: ...
     def append_turn(self, **values) -> dict: ...
@@ -259,6 +262,39 @@ class SQLiteCXRepository:
                     (conversation_id, limit),
                 ).fetchall()
         return [self._turn_dict(row) for row in reversed(rows)]
+
+    def list_conversation_turns(self, conversation_id: str) -> list[dict]:
+        """All turns for a conversation, chronological (oldest first). Unlike
+        list_recent_turns there is no LIMIT — used to reconstruct a ticket's full
+        exchange history."""
+        with self.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM conversation_turns WHERE conversation_id = ? ORDER BY created_at ASC",
+                (conversation_id,),
+            ).fetchall()
+        return [self._turn_dict(row) for row in rows]
+
+    def count_recent_inbound(self, customer_id: str, since_iso: str) -> int:
+        """Number of inbound (customer-sent) turns for a customer since since_iso
+        (ISO-8601). Used for the 'contacts in last N days' attrition signal."""
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM conversation_turns "
+                "WHERE customer_id = ? AND direction = 'inbound' AND created_at >= ?",
+                (customer_id, since_iso),
+            ).fetchone()
+        return row["n"] if row else 0
+
+    def list_customer_turns(self, customer_id: str, limit: int = 40) -> list[dict]:
+        """Most recent turns for a customer (any conversation), newest first —
+        used by the attrition scorer for sentiment/urgency and exit-language."""
+        with self.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM conversation_turns WHERE customer_id = ? "
+                "ORDER BY created_at DESC LIMIT ?",
+                (customer_id, limit),
+            ).fetchall()
+        return [self._turn_dict(row) for row in rows]
 
     def get_turn(self, turn_id: str) -> dict | None:
         with self.connection() as conn:

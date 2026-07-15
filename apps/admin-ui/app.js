@@ -1018,17 +1018,6 @@ function renderCentre(conv) {
 
   // Compose
   if (!isDone) {
-    var compBtns = document.getElementById('compChBtns');
-    compBtns.innerHTML = '';
-    var activeChans = Object.keys(seenChs);
-    if (!activeChans.length) activeChans = ['whatsapp'];
-    activeChans.forEach(function(ch) {
-      var cm = chMeta(ch);
-      var btn = document.createElement('button');
-      btn.className = 'compose-ch-btn';
-      btn.innerHTML = cm.svg + cm.label;
-      compBtns.appendChild(btn);
-    });
     document.getElementById('cinput').placeholder = 'Reply to ' + nm + '…';
   }
 
@@ -1117,13 +1106,6 @@ function renderRight(conv, tickets) {
   document.getElementById('rpcontact').innerHTML = '';
 
   var turns = conv.turns || [];
-  var seenChs = {};
-  turns.forEach(function(t) { if (t.channel) seenChs[t.channel] = true; });
-  var rpchs = document.getElementById('rpchs');
-  rpchs.innerHTML = Object.keys(seenChs).map(function(ch) {
-    var cm = chMeta(ch);
-    return '<span class="cp ' + cm.pill + '" style="font-size:10px">' + cm.svg + cm.label + '</span>';
-  }).join('');
 
   var NEG_KW = ['angry','bad','terrible','frustrated','late','failed','problem','damaged','not received','not credited','charged twice','cancel','fraud','stolen','unauthorized','incorrect charge','overdue','default','claim rejected','policy lapsed','blocked account','money gone','wrong transfer','human agent','human representative'];
   var POS_KW = ['thanks','thank you','great','good','helpful','resolved','approved','credited','disbursed','processed','excellent','perfect','awesome'];
@@ -1144,23 +1126,19 @@ function renderRight(conv, tickets) {
   var posPct = Math.round((sentCounts.positive / total) * 100);
   var neuPct = Math.max(0, 100 - negPct - posPct);
   var msgCount = Math.min(inbound.length, 5) || 1;
-  var sentLbl, sentClr, sentTrend;
+  var sentLbl, sentClr, sentCount;
   if (negPct >= 60) {
-    sentLbl = 'Very frustrated'; sentClr = '#dc2626';
-    sentTrend = 'Sharply declining · last ' + Math.min(msgCount, 4) + ' messages';
+    sentLbl = 'Very frustrated'; sentClr = '#dc2626'; sentCount = Math.min(msgCount, 4);
   } else if (negPct >= 30) {
-    sentLbl = 'Frustrated'; sentClr = 'var(--red-t)';
-    sentTrend = 'Trending negative · last ' + Math.min(msgCount, 3) + ' messages';
+    sentLbl = 'Frustrated'; sentClr = 'var(--red-t)'; sentCount = Math.min(msgCount, 3);
   } else if (posPct >= 55) {
-    sentLbl = 'Positive'; sentClr = 'var(--grn-t)';
-    sentTrend = 'Consistently positive';
+    sentLbl = 'Positive'; sentClr = 'var(--grn-t)'; sentCount = msgCount;
   } else {
-    sentLbl = 'Neutral'; sentClr = 'var(--amb-t)';
-    sentTrend = 'Stable over last ' + msgCount + ' messages';
+    sentLbl = 'Neutral'; sentClr = 'var(--amb-t)'; sentCount = msgCount;
   }
 
   var intents = turns.filter(function(t) { return t.intent; }).map(function(t) { return t.intent; });
-  var uniqueIntents = intents.filter(function(v,i,a){ return a.indexOf(v)===i; }).slice(0,3);
+  var uniqueIntents = intents.filter(function(v,i,a){ return a.indexOf(v)===i; }).slice(0,4);
 
   var _snapTickets = (tickets || [].concat(_allTickets.open, _allTickets.closed))
     .filter(function(t) { return t.conversation_id === conv.conversation_id && (t.status === 'open' || t.status === 'in_progress'); });
@@ -1179,22 +1157,11 @@ function renderRight(conv, tickets) {
     return '< 1 mo';
   }
 
-  // Churn risk heuristic: negative sentiment + high-urgency turns + open tickets
-  var highUrgCount = turns.filter(function(t) {
-    var u = (t.urgency || '').toLowerCase();
-    return u === 'high' || u === 'critical';
-  }).length;
-  var churnScore = negPct + Math.min(highUrgCount * 15, 45) + Math.min(_snapTickets.length * 10, 30);
-  var churnLbl, churnClr;
-  if (churnScore >= 50) { churnLbl = 'High'; churnClr = 'var(--red-t)'; }
-  else if (churnScore >= 20) { churnLbl = 'Medium'; churnClr = 'var(--amb-t)'; }
-  else { churnLbl = 'Low'; churnClr = 'var(--grn-t)'; }
-
   var body = document.getElementById('rpbody');
   body.innerHTML = ''
-    + '<div class="rpcard"><div class="rplbl">Sentiment</div>'
-    + '<div class="ssc" style="color:' + sentClr + '">' + escH(sentLbl) + '</div>'
-    + '<div class="ssub">' + escH(sentTrend) + '</div>'
+    + '<div class="rpcard"><div class="ssent-head"><span class="rplbl">Sentiment</span>'
+    + '<span class="ssc" style="color:' + sentClr + '">' + escH(sentLbl) + '</span>'
+    + '<span class="ssent-count">(last ' + sentCount + ' message' + (sentCount === 1 ? '' : 's') + ')</span></div>'
     + '<div class="sbar">'
     + '<div class="sbp" style="flex:' + posPct + '"></div>'
     + '<div class="sbu" style="flex:' + neuPct + '"></div>'
@@ -1206,11 +1173,15 @@ function renderRight(conv, tickets) {
     + '<span class="slbl" style="color:var(--red-t)">' + negPct + '% negative</span>'
     + '</div></div>'
     + '<div class="rpcard"><div class="rplbl">Profile snapshot</div>'
+    + '<div class="attrition-band" id="snap-attrition" style="display:none" title="Rule-based flag for whether this customer may leave. High if they mention leaving, OR 2+ strong signs (30+ days overdue, worsening mood, or a stuck ticket); Medium if 1 strong or 3+ weak signs; else Low. A transparent heuristic, not a prediction.">'
+    + '<span class="ab-lbl">Attrition risk</span>'
+    + '<span class="ab-band" id="snap-attrition-band"></span>'
+    + '<span class="ab-reasons" id="snap-attrition-reasons"></span>'
+    + '</div>'
     + '<div class="mgrid">'
-    + '<div class="mc"><div class="mv" id="snap-tenure">' + escH(tenureLbl) + '</div><div class="ml">Tenure</div></div>'
-    + '<div class="mc"><div class="mv" style="color:' + churnClr + '">' + escH(churnLbl) + '</div><div class="ml">Churn risk</div></div>'
-    + '<div class="mc"><div class="mv" id="snap-loans">—</div><div class="ml">Loans</div></div>'
-    + '<div class="mc"><div class="mv" id="snap-claims">—</div><div class="ml">Claims</div></div>'
+    + '<div class="mc" title="How long they have been a customer, from their account registration date."><div class="mv" id="snap-tenure">' + escH(tenureLbl) + '</div><div class="ml">Tenure</div></div>'
+    + '<div class="mc" title="Customer value tier set by the bank: HNI (High Net-worth Individual), Affluent, or Mass Affluent. — means no segment on record."><div class="mv mv-txt" id="snap-segment">—</div><div class="ml">Segment</div></div>'
+    + '<div class="mc mc-wide" title="Their most urgent product event within ~90 days: an overdue/upcoming card payment, FD maturity, or policy premium due. Overdue is shown in red."><div class="mv mv-txt" id="snap-event">—</div><div class="ml">Upcoming event</div></div>'
     + '</div></div>'
     + (uniqueIntents.length ? '<div class="rpcard"><div class="rplbl">Detected intents</div>'
     + uniqueIntents.map(function(i) { return '<div style="font-size:11px;font-weight:500;padding:4px 8px;background:var(--blue-bg);border:1px solid var(--blue-bd);color:var(--blue-t);border-radius:20px;display:inline-block;margin:2px">' + escH(i.replace(/_/g,' ')) + '</div>'; }).join('')
@@ -1220,12 +1191,38 @@ function renderRight(conv, tickets) {
   var _snapCustId = conv_meta.customer_id;
   if (_snapCustId) {
     api('/admin/customers/' + encodeURIComponent(_snapCustId) + '/graph').then(function(g) {
-      var loansEl = document.getElementById('snap-loans');
-      var claimsEl = document.getElementById('snap-claims');
-      if (loansEl) loansEl.textContent = g.loan_count;
-      if (claimsEl) claimsEl.textContent = g.claim_count;
       var tenureEl = document.getElementById('snap-tenure');
       if (tenureEl && g.registration_date) tenureEl.textContent = calcTenure(g.registration_date);
+      var segEl = document.getElementById('snap-segment');
+      if (segEl) segEl.textContent = g.segment || '—';
+      var eventEl = document.getElementById('snap-event');
+      if (eventEl) {
+        var ev = g.upcoming_event;
+        if (ev) {
+          var when;
+          if (ev.overdue) when = Math.abs(ev.days) + 'd overdue';
+          else if (ev.days === 0) when = 'today';
+          else when = 'in ' + ev.days + 'd';
+          eventEl.textContent = ev.label + ' · ' + when;
+          eventEl.style.color = ev.overdue ? 'var(--red-t)' : 'var(--t1)';
+        } else {
+          eventEl.textContent = 'None';
+        }
+      }
+
+      // Attrition risk band (full-width, above the tiles)
+      var atr = g.attrition;
+      var atrWrap = document.getElementById('snap-attrition');
+      if (atrWrap && atr && atr.band) {
+        var bandEl = document.getElementById('snap-attrition-band');
+        var reasonsEl = document.getElementById('snap-attrition-reasons');
+        var band = atr.band;
+        bandEl.textContent = band;
+        bandEl.className = 'ab-band ab-' + band.toLowerCase();
+        var top = (atr.reasons || []).slice(0, 2);
+        reasonsEl.textContent = top.length ? '· ' + top.join(', ') : '';
+        atrWrap.style.display = 'flex';
+      }
 
       // Extract email and phone from channel identifiers
       var ids = g.identifiers || [];
@@ -2189,11 +2186,32 @@ async function openTicketModal(ticket) {
   modal.classList.remove('hidden');
   try {
     var detail = await userApi('/user/ticket-detail/' + encodeURIComponent(ticket.ticket_id));
-    var msg = (detail.message || '').replace('Customer portal request\\n\\n', '') || '—';
-    var resp = detail.latest_response || 'Response pending';
-    body.innerHTML =
-      '<span class="utd-label">Your message</span><p class="utd-msg">' + escH(msg) + '</p>'
-      + '<span class="utd-label">Latest response</span><p class="utd-resp">' + escH(resp) + '</p>';
+    var exchanges = detail.exchanges || [];
+    if (exchanges.length) {
+      // One sub-box per exchange: the customer message, the auto-sent holding
+      // line (demoted), and the substantive response — in order.
+      body.innerHTML = exchanges.map(function(ex, i) {
+        var q = (ex.message || '').replace('Customer portal request\n\n', '');
+        var holding = ex.holding
+          ? '<p class="utd-holding">↳ Auto-sent: “' + escH(ex.holding.trim()) + '”</p>' : '';
+        var resp = ex.response
+          ? '<span class="utd-label">Response</span><p class="utd-resp">' + escH(ex.response) + '</p>'
+          : (ex.holding ? '<p class="utd-resp utd-resp--pending">Awaiting response…</p>' : '');
+        var when = ex.created_at ? fmtDateTime(ex.created_at) : '';
+        return '<div class="utd-exchange' + (i > 0 ? ' utd-exchange--next' : '') + '">'
+          + (q ? '<span class="utd-label">Your message</span><p class="utd-msg">' + escH(q) + '</p>' : '')
+          + holding + resp
+          + (when ? '<p class="utd-time">' + escH(when) + '</p>' : '')
+          + '</div>';
+      }).join('');
+    } else {
+      // Fallback (older payload without exchanges).
+      var msg = (detail.message || '').replace('Customer portal request\n\n', '') || '—';
+      var resp = detail.latest_response || 'Response pending';
+      body.innerHTML =
+        '<span class="utd-label">Your message</span><p class="utd-msg">' + escH(msg) + '</p>'
+        + '<span class="utd-label">Latest response</span><p class="utd-resp">' + escH(resp) + '</p>';
+    }
   } catch(e) {
     body.innerHTML = '<span class="utd-loading" style="color:var(--red-t)">' + escH(e.message) + '</span>';
   }

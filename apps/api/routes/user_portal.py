@@ -211,6 +211,57 @@ def _owns_conversation(conversation: dict, user_id: str) -> bool:
     )
 
 
+# Interim acknowledgement injected before a human-reviewed reply (mirrors
+# HOLDING_MESSAGE in services/orchestration_service/graph.py). Detected so it can
+# be shown as a demoted "auto-ack" line rather than the substantive answer.
+_HOLDING_MARKER = "will help you with this shortly"
+
+
+def _build_ticket_exchanges(turns: list[dict], ticket_id: str) -> list[dict]:
+    """Reconstruct a ticket's full exchange history from a conversation's turns.
+
+    In this data only OUTBOUND turns carry ``ticket_id``; the customer's inbound
+    turns have none. An inbound belongs to ``ticket_id`` when the next outbound
+    carries that ticket. Each customer message plus the reply(ies) that follow it
+    (until the next customer message) becomes one exchange:
+    ``{message, holding, response, created_at}``. ``turns`` must be chronological.
+    """
+    n = len(turns)
+    belongs = [False] * n
+    for i, turn in enumerate(turns):
+        if turn.get("direction") == "outbound":
+            belongs[i] = turn.get("ticket_id") == ticket_id
+        elif turn.get("direction") == "inbound":
+            for j in range(i + 1, n):
+                if turns[j].get("direction") == "outbound":
+                    belongs[i] = turns[j].get("ticket_id") == ticket_id
+                    break
+
+    exchanges: list[dict] = []
+    current: dict | None = None
+    for i, turn in enumerate(turns):
+        if not belongs[i]:
+            if turn.get("direction") == "inbound":
+                current = None  # a non-ticket customer message ends the ticket run
+            continue
+        text = turn.get("text") or ""
+        if turn.get("direction") == "inbound":
+            current = {"message": text, "holding": None, "response": None,
+                       "created_at": turn.get("created_at")}
+            exchanges.append(current)
+        else:  # outbound belonging to this ticket
+            if current is None:
+                current = {"message": None, "holding": None, "response": None,
+                           "created_at": turn.get("created_at")}
+                exchanges.append(current)
+            if _HOLDING_MARKER in text:
+                current["holding"] = text
+            else:
+                current["response"] = text
+            current["created_at"] = turn.get("created_at")
+    return exchanges
+
+
 def _ticket_view(conversation: dict, tickets: list[dict]) -> dict:
     turns = conversation.get("turns", [])
     latest_response = next(
@@ -471,11 +522,17 @@ def get_user_ticket_detail(
     message = (ticket.get("description") or ticket.get("title") or "").replace(
         "Customer portal request\n\n", ""
     )
+    # Full exchange history for this ticket (each customer message + its reply),
+    # reconstructed from the conversation's chronological turns.
+    turns = repo.list_conversation_turns(ticket.get("conversation_id"))
+    exchanges = _build_ticket_exchanges(turns, ticket_id)
     return {
         "ticket_id": ticket_id,
         "status": ticket.get("status"),
         "channel": (ticket.get("metadata") or {}).get("channel"),
+        # message / latest_response kept for backward compatibility.
         "message": message,
         "latest_response": repo.get_ticket_reply(ticket_id),
+        "exchanges": exchanges,
         "created_at": ticket.get("created_at"),
     }

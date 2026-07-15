@@ -48,6 +48,10 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 24i — "Collapse all" toggle:** Button at the far-right end of the View/channel-filter bar collapses EVERYTHING — every theme section AND every request node; flips to "Expand all" once all are collapsed (reopens both). Uses `collapsedThemes` + `collapsedNodes` state (persists across the poll, per conversation).
 - **Fix 24j — Removed redundant node-header timestamp:** Each query already shows its own timestamp (visible collapsed + expanded), so the extra `.spine-head-time` under the header was dropped.
 - **Fix 24k — All nodes collapsed by default:** On first open of a conversation, every request node now seeds collapsed (was: latest node open, rest collapsed). Themes still default to latest-open; manual fold choices still preserved per conversation.
+- **Fix 25 — Portal ticket modal shows full exchanges:** `/user/ticket-detail` now returns every customer-message→reply exchange for a ticket (was one message + one reply), rendered as sub-boxes with per-exchange timestamps; matched admin fonts.
+- **Fix 26 — Agent Profile Snapshot redesign:** Replaced hardcoded Loans/Claims + ad-hoc churn heuristic with agent-useful tiles — **Tenure, Segment, Upcoming event** — plus per-item tooltips. `/graph` now returns `segment`, `contacts_30d`, and the most-urgent `upcoming_event` (card due/dpd, FD maturity, policy premium; 90-day window, overdue-first).
+- **Fix 27 — Attrition risk (rule-based):** New `services/attrition_service` scorer → Low/Med/High + reasons over BFSI + conversation signs (dpd, below-min balance, thin relationship, tenure, fraud flag, bad mood, stuck ticket, repeat contact, exit-language override). Shown as a full-width band above the tiles. Named "Attrition risk" not "Churn" (heuristic, no outcome labels). See [[attrition-risk-rules]] memory.
+- **Fix 28 — Right-panel + compose cleanups:** Sentiment label+value on one line with "(last N messages)"; consistent 12px value sizing (incl. attrition as plain text, not a pill); removed redundant channel chips from the customer header; removed the "Contacts · 30d" tile (kept in attrition calc); removed the non-functional "Reply via" channel buttons (send is a simulation stub); Detected intents shows top 4.
 
 Also: corrected an earlier wrong claim about L1/L2/L3 ticketing (see "Correction" — level is decided per-query by an LLM, not fixed per intent).
 
@@ -466,3 +470,66 @@ Served JS + CSS re-checked in Chrome (parses). `buildUnits` re-simulated on the 
   boundary. Cosmetic only — never affects how turns are stored or resolved.
 - Node not available in this environment, so `app.js` was verified via Chrome parse-check +
   Python simulation of the grouping against live data; final DOM click-through pending in browser.
+
+---
+
+## Session 3 — 2026-07-15
+
+Branch: `Sayantini-phase2-ui-changes`. Agent-facing customer intelligence + portal ticket detail.
+
+### Fix 25 — Portal ticket modal: full per-exchange history
+**Problem:** the portal ticket-detail modal showed one "Your message" + one "Latest response",
+so a multi-turn ticket lost its later queries (verified: the fund-transfer ticket's "okay,
+close it" turn and its reply were dropped).
+**Cause:** `/user/ticket-detail` returned the ticket's stored description (first message) +
+`get_ticket_reply` (one reply) — it never read the ticket's turns.
+**Fix:** added `repository.list_conversation_turns`; `_build_ticket_exchanges` in `user_portal.py`
+reconstructs each customer-message→reply exchange (only outbound turns carry `ticket_id`, so an
+inbound belongs to the ticket when the next outbound does). Endpoint returns an `exchanges` list
+(kept `message`/`latest_response` for compat). `openTicketModal` renders each as a sub-box with a
+per-exchange timestamp; fonts matched to the admin view.
+**Verified:** end-to-end HTTP test → 2 correct exchanges; portal tests 12/12.
+
+### Fix 26 — Agent Profile Snapshot redesign
+Old tiles were Tenure / Churn(heuristic) / Loans / Claims — loans/claims were hardcoded counts
+(not data-driven) that don't help an agent act. Reframed the panel around agent use: **Tenure,
+Segment, Upcoming event** (3 tiles; Upcoming event full-width). Each has a native-tooltip
+explaining what it shows + the rule.
+- `/admin/customers/{id}/graph` extended: `segment` (Neo4j, was fetched-unused), `contacts_30d`
+  (`repository.count_recent_inbound`), and `upcoming_event` (`_upcoming_event`): most-urgent
+  product event across card `payment_due_date`+`dpd`, FD `maturity_date`, policy `next_premium_due`;
+  **overdue-first, then soonest; 90-day window** (drops stale years-old FD maturities).
+- Two bugs found+fixed during verification: stale FD events flooding the tile (added the window);
+  past due-date with dpd=0 mislabelled not-overdue (derive overdue from `days < 0`).
+
+### Fix 27 — Attrition risk (rule-based scorer)
+Replaced the ungrounded frontend churn heuristic with `services/attrition_service/scorer.py`.
+Named **Attrition risk**, not Churn: no historical outcome labels exist, so it is a transparent
+heuristic, never a prediction. Scope = conversation + BFSI data.
+- **Rules (v2):** override→High on exit-language; strong signs = dpd≥30, bad mood (≥40% high-urgency
+  turns), stuck ticket (open past SLA / >3d no-SLA); weak signs = dpd 1–29, below-min balance
+  (`avg_monthly_balance < min_balance_required`, a proxy — no balance history exists),
+  fraud/chargeback flag, thin relationship (≤1 product type), new customer (<6mo), ≥3 contacts/30d.
+  Banding: exit→High; ≥2 strong→High; 1 strong or ≥3 weak→Medium; else Low. Output = band + top-2
+  reasons.
+- Endpoint gathers the customer's cards/accounts/tickets/turns (`repository.list_customer_turns`)
+  and returns `attrition`. UI shows a full-width band above the tiles (High=red/Med=amber/Low=green,
+  plain text). Rules also captured in the `attrition-risk-rules` auto-memory.
+- **Verified:** 12 isolated rule/boundary unit tests pass (every sign, band cutoff, override);
+  end-to-end via endpoint gives sensible bands+reasons for all real customers.
+
+### Fix 28 — Right-panel + compose cleanups (per user review)
+- Sentiment: label+value on one line with "(last N messages)"; removed the separate trend line.
+- Consistent value sizing at 12px across the panel (incl. the attrition band, now plain coloured
+  text instead of a pill; "Frustrated" reduced 17→12px).
+- Removed the redundant channel chips from the customer header (channel already shown per-turn and in
+  the View bar); removed the "Contacts · 30d" tile (still computed for the attrition calc).
+- Removed the non-functional "Reply via" channel buttons — they had no handler and `doSend` is a
+  simulation stub; the real reply path is the human-in-the-loop draft cards. Kept the reply box.
+- Detected intents now shows top 4 (was 3).
+
+### Infra / verification notes
+- API code is baked into the image (only `apps/admin-ui` is bind-mounted), so backend changes this
+  session required rebuilding + restarting the `api` container. Frontend changes are live via mount.
+- Frontend verified by Chrome parse-check + data simulation; visual rendering confirmed by the user
+  via screenshots. Backend verified via TestClient HTTP calls + isolated unit tests against real data.
