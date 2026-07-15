@@ -14,6 +14,63 @@ var CH = {
 };
 function chMeta(ch) { return CH[(ch||'').toLowerCase()] || { label: ch||'?', pill:'pdef', stripe:'cdef', bg:'#f2f4f7', bd:'#e4e7ec', clr:'#98a2b3', svg:'' }; }
 
+// ── Theme / sub-theme grouping ────────────────────────────────────────────────
+// The conversation flow groups consecutive turns by THEME (the team an intent
+// maps to) with a labelled divider, and marks SUB-THEME (the intent) shifts
+// inside a theme with a lighter marker. Both are derived purely from the
+// `intent` already on each turn — no backend/schema change. Mirrors
+// INTENT_TO_TEAM in shared/constants/intents.py.
+var INTENT_TO_TEAM = {
+  account_balance_inquiry: 'retail_banking',
+  transaction_dispute:     'fraud_and_disputes',
+  fund_transfer:           'payments',
+  loan_status:             'loans',
+  loan_application:        'loans',
+  loan_default_notice:     'collections',
+  policy_status:           'insurance_operations',
+  claim_status:            'claims',
+  insurance_claim:         'claims',
+  card_management:         'card_services',
+  kyc_update:              'compliance',
+  fraud_report:            'fraud_and_disputes',
+  complaint:               'customer_care',
+  ticket_status:           'customer_care',
+  general_inquiry:         'customer_care',
+  human_escalation:        'customer_care'
+};
+var TEAM_LABEL = {
+  retail_banking:       'Retail Banking',
+  payments:             'Payments',
+  loans:                'Loans',
+  collections:          'Collections',
+  insurance_operations: 'Insurance Ops',
+  claims:               'Claims',
+  card_services:        'Card Services',
+  compliance:           'Compliance',
+  fraud_and_disputes:   'Fraud & Disputes',
+  customer_care:        'Customer Care'
+};
+// A stable colour per theme so dividers are visually distinct. Uses the same
+// token vocabulary as the rest of the flow view (border/bg/text triples).
+var THEME_COLOR = {
+  card_services:        { t:'var(--wc)',    bg:'var(--wc-bg)',   bd:'var(--wc-bd)' },
+  loans:                { t:'#db2777',      bg:'#fdf2f8',        bd:'#fbcfe8' },
+  collections:          { t:'#db2777',      bg:'#fdf2f8',        bd:'#fbcfe8' },
+  fraud_and_disputes:   { t:'var(--amb-t)', bg:'var(--amb-bg)',  bd:'var(--amb-bd)' },
+  retail_banking:       { t:'var(--grn-t)', bg:'var(--grn-bg)',  bd:'var(--grn-bd)' },
+  payments:             { t:'var(--grn-t)', bg:'var(--grn-bg)',  bd:'var(--grn-bd)' },
+  claims:               { t:'var(--blue-t)',bg:'var(--blue-bg)', bd:'var(--blue-bd)' },
+  insurance_operations: { t:'var(--blue-t)',bg:'var(--blue-bg)', bd:'var(--blue-bd)' },
+  compliance:           { t:'var(--t2)',    bg:'var(--surf2)',   bd:'var(--bdr)' },
+  customer_care:        { t:'var(--t2)',    bg:'var(--surf2)',   bd:'var(--bdr)' },
+  general:              { t:'var(--t3)',    bg:'var(--surf2)',   bd:'var(--bdr)' }
+};
+function themeOf(intent) {
+  var key = (intent || '').toLowerCase();
+  var team = INTENT_TO_TEAM[key] || 'general';
+  return { theme: team, themeLabel: TEAM_LABEL[team] || 'General', color: THEME_COLOR[team] || THEME_COLOR.general };
+}
+
 // ── Auth state ────────────────────────────────────────────────────────────────
 var adminKey = sessionStorage.getItem('cx-admin-key') || '';
 var adminToken = sessionStorage.getItem('cx-admin-jwt') || '';
@@ -30,7 +87,16 @@ try {
   if (savedPortalUser) portalUser = JSON.parse(savedPortalUser);
 } catch(e) {}
 
-var state = { convs: [], selectedConvId: null, convDetail: null, simTimer: null, sseSource: null, pendingDrafts: {} };
+var state = { convs: [], selectedConvId: null, convDetail: null, simTimer: null, sseSource: null, pendingDrafts: {},
+  // Theme-group fold state. Keyed "<conversation_id>:<groupIndex>"; presence in
+  // the Set = collapsed. Persists across the inbox poll re-render. `themeSeeded`
+  // tracks which conversations have had their default (all-but-latest collapsed)
+  // applied, so re-renders don't re-collapse groups the agent opened.
+  collapsedThemes: {}, themeSeeded: {},
+  // Per-request-node fold state (spine). Keyed "<conversation_id>::<nodeKey>";
+  // presence in the map = collapsed. Seeded once per conversation (latest node
+  // expanded, rest collapsed) via nodeSeeded, and preserved across the poll.
+  collapsedNodes: {}, nodeSeeded: {} };
 var rtTimers = [];
 
 function isTokenExpired(token) {
@@ -570,89 +636,376 @@ function renderCentre(conv) {
     tktStatusMap[t.ticket_id] = t.status;
   });
 
+  // ── Theme grouping (ticket-first, then theme) ────────────────────────────
+  // `steps` is newest-first (idx 0 = latest). Each step is an inbound+outbound
+  // pair; in this data the classified `intent` usually lives on the OUTBOUND
+  // turn, and a single request often spans multiple turns/steps that share ONE
+  // `ticket_id` (e.g. a "Support Agent will help…" holding turn + the full
+  // reply, sometimes with the intent flipping between them).
+  //
+  // Rules:
+  //  1. A ticket is one unit — turns sharing a ticket_id are NEVER split by a
+  //     divider, and a whole ticket run takes ONE theme (the first themed
+  //     intent seen in that ticket), so an intent flip inside a ticket (e.g.
+  //     KYC mis-labelled as fraud) can't change the theme mid-ticket.
+  //  2. Empty-intent steps otherwise inherit the surrounding theme
+  //     (carry-forward), and a leading empty step looks ahead to the first
+  //     themed step.
+  //  3. A new group starts only at a REAL boundary: the theme changed AND the
+  //     step does not share a ticket with the previous step.
+  var rawIntent = steps.map(function(step) {
+    return (step.inbound && step.inbound.intent) || (step.outbound && step.outbound.intent) || '';
+  });
+  var stepTicket = steps.map(function(step) {
+    return (step.inbound && step.inbound.ticket_id) || (step.outbound && step.outbound.ticket_id) || null;
+  });
+  // Per-ticket theme + intent: first themed intent seen for each ticket_id.
+  // ticketIntent is used to label the sub-theme marker shown between two
+  // different tickets inside the same theme group.
+  var ticketTheme = {};
+  var ticketIntent = {};
+  for (var ti = 0; ti < steps.length; ti++) {
+    var tk = stepTicket[ti];
+    if (tk && rawIntent[ti] && !ticketTheme[tk]) {
+      ticketTheme[tk] = themeOf(rawIntent[ti]);
+      ticketIntent[tk] = rawIntent[ti];
+    }
+  }
+  var stepThemes = new Array(steps.length);
+  var carried = null;
+  for (var si = 0; si < steps.length; si++) {
+    var tkt = stepTicket[si];
+    if (tkt && ticketTheme[tkt]) {
+      stepThemes[si] = ticketTheme[tkt];        // whole ticket = one theme
+    } else if (rawIntent[si]) {
+      stepThemes[si] = themeOf(rawIntent[si]);
+    } else if (carried) {
+      stepThemes[si] = carried;                 // inherit from previous themed step
+    } else {
+      // Leading empty step(s): look ahead to the first themed step.
+      var ahead = null;
+      for (var sj = si + 1; sj < steps.length; sj++) {
+        if (stepTicket[sj] && ticketTheme[stepTicket[sj]]) { ahead = ticketTheme[stepTicket[sj]]; break; }
+        if (rawIntent[sj]) { ahead = themeOf(rawIntent[sj]); break; }
+      }
+      stepThemes[si] = ahead || themeOf('');    // all-empty conversation → General
+    }
+    carried = stepThemes[si];
+  }
+  var groups = [];
+  var prevTicket = null;
   steps.forEach(function(step, idx) {
-    var isLast = idx === 0;
-    var ref = step.inbound || step.outbound;
-    var ch = chMeta(ref.channel);
+    var th = stepThemes[idx];
+    var tkt = stepTicket[idx];
+    var prev = groups[groups.length - 1];
+    // Same ticket as the previous step → always stay in the same group.
+    var sameTicket = tkt && prevTicket && tkt === prevTicket;
+    if (!prev || (prev.theme !== th.theme && !sameTicket)) {
+      groups.push({ theme: th.theme, themeLabel: th.themeLabel, color: th.color, items: [{ step: step, idx: idx, ticket: tkt }] });
+    } else {
+      prev.items.push({ step: step, idx: idx, ticket: tkt });
+    }
+    prevTicket = tkt;
+  });
 
-    var urgency = ((step.inbound && step.inbound.urgency) || '').toLowerCase();
+  // Seed default fold state ONCE per conversation: latest group (index 0)
+  // expanded, all older groups collapsed. Done only if not seeded yet, so a
+  // poll re-render never re-collapses a group the agent manually opened.
+  var convKey = conv.conversation_id;
+  if (!state.themeSeeded[convKey]) {
+    groups.forEach(function(g, gi) {
+      if (gi > 0) state.collapsedThemes[convKey + ':' + gi] = true;
+    });
+    state.themeSeeded[convKey] = true;
+  }
+
+  // Seed per-node fold state ONCE per conversation: ALL request nodes collapsed
+  // by default. Preserved across the poll via nodeSeeded, so re-renders don't
+  // reopen/re-collapse what the agent set.
+  if (!state.nodeSeeded[convKey]) {
+    groups.forEach(function(g) {
+      buildUnits(g.items).forEach(function(u) {
+        state.collapsedNodes[convKey + '::' + (u.ticket || ('u' + u.idx))] = true;
+      });
+    });
+    state.nodeSeeded[convKey] = true;
+  }
+
+  // The AI holding message injected when a reply is held for human review
+  // (mirrors HOLDING_MESSAGE in services/orchestration_service/graph.py). When a
+  // request's final outbound is only this stub, we demote it to an "auto-ack"
+  // pill rather than treating it as the substantive answer.
+  var HOLDING_PREFIX = 'support agent will help you with this shortly';
+  function isHolding(text) {
+    return (text || '').trim().toLowerCase().indexOf(HOLDING_PREFIX) === 0;
+  }
+
+  // ── Merge a group's items into request UNITS ────────────────────────────
+  // Consecutive items sharing a ticket_id collapse into one request node.
+  // Unticketed items each become their own unit. Each unit summarises: the
+  // customer's opening message, the FINAL substantive reply, whether a holding
+  // "auto-ack" was sent, plus channel/emotion/status/time for the header.
+  function buildUnits(items) {
+    var units = [];
+    items.forEach(function(it) {
+      var last = units[units.length - 1];
+      if (last && it.ticket && last.ticket === it.ticket) {
+        last.items.push(it);
+      } else {
+        units.push({ ticket: it.ticket, items: [it] });
+      }
+    });
+    return units.map(function(u) {
+      // `items` is newest-first; walk a CHRONOLOGICAL (oldest-first) copy so
+      // exchanges read in the order they happened. A ticket can span several
+      // exchanges (e.g. "Please transfer…" → holding → reply → "close it" →
+      // "resolved"); each customer message + the reply(ies) that follow it become
+      // one EXCHANGE sub-box inside the single ticket node.
+      var chrono = u.items.slice().reverse();
+      var exchanges = [];
+      var cur = null;
+      var lastTurn = null;
+      // Each exchange carries its own `ref` (its latest turn) for a per-box time.
+      function startExchange(inbound) { cur = { inbound: inbound, holdingText: null, reply: null, ref: inbound || null }; exchanges.push(cur); }
+      chrono.forEach(function(it) {
+        if (it.step.inbound) {
+          startExchange(it.step.inbound);
+          lastTurn = it.step.inbound;
+        }
+        if (it.step.outbound) {
+          if (!cur) startExchange(null);   // reply with no preceding inbound in this unit
+          if (isHolding(it.step.outbound.text)) cur.holdingText = it.step.outbound.text;
+          else cur.reply = it.step.outbound;   // latest substantive reply for this exchange
+          cur.ref = it.step.outbound;          // latest turn in this exchange
+          lastTurn = it.step.outbound;
+        }
+      });
+      var firstInbound = exchanges.length ? exchanges[0].inbound : null;
+      return {
+        ticket: u.ticket,
+        idx: u.items[0].idx,            // latest step's idx (items are newest-first)
+        exchanges: exchanges,           // ordered [{inbound, holdingText, reply, ref}]
+        firstInbound: firstInbound,     // customer's original message (summary/collapsed)
+        ref: lastTurn || firstInbound   // latest turn → node timestamp/status
+      };
+    });
+  }
+
+  // Renders one request unit as a spine node and returns the DOM element.
+  // themeColor {t,bg,bd} styles the "INTENT" badge before the title.
+  function renderUnit(u, themeColor) {
+    var src = u.firstInbound || u.ref;
+    var ch = chMeta((src && src.channel) || '');
+
+    var urgency = ((u.firstInbound && u.firstInbound.urgency) || '').toLowerCase();
     var emotion = EMOTION_MAP[urgency] || 'Neutral';
     var emotionCls = EMOTION_CLS[urgency] || 'fe-neutral';
 
-    var intent = ((step.inbound && step.inbound.intent) || (step.outbound && step.outbound.intent) || '').replace(/_/g, ' ');
+    var intentRaw = (u.firstInbound && u.firstInbound.intent)
+      || (u.ref && u.ref.intent)
+      || (u.ticket && ticketIntent[u.ticket]) || '';
+    var intent = intentRaw.replace(/_/g, ' ');
 
-    var d = ref.created_at ? new Date(ref.created_at) : null;
-    var tm = d ? d.toLocaleDateString([], {month:'short', day:'numeric', year:'numeric'})
-              + ' · ' + d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : '';
-
-    var stepTicketId = (step.inbound && step.inbound.ticket_id) || (step.outbound && step.outbound.ticket_id) || null;
-    var tktStatus = stepTicketId ? tktStatusMap[stepTicketId] : null;
-    var nodeStatus;
-    if (tktStatus === 'resolved' || tktStatus === 'closed') {
-      nodeStatus = 'resolved';
-    } else if (tktStatus === 'open' || tktStatus === 'in_progress') {
-      nodeStatus = 'active';
-    } else if (!isLast) {
-      nodeStatus = 'resolved';
-    } else {
-      nodeStatus = convIsResolved ? 'resolved' : (conv.status || 'active');
+    function fmtTime(turn) {
+      var dd = turn && turn.created_at ? new Date(turn.created_at) : null;
+      return dd ? dd.toLocaleDateString([], {month:'short', day:'numeric', year:'numeric'})
+                + ' · ' + dd.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : '';
     }
-    var nodeStatusCls = (nodeStatus === 'active' || nodeStatus === 'open' || nodeStatus === 'in_progress') ? 'fns-active' : 'fns-done';
+
+    var tktStatus = u.ticket ? tktStatusMap[u.ticket] : null;
+    var isLatestUnit = u.idx === 0;
+    var nodeStatus;
+    if (tktStatus === 'resolved' || tktStatus === 'closed') nodeStatus = 'resolved';
+    else if (tktStatus === 'open' || tktStatus === 'in_progress') nodeStatus = 'active';
+    else if (!isLatestUnit) nodeStatus = 'resolved';
+    else nodeStatus = convIsResolved ? 'resolved' : (conv.status || 'active');
+    var statusCls = (nodeStatus === 'active' || nodeStatus === 'open' || nodeStatus === 'in_progress') ? 'fns-active' : 'fns-done';
 
     var el = document.createElement('div');
-    el.className = 'flow-step';
+    el.className = 'spine-node' + (isLatestUnit ? ' spine-node--latest' : '');
+    el.style.setProperty('--spine-clr', ch.clr);
 
-    // LEFT — customer query
-    var inboundSubject = (step.inbound && step.inbound.subject) || '';
-    var inboundBody = (step.inbound && step.inbound.text) || '';
-    if (inboundSubject && inboundBody.startsWith(inboundSubject)) {
-      inboundBody = inboundBody.slice(inboundSubject.length).replace(/^\s+/, '');
+    // Header pill order: ticket → status → sentiment → channel (title stays the
+    // heading; Latest stays last).
+    var tc = themeColor || { t:'var(--t2)', bg:'var(--surf2)', bd:'var(--bdr)' };
+    var titleStyle = 'style="--th-t:' + tc.t + ';--th-bg:' + tc.bg + ';--th-bd:' + tc.bd + '"';
+    // Foldable per node. Collapsed = header + customer query only; replies
+    // (auto-sent + AI agent) reveal on click. Stable key so the poll preserves it.
+    var nodeKey = convKey + '::' + (u.ticket || ('u' + u.idx));
+    var nodeCollapsed = !!state.collapsedNodes[nodeKey];
+
+    var headHtml = '<div class="spine-head">'
+      + '<svg class="spine-chev" viewBox="0 0 24 24" width="11" height="11"><path d="M8 5l8 7-8 7z"/></svg>'
+      + '<span class="spine-title-wrap" ' + titleStyle + '>'
+      +   '<span class="spine-kind">Intent</span>'
+      +   '<span class="spine-title">' + escH(intent || 'Conversation') + '</span>'
+      + '</span>'
+      + (u.ticket ? '<span class="spine-tkt">' + escH(u.ticket) + '</span>' : '')
+      + '<span class="flow-node-status ' + statusCls + '">' + escH(nodeStatus) + '</span>'
+      + (urgency ? '<span class="flow-emotion ' + emotionCls + '">' + escH(emotion) + '</span>' : '')
+      + '<span class="cp ' + ch.pill + '" style="font-size:10px">' + ch.svg + ch.label + '</span>'
+      + (isLatestUnit ? '<span class="flow-node-latest">Latest</span>' : '')
+      + '</div>';
+
+    // Renders one customer message (strips a leading duplicated subject line).
+    function custMsgHtml(inbound) {
+      if (!inbound) return '';
+      var s = inbound.subject || '';
+      var b = inbound.text || '';
+      if (s && b.startsWith(s)) b = b.slice(s.length).replace(/^\s+/, '');
+      return (s ? '<div class="spine-subject">' + escH(s) + '</div>' : '')
+        + '<div class="spine-msg"><span class="spine-cust-lbl">Customer Query</span>' + escH(b) + '</div>';
     }
-    var leftHtml = step.inbound
-      ? '<div class="flow-query-card">'
-        + '<div class="flow-query-hdr"><span>Customer Query</span>'
-        + (urgency ? '<span class="flow-emotion ' + emotionCls + '">' + escH(emotion) + '</span>' : '')
-        + '</div>'
-        + (inboundSubject ? '<div class="flow-query-subject">' + escH(inboundSubject) + '</div>' : '')
-        + '<div class="flow-query-text">' + escH(inboundBody) + '</div>'
-        + (intent ? '<span class="flow-intent-pill">' + escH(intent) + '</span>' : '')
-        + '</div>'
-      : '';
+    function replyBlockHtml(ex) {
+      var holding = ex.holdingText
+        ? '<div class="spine-holding">↳ Auto-sent: “' + escH(ex.holdingText.trim()) + '”</div>' : '';
+      var reply;
+      if (ex.reply) {
+        reply = '<div class="spine-reply"><div class="spine-reply-hdr"><span>AI Agent</span></div>'
+          + '<div class="spine-reply-text">' + escH(ex.reply.text || '') + '</div></div>';
+      } else if (ex.holdingText) {
+        reply = '<div class="spine-reply spine-reply--pending"><span class="spine-pending">Awaiting agent reply…</span></div>';
+      } else {
+        return '';
+      }
+      // The reply(ies) live in a foldable wrapper; queries stay always visible.
+      return '<div class="spine-replies">' + holding + reply + '</div>';
+    }
 
-    // CENTER — metadata node
-    var ticketId = (step.inbound && step.inbound.ticket_id) || (step.outbound && step.outbound.ticket_id) || null;
-    var centerHtml = (ticketId ? '<div class="flow-ticket-label">TICKET: ' + escH(ticketId) + '</div>' : '')
-      + '<div class="flow-node" style="border-left-color:' + ch.clr + '">'
-      + '<div class="flow-node-top">'
-      + '<span class="flow-node-id">Turn ' + (steps.length - idx) + '</span>'
-      + (isLast ? '<span class="flow-node-latest">Latest</span>' : '')
-      + '</div>'
-      + '<div style="margin:3px 0"><span class="cp ' + ch.pill + '" style="font-size:10px">' + ch.svg + ch.label + '</span></div>'
-      + '<div class="flow-node-time">' + escH(tm) + '</div>'
-      + '<span class="flow-node-status ' + nodeStatusCls + '">' + escH(nodeStatus) + '</span>'
-      + '</div>'
-      + (idx < steps.length - 1 ? '<div class="flow-vline"></div>' : '');
+    var exchanges = u.exchanges || [];
 
-    // RIGHT — agent reply
-    var rightHtml = step.outbound
-      ? '<div class="flow-reply-card">'
-        + '<div class="flow-reply-hdr"><span>Resolution / Reply</span>'
-        + '<span class="flow-agent-pill">AI Agent</span>'
-        + '</div>'
-        + '<div class="flow-reply-text">' + escH(step.outbound.text || '') + '</div>'
-        + '</div>'
-      : '';
+    // Each exchange = one sub-box: query (ALWAYS visible) + replies (hidden when
+    // the node is collapsed) + the exchange's own timestamp.
+    var boxesHtml = '';
+    exchanges.forEach(function(ex, ei) {
+      boxesHtml += '<div class="spine-exchange' + (ei > 0 ? ' spine-exchange--next' : '') + '">'
+        + (ex.inbound ? '<div class="spine-cust">' + custMsgHtml(ex.inbound) + '</div>' : '')
+        + replyBlockHtml(ex)
+        + (fmtTime(ex.ref) ? '<div class="spine-time">' + escH(fmtTime(ex.ref)) + '</div>' : '')
+        + '</div>';
+    });
 
-    el.innerHTML = '<div class="flow-left">' + leftHtml + '</div>'
-      + '<div class="flow-center-col">' + centerHtml + '</div>'
-      + '<div class="flow-right">' + rightHtml + '</div>';
+    // Node is expandable iff any exchange actually has a reply/holding to hide.
+    var hasBody = exchanges.some(function(ex) { return ex.reply || ex.holdingText; });
 
-    if (state.highlightTicketId && stepTicketId === state.highlightTicketId) {
+    var summaryHtml = '<div class="spine-summary"' + (hasBody ? ' role="button" tabindex="0" aria-expanded="' + (nodeCollapsed ? 'false' : 'true') + '"' : '') + '>'
+      + headHtml
+      + boxesHtml
+      + '</div>';
+
+    el.innerHTML = '<div class="spine-card' + (nodeCollapsed ? ' collapsed' : '') + (hasBody ? '' : ' no-replies') + '">'
+      + summaryHtml
+      + '</div>';
+
+    if (hasBody) {
+      var summaryEl = el.querySelector('.spine-summary');
+      var toggleNode = function() {
+        if (state.collapsedNodes[nodeKey]) delete state.collapsedNodes[nodeKey];
+        else state.collapsedNodes[nodeKey] = true;
+        renderCentre(conv);
+      };
+      summaryEl.addEventListener('click', toggleNode);
+      summaryEl.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleNode(); }
+      });
+    }
+
+    if (state.highlightTicketId && u.ticket === state.highlightTicketId) {
       el.classList.add('flow-step--highlight');
     }
+    return el;
+  }
 
-    box.appendChild(el);
+  // ── Render theme groups with foldable headers ───────────────────────────
+  var allNodeKeys = [];   // every request-node key, for the Collapse/Expand All button
+  groups.forEach(function(g, gi) {
+    var groupKey = convKey + ':' + gi;
+    // If we're navigating to a specific ticket, force-open the group that holds
+    // it so the highlighted turn isn't hidden inside a collapsed group.
+    if (state.highlightTicketId) {
+      var hasHighlight = g.items.some(function(it) {
+        var tid = (it.step.inbound && it.step.inbound.ticket_id) || (it.step.outbound && it.step.outbound.ticket_id) || null;
+        return tid === state.highlightTicketId;
+      });
+      if (hasHighlight) delete state.collapsedThemes[groupKey];
+    }
+    var collapsed = !!state.collapsedThemes[groupKey];
+    var units = buildUnits(g.items);        // merged request units for this group
+    var reqCount = units.length;
+
+    var groupEl = document.createElement('div');
+    groupEl.className = 'flow-theme-group' + (collapsed ? ' collapsed' : '');
+
+    // Foldable theme header (divider). Clicking toggles this group's fold state.
+    var header = document.createElement('div');
+    header.className = 'flow-theme-divider';
+    header.setAttribute('role', 'button');
+    header.setAttribute('tabindex', '0');
+    header.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+    header.style.cssText = '--th-t:' + g.color.t + ';--th-bg:' + g.color.bg + ';--th-bd:' + g.color.bd;
+    header.innerHTML =
+        '<span class="ftd-line"></span>'
+      + '<span class="ftd-label">'
+      +   '<svg class="ftd-chev" viewBox="0 0 24 24" width="11" height="11"><path d="M8 5l8 7-8 7z"/></svg>'
+      +   '<span class="ftd-dot"></span>'
+      +   escH(g.themeLabel)
+      +   '<span class="ftd-count">' + reqCount + ' request' + (reqCount === 1 ? '' : 's') + '</span>'
+      + '</span>'
+      + '<span class="ftd-line r"></span>';
+    var toggle = function() {
+      if (state.collapsedThemes[groupKey]) delete state.collapsedThemes[groupKey];
+      else state.collapsedThemes[groupKey] = true;
+      renderCentre(conv);
+    };
+    header.addEventListener('click', toggle);
+    header.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
+    });
+    groupEl.appendChild(header);
+
+    // Group body — a vertical spine of request units + sub-theme markers.
+    var bodyEl = document.createElement('div');
+    bodyEl.className = 'flow-theme-body spine';
+
+    // Each unit is a request node; the intent is shown once, as its title
+    // (prefixed with an "INTENT" badge in the theme colour) inside renderUnit.
+    units.forEach(function(u) {
+      // Same key formula as renderUnit, so Collapse/Expand All targets each node.
+      allNodeKeys.push(convKey + '::' + (u.ticket || ('u' + u.idx)));
+      bodyEl.appendChild(renderUnit(u, g.color));
+    });
+
+    groupEl.appendChild(bodyEl);
+    box.appendChild(groupEl);
   });
+
+  // "Collapse/Expand all" toggle at the end of the channel-filter bar. Placed
+  // here (not with the other bar buttons) because it needs the final group +
+  // node lists. Collapses EVERYTHING — every theme section AND every request
+  // node — and flips to "Expand all" once everything is already collapsed.
+  if (groups.length) {
+    var allThemeKeys = groups.map(function(_, gi) { return convKey + ':' + gi; });
+    var everyCollapsed =
+      allThemeKeys.every(function(k) { return state.collapsedThemes[k]; }) &&
+      allNodeKeys.every(function(k) { return state.collapsedNodes[k]; });
+    var caBtn = document.createElement('button');
+    caBtn.className = 'chfilt chfilt-collapse';
+    caBtn.innerHTML = (everyCollapsed
+      ? '<svg viewBox="0 0 24 24" width="12" height="12"><path d="M7 10l5 5 5-5z"/></svg>Expand all'
+      : '<svg viewBox="0 0 24 24" width="12" height="12"><path d="M7 14l5-5 5 5z"/></svg>Collapse all');
+    caBtn.addEventListener('click', function() {
+      allThemeKeys.forEach(function(k) {
+        if (everyCollapsed) delete state.collapsedThemes[k];
+        else state.collapsedThemes[k] = true;
+      });
+      allNodeKeys.forEach(function(k) {
+        if (everyCollapsed) delete state.collapsedNodes[k];
+        else state.collapsedNodes[k] = true;
+      });
+      renderCentre(conv);
+    });
+    bar.appendChild(caBtn);
+  }
 
   // Scroll the highlighted turn into view and clear the pending highlight
   if (state.highlightTicketId) {

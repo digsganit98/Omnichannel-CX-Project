@@ -263,6 +263,10 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .chfilt:hover{border-color:var(--bdr2);background:var(--surf2)}
 .chfilt.on{color:#fff;border-color:transparent;background:var(--blue)}
 .ch-count{font-size:9px;background:rgba(255,255,255,.25);border-radius:20px;padding:1px 5px;font-weight:600}
+/* "Collapse/Expand all" pushed to the far end of the filter bar; same colour
+   as the other filter buttons (inherits .chfilt's var(--t2)) */
+.chfilt-collapse{margin-left:auto}
+.chfilt-collapse svg{fill:currentColor}
 
 /* MESSAGES */
 .msgs{flex:1;overflow-y:auto;padding:16px 18px;display:flex;flex-direction:column;gap:10px;min-height:0}
@@ -400,6 +404,94 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .flow-reply-hdr{display:flex;align-items:center;justify-content:space-between;font-size:9px;font-weight:700;color:var(--pur-t);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px}
 .flow-agent-pill{font-size:10px;font-weight:600;padding:2px 7px;border-radius:20px;background:rgba(124,58,237,.12);color:var(--pur-t);border:1px solid var(--pur-bd);white-space:nowrap}
 .flow-reply-text{font-size:12px;color:var(--t2);line-height:1.6;word-break:break-word;white-space:pre-wrap}
+
+/* ── THEME / SUB-THEME GROUPING ── */
+.flow-theme-group{display:flex;flex-direction:column;gap:0}
+.flow-theme-body{display:flex;flex-direction:column;gap:0;overflow:hidden;transition:none}
+.flow-theme-group.collapsed .flow-theme-body{display:none}
+
+/* foldable theme header (Tier 1 divider). Colours injected per-theme via the
+   --th-t / --th-bg / --th-bd custom props set inline on the element. */
+.flow-theme-divider{display:flex;align-items:center;gap:10px;margin:18px 2px 12px;cursor:pointer;user-select:none;border-radius:20px;outline:none}
+.flow-theme-divider:first-child{margin-top:6px}
+.flow-theme-divider:focus-visible{box-shadow:0 0 0 2px var(--th-bg),0 0 0 4px var(--th-t)}
+.flow-theme-divider .ftd-line{flex:1;height:1px;background:linear-gradient(90deg,transparent,var(--th-bd))}
+.flow-theme-divider .ftd-line.r{background:linear-gradient(90deg,var(--th-bd),transparent)}
+.flow-theme-divider .ftd-label{display:inline-flex;align-items:center;gap:7px;font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--th-t);background:var(--th-bg);border:1px solid var(--th-bd);border-radius:20px;padding:4px 12px;white-space:nowrap;transition:filter .12s}
+.flow-theme-divider:hover .ftd-label{filter:brightness(.97)}
+.flow-theme-divider .ftd-dot{width:6px;height:6px;border-radius:50%;background:var(--th-t)}
+.flow-theme-divider .ftd-chev{fill:var(--th-t);transition:transform .15s ease;flex-shrink:0}
+.flow-theme-group:not(.collapsed) .flow-theme-divider .ftd-chev{transform:rotate(90deg)}
+.flow-theme-divider .ftd-count{font-size:9px;font-weight:600;letter-spacing:.03em;opacity:.72;text-transform:none}
+
+/* sub-theme marker (Tier 2) — lighter, indented, non-interactive */
+.flow-subtheme-divider{font-size:9px;font-weight:600;letter-spacing:.04em;color:var(--t3);text-transform:uppercase;margin:11px 2px 8px 6px;display:flex;align-items:center;gap:7px}
+.flow-subtheme-divider::before{content:"";width:12px;height:1px;background:var(--bdr);flex-shrink:0}
+.flow-subtheme-divider::after{content:"";flex:1;height:1px;background:var(--bdr2)}
+
+/* ── SPINE TIMELINE (conversation view) ── */
+/* A vertical thread: one node per request (a ticket's turns merged into one,
+   or a single unticketed turn). Replaces the old 3-column flow-step grid. */
+.spine{position:relative;padding:4px 2px 4px 24px}
+.spine::before{content:"";position:absolute;left:8px;top:10px;bottom:10px;width:2px;background:var(--bdr)}
+.spine .flow-subtheme-divider{margin-left:0}
+
+.spine-node{position:relative;margin-bottom:16px}
+.spine-node:last-child{margin-bottom:4px}
+.spine-node::before{content:"";position:absolute;left:-20px;top:6px;width:11px;height:11px;border-radius:50%;
+  background:var(--spine-clr,var(--t3));border:2px solid var(--surf);box-shadow:0 0 0 2px var(--bdr)}
+.spine-node--latest::before{box-shadow:0 0 0 2px var(--blue)}
+
+.spine-card{background:var(--surf);border:1px solid var(--bdr);border-left:3px solid var(--spine-clr,var(--t3));
+  border-radius:var(--r);padding:11px 13px;box-shadow:var(--shadow)}
+.spine-node--latest .spine-card{border-color:var(--blue-bd);border-left-color:var(--spine-clr,var(--blue))}
+
+/* foldable node: ALL customer queries stay visible; only the replies fold away */
+.spine-summary{outline:none}
+.spine-card:not(.no-replies) .spine-summary{cursor:pointer}
+.spine-card:not(.no-replies) .spine-summary:hover .spine-title{text-decoration:underline}
+.spine-summary:focus-visible{box-shadow:0 0 0 2px var(--blue);border-radius:6px}
+.spine-card.collapsed .spine-replies{display:none}
+.spine-card.collapsed .spine-cust{margin-bottom:0}
+.spine-chev{fill:var(--t3);transition:transform .15s ease;flex-shrink:0}
+.spine-card:not(.collapsed) .spine-chev{transform:rotate(90deg)}
+.spine-card.no-replies .spine-chev{visibility:hidden}
+
+.spine-head{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin-bottom:9px}
+/* title = "INTENT" badge (theme colour) + the intent name, shown once per node */
+.spine-title-wrap{display:inline-flex;align-items:center;gap:6px;margin-right:auto}
+.spine-kind{font-size:8px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;
+  color:var(--th-t);background:var(--th-bg);border:1px solid var(--th-bd);border-radius:5px;padding:1px 6px;flex-shrink:0}
+.spine-title{font-size:12.5px;font-weight:700;color:var(--t1);text-transform:capitalize}
+.spine-tkt{font-size:9px;font-weight:700;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.4px;
+  color:var(--amb-t);background:var(--amb-bg);border:1px solid var(--amb-bd);border-radius:5px;padding:2px 6px;text-transform:uppercase}
+
+.spine-cust{margin-bottom:9px}
+/* "CUSTOMER QUERY" label sits INLINE, to the left of the message text */
+.spine-cust-lbl{font-size:8.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--blue-t);margin-right:8px;white-space:nowrap}
+.spine-subject{font-size:11px;font-weight:600;color:var(--blue-t);margin-bottom:5px;padding-bottom:5px;border-bottom:1px solid var(--bdr2)}
+/* customer query message: normal text colour (only the label is blue) */
+.spine-msg{font-size:11.5px;color:var(--t1);line-height:1.55;word-break:break-word}
+
+/* auto-sent holding message, shown as a small quoted line above the real reply
+   (same size as the AI reply text) */
+.spine-holding{font-size:11px;color:var(--t3);font-style:italic;line-height:1.5;margin-bottom:6px;padding-left:2px;word-break:break-word}
+
+.spine-reply{background:var(--pur-bg);border:1px solid var(--pur-bd);border-radius:var(--rs);padding:9px 11px}
+.spine-reply-hdr{display:flex;align-items:center;gap:8px;font-size:9px;font-weight:700;color:var(--pur-t);
+  text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px}
+.spine-reply-text{font-size:11px;color:var(--t2);line-height:1.6;white-space:pre-wrap;word-break:break-word}
+.spine-reply--pending{background:var(--surf2);border-style:dashed}
+.spine-pending{font-size:10.5px;font-weight:600;color:var(--t3)}
+
+/* each exchange = query + (foldable) replies + its own time, inside one node */
+.spine-exchange .spine-cust{margin-bottom:9px}
+/* 2nd+ exchange within the SAME ticket node gets a dashed separator above it */
+.spine-exchange--next{margin-top:11px;padding-top:11px;border-top:1px dashed var(--bdr)}
+
+.spine-time{font-size:10px;color:var(--t3);margin-top:8px;font-variant-numeric:tabular-nums}
+/* when collapsed, the per-exchange time still shows under the query */
+.spine-card.collapsed .spine-exchange .spine-time{margin-top:4px}
 
 /* ── ANALYTICS (DASHBOARD) ── */
 .dash{flex:1;overflow-y:auto;padding:24px;display:flex;flex-direction:column;gap:20px;background:var(--bg)}

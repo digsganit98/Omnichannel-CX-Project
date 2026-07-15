@@ -11,31 +11,45 @@ Running log of changes made to fix portal / BFSI-data / identity issues, startin
 
 Keep this list updated: add a one-sentence entry here for every fix/change made in any session.
 
-- **Fix 1 — Portal identity resolution:** Match portal signups to the real seeded BFSI customer by email/phone before minting a hash id, so no phantom/duplicate customer is created.
-- **Fix 2 — Chat bubble sides:** In the customer portal chat, put the customer's own message on the right and the AI reply on the left.
-- **Fix 3 — Portal section order + heading:** Swap "My submitted tickets"/"Latest submission" and rename the heading "User Tickets" → "Support Center".
-- **Fix 4 — Card/account/FD data routing:** Add `card_management` + `account_balance_inquiry` to `TRANSACTIONAL_INTENTS` and handle credit-card/account/FD lookups in `neo4j_answer`.
-- **Fix 5 — Email corruption + trusted-context gap:** Stop writing the `web_session:` string into the customer email, and surface card/account/FD data in the trusted "Customer account context" slot so real data is returned (₹10,65,000, not fake ₹2,00,000).
-- **Fix 6 — Inbox real name:** Propagate the real Neo4j customer name into the SQLite `display_name` so the inbox shows "Sayantini Sarkar" instead of the portal username.
-- **Fix 7 — No fake data for unknown signups:** New signups with no seeded match create no Neo4j node/synthetic data, so the existing `CustomerValidationAgent` correctly rejects their account-specific queries.
-- **Fix 8 — No false escalation promise:** Soften the LLM prompt so replies don't claim "I need to escalate" when no ticket is actually created (prompt-only; non-deterministic limitation noted).
-- **Fix 9 — Portal chat shows web-chat turns only:** The customer portal chat window was replaying the customer's WhatsApp/email turns (history was keyed by `customer_id` with no channel filter). Now the portal history is scoped to `channel="web_chat"`; the admin inbox's unified cross-channel view and the pipeline context are unchanged.
-- **Fix 12 — Removed the portal "Latest submission" panel:** It duplicated the chat window + My Tickets and exposed internal fields (Conversation ID, Channel) plus an often-empty "Phone/Email used". Removed the section + `showUserLatest` and all its callers entirely (no dead code). Portal-only, no rebuild (bind-mounted UI).
-- **Fix 23 — Portal ticket rows: green Resolved pill, per-channel colored pills, Created date, misc UI polish:** Resolved status pill is green (was amber for all); channel pills use the admin app's per-channel colors (WhatsApp green / Email blue / Web Chat purple) via `chMeta`; each row shows "Created: …". Also fixed a clipping regression (removed a leftover `overflow:hidden` + added `flex-shrink:0` so the Created line isn't cut off), the portal panels scroll internally (no page scroll), removed the oversized "Support Center" heading (kept eyebrow+subtitle), and renamed the ticket "Refresh tickets" button to "Refresh".
-- **Fix 22 — Ticket detail opens in a modal (was a cramped/truncated inline expand):** Clicking a portal ticket now opens a roomy modal (scrollable body, Esc/click-out/✕ to close) showing that ticket's own message + real reply. Replaces the inline expand that clipped long responses.
-- **Fix 21 — Ticket detail is per-ticket, not per-conversation:** Expanding any ticket showed the conversation's latest message (all tickets share one conversation). New `GET /user/ticket-detail/{ticket_id}` + `repository.get_ticket_reply` return the ticket's own message (from its description) and its real reply (latest non-holding outbound turn tagged with that ticket_id), with an ownership check.
-- **Fix 20 — Customer portal "My submitted tickets" shows ALL tickets across channels (open + closed):** Was showing one collapsed row per conversation (so effectively 1 ticket, and its channel was mislabeled from the latest inbound turn). Now `list_user_tickets` returns one row per ticket the user owns, across all channels, sorted open-group-first then newest; channel is read from `ticket.metadata.channel` (the tickets table has no channel column). New `_ticket_summary` helper. Frontend groups rows into Open/Resolved sections with channel pills (`userChannelMeta`). Honors the "track requests via WhatsApp and email" subtitle. Updated `test_user_ticket_list_is_scoped_to_portal_user` to the new per-ticket shape (kept the ownership-scoping assertion). Backend rebuilt; 12/12 portal tests pass.
-- **Fix 19 — Tickets panel rows are clickable → jump to that ticket's turn:** Each ticket in the conversation Tickets panel now navigates to that ticket's turn (reuses `goToConversation(conversationId, ticketId)` highlight/scroll from the Tickets page). The per-ticket "Resolve ticket" button uses `event.stopPropagation()` so it doesn't also navigate. NOTE: `goToConversation` had to be exposed on `window` (`window.goToConversation = ...`) — the file is wrapped in an IIFE, so inline `onclick=` (global scope) couldn't reach a plain local function; that's why the first attempt silently did nothing. Admin UI only.
-- **Fix 18 — Per-ticket resolution (conversation-level Resolve/Escalate removed):** With multiple open tickets on one conversation, the conversation-level "Resolve" closed only the newest ticket but marked the whole conversation resolved (stranding the rest + disabling the buttons); "Escalate" was a non-functional UI stub. Removed both conversation-level buttons; added a per-ticket "Resolve ticket" button in the Tickets panel (uses existing `PATCH /admin/tickets/{id}/status`); conversation "resolved" is now derived from having no open tickets left; removed the 4-ticket display cap so all tickets show. Admin UI only, no backend change, no rebuild.
-- **Fix 17 — Held drafts now capture the inbound turn id (makes Fix 16 actually work):** Root cause of the manual email reply still not threading: `state.inbound_turn_id` was never assigned in the pipeline, so every held draft stored `inbound_turn_id=None` and Fix 16 had nothing to look up. Added the missing `state.inbound_turn_id = inbound_turn["turn_id"]` after the inbound turn is created. (Pre-existing gap — the field was declared and consumed at graph.py:423/612 but never set.) NOTE: drafts created before this fix still have None and won't thread — must test with a fresh held email.
-- **Fix 16 — Manual email reply threads into the original Gmail conversation:** The agent's manually-sent draft (2nd email) arrived as a *separate* mail because the send route passed no subject and used the internal turn id as the reply reference. Now it looks up the original inbound email turn (new `repository.get_turn`) and sends with the real subject (`Re: <original>`) + the real Message-ID as In-Reply-To/References, so Gmail threads it. Non-email channels unaffected.
-- **Fix 15 — Draft-card header readability:** the held-draft card header used amber-on-amber (low contrast, unreadable). Now white text on a solid amber bar, reason as a white pill, dark label text on the light body.
-- **Fix 14 — One reply surface on held conversations:** On a held conversation the admin saw TWO send boxes — the real draft card and the old lower "Reply via" composer (a non-functional "simulation mode" stub). Now the lower compose box is hidden whenever a draft card is showing (`renderDraftCard` hides `compwrap`); after Send/Discard, `renderCentre` restores it. Portal/admin UI only, no rebuild.
-- **Fix 13 — Portal layout: wider chat + expandable tickets:** Made the chat column wider than the tickets column (`1.35fr` vs `.9fr`, was `.9fr`/`1.1fr`). Ticket rows are now inline expand/collapse: clicking a ticket expands it in place to show the full message + latest response (lazy-loaded from `/user/tickets/{id}`, cached), clicking again collapses. Replaced the now-dead `refreshUserTicket` (which fed the removed panel) with `toggleUserTicket`.
-- **Fix 11 — Recommended Actions no longer linger on resolved tickets:** The agent-assist NBA panel kept showing an "Escalate to Senior" card after a ticket was resolved. Fix A (read filter): the `/next-best-actions` endpoint now drops pending recommendations tied to a resolved/closed ticket. Fix B (rule guard): the SLA-escalate rule uses a positive allow-list (only `open`/`in_progress`) so it never generates an escalate suggestion for a terminal ticket. Verified: near-due open ticket shows escalate → after resolve, 0 actions.
-- **Fix 10 — Human-in-the-loop reply drafts:** When the review gate holds an AI reply (any query that requires a ticket — L2/L3/escalation), the customer now receives a holding message ("Support Agent will help you with this shortly ...") and the AI's real answer is stored as an editable draft. An admin sees a "Needs Review" badge/filter + an editable draft card in the inbox, corrects the text, and sends it manually (delivered + persisted as an outbound turn). The portal chat polls so web-chat customers see the agent's reply without refreshing.
+Terse one-liners only; full detail lives in the per-fix sections below.
 
-Also this session: corrected an earlier wrong claim about L1/L2/L3 ticketing (see "Correction" section — the level is decided per-query by an LLM, not fixed per intent).
+- **Fix 1 — Portal identity resolution:** Match portal signups to the real seeded BFSI customer by email/phone (no phantom/duplicate).
+- **Fix 2 — Chat bubble sides:** Portal chat — customer message on the right, AI reply on the left.
+- **Fix 3 — Portal section order + heading:** Reorder ticket panels; "User Tickets" → "Support Center".
+- **Fix 4 — Card/account/FD routing:** Route card/account/FD lookups through `neo4j_answer` (added intents to `TRANSACTIONAL_INTENTS`).
+- **Fix 5 — Email corruption + trusted-context gap:** Stop writing `web_session:` into email; put card/account/FD data in the trusted context slot (real ₹10,65,000).
+- **Fix 6 — Inbox real name:** Show the real Neo4j customer name in the inbox, not the portal username.
+- **Fix 7 — No fake data for unknown signups:** Unmatched signups create no Neo4j node/synthetic data; validation rejects them correctly.
+- **Fix 8 — No false escalation promise:** Prompt tweak so replies don't claim escalation when no ticket is created.
+- **Fix 9 — Portal chat = web-chat turns only:** Portal history scoped to `channel="web_chat"` (was replaying WhatsApp/email).
+- **Fix 10 — Human-in-the-loop reply drafts:** Ticket-worthy replies are held as an editable draft (customer gets a holding message); admin edits + sends manually.
+- **Fix 11 — NBA not lingering on resolved tickets:** Agent-assist drops recommendations for resolved/closed tickets (read filter + rule allow-list).
+- **Fix 12 — Removed portal "Latest submission" panel:** Redundant + exposed internal fields; deleted the section and dead code.
+- **Fix 13 — Portal layout: wider chat + inline-expand tickets:** Chat column widened; ticket rows expand/collapse in place.
+- **Fix 14 — One reply surface on held conversations:** Hide the old (stub) compose box while a draft card is shown.
+- **Fix 15 — Draft-card header readability:** White-on-amber header (was unreadable amber-on-amber).
+- **Fix 16 — Manual email reply threads in Gmail:** Send with the original subject + Message-ID so the reply threads.
+- **Fix 17 — Held drafts capture the inbound turn id:** Set `state.inbound_turn_id` (was never assigned) — makes Fix 16 actually work.
+- **Fix 18 — Per-ticket resolution:** Removed conversation-level Resolve/Escalate; per-ticket Resolve; conversation-resolved is derived.
+- **Fix 19 — Clickable Tickets-panel rows:** Click a ticket → jump to its turn (`goToConversation` exposed on `window`).
+- **Fix 20 — Portal "My Tickets" = all tickets, all channels:** One row per ticket (open + closed), grouped, channel from `ticket.metadata.channel`.
+- **Fix 21 — Per-ticket detail:** `GET /user/ticket-detail/{ticket_id}` returns that ticket's own message + reply (was the conversation's latest).
+- **Fix 22 — Ticket detail in a modal:** Roomy modal (replaces the cramped/truncated inline expand).
+- **Fix 23 — Portal ticket-row polish:** Green Resolved pill, per-channel colored pills, Created date; fixed a clip regression; internal panel scroll; removed the big heading; "Refresh tickets" → "Refresh".
+- **Fix 24 — Foldable theme/sub-theme dividers in the admin conversation flow:** Group turns by theme (team an intent maps to) with a clickable, foldable header + turn count; lighter sub-theme markers when the intent shifts within a theme. Frontend-only, derived from existing `intent`.
+- **Fix 24a — Divider no longer splits a single ticket:** Ticket-first grouping — turns sharing a `ticket_id` stay one unit (one theme, no divider inside); sub-theme markers only between unticketed turns.
+- **Fix 24b — Sub-theme marker between tickets in a theme:** Within a theme group, a light sub-marker (labelled by the new ticket's intent) marks a transition to a *different* ticket, so "separate request, same theme" is visible without ever splitting one ticket.
+- **Fix 24c — Spine-timeline conversation view (replaces 3-column flow):** Merge each request (a ticket's turns) into ONE spine node showing the customer message + final reply; demote the "Support Agent will help shortly" holding message. Kills duplicate reply rows + blank-column asymmetry. Theme header counts now read "N requests".
+- **Fix 24d — Spine node polish (per user review):** "Customer Query" eyebrow above the message; header pill order = ticket → status → sentiment → channel; holding message shown as a quoted "Auto-sent: …" line (was a vague pill); smaller body text (query 11.5px / reply 11px).
+- **Fix 24e — Intent shown once as node title + query styling:** Removed the between-node "INTENT · X" sub-theme marker (it duplicated the node title and was inconsistent — only fired between units). Intent now shown once as each node's title, prefixed with an "INTENT" badge in the theme colour. Customer query = "CUSTOMER QUERY" label inline (blue) + message in normal text colour. Auto-sent line 10→11px (matches reply).
+- **Fix 24f — Foldable request nodes:** Each spine node collapses to header + customer query; clicking reveals the replies (Auto-sent line + AI Agent reply). Latest node open, rest collapsed on load; per-node fold state keyed by ticket/idx, preserved across the poll. Chevron on the header; nodes with no replies aren't clickable.
+- **Fix 24g — Query disappeared + per-exchange sub-boxes (bug):** `buildUnits` walked a ticket's turns newest-first but treated them oldest-first, so it showed the customer's LAST line as the query and an earlier reply as the answer (the original "Please transfer…" query vanished). Now walks chronologically, and a multi-turn ticket renders each customer message + its reply as its own exchange sub-box inside the one node (ticket never split).
+- **Fix 24h — Timestamps + all-queries-when-collapsed:** Per-exchange timestamp on each sub-box; node header shows latest-activity time so it's visible even when collapsed. Collapsed view now shows ALL customer queries in the ticket (only the replies fold) — earlier it showed just the first query (an unrequested assumption, corrected).
+- **Fix 24i — "Collapse all" toggle:** Button at the far-right end of the View/channel-filter bar collapses EVERYTHING — every theme section AND every request node; flips to "Expand all" once all are collapsed (reopens both). Uses `collapsedThemes` + `collapsedNodes` state (persists across the poll, per conversation).
+- **Fix 24j — Removed redundant node-header timestamp:** Each query already shows its own timestamp (visible collapsed + expanded), so the extra `.spine-head-time` under the header was dropped.
+- **Fix 24k — All nodes collapsed by default:** On first open of a conversation, every request node now seeds collapsed (was: latest node open, rest collapsed). Themes still default to latest-open; manual fold choices still preserved per conversation.
+
+Also: corrected an earlier wrong claim about L1/L2/L3 ticketing (see "Correction" — level is decided per-query by an LLM, not fixed per intent).
 
 ---
 
@@ -308,3 +322,147 @@ are L2." **This was wrong.** Verified behavior (by calling `resolve_query_level`
   `huggingface-cache`) to reseed 5 real BFSI customers and clear test data.
 - Final state: healthy stack, empty inbox (0 conversations), 5 real Neo4j customers, KB indexed.
 - Changes are **uncommitted** at end of session.
+
+---
+
+## Session 2 — 2026-07-15
+
+Branch: `Sayantini-phase2-ui-changes`.
+
+### Fix 24 — Foldable theme / sub-theme dividers in the admin conversation flow
+**Goal:** In the admin inbox, a customer's turns were rendered as one continuous stack even
+when the topic changed (card question → loan question → …). Separate the conversation visually
+by **theme** and **sub-theme**, and let the agent fold each theme group.
+
+**What theme/sub-theme map to (no new data model):** there is no `theme` field in the schema —
+the only per-turn classification is `intent`. So **Theme = the team the intent maps to**
+(mirrors `INTENT_TO_TEAM` in `shared/constants/intents.py`, e.g. `card_management → Card
+Services`, `loan_* → Loans`) and **Sub-theme = the intent itself**. Both are derived on the
+frontend from the `intent` already on each turn. **Frontend-only — no backend/schema/migration/reseed.**
+
+**Behavior (ticket-first, then theme — see Fix 24a for the rule that ships):**
+- Turns (newest-first) are split into contiguous **theme groups** at each real boundary.
+- Each group has a **foldable header** (`role="button"`, `tabindex`, `aria-expanded`,
+  Enter/Space to toggle): a rotating chevron, a colored theme label, and a **turn count**.
+- **Default fold state:** on a conversation's first render, every group is collapsed **except
+  the latest** (group index 0). Seeded once per conversation (`state.themeSeeded`) so the ~3s
+  inbox poll re-render never re-collapses a group the agent opened.
+- Fold state is keyed `"<conversation_id>:<groupIndex>"` in `state.collapsedThemes`.
+- If navigating to a ticket (`highlightTicketId`), the group containing that turn is force-opened
+  so the highlighted turn isn't hidden.
+
+**Files changed (frontend only):**
+- `apps/admin-ui/app.js` — added `INTENT_TO_TEAM` / `TEAM_LABEL` / `THEME_COLOR` + `themeOf()`
+  near the `CH` constant; added `collapsedThemes` / `themeSeeded` to `state`; restructured
+  `renderCentre`'s per-step render into a `renderStep()` helper wrapped by a theme-group loop
+  that builds foldable headers + sub-theme markers.
+- `apps/admin-ui/style.css` — added `.flow-theme-group` / `.flow-theme-divider` (interactive:
+  hover, focus-visible ring, chevron rotation, `.collapsed` hides the body) and
+  `.flow-subtheme-divider`, all via existing theme tokens (light/dark safe).
+- `docs/theme-divider-plan.html` — a visual before/after plan was saved here, then **deleted**
+  once the design was replaced by the spine timeline (Fix 24c); the divider-only mock no longer
+  matched the code. Design history lives in this log.
+
+### Fix 24a — Divider no longer splits a single ticket / single request
+**Problem (found in live testing):** dividers fired *inside* one ticket. Two causes, both
+verified against real turn data (`conv_f0f35fa4190e`):
+1. One customer message often produces **two outbound turns** sharing one `ticket_id` (a
+   "Support Agent will help…" holding turn that carries the intent, then a full reply with
+   `intent = (none)`). The pairing made these separate steps, and a **sub-theme marker** fired
+   between an intent-carrying step and its own follow-up.
+2. Within a ticket the small-LLM intent can flip (e.g. a KYC message mislabelled `fraud_report`,
+   or `transaction_dispute` vs `fraud_report` on the same escalation), so two turns of the **same
+   ticket** mapped to intents that produced a **theme divider** mid-ticket.
+
+**Fix (ticket-first grouping):** a `ticket_id` is now treated as one unit.
+- Each `ticket_id` takes a **single theme** (the first themed intent seen for that ticket), so an
+  intent flip inside a ticket can't change its theme.
+- A new group starts only when the theme changes **and** the step doesn't share a ticket with the
+  previous step (`sameTicket` suppresses the boundary).
+- The **sub-theme marker** now fires **only between unticketed turns** whose intent shifts; it
+  never marks a shift into/out of/within a ticket.
+
+**Verified (simulation on the real 33-turn thread):** 20 steps → **6 clean groups**; the four
+fraud/dispute tickets all sit in **one** Fraud & Disputes group; **no `ticket_id` appears in more
+than one group**. Served JS re-checked in Chrome (parses; no SyntaxError).
+
+### Fix 24b — Sub-theme marker between different tickets in a theme
+**Why:** after 24a the sub-theme marker only fired on unticketed same-theme intent shifts, which
+are rare in this data (most classified turns carry a ticket), so it was seldom visible. Per user
+choice, the marker now surfaces "separate request, same theme".
+
+**Rule:** within a theme group the sub-theme marker fires when (a) the step enters a **different
+ticket** than the previous step (labelled by the new ticket's first intent), or (b) an
+**unticketed** intent shift between two ticket-less turns. It still **never** fires inside a
+ticket, so a single ticket is never split.
+
+**Files:** `apps/admin-ui/app.js` — added a `ticketIntent` map (first intent per ticket) and
+reworked the sub-theme block to the two-case rule above.
+
+**Verified (simulation on the real thread):** the Fraud & Disputes group (4 tickets, 12 steps)
+now shows **3 sub-markers** — one at each ticket→ticket transition (`fraud report`,
+`fraud report`, `transaction dispute`) — and **0 markers inside any ticket** (incl. the ticket
+whose intent flips KYC↔fraud). Served JS re-checked in Chrome (parses; no SyntaxError).
+
+### Fix 24c — Spine-timeline conversation view (replaces the 3-column flow-step grid)
+**Why:** even with the dividers, the conversation still looked "weird". Root cause (verified in
+the data): each ticketed request produces **two outbound turns** — a `HOLDING_MESSAGE`
+("Support Agent will help you with this shortly …", see
+`services/orchestration_service/graph.py`) followed by the real reply — so every request rendered
+as duplicate reply rows, and outbound-only turns left the left "Customer Query" column blank
+(lopsided rows + floating center node). The heavy 3-column node grid amplified it.
+
+**Design chosen (from a 4-option mock the user compared):** **Spine timeline** — a vertical
+thread with a node dot per request.
+
+**What it does:**
+- **Merge each request into one unit** (`buildUnits`): consecutive items sharing a `ticket_id`
+  collapse into one node; unticketed items are their own unit. Each unit shows the customer's
+  opening message + the **final substantive reply**.
+- **Demote the holding message** (not hidden): if a request's reply(ies) included the holding
+  stub, show a small **"auto-ack sent"** pill on the reply; the substantive "Dear …" answer is
+  the reply text. `isHolding()` matches the `HOLDING_MESSAGE` prefix.
+- **Spine layout** (`renderUnit`): node dot (channel-coloured; blue ring on the latest) + a card
+  with intent title + ticket + channel + emotion + status header, the customer message, and the
+  AI reply below. Removes the blank-column asymmetry entirely.
+- Theme header counts now read **"N requests"** (units), not raw turns.
+- Sub-theme markers and fold/seed/highlight behaviour from 24/24a/24b carry over, now operating
+  between **units**.
+
+**Files:** `apps/admin-ui/app.js` — replaced `renderStep` (3-col) with `buildUnits` + `renderUnit`
+(spine); body loop renders units; header count = request count. `apps/admin-ui/style.css` — added
+`.spine` / `.spine-node` / `.spine-card` / `.spine-cust` / `.spine-reply` / `.spine-ack` etc. (the
+old `.flow-step`/`.flow-node`/`.flow-query-card`/`.flow-reply-card` rules are now unused by the
+conversation view but left in place).
+
+**Verified (simulation on the real 33-turn thread):** Fraud & Disputes **12 steps → 4 request
+nodes** (one per ticket); each unit merges to the real "Dear Sayantini…" reply; the
+KYC-mislabelled ticket is one node, not split. Served JS + CSS re-checked in Chrome
+(parses; no SyntaxError). **Final DOM click-through in a browser still pending** (no automation
+driver installed here).
+
+### Fix 24d — Spine node polish (per user review of the first spine build)
+Six review points addressed in `renderUnit` + spine CSS:
+1. **"Customer Query" eyebrow** (`.spine-cust-lbl`, blue) above the customer message.
+2. **"auto-ack sent" was unclear** → the holding message is now shown as its own small quoted
+   line, `↳ Auto-sent: "Support Agent will help you with this shortly …"` (`.spine-holding`),
+   above the real reply. `buildUnits` now captures `holdingText` (the actual sent text) separately
+   from `finalReply` (the substantive answer). If only a holding msg exists so far → "Awaiting
+   agent reply…".
+3. **Sub-theme name source = the intent** → marker now renders an **"Intent"** badge (in the
+   sub-theme colour) followed by the intent name (`.subm-kind` / `.subm-name`).
+4. **Header pill order** = ticket → status (active/resolved) → sentiment (positive/frustrated) →
+   channel (title stays the heading, "Latest" stays last).
+5. **Body font sizes reduced:** customer query 12→**11.5px**, AI reply 12→**11px** (subject 11px).
+6. Answered #6 directly: the holding message never left the data (still a real outbound turn); it
+   is now surfaced as the quoted "Auto-sent" line instead of a duplicate reply row.
+
+Served JS + CSS re-checked in Chrome (parses). `buildUnits` re-simulated on the real thread: all
+4 fraud units capture BOTH the holding text and the real "Dear Sayantini…" reply.
+
+**Known/open:**
+- Intent classification by the small LLM is non-deterministic; ticket-first grouping masks the
+  worst effects (same-ticket turns stay together) but an unticketed mislabel could still nudge a
+  boundary. Cosmetic only — never affects how turns are stored or resolved.
+- Node not available in this environment, so `app.js` was verified via Chrome parse-check +
+  Python simulation of the grouping against live data; final DOM click-through pending in browser.
