@@ -4,7 +4,7 @@ Decides whether the AI's composed reply should be HELD as an editable draft for 
 human agent to review/correct and send manually, instead of being auto-delivered to
 the customer.
 
-Rule (deliberately simple, see docs/session-changes-log.md "Fix 10"):
+Rule (deliberately simple, see docs/Sayantini-session-changes-log.md "Fix 10"):
     HOLD the reply if and only if ``ticket_decision.required`` is True.
 
 ``ticket_decision.required`` is already the single source of truth for escalation — it
