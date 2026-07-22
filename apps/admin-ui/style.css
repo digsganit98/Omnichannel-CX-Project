@@ -246,7 +246,7 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .pdef{background:var(--surf2);color:var(--t3);border-color:var(--bdr)}
 .sl{font-size:10px;color:var(--t3);display:flex;align-items:center;gap:4px}
 .sd{width:6px;height:6px;border-radius:50%}
-.durg{background:var(--red)}.dbot{background:var(--pur)}.dopn{background:var(--t3)}.desc{background:var(--amb)}.dok{background:var(--grn)}
+.dbot{background:var(--pur)}.desc{background:var(--amb)}.dok{background:var(--grn)}
 .unrd{width:7px;height:7px;border-radius:50%;background:var(--blue);flex-shrink:0;margin:13px 8px 0 0}
 
 /* CENTRE */
@@ -372,6 +372,17 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .nba-item:last-child{margin-bottom:0}
 .nba-badge{font-size:9px;font-weight:600;text-transform:uppercase;letter-spacing:.3px;padding:2px 7px;border-radius:20px;background:var(--blue-bg);color:var(--blue-t);border:1px solid var(--blue-bd);display:inline-block}
 .nba-badge-crosssell{background:var(--grn-bg);color:var(--grn-t);border:1px solid var(--grn-bd)}
+.nba-badge-upsell{background:var(--amb-bg);color:var(--amb-t);border:1px solid var(--amb-bd)}
+.opp-basis{font-size:10px;color:var(--t3);line-height:1.4;margin-top:4px}
+.opp-suppressed{font-size:11px;color:var(--t3);font-style:italic}
+/* Offer draft (approved cross-/up-sell): green header vs the amber held-reply card */
+.draft-card--offer{border-color:var(--grn-bd);background:var(--grn-bg)}
+.draft-card--offer .draft-hdr{background:var(--grn-t)}
+/* Bank-initiated offer rows in the Detailed view */
+.det-q-text--offer{color:var(--t3);font-style:italic}
+/* Offer touchpoint in the Lineage mini-timeline: amber ring on the channel dot */
+.tl-ex--offer .tl-dot{box-shadow:0 0 0 2.5px var(--amb-bd)}
+.tl-ex--offer .tl-ch{color:var(--amb-t);font-weight:700}
 .nba-reason{font-size:11px;color:var(--t2);line-height:1.5;margin-top:6px}
 .nba-actions{display:flex;gap:6px;margin-top:8px}
 .nba-approve-btn,.nba-dismiss-btn{font-size:10px;font-weight:600;padding:4px 10px;border-radius:var(--rs);border:1px solid var(--bdr);background:var(--surf2);color:var(--t2);cursor:pointer}
@@ -445,11 +456,79 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .flow-theme-divider .ftd-chev{fill:var(--th-t);transition:transform .15s ease;flex-shrink:0}
 .flow-theme-group:not(.collapsed) .flow-theme-divider .ftd-chev{transform:rotate(90deg)}
 .flow-theme-divider .ftd-count{font-size:9px;font-weight:600;letter-spacing:.03em;opacity:.72;text-transform:none}
+/* single-request Detailed mode: header is a static label, not a fold toggle */
+.flow-theme-divider.static{cursor:default}
+.flow-theme-divider.static:hover .ftd-label{filter:none}
 
 /* sub-theme marker (Tier 2) — lighter, indented, non-interactive */
 .flow-subtheme-divider{font-size:9px;font-weight:600;letter-spacing:.04em;color:var(--t3);text-transform:uppercase;margin:11px 2px 8px 6px;display:flex;align-items:center;gap:7px}
 .flow-subtheme-divider::before{content:"";width:12px;height:1px;background:var(--bdr);flex-shrink:0}
 .flow-subtheme-divider::after{content:"";flex:1;height:1px;background:var(--bdr2)}
+
+/* ── VIEW-MODE TABS (Detailed spine ↔ Lineage overview) ── */
+.viewbar{background:var(--surf);border-bottom:1px solid var(--bdr);padding:8px 18px 0;display:flex;align-items:center;gap:4px;flex-shrink:0}
+.viewbar:empty{display:none}
+.viewtab{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;font-weight:600;padding:7px 14px;border:1px solid var(--bdr);border-bottom:none;border-radius:8px 8px 0 0;color:var(--t3);background:var(--surf2);cursor:pointer;font-family:inherit;transition:all .12s;position:relative;top:1px}
+.viewtab svg{fill:currentColor}
+.viewtab:hover{color:var(--t1)}
+.viewtab.on{color:#ea580c;background:var(--surf);border-color:var(--bdr);font-weight:700}
+.viewtab.on::after{content:"";position:absolute;left:0;right:0;bottom:-1px;height:2px;background:#ea580c}
+
+/* ── LINEAGE OVERVIEW (conversation history view) ── */
+/* Timeline-strip rows: each request is a small left section (ticket + status)
+   beside a mini timeline — one dot per customer→AI exchange, channel-coloured,
+   oldest→newest, with channel + time beneath — then a one-line opening snippet.
+   Row's left border = THEME colour (via --lin-clr); dots = channel. Click drills
+   into the Detailed view for that request. */
+.flow-theme-body.lineage{gap:8px;padding:2px 2px 8px}
+.lin-row{display:grid;grid-template-columns:auto 1fr;gap:14px;align-items:center;
+  background:var(--surf);border:1px solid var(--bdr);border-left:3px solid var(--lin-clr,var(--t3));
+  border-radius:var(--r);padding:10px 14px;cursor:pointer;outline:none;transition:box-shadow .12s,border-color .12s}
+.lin-row:hover{border-color:var(--bdr2);box-shadow:var(--shadow)}
+.lin-row:focus-visible{box-shadow:0 0 0 2px var(--blue)}
+/* left meta section: ticket + status stacked, divided from the timeline */
+.lin-meta{display:flex;flex-direction:column;align-items:flex-start;gap:5px;align-self:stretch;
+  justify-content:center;border-right:1px solid var(--bdr);padding-right:12px}
+.lin-main{min-width:0}
+.lin-tkt{font-size:8.5px;font-weight:700;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.3px;
+  color:var(--amb-t);background:var(--amb-bg);border:1px solid var(--amb-bd);border-radius:5px;padding:2px 6px;text-transform:uppercase;max-width:150px;overflow:hidden;text-overflow:ellipsis}
+.lin-tkt--none{color:var(--t3);background:var(--surf2);border-color:var(--bdr)}
+/* the mini timeline */
+.tl{position:relative;padding:2px 6px 0}
+.tl-line{position:absolute;left:14px;right:14px;top:9px;height:2px;background:var(--bdr2)}
+.tl-dots{position:relative;display:flex;justify-content:space-between}
+.tl-ex{display:flex;flex-direction:column;align-items:center;gap:5px;flex:0 0 auto;min-width:64px;max-width:130px}
+.tl-dot{width:15px;height:15px;border-radius:50%;background:var(--surf);border:3px solid var(--ex-clr);z-index:1}
+.tl-ch{font-size:8px;font-weight:600;letter-spacing:.03em;text-transform:uppercase;color:var(--ex-clr)}
+.tl-time{font-size:9px;color:var(--t3);text-align:center;white-space:nowrap;font-variant-numeric:tabular-nums}
+/* opening-message snippet */
+.lin-snip{font-size:11px;color:var(--t2);margin-top:9px;padding-top:8px;border-top:1px solid var(--bdr);
+  display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;overflow:hidden;word-break:break-word}
+.lin-snip-lbl{font-size:8px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--blue-t);margin-right:7px}
+
+/* ── DETAILED VIEW (stacked exchange rows) ── */
+/* One focused request; each customer→AI exchange is its own 3-column row,
+   stacked oldest→newest. Full reply text (no clamp). */
+.flow-theme-body.detailed{gap:10px;padding:4px 2px 8px}
+.det-unit{display:flex;flex-direction:column;gap:10px}
+.det-row{display:grid;grid-template-columns:1fr 150px 1.2fr;gap:12px;align-items:stretch;
+  background:var(--surf);border:1px solid var(--bdr);border-left:3px solid var(--det-clr,var(--t3));
+  border-radius:var(--r);padding:12px 13px;box-shadow:var(--shadow)}
+.det-lbl{display:block;font-size:8.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--t3);margin-bottom:5px}
+.det-q .det-lbl{color:var(--blue-t)}
+.det-r-lbl{color:var(--pur-t)}
+.det-q-text{font-size:11.5px;color:var(--t1);line-height:1.5;word-break:break-word}
+.det-node{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5px;text-align:center;
+  border-left:1px solid var(--bdr2);border-right:1px solid var(--bdr2);padding:0 8px}
+/* normalize the middle column to 10px (ticket/status/time default smaller) */
+.det-node .lin-tkt,.det-node .flow-node-status,.det-node .lin-time{font-size:10px}
+.det-node .lin-time{color:var(--t1)}
+.det-r{background:var(--pur-bg);border:1px solid var(--pur-bd);border-radius:var(--rs);padding:9px 11px}
+.det-r-text{font-size:11px;color:var(--t1);line-height:1.55;word-break:break-word}
+.det-r-pending{color:var(--t3)}
+.det-r-pending em{font-style:italic}
+.det-auto{font-size:10.5px;color:var(--t3);font-style:italic;line-height:1.5;margin-bottom:7px;padding-bottom:7px;
+  border-bottom:1px dashed var(--bdr2);word-break:break-word}
 
 /* ── SPINE TIMELINE (conversation view) ── */
 /* A vertical thread: one node per request (a ticket's turns merged into one,
@@ -468,17 +547,8 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
   border-radius:var(--r);padding:11px 13px;box-shadow:var(--shadow)}
 .spine-node--latest .spine-card{border-color:var(--blue-bd);border-left-color:var(--spine-clr,var(--blue))}
 
-/* foldable node: ALL customer queries stay visible; only the replies fold away */
-.spine-summary{outline:none}
-.spine-card:not(.no-replies) .spine-summary{cursor:pointer}
-.spine-card:not(.no-replies) .spine-summary:hover .spine-title{text-decoration:underline}
-.spine-summary:focus-visible{box-shadow:0 0 0 2px var(--blue);border-radius:6px}
-.spine-card.collapsed .spine-replies{display:none}
-.spine-card.collapsed .spine-cust{margin-bottom:0}
-.spine-chev{fill:var(--t3);transition:transform .15s ease;flex-shrink:0}
-.spine-card:not(.collapsed) .spine-chev{transform:rotate(90deg)}
-.spine-card.no-replies .spine-chev{visibility:hidden}
-
+/* node body is always fully expanded (per-node fold removed); customer queries
+   and replies both always show. Theme groups remain foldable via their header. */
 .spine-head{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin-bottom:9px}
 /* title = "INTENT" badge (theme colour) + the intent name, shown once per node */
 .spine-title-wrap{display:inline-flex;align-items:center;gap:6px;margin-right:auto}
@@ -512,8 +582,6 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .spine-exchange--next{margin-top:11px;padding-top:11px;border-top:1px dashed var(--bdr)}
 
 .spine-time{font-size:10px;color:var(--t3);margin-top:8px;font-variant-numeric:tabular-nums}
-/* when collapsed, the per-exchange time still shows under the query */
-.spine-card.collapsed .spine-exchange .spine-time{margin-top:4px}
 
 /* ── ANALYTICS (DASHBOARD) ── */
 .dash{flex:1;overflow-y:auto;padding:24px;display:flex;flex-direction:column;gap:20px;background:var(--bg)}

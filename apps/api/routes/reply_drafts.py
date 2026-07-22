@@ -47,6 +47,13 @@ def send_draft(draft_id: str, payload: SendDraftRequest) -> dict:
     if not text:
         raise HTTPException(status_code=400, detail="Reply text is required")
 
+    # Offer drafts (channel="offer", created when an admin approves a cross-sell/
+    # up-sell opportunity) are proactive outbound, not replies: deliver to EVERY
+    # push channel the customer has on record (WhatsApp and/or email — real banks
+    # send offers on both), never web chat. One outbound turn per delivery.
+    if draft["channel"] == "offer":
+        return _send_offer_draft(repository, draft, draft_id, text, payload.actor)
+
     # Deliver to the customer over the same channel the held query arrived on. Web-chat has
     # no push provider — delivery.send() returns a synchronous "sent" and the customer sees
     # the reply on the portal's next history poll (persisted as the outbound turn below).
@@ -100,6 +107,64 @@ def send_draft(draft_id: str, payload: SendDraftRequest) -> dict:
                  "edited": text != (draft.get("draft_text") or "")},
     )
     return {"draft": updated, "turn_id": turn["turn_id"], "delivery": delivery}
+
+
+_OFFER_EMAIL_SUBJECT = "An offer curated for you"
+
+
+def _send_offer_draft(repository, draft: dict, draft_id: str, text: str, actor: str) -> dict:
+    """Deliver an approved offer to every push channel on record (whatsapp/email).
+
+    A missing channel is skipped; at least one identifier is guaranteed because
+    the approve endpoint refuses to create an offer draft without one.
+    """
+    identifiers = repository.list_customer_identifiers(draft.get("customer_id") or "")
+    push = [i for i in identifiers if i["channel"] in ("whatsapp", "email")]
+    if not push:
+        raise HTTPException(
+            status_code=400,
+            detail="Customer has no WhatsApp or email on record to deliver this offer.")
+
+    delivery_service = OutboundDeliveryService()
+    deliveries: list[dict] = []
+    turn_ids: list[str] = []
+    for identity in push:
+        channel = Channel(identity["channel"])
+        outbound_message = InboundMessage(
+            channel=channel,
+            channel_identifier=identity["identifier"],
+            text="",
+            provider="opportunity_offer",
+            # Fresh mail (no threading headers) — an offer is not a reply.
+            subject=_OFFER_EMAIL_SUBJECT if channel == Channel.EMAIL else None,
+            correlation_id=draft_id,
+        )
+        delivery = delivery_service.send(outbound_message, text)
+        turn = repository.append_turn(
+            conversation_id=draft["conversation_id"],
+            customer_id=draft["customer_id"],
+            channel=identity["channel"],
+            direction="outbound",
+            text=text,
+            ticket_id=None,
+            delivery_status=delivery.get("status", "sent"),
+            metadata={"source": "opportunity_offer", "draft_id": draft_id, "actor": actor},
+        )
+        deliveries.append({"channel": identity["channel"],
+                           "identifier": identity["identifier"],
+                           "status": delivery.get("status", "sent")})
+        turn_ids.append(turn["turn_id"])
+
+    updated = repository.update_reply_draft(draft_id, status="sent", actor=actor, sent_text=text)
+    repository.add_audit_event(
+        "offer_draft_sent",
+        draft_id,
+        customer_id=draft.get("customer_id"),
+        conversation_id=draft.get("conversation_id"),
+        details={"actor": actor, "deliveries": deliveries,
+                 "edited": text != (draft.get("draft_text") or "")},
+    )
+    return {"draft": updated, "turn_ids": turn_ids, "deliveries": deliveries}
 
 
 @router.post("/{draft_id}/discard")

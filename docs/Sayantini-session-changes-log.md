@@ -52,6 +52,28 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 26 — Agent Profile Snapshot redesign:** Replaced hardcoded Loans/Claims + ad-hoc churn heuristic with agent-useful tiles — **Tenure, Segment, Upcoming event** — plus per-item tooltips. `/graph` now returns `segment`, `contacts_30d`, and the most-urgent `upcoming_event` (card due/dpd, FD maturity, policy premium; 90-day window, overdue-first).
 - **Fix 27 — Attrition risk (rule-based):** New `services/attrition_service` scorer → Low/Med/High + reasons over BFSI + conversation signs (dpd, below-min balance, thin relationship, tenure, fraud flag, bad mood, stuck ticket, repeat contact, exit-language override). Shown as a full-width band above the tiles. Named "Attrition risk" not "Churn" (heuristic, no outcome labels). See [[attrition-risk-rules]] memory.
 - **Fix 28 — Right-panel + compose cleanups:** Sentiment label+value on one line with "(last N messages)"; consistent 12px value sizing (incl. attrition as plain text, not a pill); removed redundant channel chips from the customer header; removed the "Contacts · 30d" tile (kept in attrition calc); removed the non-functional "Reply via" channel buttons (send is a simulation stub); Detected intents shows top 4.
+- **Fix 29 — Removed "Detected intents" card:** Deleted the redundant right-panel card (intent is already shown per-request as each spine node's title, Fix 24e); frontend-only, dropped the unused `intents`/`uniqueIntents` derivation too.
+- **Fix 30 — Two conversation views (Detailed + Lineage):** Added a `Detailed | Lineage` tab strip above the conversation. Detailed = the existing per-request view; Lineage = an at-a-glance overview of all past requests. Both render from the same `buildUnits` output. Clicking a Lineage row drills into Detailed for that request. Frontend-only (`state.convView` per conversation).
+- **Fix 31 — Detailed = one request at a time:** Detailed now shows a single focused request (default = latest; a Lineage row / Tickets-panel jump sets the focus via `state.detailFocus`), under a static theme header. Validated focus falls back to latest if the stored request no longer exists.
+- **Fix 32 — Removed per-node fold from Detailed:** Request nodes always show their replies (no chevron/click-to-expand); removed `collapsedNodes`/`nodeSeeded`. Theme-group folding kept; "Collapse all" now operates on themes (Lineage only).
+- **Fix 33 — Detailed relaid out as stacked exchange rows:** Each customer→AI exchange in the focused request is its own 3-column row (Customer Query · ticket/channel/status/time · **AI Agent Reply**), oldest→newest. Fixes the multi-message ticket showing one query + one reply. Per-row sentiment pill (from that message's urgency) added to the middle column; middle column normalised to 10px, timestamp black. Intent label removed from the query box; auto-sent (holding) line shown inside the reply box.
+- **Fix 34 — Groups keyed by raw intent (not team):** `themeOf` now groups by the raw `intent` (e.g. "Fraud Report" + "Transaction Dispute" as separate groups) instead of the team; colour still inherits from the intent's team. `ticket_resolution` system turns fold into their ticket's real intent (no bogus "Ticket Resolution" group; tickets never split). Verified on Fathima's real 32-turn thread (9 clean groups, no split).
+- **Fix 35 — Lineage = timeline-strip rows:** Rewrote each Lineage row as a small left section (ticket-id + status) beside a mini timeline — one channel-coloured dot per exchange, oldest→newest, channel + time beneath — then a one-line "Opened with" opening-message snippet. Row's left border = theme colour (dots = channel). Fixes the first-Q/last-A mismatch. Removed the theme-header request count and the redundant "← Back to Lineage" button (the Lineage tab already switches views).
+- **Fix 36 — Orange view tabs:** Active `Detailed`/`Lineage` tab styled orange (`#ea580c`) instead of blue.
+- **Also (test data):** added **Group 4 — More scenarios** (#13–#22) to Fathima's section in `docs/hil-test-questions.md` — 10 grounded questions across claims / auto policy / disputed charge / loan penalty / exit-language, to give the Lineage/theme views more requests across more themes.
+- **Fix 37 — Lineage ticket-id no longer clipped:** The fixed 104px meta column ellipsized the `TKT_…` id; changed the column to `auto` (hugs its content) and capped the pill at `max-width:150px` as an overflow safety net. CSS-only.
+- **Fix 38 — Removed inbox "Urgent" triage:** Deleted the Urgent filter button, the red inbox nav badge, the "N urgent" queue chip (`#qcnt`), the urgent filter branch, and the urgent status dot/label; `urgencyToStatus` keeps its resolved/active/open logic. Frontend-only — backend urgency + ticket priority scoring untouched.
+- **Fix 39 — Collapsed queue status label to Active/Resolved:** The row status pill dropped the "Open" case (unreachable — `conversations.status` is `NOT NULL DEFAULT 'active'`, so a conversation is never statusless); non-resolved now reads "Active". Deleted the now-unused `.dopn` dot rule. Display-only; no logic change.
+- **Fix 40 — Detailed row left border = theme colour:** The Detailed `det-row` left border used the channel colour while its theme header (and the whole Lineage view) used the theme colour, so they didn't match. Switched `--det-clr` to the theme colour (`themeColor.t`), consistent with Lineage (Fix 35). Frontend-only.
+- **Fix 41 — Unified status labels to Open / Resolved everywhere:** The app showed the same "not done" idea as four different words (conversation `active`/`Active`, ticket `open`/`Open`) across inbox/spine/lineage/right-panel/portal — confusing. Added a display-only `statusLabel()` mapping any raw status to just **Open** or **Resolved**, wrapped around the 6 display spans only. All logic/colours/branches keep reading the raw status untouched (verified). Supersedes Fix 39's "Active" label. Frontend-only; `in_progress` now displays as "Open".
+- **Fix 42 — Cross-sell / Up-sell "Opportunities" (LLM-selected, code-guarded):** New opportunity engine (10 candidate rules + sentiment gate + LLM pitch + validation) → right-panel Opportunities card → Approve creates an editable offer draft → Send delivers to every push channel on record.
+- **Fix 42a — Gates loosened to sentiment-only (user decisions):** Dropped the fraud/dpd, attrition-High, and open-ticket gates; only "latest message not negative" suppresses.
+- **Fix 42b — Rules 8–10 added:** HNI-on-entry-card upgrade (dpd<30 guard), charge-waiver upgrade (≥2 unreversed charges), asked-about-product (recent intent → unheld product family).
+- **Fix 42c — Removed the "Recommended actions" (NBA) card:** Redundant/decision-only; Opportunities is the one recommendation surface (backend NBA engine/endpoint kept; `_rule_cross_sell` deleted).
+- **Fix 42d — Offer labelling in both conversation views:** Offer turns render as "Bank-initiated / Offer Message" rows (Detailed) and an amber Offer dot/pill (Lineage) instead of blank-query reply rows.
+- **Fix 42e — Offer-glue grouping:** An offer turn never splits a ticket or starts its own request — question → offer → customer's reply-to-offer render as ONE request in Lineage + Detailed.
+- **Fix 42f — Card heading "Opportunities" → "Suggested Offers":** Agent-facing wording (what the items ARE) over CRM jargon; empty/suppressed states now say "No offers right now". Display-only.
+- **Also (test data):** Opportunity test scenarios added to `docs/hil-test-questions.md` (Sayantini Group 4, Fathima Group 5).
 
 Also: corrected an earlier wrong claim about L1/L2/L3 ticketing (see "Correction" — level is decided per-query by an LLM, not fixed per intent).
 
@@ -533,3 +555,344 @@ heuristic, never a prediction. Scope = conversation + BFSI data.
   session required rebuilding + restarting the `api` container. Frontend changes are live via mount.
 - Frontend verified by Chrome parse-check + data simulation; visual rendering confirmed by the user
   via screenshots. Backend verified via TestClient HTTP calls + isolated unit tests against real data.
+
+---
+
+## Session 4 — 2026-07-21
+
+Branch: `Sayantini-phase2-ui-changes`. Right-panel trim (continuation of Fix 28's direction).
+
+### Fix 29 — Removed the "Detected intents" card
+**Why:** the right-panel "Detected intents" card (Profile snapshot area) listed up to 4 deduped
+intent pills for the conversation. It was redundant: since Fix 24e each spine node in the main
+conversation view already shows its intent as the node title (with an "INTENT" badge), in context
+and per-request. The card flattened that away (no counts, no order, no link to which request), so
+it told the agent less than the timeline already does while taking right-panel space next to the
+more actionable tiles (Attrition risk, Tenure, Segment, Upcoming event). Fits the Fix 28 cleanup.
+**Fix (frontend-only, admin-only):** `apps/admin-ui/app.js` — deleted the `Detected intents`
+`rpcard` block from the `rpbody` innerHTML, and removed the now-unused `intents` / `uniqueIntents`
+derivation (nothing else referenced them). No backend/schema change; live via the bind mount.
+**Verified:** grep confirms `uniqueIntents` and the "Detected intents" string are fully gone with
+no remaining references. No local `node` to run `--check`; parse to be confirmed on next UI load
+(prior sessions used a Chrome parse-check).
+
+### Conversation-view redesign (Fix 30–36) — 2026-07-21
+All frontend-only (`apps/admin-ui/app.js` + `style.css` + asset-version bumps in `index.html`);
+live via the bind mount, no backend/rebuild. Asset versions ended at
+`style.css?v=20260721-6` / `app.js?v=20260721-6`. JS verified with `node --check` inside a
+throwaway `node:20-alpine` container (no local node); grouping/behaviour verified by simulating the
+real render logic against Fathima's live 32-turn conversation (`conv_e9fcc13d2feb`). DOM click-through
+not automated here — visual confirmation via the user's screenshots.
+
+**Fix 30 — Two views (`Detailed | Lineage`).** Added a tab strip (`#viewbar`) above the channel-filter
+bar. `state.convView[conversation_id]` = `'detailed'` (default) | `'lineage'`. Both views render from
+the same `buildUnits` output and theme grouping, so they never diverge. Channel bar's label renamed
+"View:" → "Channel:" so the two bars don't both say "View".
+
+**Fix 31 — Detailed shows ONE request.** `state.detailFocus[conversation_id]` holds a request key
+(ticket-id, or `u<idx>` for unticketed). Default = the latest request (group 0, unit 0); a Lineage-row
+click or a Tickets-panel jump (`goToConversation`) sets it. The stored focus is validated against the
+current data each render and falls back to latest if it no longer exists. The group loop skips every
+group/unit except the focused one; its theme header renders as a static (non-foldable) label.
+
+**Fix 32 — Per-node fold removed from Detailed.** Request nodes always show their replies; removed the
+chevron, the click/keydown toggle, and the `collapsedNodes`/`nodeSeeded` seeding + state. Theme-group
+folding kept. The "Collapse/Expand all" button now toggles themes only and shows in Lineage only.
+
+**Fix 33 — Detailed = stacked exchange rows.** Rewrote `renderUnit`: instead of a spine card with
+sub-boxes, the focused request renders one **3-column row per exchange** (`.det-row`): Customer Query ·
+middle (sentiment · ticket · channel · status · time) · **AI Agent Reply**, oldest→newest. This fixes
+the multi-message ticket that previously showed one query + one reply. The middle-column sentiment pill
+is per-exchange (from that inbound's urgency, since sentiment varies per message within a ticket);
+middle column normalised to 10px; timestamp coloured `--t1` (black). Intent label dropped from the
+query box; the reply box shows the auto-sent (holding) line above the AI reply when present and reply
+text in full (no clamp).
+
+**Fix 34 — Groups keyed by raw intent.** `themeOf` now returns the raw `intent` as the group key +
+prettified label (via new `intentLabel`), instead of mapping to a team — so e.g. Fraud Report and
+Transaction Dispute become separate groups (previously merged as "Fraud & Disputes"). Colour still
+looks up the intent's team so related intents keep a shared colour family. `ticket_resolution` (a
+system auto-resolve event, not a customer topic) is treated as unthemed via a new
+`NON_TOPIC_INTENTS`/`topicOrEmpty` helper — everywhere intent feeds grouping AND the node/row titles —
+so it never forms its own group and folds into its ticket's real intent. **Verified** on the real
+32-turn thread: 9 clean groups, no ticket split across groups (incl. `tkt_785b7fe2e402` spanning two
+loan messages), no standalone "Ticket Resolution" group. Note: a theme label can legitimately appear
+more than once (two non-adjacent same-intent tickets = two groups, in time order — kept by choice).
+
+**Fix 35 — Lineage = timeline strip.** Rewrote `renderLineageRow` (dropping the old 3-col query/reply
+row and its first-Q/last-A pairing bug). Each request = a `.lin-row`: a narrow left `.lin-meta` section
+(ticket-id + status stacked, divided) beside `.lin-main` = a mini timeline (`.tl`) with **one
+channel-coloured dot per exchange** (`.tl-ex`: dot + channel label + time, oldest→newest) and a
+one-line **"Opened with"** snippet of the opening customer message. Row's left border = **theme colour**
+(`--lin-clr` = `themeColor.t`); dots stay **channel**-coloured — fixes the earlier border/header colour
+mismatch. Click still drills into Detailed for that request. Removed the theme-header request count
+(`ftd-count`; was only visible in Lineage and the "N requests vs N tickets" wording was ambiguous —
+units include unticketed requests) and the redundant `.detail-back` "← Back to Lineage" button (the
+Lineage tab already switches views). **Verified** (dot-per-exchange sim on real data): the two-message
+Loan ticket = 2 dots; single-message tickets = 1 dot.
+
+**Fix 36 — Orange view tabs.** Active `.viewtab.on` text + underline styled `#ea580c` (true orange;
+`--amb-t` read as brown). Purely cosmetic.
+
+### Also — Fathima HIL test questions (test data)
+`docs/hil-test-questions.md` — added **Group 4 — More scenarios** (#13–#22) to Fathima's section:
+10 questions grounded in her documented holdings (theft/under-review/approved claims, auto policy,
+disputed ₹265 min-balance charge, ₹2,371 loan penalty, account-closure + switch-banks exit language,
+avg-balance / pending-EMIs controls) so the Lineage / theme views have more requests across more
+themes. Two helper columns ("Grounds on", "Expected"). L2 "Expected" values are best-guess (small-LLM,
+non-deterministic — not run); the exit-language items rely on the deterministic attrition override.
+
+### Fix 37 — Lineage ticket-id no longer clipped
+**Problem:** in the Lineage view the `TKT_…` id pill showed truncated with an ellipsis (e.g.
+`TKT_78587FE2E…`). Not a data issue — the full id is present; the fixed-width left meta column
+was too narrow. `.lin-row` used `grid-template-columns:104px 1fr`, and the pill's
+`max-width:100%;overflow:hidden;text-overflow:ellipsis` clipped the 16-char id to fit ~80px.
+**Fix (CSS-only, `apps/admin-ui/style.css`):** changed the meta column from `104px` to `auto` so
+it sizes to its content (pill + status) — exactly as wide as needed, no fixed guess, no gap. Kept
+the pill's ellipsis but changed its cap `max-width:100% → 150px` so an unusually long id still
+ellipsizes instead of stretching the row. Asset versions bumped `-6 → -8` in `index.html`
+(intermediate `-7` was a first attempt at a fixed `136px`, which overshot and left a gap — replaced
+by `auto`). Live via the bind mount; reload only. Visual confirmation via the user's screenshot.
+
+### Fix 38 — Removed the inbox "Urgent" triage (redundant)
+**Why:** the inbox surfaced high/critical conversations via an "Urgent" pre-triage — a red nav
+badge, an "N urgent" count chip, an Urgent queue filter, and a per-row Urgent status pill. The
+user judged this redundant: ticket **priority scoring** (backend, `services/ticket_service/priority_scoring.py`)
+already scores risk into Low/Med/High/Critical, and the Needs-Review flow surfaces held escalations,
+so the inbox's separate visual urgency flag added little.
+**How urgency was derived (for reference — unchanged by this fix):** per-turn in
+`services/intent_service/urgency.py` (`detect_urgency`): keyword net (fraud/blocked/stolen/overdue/
+complaint/…) → `high`, negative sentiment → `medium`, else `low`; stored on each turn. The inbox read
+the latest inbound turn's value as `last_urgency` (`repository.py` conversations query) and
+`urgencyToStatus` mapped `high`/`critical` → `'urgent'`.
+**Fix (frontend-only, `apps/admin-ui/`):**
+- `index.html` — removed the `#inboxBadge` nav badge, the `#qcnt` "N urgent" chip, and the
+  `data-f="urgent"` filter button (All + Needs Review remain).
+- `app.js` — removed the badge/qcnt fill block in `loadConversations`; removed the
+  `high/critical → 'urgent'` branch from `urgencyToStatus` (its resolved/active/open logic stays,
+  still used by the row status pill and the header Resolve state); removed the
+  `activeFilter === 'urgent'` branch in `renderQueue`; dropped the `'urgent'` cases from the row
+  status dot/label (rows now read Resolved / Active / Open).
+- `style.css` — deleted the now-orphaned `.durg{background:var(--red)}` dot-colour rule.
+- Asset versions bumped `-8 → -9`.
+**Not touched:** backend urgency (`detect_urgency`, `last_urgency`) and **ticket priority scoring**
+are unchanged — this removed only the inbox's *visual* urgency triage. The settings-page
+"Active / Not configured" inbox-connection badge (`inboxBadgeCls`/`inboxBadgeTxt`) shares a name but
+is a different feature and was left as-is. Live via the bind mount; reload only. `node` not available
+locally; DOM confirmation on next UI load.
+
+### Fix 39 — Queue status label collapsed to Active / Resolved
+**Why:** after Fix 38 the row status pill read Resolved / Active / **Open**, but "Open" is
+unreachable: `conversations.status` is `NOT NULL DEFAULT 'active'` (`001_phase1.sql`), the only writes
+set it to `active` or `resolved`, and a resolved conversation is flipped back to `active` when the
+customer messages again (`repository.py`). The `|| 'open'` fallback in `urgencyToStatus`
+(`app.js`) therefore never fires for real data, so "Open" was a label users never actually see. The
+true distinction is binary: resolved vs not-resolved.
+**Fix (frontend-only, display-only):**
+- `app.js` — the row `stDot`/`stLabel` ternaries drop the "Open"/`dopn` branch: non-resolved →
+  `desc` dot + "Active". `urgencyToStatus`'s internal `|| 'open'` return was left as a harmless
+  default (its contract is unchanged; only the label stops printing "Open").
+- `style.css` — deleted the now-unused `.dopn{background:var(--t3)}` dot rule.
+- Asset versions bumped `-9 → -10`.
+**Consequences (verified none):** `isDone`/header Resolve keys only on `=== 'resolved'`; every other
+`'open'`/`'in_progress'` check in the UI is about **ticket** status (a separate field) — spine/lineage
+node status, the Tickets panel, portal "My Tickets" `renderGroup('Open', …)` — all untouched. No
+backend/schema/data change.
+
+### Fix 40 — Detailed row left border matches the theme colour
+**Problem:** in the Detailed view the exchange row's left border colour didn't match the theme
+header above it (e.g. a purple-ish border under a pink `LOAN STATUS` header), while the Lineage view
+matched. **Cause:** both views receive the same theme-colour object (`g.color`), but they coloured the
+border differently — Lineage's `renderLineageRow` set `--lin-clr` to `themeColor.t` (theme colour, per
+Fix 35), whereas Detailed's `renderUnit` set `det-row`'s `--det-clr` to `chn.clr` (the per-exchange
+**channel** colour). Detailed already received `themeColor` but never used it for the border.
+**Fix (frontend-only, `apps/admin-ui/app.js`):** in `renderUnit`, compute `themeClr =
+(themeColor && themeColor.t) || 'var(--t3)'` (mirroring Lineage's fallback) and set the row's
+`--det-clr` from it instead of `chn.clr`. `chn` is still used for the row's channel pill, so it's not
+orphaned. Asset versions bumped `-10 → -11`. DOM confirmation on next UI load.
+
+### Fix 41 — Unified status labels to Open / Resolved everywhere
+**Problem:** the app has two status vocabularies — **ticket** status (`open` / `in_progress` /
+`resolved`; enum in `shared/schemas/tickets.py`) and **conversation** status (`active` / `resolved`;
+free-text SQLite column). The same "still being worked on" idea therefore rendered as four different
+words across surfaces (inbox pill "Active", spine/lineage node "active", right-panel ticket pill
+"open", portal My Tickets "Open"), which read as confusing near-synonyms. (`closed` also appears in
+several frontend guards but the backend never writes it — inert.)
+**Decision (user, after weighing keep-both vs unify):** collapse the *display* to one pair —
+**Open / Resolved** — everywhere. Accepted tradeoff: `in_progress` now shows as "Open", so the UI no
+longer distinguishes "picked up" from "not picked up" (that state is barely used and never set in the
+normal flow; still fully functional in code).
+**Fix (frontend-only, display-only — `apps/admin-ui/app.js`):** added `statusLabel(s)` →
+`resolved`/`closed` ⇒ "Resolved", everything else ⇒ "Open". Wrapped it around the **6 display spans
+only**: inbox queue pill, spine node pill, lineage node pill, right-panel ticket pill, portal
+list pill, portal modal pill. Portal group headings were already "Open"/"Resolved".
+**Why it's safe (verified by reading every site):** in each render site the status is used in two
+separable roles — a raw value that drives logic (CSS class `statusCls`/`stBg`, `isOpen`, the Resolve
+button, `nodeStatus`, and `resolveTicket`'s re-derivation at `app.js:1479-1483`) and a displayed
+string. `statusLabel` is applied ONLY inside the `escH(...)` display spans; it never feeds a class,
+branch, or comparison, and no code anywhere compares against a capitalized/renamed label or
+round-trips a label back into logic. So colours, counts, filters, badges, priority sort, and the
+resolve flow are unchanged. No backend/schema/DB/API change; enum + column values untouched. The
+settings-page "Active / Not configured" inbox-connection badge shares the word but is unrelated and
+was left as-is. Supersedes the "Active" label introduced in Fix 39. Asset versions bumped `-11 → -12`.
+DOM confirmation on next UI load.
+
+### Infra note this session
+Docker Desktop shut down mid-session; all 6 project containers exited (255). Recovered with
+`docker compose start` (data volumes intact — 5 real Neo4j customers + Fathima's conversation
+preserved); API healthy on 8888 again. Not caused by the code changes (static bind-mounted assets).
+
+---
+
+## Session 5 — 2026-07-22 → 2026-07-23
+
+Branch: `Sayantini-phase2-ui-changes`. Cross-sell / Up-sell "Suggested Offers" (Fix 42 family),
+designed from the reference doc `docs/Call_Agent_Assist_Tool_CROSS_SELL_UPSELL_DESIGN.md` (nudge
+engine from another project) adapted to async ticket-based chat. This project's own implemented
+design is documented in `docs/CROSS_SELL_UPSELL_DESIGN.md`.
+
+### Fix 42 — Cross-sell / Up-sell opportunity engine + admin flow
+**Goal (user):** in a customer's chat, based on the recent conversation and/or the customer's
+BFSI profile, the admin gets cross-sell and/or up-sell recommendations. User chose the
+**LLM-driven** approach (doc-style) in a **separate Opportunities card**, and required that
+**Approve executes something** (not decision-only like the old NBA Approve).
+
+**Division of labour (the doc's core lesson):** CODE owns the guardrails — when to sell (gate),
+what is offerable (deterministic candidate rules over Neo4j holdings/charges/conversation), and
+validating the LLM only picked from that set. The LLM owns judgment — which ≤2 candidates fit the
+recent conversation and a ≤20-word pitch grounded in the customer's real numbers.
+
+**Pipeline** (`services/agent_assist_service/opportunity_engine.py`, new):
+gate → `build_candidates` (10 rules, one candidate per product) → prompt (GOOD/BAD few-shot,
+JSON-only contract, do-not-repeat list, last ~10 turns) → `GroqGenerator._generate`
+(operation `opportunity_generation` → LLM observability for free) → `parse_and_validate`
+(JSON cleanup; drops out-of-set products; `kind` always from OUR candidate, never the LLM's
+claim; clamps; parse failure ⇒ fall back to stored pending rows — UI never blanks).
+
+**Candidate rules (1–10):** loan+no life cover→term insurance · no health policy→health
+insurance · account+no card→credit card · high balance (≥5× min)+no FD→FD · high balance→premium
+account tier · FD maturing ≤90d→renewal · ≥5000 reward points (dpd<30)→premium card ·
+**(8)** HNI/premium segment on entry variant (dpd<30 guard, user choice "a")→premium card ·
+**(9)** ≥2 unreversed charges→charge-waiver account upgrade (sells by saving money) ·
+**(10)** recent turn intent maps to an UNHELD product family→that product (loan_status/
+loan_application→loan, card_management→card, policy_status→policy; FD/insurance questions
+classify as general_inquiry in this taxonomy so rule 10 can't cover them — documented limitation;
+family granularity is coarse: holding a Health policy blocks a term-insurance interest match).
+
+**API** (`apps/api/routes/agent_assist.py`): `GET /admin/agent-assist/opportunities` — resolves
+the Neo4j customer via channel identities (NBA `_load_graph_context` pattern), fetches context +
+`get_charges`, normalizes turns to chronological (newest-first bug class from Fix 24g avoided),
+runs the engine, persists new items into the existing `agent_assist_recommendations` table (no
+migration), **dedupes by product against every prior row** — pending/approved/dismissed all
+retire a product for that conversation ("one-shot"). Decision endpoint extended: **approving a
+cross_sell/up_sell row creates an editable reply draft** (`channel="offer"` marker, pitch as
+draft_text) after validating a push identity exists (400) and no other draft is pending (409 —
+checked BEFORE flipping the recommendation). `repository.get_agent_assist_recommendation` added
+(getter didn't exist).
+
+**Dual-channel send** (`apps/api/routes/reply_drafts.py`): `send_draft` branches on
+`channel=="offer"` → `_send_offer_draft` delivers the (edited) text to **every** push channel on
+record — WhatsApp and/or email, missing ones skipped (user rule: "send to both; if one missing,
+skip") — as a **fresh** mail (subject "An offer curated for you", no threading: an offer is not a
+reply), one outbound turn per delivery (`metadata.source="opportunity_offer"`), draft→sent,
+`offer_draft_sent` audit with the delivery list. Held-reply path untouched.
+
+**UI** (`apps/admin-ui/`): right-panel **Opportunities** card (Cross-sell green / Up-sell amber
+badge, pitch, "Why: <basis>" grounding line, Approve/Dismiss; suppressed state shows the gate
+reason). Approve → `loadPendingDrafts()` + re-render so the draft card appears immediately.
+Offer variant of the draft card: green, "💡 Approved offer — edit & send", "Send offer".
+
+**Verified live:** engine exercised in-container on Fathima's real data (2 candidates, grounded
+pitches, validation passed); Sayantini end-to-end **organically**: portal loan question →
+rule 10 candidate + rule 9 (her real ₹3,791 AnnualFee+LateFee charges — disproving an earlier
+wrong guess that she had none) → LLM items in the card → Approve → offer draft → Send →
+delivered to **email only** (verified: her portal signup stored no WhatsApp identity — the
+skip-missing rule working) → Mailpit mail → she replied to the offer email → reply landed in the
+same conversation on the same ticket. Known LLM caveat surfaced: the pitch invented "12.99%
+interest" (not in her data) — product/eligibility are code-validated, wording is not; the
+admin's edit-before-send is the control. Tests: `tests/test_opportunities.py` (new) — gates,
+all candidate rules, malformed-JSON/out-of-set/kind-override validation, pipeline with fake
+generator, approve→draft→dual-send + 409/400 guards via TestClient. Suite at session end:
+47 opportunity+agent-assist tests pass; full suite 4 pre-existing test_phase1 failures only.
+
+### Fix 42a — Gates loosened to sentiment-only (sequence of user decisions)
+Initial build had 4 gates (open ticket · negative latest message · fraud/dpd · attrition High).
+Walked the user through what the reference doc gated (call-stage; only its "resolve first, sell
+when receptive" maps here — fraud/dpd/attrition were our BFSI additions). User: **drop fraud/dpd
++ attrition** (42a-1), then — after the open-ticket gate forced send-reply+resolve clicks mid-
+demo — **drop the open-ticket gate too** (42a-2). Shipped gate: ONLY "latest inbound message not
+negative". The human admin reviewing every offer is the remaining judgment layer. `check_gates`
+signature keeps `tickets` for future re-tightening; `score_attrition` import and the route's
+`contacts_30d` plumbing removed as dead.
+
+### Fix 42b — Rules 8–10 (folded into the rule list above)
+Rule 8 chosen after the user challenged "gates pass but zero candidates" for Sayantini — audit
+showed every rule correctly not firing on her data; the one real catalogue gap was HNI-on-Classic.
+Rules 9+10 chosen from a practicality review (4-part test: grounded fact · customer benefit ·
+one-sentence justification · data supports it). Explicitly REJECTED as not correct to build:
+age/occupation demographic rules (profiling, no outcome data), loan pre-approvals (no credit
+scoring), card limit increase (invented threshold), premium-due "offer" (duplicates the
+Upcoming-event tile). `MAX_OPPORTUNITIES` stays 2 (doc lesson: fewer, better).
+
+### Fix 42c — Removed the "Recommended actions" (NBA) card
+Offer rows appeared in BOTH cards (same table; the NBA endpoint returns all pending rows —
+a flagged-but-unapplied filter from the plan). User asked what NBA still does: 3 rules
+(SLA-escalate / retention / KYC), all Approve-decision-only (dead-button problem from Fix 11),
+two overlapping newer surfaces (Attrition band, Tickets panel). User chose **remove the card**
+(consistent with Fixes 28/29/38). Frontend-only: card block + `renderNbaActions` + `decideNba`
+deleted; backend engine/endpoint/tests kept; `_rule_cross_sell` + `_latest_sentiment` deleted
+from the engine earlier in the session (superseded by the opportunity engine; its 5 rule tests
+replaced by the new suite; `_load_graph_context` + its regression test kept).
+
+### Fix 42d — Offer labelling in Lineage + Detailed
+Sent offers rendered as ordinary "AI Agent Reply" rows with a blank Customer Query / "Opened
+with —" (nothing pairs with a bank-initiated turn). Detection via `metadata.source ==
+"opportunity_offer"` (verified present in the conversations API payload). Detailed: offer
+exchange renders as "Bank-initiated / Offer approved by admin & sent" + amber **Offer** pill +
+"Offer Message" box. Lineage: offer-only unit shows an **Offer/Sent** meta pill + "OFFER SENT
+<text>" snippet; offer exchange dots get an amber ring + "Offer · <channel>" label.
+
+### Fix 42e — Offer-glue grouping (user-corrected design)
+**Problem (user):** the offer split its ticket — question `TKT_9C…` / offer / customer's
+reply-to-offer (same `TKT_9C…`) rendered as THREE Lineage rows, because `buildUnits` merges only
+consecutive same-ticket items and the unticketed offer broke adjacency (first-ever unticketed
+turn injected mid-ticket; Fix 24a's "ticket never splits" held until now). First proposed rule
+("absorb when sandwiched between same-ticket runs") was **rejected by the user as too narrow**;
+the corrected principle: **an offer is not its own request — it glues to the request that
+triggered it, and the customer's response to the offer continues that same request.**
+**Implementation (frontend only):** `isOfferStep`/`isOfferTurn`; in the theme-group loop and in
+`buildUnits` an offer item never starts a group/unit and is transparent to ticket adjacency
+(`prevTicket`/`last.ticket` carry through, so same-ticket runs on both sides reunite); when the
+offer is the newest turn (no unit yet), the next older item is adopted into its unit (offer
+belongs to what triggered it); in the exchange builder an offer outbound starts its OWN exchange
+(never overwrites the previous exchange's reply). **Verified by simulating the exact new logic
+against her live turns:** loan request = ONE unit with 3 ordered exchanges (question→reply ·
+OFFER · "I'm interested"→bank reply); FD/thank-you/dispute/card-limit units unchanged (7 units →
+5). Screenshots confirmed by the user.
+
+### Also — opportunity test scenarios in `docs/hil-test-questions.md`
+Sayantini **Group 4** (#12–15): rule-10 loan question (marked consumed), rule-9 charge waiver,
+sentiment-gate check, and the policy-family limitation documented as expected-nothing. Fathima
+**Group 5** (#23–27): credit-card interest question (clears sentiment gate + rule 10), her three
+data-driven offers, sentiment-gate check; **⚠ send caution** for her real email/WhatsApp on
+non-local delivery modes (user's concern — she'd receive real mails). One-shot semantics noted.
+
+### Decisions / open items
+- Offer pitch **wording** can embellish (e.g. an invented interest rate) — grounding is enforced
+  for product/eligibility only; admin edit-before-send is the control. A stricter "numbers only
+  from basis" post-check was not built.
+- "Thank-you" messages still create tickets (Rule 8 low_retrieval_confidence — no
+  acknowledgement intent in the taxonomy) and aren't linked to the resolved ticket they refer to.
+  Diagnosed in-session (design gap, not a bug); fix options discussed, deferred.
+- Rule 10 family granularity is coarse (holding ANY policy blocks policy-interest matches);
+  refining to sub-types (term vs health) discussed, deferred.
+- Dismissed/suggested offers are retired per-conversation forever (no expiry window).
+- Backend NBA engine + `/next-best-actions` endpoint remain API-only (no UI consumer).
+
+### Infra / verification notes
+- Multiple `docker compose build api && up -d api` rebuilds (backend baked into the image);
+  frontend live via bind mount, asset versions `-12` → `20260723-3`.
+- `node --check` via throwaway node:20-alpine container (MSYS_NO_PATHCONV=1 for the mount);
+  grouping changes verified by Python simulation of the exact JS logic against live turn data
+  before shipping.
+- Changes remain **uncommitted** on `Sayantini-phase2-ui-changes`.

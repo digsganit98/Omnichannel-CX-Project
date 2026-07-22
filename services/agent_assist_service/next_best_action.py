@@ -34,13 +34,14 @@ class NextBestActionEngine:
             ticket = active.model_dump(mode="json") if active else None
 
         turns = self.repository.list_recent_turns(conversation_id)
-        graph_context = self._load_graph_context(customer_id)
 
+        # Cross-sell/up-sell moved to the opportunity engine (LLM-selected from a
+        # code-built candidate set; see opportunity_engine.py) — operational
+        # actions only here.
         candidates = [
             self._rule_escalate_aging_high_priority(ticket),
             self._rule_repeat_negative_sentiment(turns),
             self._rule_kyc_pending(ticket),
-            self._rule_cross_sell(graph_context, ticket, self._latest_sentiment(turns)),
         ]
         actions = sorted(
             (action for action in candidates if action is not None),
@@ -74,15 +75,6 @@ class NextBestActionEngine:
             return {}
         except Exception:
             return {}
-
-    @staticmethod
-    def _latest_sentiment(turns: list[dict]) -> str:
-        for turn in reversed(turns):
-            if turn.get("direction") == "inbound":
-                sentiment = (turn.get("metadata") or {}).get("sentiment")
-                if sentiment:
-                    return sentiment
-        return "neutral"
 
     # ── Rule providers ───────────────────────────────────────────────────
 
@@ -152,23 +144,6 @@ class NextBestActionEngine:
             metadata={"ticket_id": ticket["ticket_id"]},
         )
 
-    @staticmethod
-    def _rule_cross_sell(graph_context: dict, ticket: dict | None, sentiment: str) -> NextBestAction | None:
-        if ticket is not None and ticket.get("status") != TicketStatus.RESOLVED.value:
-            return None
-        if sentiment not in {"positive", "neutral"}:
-            return None
-        loans = graph_context.get("loans") or []
-        if not loans:
-            return None
-        insured_types = {"term insurance", "life", "life insurance"}
-        policies = graph_context.get("policies") or []
-        if any((policy.get("policy_type") or "").strip().lower() in insured_types for policy in policies):
-            return None
-        return NextBestAction(
-            action_type=ActionType.CROSS_SELL,
-            reason="Customer holds a loan with no term/life insurance policy on record.",
-            confidence=0.55,
-            priority=4,
-            metadata={"loan_count": len(loans)},
-        )
+    # NOTE: the old _rule_cross_sell (loan + no life cover) moved into
+    # opportunity_engine.build_candidates — cross-sell/up-sell is now LLM-selected
+    # from a code-built candidate set and surfaced in the Opportunities card.

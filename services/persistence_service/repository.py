@@ -74,6 +74,7 @@ class CXRepository(Protocol):
                                            ticket_id: str | None = None,
                                            status: str | None = None) -> list[dict]: ...
     def update_agent_assist_recommendation(self, recommendation_id: str, status: str, actor: str) -> dict | None: ...
+    def get_agent_assist_recommendation(self, recommendation_id: str) -> dict | None: ...
     def add_reply_draft(self, conversation_id: str, customer_id: str, channel: str, draft_text: str,
                         ticket_id: str | None = None, inbound_turn_id: str | None = None,
                         hold_reason: str = "", reason_code: str = "",
@@ -527,6 +528,13 @@ class SQLiteCXRepository:
         with self.connection() as conn:
             rows = conn.execute(query, args).fetchall()
         return [self._json_fields(dict(row), "metadata_json") for row in rows]
+
+    def get_agent_assist_recommendation(self, recommendation_id: str) -> dict | None:
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM agent_assist_recommendations WHERE recommendation_id = ?", (recommendation_id,)
+            ).fetchone()
+        return self._json_fields(dict(row), "metadata_json") if row else None
 
     def update_agent_assist_recommendation(self, recommendation_id: str, status: str, actor: str) -> dict | None:
         with self.connection() as conn:

@@ -11,6 +11,7 @@ class ActionType(StrEnum):
     OFFER_RETENTION = "offer_retention"
     REQUEST_DOCUMENT = "request_document"
     CROSS_SELL = "cross_sell"
+    UP_SELL = "up_sell"
     NO_ACTION = "no_action"
 
 

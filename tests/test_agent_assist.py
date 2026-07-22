@@ -92,37 +92,7 @@ def test_kyc_rule_does_not_fire_for_resolved_ticket():
     assert NextBestActionEngine._rule_kyc_pending(ticket) is None
 
 
-# ── Cross-sell rule (Phase 3) ───────────────────────────────────────────────
-
-_LOAN_NO_INSURANCE_CONTEXT = {"loans": [{"loan_id": "L1"}], "policies": []}
-_LOAN_WITH_INSURANCE_CONTEXT = {"loans": [{"loan_id": "L1"}], "policies": [{"policy_type": "Term Insurance"}]}
-
-
-def test_cross_sell_recommended_when_resolved_and_positive_and_eligible():
-    action = NextBestActionEngine._rule_cross_sell(_LOAN_NO_INSURANCE_CONTEXT, None, "positive")
-    assert action is not None
-    assert action.action_type == ActionType.CROSS_SELL
-
-
-def test_cross_sell_not_recommended_when_ticket_still_open():
-    ticket = _ticket(status=TicketStatus.OPEN)
-    action = NextBestActionEngine._rule_cross_sell(_LOAN_NO_INSURANCE_CONTEXT, ticket, "positive")
-    assert action is None
-
-
-def test_cross_sell_not_recommended_on_negative_sentiment():
-    action = NextBestActionEngine._rule_cross_sell(_LOAN_NO_INSURANCE_CONTEXT, None, "negative")
-    assert action is None
-
-
-def test_cross_sell_not_recommended_when_already_insured():
-    action = NextBestActionEngine._rule_cross_sell(_LOAN_WITH_INSURANCE_CONTEXT, None, "positive")
-    assert action is None
-
-
-def test_cross_sell_not_recommended_without_loans():
-    action = NextBestActionEngine._rule_cross_sell({"loans": [], "policies": []}, None, "positive")
-    assert action is None
+# ── Cross-sell/up-sell moved to opportunity_engine (see test_opportunities.py) ──
 
 
 # ── Engine + persistence integration ────────────────────────────────────────
