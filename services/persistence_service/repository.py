@@ -726,6 +726,7 @@ class SQLiteCXRepository:
             "operation": event.get("operation") or "unknown",
             "provider": event.get("provider") or "unknown",
             "model": event.get("model") or "unknown",
+            "model_version": event.get("model_version"),
             "llm_used": 1 if event.get("llm_used") else 0,
             "prompt_tokens": int(event.get("prompt_tokens") or 0),
             "completion_tokens": int(event.get("completion_tokens") or 0),
@@ -746,13 +747,13 @@ class SQLiteCXRepository:
                 """
                 INSERT INTO llm_usage_events(
                     event_id, correlation_id, conversation_id, customer_id, message_id, channel,
-                    agent, operation, provider, model, llm_used, prompt_tokens, completion_tokens,
+                    agent, operation, provider, model, model_version, llm_used, prompt_tokens, completion_tokens,
                     total_tokens, estimated_cost_usd, latency_ms, status, error, intent,
                     resolution_level, ticket_id, retrieval_backend, metadata_json, created_at
                 )
                 VALUES (
                     :event_id, :correlation_id, :conversation_id, :customer_id, :message_id, :channel,
-                    :agent, :operation, :provider, :model, :llm_used, :prompt_tokens, :completion_tokens,
+                    :agent, :operation, :provider, :model, :model_version, :llm_used, :prompt_tokens, :completion_tokens,
                     :total_tokens, :estimated_cost_usd, :latency_ms, :status, :error, :intent,
                     :resolution_level, :ticket_id, :retrieval_backend, :metadata_json, :created_at
                 )
@@ -821,12 +822,25 @@ class SQLiteCXRepository:
 
             by_model = conn.execute(
                 f"""
-                SELECT model, COUNT(*) AS calls, SUM(total_tokens) AS total_tokens,
-                       SUM(estimated_cost_usd) AS estimated_cost_usd
+                SELECT model, COALESCE(model_version, 'unknown') AS model_version,
+                       COUNT(*) AS calls, SUM(total_tokens) AS total_tokens,
+                       SUM(estimated_cost_usd) AS estimated_cost_usd, AVG(latency_ms) AS avg_latency_ms
                 FROM llm_usage_events
                 {where}
-                GROUP BY model
+                GROUP BY model, COALESCE(model_version, 'unknown')
                 ORDER BY estimated_cost_usd DESC, total_tokens DESC
+                """,
+                args,
+            ).fetchall()
+
+            by_resolution_level = conn.execute(
+                f"""
+                SELECT COALESCE(resolution_level, 'unknown') AS resolution_level, COUNT(*) AS calls,
+                       SUM(total_tokens) AS total_tokens, SUM(estimated_cost_usd) AS estimated_cost_usd
+                FROM llm_usage_events
+                {where}
+                GROUP BY COALESCE(resolution_level, 'unknown')
+                ORDER BY calls DESC
                 """,
                 args,
             ).fetchall()
@@ -871,6 +885,7 @@ class SQLiteCXRepository:
             "by_model": [self._usage_group(row) for row in by_model],
             "by_channel": [self._usage_group(row) for row in by_channel],
             "by_intent": [self._usage_group(row) for row in by_intent],
+            "by_resolution_level": [self._usage_group(row) for row in by_resolution_level],
         }
 
     def get_conversation(self, conversation_id: str) -> dict | None:
