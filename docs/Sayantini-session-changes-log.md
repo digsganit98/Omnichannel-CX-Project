@@ -74,6 +74,14 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 42e — Offer-glue grouping:** An offer turn never splits a ticket or starts its own request — question → offer → customer's reply-to-offer render as ONE request in Lineage + Detailed.
 - **Fix 42f — Card heading "Opportunities" → "Suggested Offers":** Agent-facing wording (what the items ARE) over CRM jargon; empty/suppressed states now say "No offers right now". Display-only.
 - **Also (test data):** Opportunity test scenarios added to `docs/hil-test-questions.md` (Sayantini Group 4, Fathima Group 5).
+- **Fix 43 — Removed inbox-row status dot + label:** Dropped the redundant per-row "Open/Resolved" dot+text (state already encoded by the dimmed `done` row style); channel pill/stripe kept. Display-only.
+- **Fix 44 — Snapshot tile "Upcoming event" → "Deadline":** More honest label — the tile's dominant state is an *overdue* (past) item, and all three sources are deadlines (card due, FD maturity, premium due). Display-only.
+- **Fix 45 — Sentiment panel computes over the last 5 messages for real:** The "(last N messages)" caption was fake — counts/label ran over ALL inbound turns and the caption number was clamped per-verdict (3 when "Frustrated"). Now counts, bar, and label all derive from the true last-5 window; caption reports the actual window size.
+- **Fix 46 — Sentiment + snapshot merged into one card:** Removed the "Profile snapshot" heading; the sentiment block and the attrition band/tiles now share one grey card, separated by a subtle top border. Display-only.
+- **Fix 47 — Tickets card = open only, one-ticket height:** Right-panel card filters to open/in_progress tickets, header "Open Tickets (N)", scroll area capped at ~one open-ticket height (118px); card disappears when nothing is open. Resolved-ticket history stays visible in Lineage + portal My Tickets.
+- **Fix 48 — Truthful Connectors page:** Gmail SMTP badge read a nonexistent `configured` field (endpoint returns `gmail_ready`) → always "Disconnected"; Jira CRM badge was a hardcoded literal, never calling the real `/admin/crm/status` (which reports configured:true). Both wired to their real statuses; the two email cards renamed "Email · Outbound (SMTP)" / "Email · Inbound (IMAP)" so the direction split is obvious.
+- **Fix 48a — One Email card (merged), reordered:** The two email cards merged into a single "Email" card with per-pipe status rows (Inbound IMAP / Outbound SMTP — independent pipes that fail separately), keeping the stats + Poll-now; card badge = Connected/Partial/Disconnected. Card order now WhatsApp · Email · Call · Jira. Call kept (user choice).
+- **Fix 49 — Removed the Tickets page:** Deleted the browse-all-tickets page + nav item + badge (no real user at scale; ticket lifecycle belongs to the Jira CRM the pipeline already syncs to; per-customer tickets live in the right-panel card, history in Lineage/portal, aggregates in Analytics). `_allTickets` cache kept (fed by `loadConversations`); `resolveTicket` rewired; fully revertible via git.
 
 Also: corrected an earlier wrong claim about L1/L2/L3 ticketing (see "Correction" — level is decided per-query by an LLM, not fixed per intent).
 
@@ -896,3 +904,158 @@ non-local delivery modes (user's concern — she'd receive real mails). One-shot
   grouping changes verified by Python simulation of the exact JS logic against live turn data
   before shipping.
 - Changes remain **uncommitted** on `Sayantini-phase2-ui-changes`.
+  (Committed after session close as `4f2f85c`.)
+
+---
+
+## Session 6 — 2026-07-23
+
+Branch: `Sayantini-phase2-ui-changes`. Inbox-row declutter.
+
+### Fix 43 — Removed the inbox-row status dot + label
+**Why:** after Fix 38 (Urgent removed) and Fix 41 (labels unified), the queue-row status is strictly
+binary Open/Resolved — and a resolved row is already visually distinct twice over (the `done` class
+dims the row; the dot flipped amber→green). The text label was a third encoding of the same bit, and
+"Open" on nearly every row carried no information (same reasoning as Fix 39). User reviewed the
+options (drop status only / drop pill too / keep pill drop stripe) and chose **drop the status
+dot+label only** — channel pill and stripe stay.
+**Fix (frontend-only, display-only — `apps/admin-ui/`):**
+- `app.js` — `renderQueue`: removed the `stDot`/`stLabel` derivation and the `.sl`/`.sd` status span
+  from the row template. `sts` (`urgencyToStatus`) is still computed — it drives the `done` row class
+  and selection state. `statusLabel()` keeps its 5 other display sites (spine, lineage, tickets
+  panel, portal list + modal) — verified by grep.
+- `style.css` — deleted the now-orphaned `.sl`, `.sd`, and the `.dbot`/`.desc`/`.dok` dot-colour
+  line (`.dbot` was already dead — no JS/HTML reference anywhere).
+- `index.html` — asset versions bumped `20260723-3/-4 → -5` (both files now on `-5`).
+**Verified:** `node --check` via throwaway node:20-alpine container — syntax OK. Live via the bind
+mount; DOM confirmation on next UI load.
+
+### Fix 44 — Snapshot tile renamed "Upcoming event" → "Deadline"
+**Why:** the name was subtly wrong for the tile's highest-value state — an *overdue* item (e.g.
+"Card payment · 45d overdue") is a past event, and "event" reads like a calendar appointment
+rather than a money deadline. All three data sources (card payment due, FD maturity, policy
+premium due) ARE deadlines, so "Deadline" is true in every state the tile renders (overdue /
+today / in Nd). Chosen after weighing Key date / Next due / Account alert / Needs attention etc.
+("Next due" fails FD maturity; "Account alert" overstates a calm upcoming item).
+**Fix (frontend-only, display-only — `apps/admin-ui/app.js`):** one display site — the `.ml`
+label in the Profile Snapshot tile ("Upcoming event" → "Deadline") and its native tooltip
+("product event" → "product deadline"). Backend field stays `upcoming_event` (API contract
+untouched). Asset version bumped `-5 → -6` (app.js only). `node --check` OK.
+
+### Fix 45 — Sentiment panel: "(last N messages)" made true
+**Problem (found reading the code while explaining it):** the right-panel Sentiment card's
+"(last 5 messages)" caption was fiction on two levels: (1) the counts/percentages/label were
+computed over **ALL** inbound turns in the conversation — `msgCount = Math.min(inbound.length, 5)`
+was used only to print the caption, never to slice the data; (2) the caption number was then
+clamped **by verdict** (`Frustrated → min(…,3)`, `Very frustrated → min(…,4)`) — cosmetic
+storytelling with no computation behind it, and backwards (the verdict changed the claimed window).
+A conversation angry long ago but calm now still read "Frustrated (last 3 messages)".
+**Fix (user chose "make the computation match the caption" over relabelling; frontend-only,
+`apps/admin-ui/app.js` `renderRight`):** `recent = inbound.slice(-SENT_WINDOW)` (SENT_WINDOW=5) —
+counts, percentages, bar, and headline label all now derive from that same window; caption shows
+the real window size (`recent.length`, < 5 for short conversations); per-verdict clamps deleted.
+Label thresholds unchanged (neg≥60 Very frustrated / neg≥30 Frustrated / pos≥55 Positive / else
+Neutral). **Ordering verified before shipping:** `conv.turns` is chronological — `list_recent_turns`
+selects `DESC` then `reversed(rows)` (`repository.py:262-265`) — so `slice(-5)` takes the newest 5.
+Known consequence: with a 5-message window the bar shows multiples of 20% (correct trade for
+"how do they feel now"; lifetime mood remains the attrition scorer's bad-mood sign, backend).
+Asset version bumped `-6 → -7`. `node --check` OK.
+
+### Fix 46 — Sentiment + Profile-snapshot merged into one right-panel card
+**User request:** drop the "Profile snapshot" heading and put both sections under the same grey
+area. **Fix (frontend-only):** `app.js` — the two sibling `.rpcard` divs in `renderRight` became
+one; the `rplbl` "Profile snapshot" line deleted; the attrition band + `mgrid` tiles now sit in a
+new `.snap-sec` wrapper inside the same card. `style.css` — `.snap-sec{margin-top:12px;
+padding-top:12px;border-top:1px solid var(--bdr)}` gives a subtle divider between the sentiment
+block and the tiles (border on the wrapper, not the attrition band, because the band is
+`display:none` until the async /graph fetch fills it — the divider must show regardless). All
+`snap-*` ids unchanged, so the async fill code needed no changes. Asset versions bumped → `-8`
+(both files). `node --check` OK.
+
+### Fix 47 — Right-panel Tickets card: open-only + one-ticket-height scroll
+**User request:** show only open tickets, header "Open Tickets (N)", and cap the scroll area at
+one ticket's height. **Fix (frontend-only):**
+- `app.js` `renderRight` — the `convTickets` filter now also requires
+  `status === 'open' || 'in_progress'`; header "Tickets (N)" → "Open Tickets (N)" (count = open
+  only). When a conversation has zero open tickets the card doesn't render at all (pre-existing
+  no-tickets behaviour, now also the all-resolved case).
+- `style.css` — `.tkt-scroll` `max-height:360px → 118px` (~one open card: padding 18 + head 16 +
+  title 16 + created 14 + Resolve button ~32 + margin 6); additional open tickets scroll, the
+  header count signalling there are more.
+- **Checked before shipping:** `resolveTicket` re-derives + calls `renderRight` with fresh ticket
+  data, so a just-resolved ticket cleanly drops out of the list (and the card disappears on the
+  last one) — no stale-row path. Resolved history remains visible in the Lineage view and the
+  portal My Tickets. The row's resolved-styling branch (`stBg`/`statusLabel`) is now unreachable
+  in this card but left in place (harmless).
+Asset versions bumped `-8 → -9`. `node --check` OK.
+
+### Fix 48 — Connectors page: two false "Disconnected" badges + email-card naming
+**Problem (user: "why does the connector page look weird? two mail connectors? Jira
+disconnected?"):** three distinct issues, diagnosed by calling all four status endpoints live
+with the admin key before changing anything:
+1. **Gmail SMTP showed "Disconnected" while mail demonstrably sends** (Session 5's offer emails
+   delivered). Cause: frontend read `emRes.configured` but `/admin/email/status`
+   (`SMTPEmailConnector().status()`) has NO `configured` field — its readiness flag is
+   `gmail_ready` (live: `true`). `undefined` → falsy → permanent "Disconnected".
+2. **Jira CRM showed "Disconnected" as a hardcoded literal** (`status:'disconnected'` in the
+   connectors array) — the real `/admin/crm/status` endpoint existed but was never called; live
+   it returns `configured: true` (full Jira env config present), and the pipeline actually
+   reaches Jira (the known 400 proves contact).
+3. **"Two mail connectors" is correct but unreadable** — Gmail SMTP (outbound) vs Email Inbox
+   IMAP (inbound) are two directions of the same account, presented as near-identical red
+   envelope cards.
+**Fix (frontend-only, `apps/admin-ui/app.js` `loadConnectors`):** SMTP badge now keys on
+`gmail_ready`; added a `/admin/crm/status` fetch and the Jira card uses it (`configured` →
+Connected); cards renamed **"Email · Outbound (SMTP)"** / **"Email · Inbound (IMAP)"** with
+direction-first descriptions. WhatsApp (`connected:true`, matches) and IMAP ("Active", matches)
+untouched; "Last poll: Never" was just the poller not having run yet — not a bug. Known
+remaining sloppiness (not fixed): a failed status *fetch* still renders as "Disconnected"
+rather than "Unknown" (all catches swallow). Asset version bumped `-9 → -10` (app.js).
+`node --check` OK.
+
+### Fix 48a — Connectors: merged Email card + ordering
+**Why (user: "why does email come twice?"):** inbound (IMAP poller) and outbound (SMTP sender)
+are genuinely two independent pipes with separate failure modes — but that's an implementation
+truth, not a user-facing one; to an admin, Email is ONE channel, and two peer cards leaked the
+plumbing. **Fix (frontend-only, `apps/admin-ui/app.js` `loadConnectors`):** removed the
+"Email · Outbound (SMTP)" entry from the simple-cards array; the extended IMAP card became the
+single **"Email"** card — its stats grid now leads with two per-pipe rows (**Inbound (IMAP)** /
+**Outbound (SMTP)**, each Active/Down) above Mailbox / Poll interval / Last poll / Emails
+processed, keeping the Poll-now button and error line. Card badge: **Connected** (both up) /
+**Partial** (one up — reuses the `disconnected` badge style) / **Disconnected**. Inserted via
+`grid.insertBefore(..., grid.children[1])` so the order is **WhatsApp · Email · Call · Jira CRM**
+(channels first, back-office last). **Call kept** by user choice (Phase-2 roadmap visibility).
+Asset version bumped `-10 → -11`. `node --check` OK.
+
+### Fix 49 — Removed the standalone Tickets page
+**Reasoning (user asked for it explicitly + "why removing is correct"):**
+1. No real user at scale — agents work assigned queues (inbox), supervisors need scoped
+   worklists with assignment/SLA (this page had neither), managers need aggregates (Analytics),
+   auditors need single-ticket lookup (inbox search / right-panel). A flat browse-everything
+   table serves nobody's actual job.
+2. The architecture already names its replacement: every ticket is pushed to **Jira CRM**
+   (`ticket_manager` → `crm_sync_status`; Connectors card now truthfully Connected). Keeping a
+   homegrown 1% re-implementation alongside the integration contradicts the design's own story.
+3. Read-mostly dead weight — resolve/reply happen in the inbox. (Correction found during
+   removal: rows WERE clickable into conversations via `goToConversation` — the earlier
+   "read-only" claim was wrong on that detail; the other arguments stand.)
+4. Technically unscalable — fetched ALL tickets and filtered client-side in JS.
+5. Consistent with the session arc (Fixes 38/29/42c/43/47): one authoritative home per fact.
+**Reversibility (user requirement):** the page exists complete in git history; this removal is
+its own commit — `git revert` restores it wholesale. Nothing else needed.
+**Removed:** `index.html` — nav item (`#nav-tickets` + `#ticketsBadge`) and the 126-line
+`#page-tickets` block. `app.js` — `loadTickets`, `filterTickets`, `onTktDateChange`,
+`clearTktRange`, `applyTktFilters`, `tktCustomerCell`, `renderTicketRows`, `tktSlaCell`,
+`fmtDuration` (only caller was `tktSlaCell`), `_convMap`; the `switchPage` tickets branch, the
+SSE-handler tickets/badge branch, and the 10s fallback-poll timer. `style.css` — the 47-line
+`.tkt-page`…`.pri-low` block (deleted via a guarded Python script asserting no right-panel
+class was inside).
+**Kept (verified each):** `_allTickets` cache — fed independently by `loadConversations()`, so
+inbox status derivation, spine/lineage `tktStatusMap`, `selectConv`, and the right-panel Open
+Tickets card all work unchanged; `fmtDateTime` (shared by right panel + portal);
+`goToConversation`; all right-panel `.tkt-item`/`.tkt-scroll`/`.tkt-resolve-btn` CSS (grep: 10
+refs remain). `resolveTicket` rewired to drop its `loadTickets()` step — its
+`loadConversations()` call already refreshes the cache it re-derives from. Backend
+`/admin/tickets` endpoint untouched (still consumed by `loadConversations`).
+**Verified:** repo-wide grep — zero dangling references to any removed symbol/id; `node
+--check` OK. Asset versions bumped → `-12` (both files).

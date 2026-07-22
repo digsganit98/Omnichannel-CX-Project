@@ -414,7 +414,6 @@ window.switchPage = function(name) {
   if (navEl) navEl.classList.add('active');
   activePage = name;
   if (name === 'analytics') loadAnalytics();
-  if (name === 'tickets') loadTickets();
   if (name === 'connectors') loadConnectors();
   if (name === 'sim') loadAudit();
   if (name === 'settings') loadSettings();
@@ -543,8 +542,6 @@ function renderQueue() {
     var isOn = c.conversation_id === state.selectedConvId;
     var sts = urgencyToStatus(c);
     var ch = chMeta(c.last_channel);
-    var stDot = sts === 'resolved' ? 'dok' : 'desc';
-    var stLabel = statusLabel(sts);
     var div = document.createElement('div');
     div.className = 'qi' + (isOn ? ' on' : '') + (sts === 'resolved' ? ' done' : '');
     div.innerHTML = '<div class="cs ' + ch.stripe + '"></div>'
@@ -553,7 +550,6 @@ function renderQueue() {
       + '<div class="qp">' + escH((c.last_message || c.summary || 'No messages yet').slice(0,60)) + '</div>'
       + '<div class="qf">'
       + (c.last_channel ? '<span class="cp ' + ch.pill + '">' + ch.svg + ch.label + '</span>' : '<span class="cp pdef">Unknown</span>')
-      + '<span class="sl"><span class="sd ' + stDot + '"></span>' + stLabel + '</span>'
       + (state.pendingDrafts[c.conversation_id] ? '<span class="qi-review-dot" title="Held reply needs review"></span>' : '')
       + '</div></div>';
     div.addEventListener('click', function() { selectConv(c.conversation_id); });
@@ -1295,25 +1291,30 @@ function renderRight(conv, tickets) {
     return 'neutral';
   }
   var inbound = turns.filter(function(t) { return t.direction === 'inbound'; });
+  // Sentiment window: the last N customer messages (newest), so the panel
+  // reflects how the customer feels NOW, not a lifetime average. Counts,
+  // bar, and label are all computed from this same window.
+  var SENT_WINDOW = 5;
+  var recent = inbound.slice(-SENT_WINDOW);
   var sentCounts = { positive: 0, neutral: 0, negative: 0 };
-  inbound.forEach(function(t) {
+  recent.forEach(function(t) {
     var s = (t.metadata && t.metadata.sentiment) ? t.metadata.sentiment.toLowerCase() : clientSentiment(t.text);
     if (sentCounts[s] !== undefined) sentCounts[s]++;  else sentCounts.neutral++;
   });
-  var total = inbound.length || 1;
+  var total = recent.length || 1;
   var negPct = Math.round((sentCounts.negative / total) * 100);
   var posPct = Math.round((sentCounts.positive / total) * 100);
   var neuPct = Math.max(0, 100 - negPct - posPct);
-  var msgCount = Math.min(inbound.length, 5) || 1;
-  var sentLbl, sentClr, sentCount;
+  var sentCount = recent.length || 1;
+  var sentLbl, sentClr;
   if (negPct >= 60) {
-    sentLbl = 'Very frustrated'; sentClr = '#dc2626'; sentCount = Math.min(msgCount, 4);
+    sentLbl = 'Very frustrated'; sentClr = '#dc2626';
   } else if (negPct >= 30) {
-    sentLbl = 'Frustrated'; sentClr = 'var(--red-t)'; sentCount = Math.min(msgCount, 3);
+    sentLbl = 'Frustrated'; sentClr = 'var(--red-t)';
   } else if (posPct >= 55) {
-    sentLbl = 'Positive'; sentClr = 'var(--grn-t)'; sentCount = msgCount;
+    sentLbl = 'Positive'; sentClr = 'var(--grn-t)';
   } else {
-    sentLbl = 'Neutral'; sentClr = 'var(--amb-t)'; sentCount = msgCount;
+    sentLbl = 'Neutral'; sentClr = 'var(--amb-t)';
   }
 
 
@@ -1348,8 +1349,8 @@ function renderRight(conv, tickets) {
     + '<span class="slbl" style="color:var(--grn-t)">' + posPct + '% positive</span>'
     + '<span class="slbl">' + neuPct + '% neutral</span>'
     + '<span class="slbl" style="color:var(--red-t)">' + negPct + '% negative</span>'
-    + '</div></div>'
-    + '<div class="rpcard"><div class="rplbl">Profile snapshot</div>'
+    + '</div>'
+    + '<div class="snap-sec">'
     + '<div class="attrition-band" id="snap-attrition" style="display:none" title="Rule-based flag for whether this customer may leave. High if they mention leaving, OR 2+ strong signs (30+ days overdue, worsening mood, or a stuck ticket); Medium if 1 strong or 3+ weak signs; else Low. A transparent heuristic, not a prediction.">'
     + '<span class="ab-lbl">Attrition risk</span>'
     + '<span class="ab-band" id="snap-attrition-band"></span>'
@@ -1358,8 +1359,8 @@ function renderRight(conv, tickets) {
     + '<div class="mgrid">'
     + '<div class="mc" title="How long they have been a customer, from their account registration date."><div class="mv" id="snap-tenure">' + escH(tenureLbl) + '</div><div class="ml">Tenure</div></div>'
     + '<div class="mc" title="Customer value tier set by the bank: HNI (High Net-worth Individual), Affluent, or Mass Affluent. — means no segment on record."><div class="mv mv-txt" id="snap-segment">—</div><div class="ml">Segment</div></div>'
-    + '<div class="mc mc-wide" title="Their most urgent product event within ~90 days: an overdue/upcoming card payment, FD maturity, or policy premium due. Overdue is shown in red."><div class="mv mv-txt" id="snap-event">—</div><div class="ml">Upcoming event</div></div>'
-    + '</div></div>';
+    + '<div class="mc mc-wide" title="Their most urgent product deadline within ~90 days: an overdue/upcoming card payment, FD maturity, or policy premium due. Overdue is shown in red."><div class="mv mv-txt" id="snap-event">—</div><div class="ml">Deadline</div></div>'
+    + '</div></div></div>';
 
   // Async: fetch loans/claims count from Neo4j via customer graph endpoint
   var _snapCustId = conv_meta.customer_id;
@@ -1437,7 +1438,10 @@ function renderRight(conv, tickets) {
   }
 
   var allTickets = tickets || [].concat(_allTickets.open, _allTickets.closed);
-  var convTickets = allTickets.filter(function(t) { return t.conversation_id === conv.conversation_id; });
+  var convTickets = allTickets.filter(function(t) {
+    return t.conversation_id === conv.conversation_id
+      && (t.status === 'open' || t.status === 'in_progress');
+  });
   if (convTickets.length) {
     var tktHtml = convTickets.map(function(t) {
       var isOpen = t.status === 'open' || t.status === 'in_progress';
@@ -1452,7 +1456,7 @@ function renderRight(conv, tickets) {
         + (isOpen ? '<button class="tkt-resolve-btn" onclick="event.stopPropagation();resolveTicket(this,\'' + escH(t.ticket_id) + '\')">Resolve ticket</button>' : '')
         + '</div>';
     }).join('');
-    body.innerHTML += '<div class="rpcard"><div class="rplbl">Tickets (' + convTickets.length + ')</div>'
+    body.innerHTML += '<div class="rpcard"><div class="rplbl">Open Tickets (' + convTickets.length + ')</div>'
       + '<div class="tkt-scroll">' + tktHtml + '</div></div>';
   }
 
@@ -1587,9 +1591,7 @@ window.resolveTicket = function(btn, ticketId) {
     body: JSON.stringify({ status: 'resolved', actor: adminUser })
   }).then(function() {
     toast('Ticket ' + ticketId.slice(0,16) + ' resolved ✓');
-    return loadTickets ? loadTickets() : null;
-  }).then(function() {
-    // Re-derive: refresh conversations + tickets and re-render the open conversation.
+    // Re-derive: loadConversations refreshes the _allTickets cache too.
     return loadConversations();
   }).then(function() {
     if (state.convDetail) {
@@ -1828,19 +1830,7 @@ function connectSSE() {
     // 3. Inbox — refresh conversation list + badge on every event
     loadConversations();
 
-    // 4. Tickets — refresh table if visible, badge otherwise
-    if (activePage === 'tickets') {
-      loadTickets();
-    } else {
-      api('/admin/tickets').then(function(tickets) {
-        var open = tickets.filter(function(t) { return t.status === 'open' || t.status === 'in_progress'; });
-        var badge = document.getElementById('ticketsBadge');
-        if (open.length > 0) { badge.style.display = 'flex'; badge.textContent = open.length > 9 ? '9+' : open.length; }
-        else { badge.style.display = 'none'; }
-      }).catch(function() {});
-    }
-
-    // 5. Analytics charts — full refresh if analytics page is open
+    // 4. Analytics charts — full refresh if analytics page is open
     if (activePage === 'analytics') loadAnalytics();
   };
 
@@ -1853,20 +1843,20 @@ function connectSSE() {
 window.loadConnectors = async function() {
   var grid = document.getElementById('connGrid');
   grid.innerHTML = '';
-  var waStatus = 'disconnected', emStatus = 'disconnected';
+  var waStatus = 'disconnected', emStatus = 'disconnected', crmStatus = 'disconnected';
   try { var waRes = await api('/admin/whatsapp/status'); waStatus = waRes.connected ? 'connected' : (waRes.mode === 'local_test' ? 'connected' : 'disconnected'); } catch(e){}
-  try { var emRes = await api('/admin/email/status'); emStatus = emRes.configured ? 'connected' : 'disconnected'; } catch(e){}
+  // /admin/email/status has no `configured` field — readiness flag is `gmail_ready`.
+  try { var emRes = await api('/admin/email/status'); emStatus = emRes.gmail_ready ? 'connected' : 'disconnected'; } catch(e){}
+  try { var crmRes = await api('/admin/crm/status'); crmStatus = crmRes.configured ? 'connected' : 'disconnected'; } catch(e){}
   var inboxRes = null;
   try { inboxRes = await api('/admin/email-inbox/status'); } catch(e){}
 
   var connectors = [
     { nm:'WhatsApp Business', desc:'Meta Cloud API · inbound webhook + outbound', status: waStatus,
       icon:'background:#22c55e', svg:'<svg viewBox="0 0 24 24" fill="#fff"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413z"/><path d="M20.52 3.449C12.831-3.984.106 1.407.101 11.893c0 2.096.549 4.14 1.595 5.945L.057 24l6.335-1.652c1.746.943 3.71 1.444 5.71 1.447h.006c9.756 0 15.466-8.65 11.466-16.001a11.816 11.816 0 0 0-3.054-4.345z"/></svg>' },
-    { nm:'Gmail SMTP', desc:'Outbound email delivery to customers', status: emStatus,
-      icon:'background:#ea4335', svg:'<svg viewBox="0 0 24 24" fill="#fff"><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/></svg>' },
     { nm:'Call', desc:'Voice channel integration', status:'phase2',
       icon:'background:#6366f1', svg:'<svg viewBox="0 0 24 24" fill="#fff"><path d="M6.62 10.79c1.44 2.83 3.76 5.14 6.59 6.59l2.2-2.2c.27-.27.67-.36 1.02-.24 1.12.37 2.33.57 3.57.57.55 0 1 .45 1 1V20c0 .55-.45 1-1 1-9.39 0-17-7.61-17-17 0-.55.45-1 1-1h3.5c.55 0 1 .45 1 1 0 1.25.2 2.45.57 3.57.11.35.03.74-.25 1.02l-2.2 2.2z"/></svg>' },
-    { nm:'Jira CRM', desc:'Ticket synchronisation', status:'disconnected',
+    { nm:'Jira CRM', desc:'Ticket synchronisation', status: crmStatus,
       icon:'background:#0052cc', svg:'<svg viewBox="0 0 24 24" fill="#fff"><path d="M11.571 11.513H0a5.218 5.218 0 0 0 5.232 5.215h2.13v2.057A5.218 5.218 0 0 0 12.575 24V12.518a1.005 1.005 0 0 0-1.004-1.005zm5.723-5.756H5.736a5.218 5.218 0 0 0 5.215 5.214h2.129v2.058a5.218 5.218 0 0 0 5.215 5.214V6.762a1.005 1.005 0 0 0-1.001-1.005z"/></svg>' },
   ];
 
@@ -1880,13 +1870,17 @@ window.loadConnectors = async function() {
     grid.appendChild(card);
   });
 
-  // Email Inbox (IMAP) — extended card with live stats and Poll Now button
+  // Email — ONE card for the channel, showing both pipes: inbound (IMAP poller)
+  // and outbound (SMTP sender) are independent connections that can fail
+  // separately, so each gets its own status row. Live stats + Poll Now for the
+  // inbound side. Card badge = Connected only when BOTH pipes are up.
   var inboxCard = document.createElement('div');
   inboxCard.className = 'conn-card';
   inboxCard.id = 'connInboxCard';
   var inboxConfigured = inboxRes && inboxRes.configured;
-  var inboxBadgeCls = inboxConfigured ? 'connected' : 'disconnected';
-  var inboxBadgeTxt = inboxConfigured ? 'Active' : 'Not configured';
+  var emailBadgeCls = (inboxConfigured && emStatus === 'connected') ? 'connected' : 'disconnected';
+  var emailBadgeTxt = (inboxConfigured && emStatus === 'connected') ? 'Connected'
+    : (inboxConfigured || emStatus === 'connected') ? 'Partial' : 'Disconnected';
   var lastPollTxt = (inboxRes && inboxRes.last_poll_ts)
     ? new Date(inboxRes.last_poll_ts * 1000).toLocaleTimeString() : 'Never';
   var processedTxt = inboxRes ? String(inboxRes.emails_processed) : '0';
@@ -1894,13 +1888,17 @@ window.loadConnectors = async function() {
   var mailboxTxt = (inboxRes && inboxRes.configured) ? escH(inboxRes.mailbox || 'INBOX') : '—';
   var errorHtml = (inboxRes && inboxRes.last_error)
     ? '<div style="font-size:10px;color:#dc2626;margin-top:6px;word-break:break-all">'+escH(inboxRes.last_error)+'</div>' : '';
+  var pipeOk  = '<span style="color:var(--grn-t);font-weight:600">Active</span>';
+  var pipeBad = '<span style="color:var(--red-t);font-weight:600">Down</span>';
   inboxCard.innerHTML =
     '<div class="conn-hdr">'
     + '<div class="conn-icon" style="background:#db4437"><svg viewBox="0 0 24 24" fill="#fff"><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/></svg></div>'
-    + '<div><div class="conn-nm">Email Inbox (IMAP)</div><div class="conn-desc">Inbound customer emails · Gmail IMAP auto-poll</div></div>'
+    + '<div><div class="conn-nm">Email</div><div class="conn-desc">Gmail · inbound IMAP auto-poll + outbound SMTP delivery</div></div>'
     + '</div>'
-    + '<div class="conn-status"><span class="conn-badge ' + inboxBadgeCls + '">' + inboxBadgeTxt + '</span></div>'
+    + '<div class="conn-status"><span class="conn-badge ' + emailBadgeCls + '">' + emailBadgeTxt + '</span></div>'
     + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;font-size:11px;color:var(--t2);margin-top:10px">'
+    + '<span style="color:var(--t3)">Inbound (IMAP)</span><span>' + (inboxConfigured ? pipeOk : pipeBad) + '</span>'
+    + '<span style="color:var(--t3)">Outbound (SMTP)</span><span>' + (emStatus === 'connected' ? pipeOk : pipeBad) + '</span>'
     + '<span style="color:var(--t3)">Mailbox</span><span>' + mailboxTxt + '</span>'
     + '<span style="color:var(--t3)">Poll interval</span><span>' + intervalTxt + '</span>'
     + '<span style="color:var(--t3)">Last poll</span><span id="inboxLastPoll">' + lastPollTxt + '</span>'
@@ -1911,7 +1909,8 @@ window.loadConnectors = async function() {
     + (inboxConfigured ? 'Poll now' : 'Set IMAP_USERNAME + IMAP_PASSWORD in .env')
     + '</button>'
     + '<div class="sim-status" id="inboxPollStatus" style="display:none;font-size:11px;margin-top:6px"></div>';
-  grid.appendChild(inboxCard);
+  // Insert after WhatsApp so the card order is: WhatsApp · Email · Call · Jira.
+  grid.insertBefore(inboxCard, grid.children[1] || null);
 };
 
 window.triggerEmailInboxPoll = async function() {
@@ -2033,165 +2032,12 @@ window.loadAudit = async function() {
   }
 };
 
-// ── TICKETS ──────────────────────────────────────────────────────────────────
+// ── TICKETS (shared cache) ───────────────────────────────────────────────────
+// The standalone Tickets page was removed (Fix 49) — ticket lifecycle management
+// lives in the CRM (Jira sync). This cache remains: it is filled by
+// loadConversations() and consumed by the inbox status logic, the spine/lineage
+// views, and the right-panel Open Tickets card.
 var _allTickets = { open: [], closed: [] };
-var _convMap = {};
-
-window.loadTickets = async function() {
-  var spinner = document.getElementById('ticketsSpinner');
-  if (spinner) spinner.classList.add('spinning');
-  try {
-    var results = await Promise.all([api('/admin/tickets'), api('/admin/conversations')]);
-    var tickets = results[0], convs = results[1];
-
-    _convMap = {};
-    convs.forEach(function(c) { _convMap[c.conversation_id] = c; });
-
-    var open   = tickets.filter(function(t) { return t.status === 'open' || t.status === 'in_progress'; });
-    var closed = tickets.filter(function(t) { return t.status === 'resolved' || t.status === 'closed'; });
-    open.sort(function(a, b) { return (b.priority_score || 0) - (a.priority_score || 0); });
-    closed.sort(function(a, b) { return new Date(b.updated_at) - new Date(a.updated_at); });
-
-    _allTickets.open   = open;
-    _allTickets.closed = closed;
-
-    var openBadge = document.getElementById('ticketsBadge');
-    if (open.length > 0) { openBadge.style.display = 'flex'; openBadge.textContent = open.length > 9 ? '9+' : open.length; }
-    else { openBadge.style.display = 'none'; }
-
-    document.getElementById('openTktCount').textContent   = open.length   + ' ticket' + (open.length   !== 1 ? 's' : '');
-    document.getElementById('closedTktCount').textContent = closed.length + ' ticket' + (closed.length !== 1 ? 's' : '');
-
-    filterTickets();
-  } catch(e) {
-    document.getElementById('openTktBody').innerHTML = '<tr><td colspan="8" class="tkt-empty" style="color:var(--red-t)">' + escH(e.message) + '</td></tr>';
-  } finally {
-    if (spinner) spinner.classList.remove('spinning');
-  }
-};
-
-window.filterTickets = function() {
-  var oSearch = (document.getElementById('openTktSearch').value   || '').toLowerCase();
-  var cSearch = (document.getElementById('closedTktSearch').value || '').toLowerCase();
-  var oDate   = document.getElementById('openTktDate').value;
-  var cDate   = document.getElementById('closedTktDate').value;
-  var oFrom   = document.getElementById('openTktFrom').value;
-  var oTo     = document.getElementById('openTktTo').value;
-  var cFrom   = document.getElementById('closedTktFrom').value;
-  var cTo     = document.getElementById('closedTktTo').value;
-  renderTicketRows('openTktBody',   applyTktFilters(_allTickets.open,   oSearch, oDate, oFrom, oTo), false);
-  renderTicketRows('closedTktBody', applyTktFilters(_allTickets.closed, cSearch, cDate, cFrom, cTo), true);
-};
-
-window.onTktDateChange = function(queue) {
-  var sel = document.getElementById(queue + 'TktDate');
-  var rangeEl = document.getElementById(queue + 'TktRange');
-  if (sel.value === 'custom') {
-    rangeEl.classList.remove('hidden');
-  } else {
-    rangeEl.classList.add('hidden');
-    document.getElementById(queue + 'TktFrom').value = '';
-    document.getElementById(queue + 'TktTo').value   = '';
-  }
-  filterTickets();
-};
-
-window.clearTktRange = function(queue) {
-  document.getElementById(queue + 'TktFrom').value = '';
-  document.getElementById(queue + 'TktTo').value   = '';
-  document.getElementById(queue + 'TktDate').value = 'all';
-  document.getElementById(queue + 'TktRange').classList.add('hidden');
-  filterTickets();
-};
-
-function applyTktFilters(tickets, search, dateFilter, fromVal, toVal) {
-  return tickets.filter(function(t) {
-    if (search) {
-      var conv = _convMap[t.conversation_id] || {};
-      var custLbl = (conv.display_name && conv.display_name !== 'None' ? conv.display_name : '') || t.customer_id || '';
-      var hay = [t.ticket_id, t.title, t.intent, t.assigned_team, custLbl].join(' ').toLowerCase();
-      if (!hay.includes(search)) return false;
-    }
-    var created = new Date(t.created_at);
-    if (dateFilter === 'custom') {
-      if (fromVal) { var f = new Date(fromVal); f.setHours(0,0,0,0); if (created < f) return false; }
-      if (toVal)   { var to = new Date(toVal);  to.setHours(23,59,59,999); if (created > to) return false; }
-    } else if (dateFilter !== 'all') {
-      var now = new Date(), cutoff;
-      if      (dateFilter === 'today') cutoff = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-      else if (dateFilter === '7d')    cutoff = new Date(now - 7  * 86400000);
-      else if (dateFilter === '30d')   cutoff = new Date(now - 30 * 86400000);
-      else if (dateFilter === 'month') cutoff = new Date(now.getFullYear(), now.getMonth(), 1);
-      if (created < cutoff) return false;
-    }
-    return true;
-  });
-}
-
-function tktCustomerCell(t) {
-  var conv = _convMap[t.conversation_id] || {};
-  var name = conv.display_name && conv.display_name !== 'None' && conv.display_name !== 'null'
-    ? conv.display_name : null;
-  var channel = (t.metadata && t.metadata.channel) ? t.metadata.channel.toLowerCase() : '';
-  var label = name || ('cust_' + (t.customer_id || '').slice(-8));
-  var icon = channel === 'whatsapp'
-    ? '<svg viewBox="0 0 24 24" width="9" height="9" style="fill:#16a34a;flex-shrink:0"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51C10.25 6.01 10.052 6 9.853 6c-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413z"/><path d="M20.52 3.449C12.831-3.984.106 1.407.101 11.893c0 2.096.549 4.14 1.595 5.945L.057 24l6.335-1.652c1.746.943 3.71 1.444 5.71 1.447h.006c9.756 0 15.466-8.65 11.466-16.001a11.816 11.816 0 0 0-3.054-4.345z"/></svg>'
-    : channel === 'email'
-    ? '<svg viewBox="0 0 24 24" width="9" height="9" style="fill:#2563eb;flex-shrink:0"><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/></svg>'
-    : '';
-  return '<td class="tkt-customer"><div class="tkt-cust-inner">' + icon + '<span>' + escH(label) + '</span></div></td>';
-}
-
-function renderTicketRows(tbodyId, tickets, isClosed) {
-  var tbody = document.getElementById(tbodyId);
-  if (!tickets.length) {
-    tbody.innerHTML = '<tr><td colspan="8" class="tkt-empty">No tickets</td></tr>';
-    return;
-  }
-  tbody.innerHTML = '';
-  tickets.forEach(function(t) {
-    var tr = document.createElement('tr');
-    tr.className = 'tkt-row';
-    tr.title = 'Click to open conversation in Inbox';
-
-    var priCls = t.priority === 'critical' ? 'pri-crit' : t.priority === 'high' ? 'pri-high' : t.priority === 'medium' ? 'pri-med' : 'pri-low';
-    var channel = (t.metadata && t.metadata.channel) ? t.metadata.channel : '—';
-    var chMd = chMeta(channel);
-    var dateCol = isClosed ? fmtDateTime(t.updated_at) : fmtDateTime(t.created_at);
-
-    tr.innerHTML = '<td class="tkt-id-cell"><span class="tkt-id-pill">' + escH(t.ticket_id.slice(0, 14)) + '</span></td>'
-      + '<td class="tkt-title-cell">' + escH((t.title || '—').slice(0, 48)) + '</td>'
-      + '<td>' + escH(t.assigned_team || '—') + '</td>'
-      + '<td><span class="tkt-pri ' + priCls + '">' + escH(t.priority || '—') + '</span></td>'
-      + '<td class="tkt-intent">' + escH((t.intent || '—').replace(/_/g, ' ')) + '</td>'
-      + tktCustomerCell(t)
-      + '<td><span class="cp ' + chMd.pill + '" style="font-size:10px">' + chMd.svg + chMd.label + '</span></td>'
-      + '<td>' + dateCol + '</td>';
-
-    tr.addEventListener('click', function() { goToConversation(t.conversation_id, t.ticket_id); });
-    tbody.appendChild(tr);
-  });
-}
-
-function tktSlaCell(slaAt) {
-  if (!slaAt) return '<span style="color:var(--t3)">—</span>';
-  var due = new Date(slaAt);
-  var now = new Date();
-  var diff = due - now;
-  var breached = diff < 0;
-  var label = breached ? 'Breached' : fmtDuration(diff);
-  var cls = breached ? 'color:var(--red-t);font-weight:600' : diff < 3600000 ? 'color:var(--amb-t);font-weight:600' : 'color:var(--t2)';
-  return '<span style="' + cls + '" title="' + escH(slaAt) + '">' + label + '</span>';
-}
-
-function fmtDuration(ms) {
-  var s = Math.floor(ms / 1000);
-  if (s < 60) return s + 's';
-  var m = Math.floor(s / 60);
-  if (m < 60) return m + 'm';
-  var h = Math.floor(m / 60);
-  return h + 'h ' + (m % 60) + 'm';
-}
 
 function fmtDateTime(iso) {
   if (!iso) return '—';
@@ -2534,10 +2380,6 @@ function startRealtime() {
   // Inbox: fallback poll every 10s
   rtTimers.push(setInterval(function() {
     if (activePage === 'inbox') loadConversations();
-  }, 10000));
-  // Tickets: fallback poll every 10s
-  rtTimers.push(setInterval(function() {
-    if (activePage === 'tickets') loadTickets();
   }, 10000));
   // Analytics charts: full refresh every 90s when visible
   rtTimers.push(setInterval(function() {
