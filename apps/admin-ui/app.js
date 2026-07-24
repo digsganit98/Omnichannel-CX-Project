@@ -1456,13 +1456,13 @@ function renderRight(conv, tickets) {
         + (isOpen ? '<button class="tkt-resolve-btn" onclick="event.stopPropagation();resolveTicket(this,\'' + escH(t.ticket_id) + '\')">Resolve ticket</button>' : '')
         + '</div>';
     }).join('');
-    body.innerHTML += '<div class="rpcard"><div class="rplbl">Open Tickets (' + convTickets.length + ')</div>'
+    body.innerHTML += '<div class="rpcard"><div class="rplbl rplbl-tickets">Open Tickets (' + convTickets.length + ')</div>'
       + '<div class="tkt-scroll">' + tktHtml + '</div></div>';
   }
 
   // Cross-sell / up-sell opportunities (LLM-selected, code-gated; admin
   // approves → editable offer draft → sent to WhatsApp + email).
-  body.innerHTML += '<div class="rpcard" id="rpOppCard"><div class="rplbl">Suggested Offers</div>'
+  body.innerHTML += '<div class="rpcard" id="rpOppCard"><div class="rplbl rplbl-offers">Suggested Offers</div>'
     + '<div id="rpOppBody" style="font-size:11px;color:var(--t3)">Checking…</div></div>';
   api('/admin/agent-assist/opportunities?conversation_id=' + encodeURIComponent(conv.conversation_id))
     .then(function(result) { renderOpportunities(result); })
@@ -1899,18 +1899,23 @@ window.loadConnectors = async function() {
     + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;font-size:11px;color:var(--t2);margin-top:10px">'
     + '<span style="color:var(--t3)">Inbound (IMAP)</span><span>' + (inboxConfigured ? pipeOk : pipeBad) + '</span>'
     + '<span style="color:var(--t3)">Outbound (SMTP)</span><span>' + (emStatus === 'connected' ? pipeOk : pipeBad) + '</span>'
-    + '<span style="color:var(--t3)">Mailbox</span><span>' + mailboxTxt + '</span>'
-    + '<span style="color:var(--t3)">Poll interval</span><span>' + intervalTxt + '</span>'
-    + '<span style="color:var(--t3)">Last poll</span><span id="inboxLastPoll">' + lastPollTxt + '</span>'
-    + '<span style="color:var(--t3)">Emails processed</span><span id="inboxProcessed">' + processedTxt + '</span>'
-    + '</div>'
-    + errorHtml
-    + '<button class="sim-btn" id="inboxPollBtn" onclick="triggerEmailInboxPoll()" style="margin-top:12px;font-size:11px;padding:5px 12px">'
-    + (inboxConfigured ? 'Poll now' : 'Set IMAP_USERNAME + IMAP_PASSWORD in .env')
-    + '</button>'
-    + '<div class="sim-status" id="inboxPollStatus" style="display:none;font-size:11px;margin-top:6px"></div>';
+    + '</div>';
   // Insert after WhatsApp so the card order is: WhatsApp · Email · Call · Jira.
   grid.insertBefore(inboxCard, grid.children[1] || null);
+
+  // Web Chat — the customer portal's live "Chat with support" box. Served by
+  // this same app (synchronous inbound + reply via the portal history poll), so
+  // it is always Connected. Inserted at index 2 so order is:
+  // WhatsApp · Email · Web Chat · Call · Jira.
+  var webCard = document.createElement('div');
+  webCard.className = 'conn-card';
+  webCard.innerHTML =
+    '<div class="conn-hdr">'
+    + '<div class="conn-icon" style="background:#2563eb"><svg viewBox="0 0 24 24" fill="#fff"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-2 12H6v-2h12v2zm0-3H6V9h12v2zm0-3H6V6h12v2z"/></svg></div>'
+    + '<div><div class="conn-nm">Web Chat</div><div class="conn-desc">Customer portal · in-app chat (synchronous inbound + reply)</div></div>'
+    + '</div>'
+    + '<div class="conn-status"><span class="conn-badge connected">Connected</span></div>';
+  grid.insertBefore(webCard, grid.children[2] || null);
 };
 
 window.triggerEmailInboxPoll = async function() {

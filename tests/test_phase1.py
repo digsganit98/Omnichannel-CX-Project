@@ -1671,3 +1671,211 @@ def test_generate_answer_masks_pii_before_sending_to_groq_and_restores_name():
     assert "LN001002" in prompt
     # The final answer shown to the customer has the real name restored.
     assert result["text"] == "Hello Fathima Devasahayam, your loan LN001002 status is Active."
+
+
+def test_specific_scope_refines_open_other_ticket_instead_of_forking():
+    """Omnichannel continuation: a vague dispute ("...:other" scope) followed by a
+    specific follow-up ("...:card") on ANY channel must refine the open ticket,
+    not create a duplicate (Sayantini email->web_chat split, 23 Jul 2026)."""
+    from services.ticket_service.ticket_manager import TicketManager
+    from shared.schemas.intents import Urgency
+    from shared.schemas.messages import Channel, InboundMessage
+
+    repo = SQLiteCXRepository(":memory:")
+    manager = TicketManager(repo)
+
+    def inbound(channel: Channel, text: str, msg_id: str) -> InboundMessage:
+        return InboundMessage(
+            channel=channel,
+            channel_identifier="cust-identifier",
+            text=text,
+            provider="test",
+            external_message_id=msg_id,
+            correlation_id=msg_id,
+        )
+
+    # Real customer + conversation rows (tickets has FK constraints on both).
+    first = inbound(Channel.EMAIL, "I want to dispute a transaction on my last statement.", "m1")
+    customer = repo.resolve_customer(first)
+    conversation = repo.get_or_create_conversation(customer["customer_id"])
+    conv_id, cust_id = conversation["conversation_id"], customer["customer_id"]
+
+    vague = manager.create_or_get_ticket(
+        conv_id, cust_id,
+        first,
+        Intent.TRANSACTION_DISPUTE, Urgency.HIGH,
+        escalation_reason="assisted_resolution_required:transaction_dispute",
+    )
+    assert vague.metadata["ticket_scope"] == "transaction_dispute:other"
+
+    specific = manager.create_or_get_ticket(
+        conv_id, cust_id,
+        inbound(Channel.WEB_CHAT, 'The charge of Rs. 4,500 at "TechMart" on my Mastercard Classic card.', "m2"),
+        Intent.TRANSACTION_DISPUTE, Urgency.HIGH,
+        escalation_reason="assisted_resolution_required:transaction_dispute",
+    )
+    # Same ticket, scope upgraded, refinement audit-trailed.
+    assert specific.ticket_id == vague.ticket_id
+    assert specific.metadata["ticket_scope"] == "transaction_dispute:card"
+    events = [e["event_type"] for e in repo.list_ticket_events(vague.ticket_id)]
+    assert "ticket_scope_refined" in events
+
+    # Guard rail: a DIFFERENT specific scope (UPI) is a distinct incident -> new ticket.
+    upi = manager.create_or_get_ticket(
+        conv_id, cust_id,
+        inbound(Channel.WHATSAPP, "I also want to dispute a UPI payment of Rs. 900.", "m3"),
+        Intent.TRANSACTION_DISPUTE, Urgency.HIGH,
+        escalation_reason="assisted_resolution_required:transaction_dispute",
+    )
+    assert upi.ticket_id != vague.ticket_id
+    assert upi.metadata["ticket_scope"] == "transaction_dispute:upi"
+
+    # Idempotency: repeating the card details still lands on the refined ticket.
+    repeat = manager.create_or_get_ticket(
+        conv_id, cust_id,
+        inbound(Channel.WEB_CHAT, "Again: the card charge at TechMart is the disputed one.", "m4"),
+        Intent.TRANSACTION_DISPUTE, Urgency.HIGH,
+        escalation_reason="assisted_resolution_required:transaction_dispute",
+    )
+    assert repeat.ticket_id == vague.ticket_id
+
+
+# ── Tier-4 ticket referee (LLM matches a scope-unmatched message to an open ticket) ──
+
+class _FakeRefereeGenerator:
+    """Stands in for GroqGenerator: returns a scripted answer per call and
+    records the prompts it was given."""
+
+    def __init__(self, answers: list[str]):
+        self.answers = list(answers)
+        self.prompts: list[str] = []
+        self.raise_error = False
+
+    def _generate(self, system_prompt: str, user_prompt: str, operation: str = "llm_generation", metadata=None) -> dict:
+        if self.raise_error:
+            raise RuntimeError("llm down")
+        self.prompts.append(user_prompt)
+        answer = self.answers.pop(0) if self.answers else "NEW"
+        return {"text": answer, "llm_used": True, "model": "fake"}
+
+
+def _referee_fixture():
+    """Repo + manager + the demo's first two turns: an email :other opener
+    refined to :card by a web-chat follow-up (one open ticket)."""
+    from services.ticket_service.ticket_manager import TicketManager
+    from shared.schemas.intents import Urgency
+    from shared.schemas.messages import Channel, InboundMessage
+
+    repo = SQLiteCXRepository(":memory:")
+    manager = TicketManager(repo)
+
+    counter = {"n": 0}
+
+    def send(channel: Channel, text: str):
+        counter["n"] += 1
+        msg = InboundMessage(
+            channel=channel, channel_identifier="cust-identifier", text=text,
+            provider="test", external_message_id=f"r{counter['n']}", correlation_id=f"r{counter['n']}",
+        )
+        return manager.create_or_get_ticket(
+            conv_id, cust_id, msg, Intent.TRANSACTION_DISPUTE, Urgency.HIGH,
+            escalation_reason="assisted_resolution_required:transaction_dispute",
+        )
+
+    first = InboundMessage(
+        channel=Channel.EMAIL, channel_identifier="cust-identifier",
+        text="Hi, I need help disputing a transaction on my statement. Can you please help.",
+        provider="test", external_message_id="r0", correlation_id="r0",
+    )
+    customer = repo.resolve_customer(first)
+    conversation = repo.get_or_create_conversation(customer["customer_id"])
+    conv_id, cust_id = conversation["conversation_id"], customer["customer_id"]
+
+    opener = manager.create_or_get_ticket(
+        conv_id, cust_id, first, Intent.TRANSACTION_DISPUTE, Urgency.HIGH,
+        escalation_reason="assisted_resolution_required:transaction_dispute",
+    )
+    refined = send(Channel.WEB_CHAT, "It's the Rs. 4,500 charge at TechMart on my Mastercard Classic card.")
+    assert refined.ticket_id == opener.ticket_id
+    assert refined.metadata["ticket_scope"] == "transaction_dispute:card"
+    return repo, manager, send, opener
+
+
+def test_referee_attaches_vague_cross_channel_followup_to_open_ticket():
+    """The live 23 Jul demo failure: email ':other' follow-up after refinement
+    to ':card' must land on the SAME ticket when the LLM referee confirms it."""
+    from shared.schemas.messages import Channel
+
+    repo, manager, send, opener = _referee_fixture()
+    manager.generator = _FakeRefereeGenerator([opener.ticket_id])
+
+    followup = send(Channel.EMAIL, "Hi, Any update on my transaction dispute request? This is urgent for me.")
+    assert followup.ticket_id == opener.ticket_id
+    events = [e["event_type"] for e in repo.list_ticket_events(opener.ticket_id)]
+    assert "ticket_referee_attached" in events
+    # The referee saw the candidate ticket in its prompt.
+    assert opener.ticket_id in manager.generator.prompts[0]
+
+
+def test_referee_new_verdict_forks():
+    """LLM says NEW (a genuinely different matter, e.g. another merchant) ->
+    new ticket, not an attach to the open ':card' one."""
+    from shared.schemas.messages import Channel
+
+    _, manager, send, opener = _referee_fixture()
+    manager.generator = _FakeRefereeGenerator(["NEW"])
+    gym = send(Channel.EMAIL, "I want to dispute a transaction - my gym charged me twice this month.")
+    assert gym.ticket_id != opener.ticket_id
+
+
+def test_referee_skipped_without_generator_forks():
+    """No generator wired -> referee skipped -> vague follow-up forks (exact
+    pre-referee behavior preserved)."""
+    from shared.schemas.messages import Channel
+
+    _, manager, send, opener = _referee_fixture()
+    manager.generator = None
+    no_llm = send(Channel.WHATSAPP, "Please give me the latest update on my complaint.")
+    assert no_llm.ticket_id != opener.ticket_id
+
+
+def test_referee_hallucinated_id_forks():
+    """An answer outside the vetted candidate set is rejected -> new ticket."""
+    from shared.schemas.messages import Channel
+
+    _, manager, send, opener = _referee_fixture()
+    manager.generator = _FakeRefereeGenerator(["tkt_definitely_not_real"])
+    halluc = send(Channel.EMAIL, "Any news about my issue?")
+    assert halluc.ticket_id != opener.ticket_id
+
+
+def test_referee_llm_error_forks():
+    """The LLM raising must fall back to a new ticket - doubt forks, never merges."""
+    from shared.schemas.messages import Channel
+
+    _, manager, send, opener = _referee_fixture()
+    broken = _FakeRefereeGenerator([])
+    broken.raise_error = True
+    manager.generator = broken
+    errored = send(Channel.WHATSAPP, "Following up on my pending matter please.")
+    assert errored.ticket_id != opener.ticket_id
+
+
+def test_referee_can_pick_older_ticket_among_multiple_candidates():
+    """Two open dispute tickets (:card older, :upi newer): the referee's answer
+    - not recency - decides, so naming the OLDER ticket attaches there."""
+    from shared.schemas.messages import Channel
+
+    repo, manager, send, opener = _referee_fixture()
+
+    manager.generator = _FakeRefereeGenerator(["NEW"])
+    upi = send(Channel.WHATSAPP, "I also want to dispute a UPI payment of Rs. 900 I never made.")
+    assert upi.ticket_id != opener.ticket_id
+    assert upi.metadata["ticket_scope"] == "transaction_dispute:upi"
+
+    manager.generator = _FakeRefereeGenerator([opener.ticket_id])
+    techmart = send(Channel.EMAIL, "What is happening with the TechMart one?")
+    assert techmart.ticket_id == opener.ticket_id
+    # Both candidates were offered to the referee.
+    prompt = manager.generator.prompts[0]
+    assert opener.ticket_id in prompt and upi.ticket_id in prompt

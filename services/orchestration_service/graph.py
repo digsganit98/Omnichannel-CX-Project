@@ -91,6 +91,9 @@ class OrchestrationGraph:
         self.validation_agent = CustomerValidationAgent(neo4j_client=self.neo4j_client)
         self.resolution_agent = QueryResolutionAgent(rag, neo4j_client=self.neo4j_client, resolution_engine=resolution_engine)
         self.ticket_agent = TicketCreationAgent(self.tickets)
+        # Share the ticket agent's LLM with the manager's tier-4 ticket referee
+        # (one generator instance; TicketManager stays LLM-free by default).
+        self.tickets.generator = self.ticket_agent.generator
 
         # Outbound delivery wrapper (not a named agent, infrastructure concern)
         self.workflow_automation_agent = WorkflowAutomationAgent(delivery)

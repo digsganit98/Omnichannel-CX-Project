@@ -43,6 +43,7 @@ class CXRepository(Protocol):
     def find_active_ticket(self, conversation_id: str) -> Ticket | None: ...
     def find_active_ticket_for_intent(self, conversation_id: str, intent: str) -> Ticket | None: ...
     def find_active_ticket_for_scope(self, conversation_id: str, intent: str, ticket_scope: str) -> Ticket | None: ...
+    def list_active_tickets_for_intent(self, conversation_id: str, intent: str) -> list[Ticket]: ...
     def find_open_tickets_for_customer(self, customer_id: str, limit: int = 5) -> list[dict]: ...
     def list_tickets(self) -> list[dict]: ...
     def get_ticket(self, ticket_id: str) -> dict | None: ...
@@ -397,7 +398,7 @@ class SQLiteCXRepository:
         allowed = {
             "status", "priority", "external_ticket_id", "external_ticket_url", "crm_sync_status", "crm_sync_error",
             "approval_status", "escalation_reason", "sla_due_at", "priority_score", "priority_breakdown_json",
-            "metadata_json",
+            "metadata_json", "description",
         }
         updates = {key: value for key, value in values.items() if key in allowed}
         if not updates:
@@ -439,6 +440,15 @@ class SQLiteCXRepository:
             if ticket.metadata.get("ticket_scope") == ticket_scope:
                 return ticket
         return None
+
+    def list_active_tickets_for_intent(self, conversation_id: str, intent: str) -> list[Ticket]:
+        with self.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM tickets WHERE conversation_id = ? AND intent = ? AND status != 'resolved' "
+                "ORDER BY created_at DESC",
+                (conversation_id, intent),
+            ).fetchall()
+        return [self._ticket(row) for row in rows]
 
     def find_open_tickets_for_customer(self, customer_id: str, limit: int = 5) -> list[dict]:
         """Return all open (non-resolved) tickets for a customer across all channels."""

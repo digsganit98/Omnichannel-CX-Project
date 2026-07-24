@@ -112,6 +112,37 @@ def send_draft(draft_id: str, payload: SendDraftRequest) -> dict:
 _OFFER_EMAIL_SUBJECT = "An offer curated for you"
 
 
+def _push_dedupe_key(identity: dict) -> str:
+    """Normalized destination key so the same person isn't messaged twice.
+
+    A customer can carry the same WhatsApp number stored both bare and with the
+    country code (e.g. '7890864700' and '917890864700'), because the inbound
+    path only does `.lstrip('+')`. Collapse to digits and drop a leading Indian
+    country code (91) so both rows map to one destination. Email is keyed by
+    lowercased address.
+    """
+    channel = identity.get("channel")
+    ident = (identity.get("identifier") or "").strip()
+    if channel == "email":
+        return f"email:{ident.lower()}"
+    digits = "".join(c for c in ident if c.isdigit())
+    if len(digits) > 10 and digits.startswith("91"):
+        digits = digits[2:]
+    return f"whatsapp:{digits}"
+
+
+def _dedupe_push_identifiers(push: list[dict]) -> list[dict]:
+    """Keep the first identifier per normalized destination (order preserved)."""
+    seen: set[str] = set()
+    unique: list[dict] = []
+    for identity in push:
+        key = _push_dedupe_key(identity)
+        if key not in seen:
+            seen.add(key)
+            unique.append(identity)
+    return unique
+
+
 def _send_offer_draft(repository, draft: dict, draft_id: str, text: str, actor: str) -> dict:
     """Deliver an approved offer to every push channel on record (whatsapp/email).
 
@@ -119,7 +150,9 @@ def _send_offer_draft(repository, draft: dict, draft_id: str, text: str, actor: 
     the approve endpoint refuses to create an offer draft without one.
     """
     identifiers = repository.list_customer_identifiers(draft.get("customer_id") or "")
-    push = [i for i in identifiers if i["channel"] in ("whatsapp", "email")]
+    push = _dedupe_push_identifiers(
+        [i for i in identifiers if i["channel"] in ("whatsapp", "email")]
+    )
     if not push:
         raise HTTPException(
             status_code=400,

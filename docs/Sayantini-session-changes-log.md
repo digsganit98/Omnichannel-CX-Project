@@ -82,8 +82,11 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 48 — Truthful Connectors page:** Gmail SMTP badge read a nonexistent `configured` field (endpoint returns `gmail_ready`) → always "Disconnected"; Jira CRM badge was a hardcoded literal, never calling the real `/admin/crm/status` (which reports configured:true). Both wired to their real statuses; the two email cards renamed "Email · Outbound (SMTP)" / "Email · Inbound (IMAP)" so the direction split is obvious.
 - **Fix 48a — One Email card (merged), reordered:** The two email cards merged into a single "Email" card with per-pipe status rows (Inbound IMAP / Outbound SMTP — independent pipes that fail separately), keeping the stats + Poll-now; card badge = Connected/Partial/Disconnected. Card order now WhatsApp · Email · Call · Jira. Call kept (user choice).
 - **Fix 49 — Removed the Tickets page:** Deleted the browse-all-tickets page + nav item + badge (no real user at scale; ticket lifecycle belongs to the Jira CRM the pipeline already syncs to; per-customer tickets live in the right-panel card, history in Lineage/portal, aggregates in Analytics). `_allTickets` cache kept (fed by `loadConversations`); `resolveTicket` rewired; fully revertible via git.
-
-Also: corrected an earlier wrong claim about L1/L2/L3 ticketing (see "Correction" — level is decided per-query by an LLM, not fixed per intent).
+- **Fix 50 — Coloured right-panel card headings:** "Open Tickets (N)" heading amber, "Suggested Offers" purple (green then orange tried and rejected); Sentiment stays grey. Display-only.
+- **Fix 51 — Ticket scope refinement (vague→specific, omnichannel):** A specific-scope follow-up ("...on my Mastercard") now refines the open `:other` dispute ticket instead of forking a duplicate; two different specific scopes (card vs upi) still get separate tickets. Backend; had been sitting uncommitted+unlogged from a prior manual test.
+- **Fix 52 — Tier-4 LLM ticket referee (specific→vague, omnichannel):** When a message's scope label matches no open ticket (e.g. a vague "any update on my dispute?" arriving on another channel after the ticket was refined to `:card`), an LLM picks among code-vetted candidates (active, same intent, same conversation) or says NEW; any doubt/error/absent-LLM forks. Refining a scope now also appends the new details to the ticket description (was frozen at the vague opener). Fixes the live 23 Jul duplicate-ticket found during omnichannel demo testing.
+- **Fix 53 — Offer send: dedupe push channels by destination:** The offer send loop messaged every whatsapp/email identifier, so a customer whose WhatsApp number was stored both bare (`7890864700`) and with the country code (`917890864700`) got the offer TWICE on WhatsApp. Added `_dedupe_push_identifiers` (normalize phone → strip non-digits + drop leading `91`; email → lowercased) so one message goes per real destination. Backend; symptom fix — the duplicate-identifier root (identity normalization on write) is a separate deferred item.
+- **Fix 54 — Connectors page: added Web Chat card + trimmed Email card:** Added a **Web Chat** connector card (customer-portal in-app chat, always Connected) as the 3rd card so order is WhatsApp · Email · Web Chat · Call · Jira — completing the channel story. Trimmed the Email card to just the badge + Inbound/Outbound Active rows (dropped Mailbox / Poll interval / Last poll / Emails processed + Poll-now button — demo-noisy, and "Last poll: Never / 0 processed" looked broken). Frontend-only; `triggerEmailInboxPoll` now dead (button gone) but left in place.
 
 ---
 
@@ -1059,3 +1062,139 @@ refs remain). `resolveTicket` rewired to drop its `loadTickets()` step — its
 `/admin/tickets` endpoint untouched (still consumed by `loadConversations`).
 **Verified:** repo-wide grep — zero dangling references to any removed symbol/id; `node
 --check` OK. Asset versions bumped → `-12` (both files).
+
+### Fix 50 — Coloured "Open Tickets" + "Suggested Offers" headings
+**User request:** show those two right-panel headings in colour (chose "just those two" over a
+uniform accent on all three). **Open Tickets → amber** (`--amb-t` — matches the app's
+open-ticket accent: Open pill, ticket labels). **Suggested Offers → purple** (`--pur-t`), the
+user's pick after two rejected attempts: green `--grn-t` (looked washed-out at 10px uppercase)
+then orange `#ea580c` (applied without waiting for the user's choice — process slip, called
+out; superseded). Sentiment heading stays muted grey.
+**Fix (frontend-only):** `app.js` — added `rplbl-tickets` / `rplbl-offers` classes to the two
+heading divs; `style.css` — two one-line colour overrides under `.rplbl`. Asset versions bumped
+`-12 → -15` across the iterations. `node --check` OK.
+
+---
+
+## Session 7 — 2026-07-23 → 2026-07-24
+
+Branch: `Sayantini-phase2-ui-changes`. Omnichannel demo testing for Sayantini (`CRN00010001`)
+surfaced a cross-channel ticket-continuity bug; fixed with a scope-refinement guard (Fix 51,
+which had already been drafted+manually-tested but never logged) and a new tier-4 LLM ticket
+referee (Fix 52). Fresh-start reseed done at session open (wiped `cx-data` + `neo4j-data`, kept
+`ollama`/`huggingface`/`opensearch`; 5 BFSI customers reseeded, empty inbox).
+
+**How the bug was found (live):** Sayantini opened a dispute by **email** ("I need help disputing
+a transaction"), added specifics by **web chat** ("Rs. 4,500 at TechMart on my Mastercard"), then
+asked by **email** "Any update on my dispute?". The last message created a **second ticket**
+(`TKT_B32E…`) instead of continuing the first — the exact opposite of the omnichannel promise
+("I couldn't find any information about a transaction dispute request in your account context").
+
+### Fix 51 — Ticket scope refinement (vague → specific)
+**Context:** `_ticket_scope` (`ticket_manager.py`) tags each escalating message by keyword —
+`transaction_dispute:card` / `:upi` / `:other` (vague fallback). Ticket reuse matched on
+**exact scope-string equality**, so a vague opener (`:other`) followed by a specific follow-up
+(`:card`) forked a duplicate.
+**Fix (backend, `services/ticket_service/ticket_manager.py`):** when a **specific** scope matches
+no active ticket, look for an active `:other` ticket of the same intent and **refine it in place**
+(`_refine_ticket_scope`: update `ticket_scope` in metadata, write a `ticket_scope_refined` ticket
+event + audit). Only `:other` is upgradeable — two different specific scopes (card vs upi) are
+distinct incidents and still fork. **This code + its test had been written in an earlier manual
+session and left uncommitted/unlogged;** verified this session (`test_specific_scope_refines_open_
+other_ticket_instead_of_forking` passes) and folded into the log.
+
+### Fix 52 — Tier-4 LLM ticket referee (specific → vague) + description refresh
+**Why Fix 51 alone was incomplete:** the refinement only looks *up* the specificity ladder. A
+status-style follow-up ("any update on my dispute?") carries no card/upi keyword → scopes `:other`
+→ but after refinement no `:other` ticket exists → forks. A vague follow-up is the *signature* of a
+cross-channel continuation (channel-hopping strips detail), so this hit the omnichannel story
+directly. Ticket identity is decided by deterministic keyword+SQL, not the LLM — so the LLM did not
+"fail"; it was never consulted for this decision.
+**Design (agreed after weighing pure-deterministic vs LLM):** tiered — deterministic where certain,
+LLM only where genuinely ambiguous, safe default always.
+1. exact scope match → attach (existing)
+2. specific scope + active `:other` → refine (Fix 51)
+3. no match + 0 active same-intent tickets → new ticket
+4. **no match + ≥1 active same-intent ticket → LLM referee** (`_referee_match`): given the message
+   + each **code-vetted** candidate (active, same intent, same conversation), answer a ticket id or
+   NEW. Validation: answer must be a candidate id, else NEW. LLM error / down / no generator → NEW.
+   **Doubt forks, never merges** (a fork is visible+fixable; a silent merge corrupts the record).
+   Attach writes a `ticket_referee_attached` event + audit.
+**Root-cause found mid-fix (via prompt/answer dump):** the referee initially mismatched because a
+refined ticket's `description` was **frozen at the vague opener** ("please help") — it never
+contained the details ("TechMart/Mastercard") that arrived later, so the model matched against a
+summary missing its own defining facts. **Two-part fix:** (A) surface the scope **subtype** as a
+human-readable discriminator in the prompt (`_scope_label`: `transaction_dispute:card` →
+"card transaction dispute"); (B) `_refine_ticket_scope` now **appends the new details to the ticket
+description** (`update_ticket` allow-list gained `description`) — also improves the admin ticket
+card / Lineage, which showed only "please help" before.
+**Files:** `services/ticket_service/ticket_manager.py` (referee, `_scope_label`, description
+append, `generator` param — no default, so TicketManager stays LLM-free unless wired);
+`services/persistence_service/repository.py` (new `list_active_tickets_for_intent`; `description`
+in `update_ticket` allow-list); `services/orchestration_service/graph.py` (shares the ticket
+agent's generator into the manager — the only production wiring change).
+**Real-LLM spot-check** (`llama-3.1-8b-instant`, 5 runs/case, in-container against grounded
+tickets):
+- "any update on my dispute?" with **1** open ticket (the live demo state) → CARD **5/5** ✅
+- "the TechMart charge" with 2 open tickets → CARD **5/5** ✅ (0/5 before the description fix)
+- "the UPI one" with 2 open → UPI **5/5** ✅
+- new incident (gym double-charge / FlyHigh ₹12,300) → NEW **5/5** each ✅
+- **Residual limitation (accepted, not a bug):** a *bare* "any update on my dispute?" with **two**
+  open disputes is genuinely ambiguous (no distinguishing words) — the model picks one; a human
+  agent would also guess. It never wrongly forks and never merges a new matter. The moment the
+  customer names anything ("the card one"/"the UPI one") → correct 5/5.
+**Tests (`tests/test_phase1.py`):** 6 new referee tests + the extended refinement test — vague
+cross-channel follow-up attaches (via `_FakeRefereeGenerator`), NEW verdict forks, no-generator
+forks, hallucinated out-of-set id forks, LLM error forks, and picks the *older* of two candidates
+by the LLM's answer (proving not-recency). Full suite: **135 pass, 4 pre-existing test_phase1
+failures only** (confirmed identical with changes stashed).
+**Live:** api image rebuilt 3× this session; referee is live. The demo conversation created before
+the fix keeps its duplicate `TKT_B32E…` (not retroactively merged — the fix applies to new
+messages). Changes **uncommitted** at session end.
+
+### Fix 53 — Offer send: dedupe push channels by normalized destination
+**Found live (Sayantini offer demo):** an approved personal-loan offer showed as TWO identical
+"OFFER · WHATSAPP" turns (+ one email) in Lineage/Detailed. **Root cause (verified against live
+data):** her customer record carried the same WhatsApp number twice —
+`whatsapp | 7890864700` AND `whatsapp | 917890864700` (bare vs. `91` country-code) — because the
+inbound path only does `.lstrip('+')`, which never strips `91`. `_send_offer_draft`
+(`apps/api/routes/reply_drafts.py`) loops over every whatsapp/email identifier and delivers one
+message + one outbound turn per row, with no dedupe → the same person messaged twice.
+**Fix (backend, `apps/api/routes/reply_drafts.py`):** added `_push_dedupe_key` (email →
+`email:<lowercased>`; whatsapp → digits only, drop a leading `91`) + `_dedupe_push_identifiers`
+(keep first per key, order preserved), applied to the push list before the send loop. One message
+per real destination now.
+**NOT this fix (deferred, deeper):** the *duplicate identifier row itself* — identity resolution
+should normalize phone numbers on write so `7890864700` and `917890864700` never both exist (Fix 1
+territory; needs a reseed to verify). This is the symptom fix per "simplest working option first";
+the held-reply path (non-offer) delivers on the single arriving channel so it isn't affected.
+**Verified:** 3 new unit tests (country-code collapse, distinct destinations kept, email
+case-insensitive) — `tests/test_opportunities.py` 37 pass; live in-container check on her real
+identifiers: push list 3 → 2 (one email + one whatsapp). api rebuilt; live.
+**Also surfaced this session (logged as known caveats, NOT fixed — pre-existing, unrelated to the
+ticket/offer code):** (1) an irrelevant "personal loan requirements" paragraph in a dispute answer
+— weak RAG retrieval on a detail-less query pulled an off-topic KB chunk and the 8B model ignored
+its "don't volunteer unrelated products" rule (answer is generated at `resolve_query`, two steps
+BEFORE any ticket work — confirmed not caused by Fix 51/52); (2) email-channel replies greet
+"Sayantini S 55" (the email-derived username) instead of her real Neo4j name — Fix 6 name
+propagation may not cover the email path. Both are answer/identity-quality gaps for a later
+session.
+
+### Fix 54 — Connectors page: Web Chat card + trimmed Email card
+**User requests (demo prep):** (1) add Web App / Web Chat as a connector after Email; (2) the Email
+card showed "so many info" — too much plumbing for a client-facing page.
+**Fix (frontend-only, `apps/admin-ui/app.js` `loadConnectors` + `index.html` asset bump
+`20260723-13` → `20260724-1`):**
+- **Web Chat card** — new simple card (blue chat icon, "Customer portal · in-app chat (synchronous
+  inbound + reply)", always **Connected** since it's served by this same app). Inserted at grid
+  index 2 (after the Email card, which itself is inserted at index 1), giving order
+  **WhatsApp · Email · Web Chat · Call · Jira**.
+- **Email card trimmed** (user chose "keep Inbound/Outbound only") — kept the badge + the two pipe
+  rows (Inbound IMAP / Outbound SMTP Active/Down); removed Mailbox / Poll interval / Last poll /
+  Emails processed and the **Poll now** button. Reason: operational detail is demo-noisy, and
+  "Last poll: Never / Emails processed 0" made a Connected card look broken.
+- `triggerEmailInboxPoll` and the `inboxLastPoll`/`inboxProcessed`/`inboxPollBtn`/`inboxPollStatus`
+  ids are now unreferenced (button removed) — dead but harmless; left in place to avoid a wider
+  edit before the demo. Unused vars (`lastPollTxt`/`processedTxt`/`intervalTxt`/`mailboxTxt`/
+  `errorHtml`) likewise left.
+**Verified:** `node --check` (throwaway node:20-alpine) — JS OK. Live via bind mount; reload only.

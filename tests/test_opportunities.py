@@ -439,3 +439,41 @@ def test_dismiss_offer_does_not_create_draft(monkeypatch):
     assert response.status_code == 200
     assert response.json()["status"] == "dismissed"
     assert repo.list_reply_drafts(conversation_id=conv["conversation_id"]) == []
+
+
+# ── Push-channel dedupe (same person not messaged twice) ─────────────────────
+
+def test_dedupe_collapses_same_whatsapp_number_with_and_without_country_code():
+    from apps.api.routes.reply_drafts import _dedupe_push_identifiers
+
+    push = [
+        {"channel": "whatsapp", "identifier": "7890864700"},
+        {"channel": "whatsapp", "identifier": "917890864700"},
+        {"channel": "email", "identifier": "Sayantini.S.55@gmail.com"},
+    ]
+    result = _dedupe_push_identifiers(push)
+    # One WhatsApp destination (first kept) + one email.
+    assert [i["identifier"] for i in result] == ["7890864700", "Sayantini.S.55@gmail.com"]
+
+
+def test_dedupe_keeps_genuinely_distinct_destinations():
+    from apps.api.routes.reply_drafts import _dedupe_push_identifiers
+
+    push = [
+        {"channel": "whatsapp", "identifier": "7890864700"},
+        {"channel": "whatsapp", "identifier": "9998887776"},   # different number
+        {"channel": "email", "identifier": "a@x.com"},
+        {"channel": "email", "identifier": "b@x.com"},          # different email
+    ]
+    result = _dedupe_push_identifiers(push)
+    assert len(result) == 4
+
+
+def test_dedupe_email_case_insensitive():
+    from apps.api.routes.reply_drafts import _dedupe_push_identifiers
+
+    push = [
+        {"channel": "email", "identifier": "Fathima@x.com"},
+        {"channel": "email", "identifier": "fathima@x.com"},
+    ]
+    assert len(_dedupe_push_identifiers(push)) == 1
