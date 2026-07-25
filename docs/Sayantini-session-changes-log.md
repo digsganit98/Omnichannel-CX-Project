@@ -91,6 +91,10 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 58 — WhatsApp offer failed to deliver (bare number → Meta 400):** an approved offer's WhatsApp turn 400'd (`#131030 Recipient phone number not in allowed list`) because the send loop used the customer's number stored **bare** (`7890864700`) — Meta needs the country code. Normal replies were unaffected (they mirror the sender's already-`91` inbound number). Added `_normalize_wa_recipient()` in [whatsapp_meta.py](../services/channel_adapter/whatsapp_meta.py) `send_outbound` (bare 10-digit → prepend `91`; already-prefixed/`+91` → digits; empty/None passthrough) so ALL WhatsApp sends use a Meta-valid format. Symptom fix (Level 1) — the duplicate-number ROW (identity normalization on write) is still the deferred root, same as Fix 53. Backend (api rebuilt); India-only `91` assumption (safe: all BFSI data Indian).
 - **Fix 57 — Customer name now correct in admin inbox + all reply greetings:** `display_name` (which drives BOTH the admin inbox and the reply salutation) was being set to the customer's **email** for whatsapp/email channels — discarding the real `name` Neo4j already returned — so the admin showed an email-derived name and the email greeting reconstructed a mangled "Sayantini S 55" from `sayantini.s.55@…`; WhatsApp/web replies had **no** greeting at all. Now stores the real Neo4j `name` in `display_name` ([graph.py:257](../services/orchestration_service/graph.py)), and WhatsApp/web replies open with `Hi {name},` (falls back to "Customer" for unknowns) ([orchestration_agents.py:628](../services/agent_service/orchestration_agents.py)). Backend (api rebuilt); pre-existing test_phase1 failures unchanged (proven by stash-baseline).
 - **Fix 54 — Connectors page: added Web Chat card + trimmed Email card:** Added a **Web Chat** connector card (customer-portal in-app chat, always Connected) as the 3rd card so order is WhatsApp · Email · Web Chat · Call · Jira — completing the channel story. Trimmed the Email card to just the badge + Inbound/Outbound Active rows (dropped Mailbox / Poll interval / Last poll / Emails processed + Poll-now button — demo-noisy, and "Last poll: Never / 0 processed" looked broken). Frontend-only; `triggerEmailInboxPoll` now dead (button gone) but left in place.
+- **Merge — Analytics-page work (Digvijay `eb55195`) merged into this branch:** `--no-ff` merge (`f96cb5c`) folding Digvijay's analytics LLM-usage panel + migration `010` into `Sayantini-phase2-ui-changes`. Clean auto-merge, **zero conflicts** (verified via `merge-tree` dry run first); both branches' work verified coexisting; the 5 `test_phase1` failures proven **pre-existing** (identical on the pre-merge backup tree — 3 documented mock-signature + 2 Groq-key-blanked). Backup tag `backup-before-analytics-merge` → `a7da603`. api rebuilt so migration 010 applies.
+- **Analytics page — whole-page creative redesign (frontend-only):** one shared `.kpi-tile` design system (gradient-accent tiles + top accent bar + icon + hover lift) applied to all 8 KPI tiles AND the LLM panel; bar charts → taller rounded gradient meters with row hover; sentiment bar → rounded gradient segments + keyed legend; Agent table → colour dots + tabular numerals; chart-card hover. No backend/data change.
+- **Analytics — formula tooltips on every KPI card:** each KPI tile now shows its exact formula on hover (native `title` + a `?` affordance), across both the Customer Care set and the Solution Performance set.
+- **Analytics — Solution Performance section rebuilt with practical, data-backed KPIs (backend + frontend):** replaced the broken/empty metrics (233% escalation bug, always-empty resolution-mix, single-day trend) with 4 KPIs that compute on real present-state data — **Escalation rate** (escalated tickets ÷ inbound customer queries = 7/18 = 38.9%; denominator is inbound turns so routine queries pull it down, never saturates), **Avg risk score** (AVG priority_score over open tickets = 60), **Critical load** (open critical tickets = 4), **Drafts handled** (reply_drafts sent = 14) — and 2 real charts: **Open tickets by risk band** + **Why tickets escalate**. New `/analytics/solution-performance` endpoint + `get_solution_performance` aggregator; api rebuilt.
 
 ---
 
@@ -1402,3 +1406,104 @@ scopes `whatsapp_business_messaging` + `whatsapp_business_management`. Verified 
 (`debug_token`: valid, `type: SYSTEM_USER`, **expires 2026-09-23** ~59 days). No more few-hour tokens —
 **refresh before ~23 Sep 2026**. (A "Never" expiry option exists at the Set-expiry step if a
 truly-permanent token is wanted later.) See memory [[whatsapp-token-expiry]].
+
+---
+
+## Session 9 — 2026-07-26
+
+Branch: `Sayantini-phase2-ui-changes`. **Merged in a friend's (Digvijay's) analytics-page work** so
+this branch holds both bodies of work with nothing lost.
+
+### Merge — Digvijay's analytics-page work into `Sayantini-phase2-ui-changes`
+**Goal (user):** combine this branch (Fixes 42–58) with Digvijay's branch, which adds work on the
+admin Analytics page, **without losing any implementation from either side.**
+
+**Which branch was his:** of all the remote branches, `origin/digvijay-work-branch` was the analytics
+one — its tip is literally `eb55195 "Additions in analytics page"` (2026-07-22). This branch had
+**forked off `digvijay-work-branch`** originally, so the two shared a clean common ancestor
+(`5881715`, 2026-07-16); since then **this branch = 5 commits** (Fixes 42–58) and **his = 1 commit**
+(`eb55195`).
+
+**His commit (`eb55195`) — 6 files:** `apps/admin-ui/{app.js,index.html,style.css}` (the analytics
+**LLM-usage panel** — `renderLlmUsagePanel`, `loadAnalytics` additions),
+`services/observability_service/llm_usage.py`, `services/persistence_service/repository.py`, and a new
+migration `services/persistence_service/migrations/010_llm_usage_model_version.sql`. The 3 shared UI
+files were the only overlap risk; his edits sit in the analytics regions, away from this branch's edits.
+
+**Method (safe, reversible, verified before acting):**
+1. **Dry-run first** — `git merge-tree --write-tree HEAD origin/digvijay-work-branch` reported a
+   **clean auto-merge, exit 0, zero conflicts** *before* touching anything.
+2. **Backup tag** `backup-before-analytics-merge` → `a7da603` (instant undo:
+   `git reset --hard backup-before-analytics-merge`).
+3. **`git merge --no-ff origin/digvijay-work-branch`** → merge commit `f96cb5c`; all 4 shared files
+   auto-merged, no conflicts. Both histories preserved (nothing rewritten/dropped).
+4. **Verified both sides coexist:** his `renderLlmUsagePanel` / `loadAnalytics` / migration `010`
+   present; this branch's Fix 58 (`_normalize_wa_recipient`), Fix 42 (offers UI), Fix 41
+   (`statusLabel`), and the session log all intact; his `llm_usage.py` + `repository.py` byte-compile.
+5. **Test suite (Groq-safe — `GROQ_API_KEY=""` so no accidental quota spend):** **137 passed, 5
+   failed.** Proved the 5 failures are **pre-existing, not merge-caused** by running the same 5 on the
+   pre-merge tree (via a throwaway `git worktree` at the backup tag) — **identical 5 failures**. Of the
+   5: 3 are the long-documented `test_phase1` mock-signature failures (since Session 1); 2 are
+   Groq-key-dependent and only surface because the key was deliberately blanked for quota safety. **0
+   Groq tokens spent.**
+6. **api rebuilt + recreated** off the merged tree so migration `010` applies (his change is backend +
+   a migration; the analytics LLM-usage panel needs the baked image, not just the bind-mounted UI).
+
+**Result:** `Sayantini-phase2-ui-changes` now contains **both** branches' work; ahead of origin by 2
+(his commit + the merge commit). **Not pushed** (awaiting user go-ahead). Backup tag retained.
+
+### Analytics page — whole-page creative redesign (frontend-only)
+**User ask:** the Analytics page (KPI tiles, bars, tables, LLM panel) looked flat; make it creative,
+one cohesive design system, matching the LLM-panel restraint (subtle gradient, not flashy).
+**Design system (`apps/admin-ui/`):** introduced a shared **`.kpi-tile`** class (gradient wash + thin
+top accent bar + small icon + hover lift) with per-tone variants (blue/pur/grn/amb/red/pnk) and a
+shared `renderKpiTiles()` JS helper. Applied to: all 8 KPI tiles (Customer Care `renderOverview` +
+Solution Performance `renderSolutionStats`) AND the LLM usage tiles (renamed the earlier `.llm-stat-*`
+→ `.kpi-*` so there's ONE tile system, not two). Bars (`renderBars` + `.bar-*`): taller rounded track,
+gradient fill (`color-mix` tint), row hover, bolder tabular values. Sentiment bar: bigger total,
+rounded gradient segments, colour-keyed legend. Agent table: colour dot per team + right-aligned
+tabular numerals (reused `.llm-op-*`). Chart cards: hover shadow. Frontend-only; live via bind mount;
+asset versions bumped to `20260726-2/-3`. `node --check` OK. **Modern-browser caveat:** bar-fill tint
+uses CSS `color-mix()` (all current browsers; graceful degrade to no-tint on old ones).
+
+### Analytics — formula tooltips on every KPI card
+**User ask (mid-task):** KPIs involve formulas; hovering a card should show the formula. **Fix:**
+`renderKpiTiles` gained an optional `tip` field → native `title` tooltip on the whole tile + a small
+`?` affordance (`.kpi-help`) so users know to hover. Wired a plain-English formula into all 8 tiles
+(both sections). Native-tooltip pattern, consistent with the Profile Snapshot tiles.
+
+### Analytics — Solution Performance section rebuilt with practical, data-backed KPIs
+**Why:** the section's metrics were broken or meaningless on real data — **Escalation rate = 233%**
+(bug: `total_escalated`(7 tickets) ÷ `total_conversations`(3) — mixed units, >100%), **Resolution
+level mix** always "No data" (all `llm_usage_events.resolution_level` are NULL), **14-day trend** had
+one day of data. User asked for KPIs that "practically make sense" on the data that exists.
+**Escalation-rate definition (settled after a long clarification with the user — the key decision):**
+NOT conversation-level (2/3 → saturates toward 100% as every customer eventually escalates) and NOT
+ticket-level (7/7 → circular, since a ticket is mostly *created* on escalation). The honest denominator
+is **total inbound customer queries** (every message the customer actually sent), so non-escalating
+routine queries pull the rate down and it stays a real 0–100% rate:
+**escalation rate = escalated tickets ÷ inbound turns = 7 ÷ 18 = 38.9%.**
+**The 4 KPIs (all present-state, all compute today):** Escalation rate 38.9% · Avg risk score 60.0
+(`AVG(priority_score)` over OPEN tickets) · Critical load 4 (open critical tickets) · Drafts handled 14
+(`reply_drafts` status=sent — human-in-the-loop throughput). **The 2 charts** (replaced trend +
+resolution-mix): **Open tickets by risk band** (priority_score bucketed Critical/High/Med/Low) and
+**Why tickets escalate** (`escalation_reason` breakdown; raw codes prettified AND merged after
+prettify so `assisted_resolution_required:transaction_dispute` + `:loan_status` count as one
+"Assisted resolution" bar = 4, not two — a self-caught bug during verification).
+**Files:** `services/analytics_service/metrics.py` (new `SolutionPerformanceMetrics` + `LabelCount`
+dataclasses); `services/analytics_service/aggregator.py` (new `get_solution_performance` + `_risk_band`
++ `_pretty_reason`); `apps/api/routes/analytics.py` (new `GET /analytics/solution-performance`);
+`apps/admin-ui/` (rewrote `renderSolutionStats(sp)`, new `renderSolutionCharts(sp)`, added the fetch to
+`loadAnalytics`, repurposed the two chart containers to `riskBandPanel`/`escReasonPanel` with new
+titles). The old `renderTrendPanel` + `renderResolutionLevelPanel` JS are now **orphaned dead code**
+(no container targets them; left in place, flagged for cleanup). **Verified (0 Groq — pure SQL):** ran
+the new aggregator against a copy of the real DB (38.9% / 60 / 4 / 14; bands + merged reasons correct);
+api rebuilt + recreated; `GET /analytics/solution-performance` live returns the expected JSON;
+`/health` ok; served assets carry the new code. `node --check` OK; backend byte-compiles.
+
+**Open / deferred at this point in the session:**
+- **"Tickets by channel" chart still shows fake `graph`/`portal` channels** + inflated per-identity
+  join counts (Image-1 bug) — a *different* chart (`get_channel_metrics`), not yet fixed.
+- **LLM-panel version tag** (`v-xxxx` config-hash) frontend is ready but the backend hash logic isn't
+  built — version still reads "unknown".
+- Two orphaned dead render functions (trend / resolution-level) pending a cleanup pass.

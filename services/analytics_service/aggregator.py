@@ -7,9 +7,11 @@ from .metrics import (
     ChannelMetrics,
     IntentCount,
     IntentMetrics,
+    LabelCount,
     OverviewMetrics,
     RealtimeEvent,
     SentimentMetrics,
+    SolutionPerformanceMetrics,
     TicketTrendPoint,
 )
 
@@ -178,6 +180,101 @@ def get_channel_metrics(db_path: str) -> ChannelMetrics:
         for ch in sorted(all_channels)
     ]
     return ChannelMetrics(channels=channels)
+
+
+# Map a numeric priority_score (0-100) to a risk band for the "by risk band" chart.
+def _risk_band(score: float) -> str:
+    if score >= 80:
+        return "Critical"
+    if score >= 50:
+        return "High"
+    if score >= 25:
+        return "Medium"
+    return "Low"
+
+
+def get_solution_performance(db_path: str) -> SolutionPerformanceMetrics:
+    """Operational 'state of the queue right now' metrics for the Solution Performance section.
+
+    Formulas (agreed with the product owner):
+      - escalation_rate = escalated tickets / total inbound customer queries.
+        The denominator is INBOUND TURNS (every query the customer actually sent), NOT
+        tickets/conversations — so routine non-escalating queries pull the rate down and it
+        stays a real 0-100% rate instead of saturating toward 100%.
+      - avg_risk_score = AVG(priority_score) over OPEN tickets (current queue heat).
+      - critical_open  = count of OPEN tickets with priority='critical'.
+      - drafts_handled = reply_drafts with status='sent' (human-in-the-loop throughput).
+      - by_risk_band   = OPEN tickets bucketed by priority_score band.
+      - by_escalation_reason = escalated tickets grouped by escalation_reason.
+    """
+    _open = "status NOT IN ('resolved','closed')"
+    _escalated = "escalation_reason IS NOT NULL AND escalation_reason != ''"
+    with _connect(db_path) as conn:
+        escalations = conn.execute(
+            f"SELECT COUNT(*) FROM tickets WHERE {_escalated}"
+        ).fetchone()[0] or 0
+        inbound = conn.execute(
+            "SELECT COUNT(*) FROM conversation_turns WHERE direction = 'inbound'"
+        ).fetchone()[0] or 0
+        avg_risk = conn.execute(
+            f"SELECT AVG(priority_score) FROM tickets WHERE {_open}"
+        ).fetchone()[0] or 0.0
+        critical_open = conn.execute(
+            f"SELECT COUNT(*) FROM tickets WHERE priority = 'critical' AND {_open}"
+        ).fetchone()[0] or 0
+        drafts_handled = conn.execute(
+            "SELECT COUNT(*) FROM reply_drafts WHERE status = 'sent'"
+        ).fetchone()[0] or 0
+
+        # Risk-band breakdown (open tickets, bucketed in Python so the bands live in one place).
+        band_counts: dict[str, int] = {"Critical": 0, "High": 0, "Medium": 0, "Low": 0}
+        for r in conn.execute(f"SELECT priority_score FROM tickets WHERE {_open}"):
+            band_counts[_risk_band(r[0] or 0.0)] += 1
+
+        reason_rows = conn.execute(
+            f"SELECT escalation_reason AS reason FROM tickets WHERE {_escalated}"
+        ).fetchall()
+
+    # Aggregate AFTER prettifying so raw codes that map to the same label
+    # (e.g. assisted_resolution_required:transaction_dispute and :loan_status) merge
+    # into one bar instead of appearing twice.
+    reason_counts: dict[str, int] = {}
+    for r in reason_rows:
+        label = _pretty_reason(r["reason"])
+        reason_counts[label] = reason_counts.get(label, 0) + 1
+    reason_sorted = sorted(reason_counts.items(), key=lambda kv: kv[1], reverse=True)
+
+    rate = round((escalations / inbound) * 100, 1) if inbound else 0.0
+    return SolutionPerformanceMetrics(
+        escalation_rate_pct=rate,
+        escalations=escalations,
+        inbound_queries=inbound,
+        avg_risk_score=round(avg_risk, 1),
+        critical_open=critical_open,
+        drafts_handled=drafts_handled,
+        by_risk_band=[
+            LabelCount(label=band, count=band_counts[band])
+            for band in ("Critical", "High", "Medium", "Low")
+            if band_counts[band] > 0
+        ],
+        by_escalation_reason=[
+            LabelCount(label=label, count=cnt) for label, cnt in reason_sorted
+        ],
+    )
+
+
+# Turn a raw escalation_reason code into a short human label for the chart.
+def _pretty_reason(reason: str) -> str:
+    if not reason:
+        return "Other"
+    base = reason.split(":", 1)[0]  # drop the ":intent" suffix (assisted_resolution_required:x)
+    labels = {
+        "assisted_resolution_required": "Assisted resolution",
+        "low_retrieval_confidence": "Low confidence",
+        "high_urgency": "High urgency",
+        "critical_escalation": "Critical",
+    }
+    return labels.get(base, base.replace("_", " ").title())
 
 
 def get_intent_metrics(db_path: str, top_n: int = 10) -> IntentMetrics:

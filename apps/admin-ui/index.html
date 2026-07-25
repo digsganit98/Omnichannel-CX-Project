@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Omnichannel CX Accelerator - Ticket Operations</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/admin-ui/assets/style.css?v=20260725-1">
+<link rel="stylesheet" href="/admin-ui/assets/style.css?v=20260726-3">
 </head>
 <body>
 
@@ -373,11 +373,11 @@
         <div class="analytics-section">
           <div class="section-lbl">Customer Care Analytics</div>
 
-          <div class="stat-grid" style="grid-template-columns:repeat(4,1fr)" id="overviewGrid">
-            <div class="stat-card"><div class="stat-val">—</div><div class="stat-lbl">Loading…</div></div>
-            <div class="stat-card"><div class="stat-val">—</div><div class="stat-lbl">Loading…</div></div>
-            <div class="stat-card"><div class="stat-val">—</div><div class="stat-lbl">Loading…</div></div>
-            <div class="stat-card"><div class="stat-val">—</div><div class="stat-lbl">Loading…</div></div>
+          <div class="kpi-grid" id="overviewGrid">
+            <div class="kpi-tile kpi-blue"><div class="kpi-val">—</div><div class="kpi-lbl">Loading…</div></div>
+            <div class="kpi-tile kpi-grn"><div class="kpi-val">—</div><div class="kpi-lbl">Loading…</div></div>
+            <div class="kpi-tile kpi-red"><div class="kpi-val">—</div><div class="kpi-lbl">Loading…</div></div>
+            <div class="kpi-tile kpi-amb"><div class="kpi-val">—</div><div class="kpi-lbl">Loading…</div></div>
           </div>
 
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
@@ -395,16 +395,16 @@
         <div class="analytics-section">
           <div class="section-lbl">Solution Performance Analytics</div>
 
-          <div class="stat-grid" style="grid-template-columns:repeat(4,1fr)" id="solutionStatsGrid">
-            <div class="stat-card"><div class="stat-val">—</div><div class="stat-lbl">Loading…</div></div>
-            <div class="stat-card"><div class="stat-val">—</div><div class="stat-lbl">Loading…</div></div>
-            <div class="stat-card"><div class="stat-val">—</div><div class="stat-lbl">Loading…</div></div>
-            <div class="stat-card"><div class="stat-val">—</div><div class="stat-lbl">Loading…</div></div>
+          <div class="kpi-grid" id="solutionStatsGrid">
+            <div class="kpi-tile kpi-red"><div class="kpi-val">—</div><div class="kpi-lbl">Loading…</div></div>
+            <div class="kpi-tile kpi-amb"><div class="kpi-val">—</div><div class="kpi-lbl">Loading…</div></div>
+            <div class="kpi-tile kpi-blue"><div class="kpi-val">—</div><div class="kpi-lbl">Loading…</div></div>
+            <div class="kpi-tile kpi-grn"><div class="kpi-val">—</div><div class="kpi-lbl">Loading…</div></div>
           </div>
 
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
-            <div class="chart-card"><div class="chart-title">Tickets created vs resolved (14d)</div><div id="trendPanel"><div class="empty-state">Loading…</div></div></div>
-            <div class="chart-card"><div class="chart-title">Resolution level mix (L1 auto / L2 / L3 escalation)</div><div id="resolutionLevelPanel"><div class="empty-state">Loading…</div></div></div>
+            <div class="chart-card"><div class="chart-title">Open tickets by risk band</div><div id="riskBandPanel"><div class="empty-state">Loading…</div></div></div>
+            <div class="chart-card"><div class="chart-title">Why tickets escalate</div><div id="escReasonPanel"><div class="empty-state">Loading…</div></div></div>
           </div>
         </div>
 
@@ -581,6 +581,6 @@
   </div>
 </div>
 
-<script src="/admin-ui/assets/app.js?v=20260725-3"></script>
+<script src="/admin-ui/assets/app.js?v=20260726-3"></script>
 </body>
 </html>

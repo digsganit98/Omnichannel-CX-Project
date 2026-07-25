@@ -13,6 +13,7 @@ from services.analytics_service.aggregator import (
     get_overview,
     get_realtime_events,
     get_sentiment_metrics,
+    get_solution_performance,
     get_ticket_trend,
     get_agent_metrics,
 )
@@ -54,6 +55,11 @@ def agents(_: dict = Depends(require_analytics_token)) -> list:
 @router.get("/trend")
 def trend(_: dict = Depends(require_analytics_token)) -> list:
     return [asdict(t) for t in get_ticket_trend(_db())]
+
+
+@router.get("/solution-performance")
+def solution_performance(_: dict = Depends(require_analytics_token)) -> dict:
+    return asdict(get_solution_performance(_db()))
 
 
 @router.get("/events")

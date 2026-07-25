@@ -63,6 +63,26 @@ class TicketTrendPoint:
 
 
 @dataclass
+class LabelCount:
+    label: str = ""
+    count: int = 0
+
+
+@dataclass
+class SolutionPerformanceMetrics:
+    # 4 headline KPIs (see get_solution_performance for exact formulas)
+    escalation_rate_pct: float = 0.0      # escalations / inbound queries
+    escalations: int = 0
+    inbound_queries: int = 0
+    avg_risk_score: float = 0.0           # AVG(priority_score) over OPEN tickets
+    critical_open: int = 0                # open tickets with priority='critical'
+    drafts_handled: int = 0               # reply_drafts sent (human-in-the-loop)
+    # 2 breakdowns for the charts
+    by_risk_band: list[LabelCount] = field(default_factory=list)      # Critical/High/Medium/Low (open)
+    by_escalation_reason: list[LabelCount] = field(default_factory=list)
+
+
+@dataclass
 class RealtimeEvent:
     event_id: str = ""
     event_type: str = ""

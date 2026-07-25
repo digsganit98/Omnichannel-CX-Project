@@ -1635,6 +1635,7 @@ window.loadAnalytics = async function() {
       fetch('/admin/llm-observability/summary?days=7', { headers: adminHeaders() }).then(function(r){return r.json();}),
       fetch('/analytics/sentiment', { headers: adminHeaders() }).then(function(r){return r.json();}),
       fetch('/analytics/trend',     { headers: adminHeaders() }).then(function(r){return r.json();}),
+      fetch('/analytics/solution-performance', { headers: adminHeaders() }).then(function(r){return r.json();}),
     ]);
     renderOverview(results[0]);
     renderChannelBars(results[1]);
@@ -1644,10 +1645,9 @@ window.loadAnalytics = async function() {
     renderLlmUsagePanel(results[5]);
     renderCostByModelPanel(results[5]);
     renderLatencyByModelPanel(results[5]);
-    renderResolutionLevelPanel(results[5]);
     renderSentimentPanel(results[6]);
-    renderTrendPanel(results[7]);
-    renderSolutionStats(results[0], results[5]);
+    renderSolutionStats(results[8]);
+    renderSolutionCharts(results[8]);
   } catch(e) {
     console.error('Analytics load error:', e.message);
   } finally {
@@ -1668,13 +1668,33 @@ function renderOverview(d) {
   var frtDeltaClr = 'var(--t1)';
 
   var cards = [
-    { val: d.total_open, lbl: 'Open tickets', sub: d.total_conversations + ' total conversations', clr: d.total_open > 20 ? 'var(--amb-t)' : 'var(--t1)', subClr: '' },
-    { val: d.total_resolved, lbl: 'Resolved', sub: d.total_customers + ' customers', clr: 'var(--grn-t)', subClr: '' },
-    { val: negPct.toFixed(0) + '%', lbl: 'Negative sentiment today', sub: negDeltaLabel, clr: 'var(--red-t)', subClr: negDeltaClr },
-    { val: frtLabel, lbl: 'Avg resolution time today', sub: frtDeltaLabel, clr: 'var(--t1)', subClr: frtDeltaClr },
+    { val: d.total_open, lbl: 'Open tickets', sub: d.total_conversations + ' total conversations', tone: 'amb', icon: '&#9873;', clr: d.total_open > 20 ? 'var(--amb-t)' : 'var(--t1)', subClr: '',
+      tip: 'Count of tickets whose status is not resolved or closed. The live backlog across all conversations.' },
+    { val: d.total_resolved, lbl: 'Resolved', sub: d.total_customers + ' customers', tone: 'grn', icon: '&#10003;', clr: 'var(--grn-t)', subClr: '',
+      tip: 'Count of tickets with status resolved or closed.' },
+    { val: negPct.toFixed(0) + '%', lbl: 'Negative sentiment today', sub: negDeltaLabel, tone: 'red', icon: '&#9760;', clr: 'var(--red-t)', subClr: negDeltaClr,
+      tip: 'Share of today\'s inbound messages classified negative (stored AI sentiment, falling back to keyword detection) ÷ today\'s inbound messages × 100. The delta compares against yesterday\'s same figure.' },
+    { val: frtLabel, lbl: 'Avg resolution time today', sub: frtDeltaLabel, tone: 'blue', icon: '&#9201;', clr: 'var(--t1)', subClr: frtDeltaClr,
+      tip: 'Average of (ticket updated_at − created_at) over tickets resolved/closed, in minutes (shown as hr when ≥60).' },
   ];
-  document.getElementById('overviewGrid').innerHTML = cards.map(function(c) {
-    return '<div class="stat-card"><div class="stat-val" style="color:' + c.clr + '">' + c.val + '</div><div class="stat-lbl">' + c.lbl + '</div>' + (c.sub ? '<div class="stat-sub" style="color:' + (c.subClr || 'var(--t3)') + '">' + c.sub + '</div>' : '') + '</div>';
+  document.getElementById('overviewGrid').innerHTML = renderKpiTiles(cards);
+}
+
+// Shared KPI-tile renderer — accent tone + icon + optional data-driven value colour + sub line.
+// c.tip (optional) = a formula/explanation shown as a native hover tooltip on the whole tile,
+// with a small "?" affordance so users know to hover.
+function renderKpiTiles(cards) {
+  return cards.map(function(c) {
+    var valStyle = c.clr ? ' style="color:' + c.clr + '"' : '';
+    var sub = c.sub ? '<div class="kpi-sub"' + (c.subClr ? ' style="color:' + c.subClr + '"' : '') + '>' + c.sub + '</div>' : '';
+    var tipAttr = c.tip ? ' title="' + escH(c.tip) + '"' : '';
+    var tipMark = c.tip ? '<span class="kpi-help" title="' + escH(c.tip) + '">?</span>' : '';
+    return '<div class="kpi-tile kpi-' + (c.tone || 'blue') + (c.tip ? ' kpi-has-tip' : '') + '"' + tipAttr + '>'
+      + tipMark
+      + '<div class="kpi-icon">' + (c.icon || '') + '</div>'
+      + '<div class="kpi-val"' + valStyle + '>' + c.val + '</div>'
+      + '<div class="kpi-lbl">' + c.lbl + '</div>'
+      + sub + '</div>';
   }).join('');
 }
 
@@ -1686,8 +1706,10 @@ function renderBars(containerId, items, lk, vk, colorFn) {
   el.innerHTML = items.map(function(item, idx) {
     var pct = max > 0 ? Math.round((item[vk]/max)*100) : 0;
     var clr = colorFn ? colorFn(item[lk], idx) : COLORS[idx % COLORS.length];
+    // subtle gradient: base colour → a lighter tint of itself, for depth without new tokens
+    var fill = 'linear-gradient(90deg,' + clr + ',' + clr + ' 55%,color-mix(in srgb,' + clr + ' 68%,#fff))';
     return '<div class="bar-row"><span class="bar-label" title="' + escH(item[lk]) + '">' + escH(String(item[lk])) + '</span>'
-      + '<div class="bar-track"><div class="bar-fill" style="width:' + pct + '%;background:' + clr + '"></div></div>'
+      + '<div class="bar-track"><div class="bar-fill" style="width:' + pct + '%;background:' + fill + '"></div></div>'
       + '<span class="bar-val">' + item[vk] + '</span></div>';
   }).join('');
 }
@@ -1699,6 +1721,13 @@ function renderChannelBars(data) {
 function renderIntentBars(data) {
   var items = (data.intents||[]).map(function(i){return {intent:i.intent.replace(/_/g,' '),count:i.count};});
   renderBars('intentBars', items, 'intent', 'count', null);
+}
+
+// Stable colour per operation so the same op keeps its colour across the table + meters.
+var LLM_OP_COLORS = ['--blue', '--pur', '--grn', '--amb', '--pnk', '--red'];
+function llmOpColor(name, idx) {
+  // deterministic by index so ordering (cost-desc) reads as a gentle palette walk
+  return 'var(' + LLM_OP_COLORS[idx % LLM_OP_COLORS.length] + ')';
 }
 
 function renderLlmUsagePanel(data) {
@@ -1713,25 +1742,65 @@ function renderLlmUsagePanel(data) {
   var cost = Number(totals.estimated_cost_usd || 0);
   var avg = Number(totals.avg_latency_ms || 0);
   var cards = [
-    { val: calls, lbl: 'LLM calls' },
-    { val: (totals.total_tokens || 0).toLocaleString(), lbl: 'Tokens' },
-    { val: '$' + cost.toFixed(6), lbl: 'Estimated cost' },
-    { val: avg.toFixed(0) + ' ms', lbl: 'Avg latency' },
+    { val: Number(calls).toLocaleString(), lbl: 'LLM calls', tone: 'blue', icon: '&#9673;' },
+    { val: (totals.total_tokens || 0).toLocaleString(), lbl: 'Tokens', tone: 'pur', icon: '&#9632;' },
+    { val: '$' + cost.toFixed(6), lbl: 'Estimated cost', tone: 'grn', icon: '&#36;' },
+    { val: avg.toFixed(0) + ' ms', lbl: 'Avg latency', tone: 'amb', icon: '&#9201;' },
   ];
-  var opRows = (data.by_operation || []).map(function(row) {
-    return '<tr><td style="font-weight:500;color:var(--t1)">' + escH((row.operation || 'unknown').replace(/_/g, ' ')) + '</td>'
-      + '<td>' + (row.calls || 0) + '</td>'
-      + '<td>' + Number(row.total_tokens || 0).toLocaleString() + '</td>'
-      + '<td>$' + Number(row.estimated_cost_usd || 0).toFixed(6) + '</td></tr>';
+
+  // Operation rows become mini bar-chart rows: a coloured dot + a token-share meter,
+  // so relative token weight reads at a glance instead of hunting the numbers column.
+  var ops = (data.by_operation || []).slice();
+  var maxTok = ops.reduce(function(m, r) { return Math.max(m, Number(r.total_tokens || 0)); }, 0) || 1;
+  var opRows = ops.map(function(row, i) {
+    var clr = llmOpColor(row.operation, i);
+    var tok = Number(row.total_tokens || 0);
+    var pct = Math.max(2, Math.round((tok / maxTok) * 100));
+    return '<tr>'
+      + '<td class="llm-op-cell"><span class="llm-op-dot" style="background:' + clr + '"></span>'
+        + escH((row.operation || 'unknown').replace(/_/g, ' ')) + '</td>'
+      + '<td class="llm-num">' + (row.calls || 0) + '</td>'
+      + '<td class="llm-meter-cell"><div class="llm-meter"><div class="llm-meter-fill" style="width:' + pct + '%;background:' + clr + '"></div></div>'
+        + '<span class="llm-meter-val">' + tok.toLocaleString() + '</span></td>'
+      + '<td class="llm-num llm-cost">$' + Number(row.estimated_cost_usd || 0).toFixed(6) + '</td>'
+      + '</tr>';
   }).join('');
-  el.innerHTML = '<div class="stat-grid" style="grid-template-columns:repeat(4,1fr);margin-bottom:12px">'
+
+  el.innerHTML =
+    '<div class="kpi-grid">'
     + cards.map(function(c) {
-      return '<div class="stat-card"><div class="stat-val">' + c.val + '</div><div class="stat-lbl">' + c.lbl + '</div></div>';
+      return '<div class="kpi-tile kpi-' + c.tone + '">'
+        + '<div class="kpi-icon">' + c.icon + '</div>'
+        + '<div class="kpi-val">' + c.val + '</div>'
+        + '<div class="kpi-lbl">' + c.lbl + '</div>'
+        + '</div>';
     }).join('')
     + '</div>'
-    + '<table class="mini-table"><thead><tr><th>Operation</th><th>Calls</th><th>Tokens</th><th>Cost</th></tr></thead><tbody>'
+    + '<table class="mini-table llm-op-table"><thead><tr>'
+      + '<th>Operation</th><th class="llm-num">Calls</th><th>Token share</th><th class="llm-num">Cost</th>'
+      + '</tr></thead><tbody>'
     + (opRows || '<tr><td colspan="4">No operation breakdown yet</td></tr>')
     + '</tbody></table>';
+}
+
+// Render the short config version as a tag + decode it from the per-row config the backend
+// stores alongside each call ("log it somewhere" — the tag is never a mystery). Falls back
+// to plain text when no decoded config is present (e.g. legacy 'unknown' rows).
+function llmVersionCell(row) {
+  var v = row.model_version || 'unknown';
+  var cfg = row.model_config || null;
+  if (v === 'unknown' || !v) {
+    return '<span class="llm-ver llm-ver-unknown">unknown</span>';
+  }
+  var decoded = '';
+  if (cfg && typeof cfg === 'object') {
+    var parts = [];
+    if (cfg.temperature != null) parts.push('temp ' + cfg.temperature);
+    if (cfg.max_tokens != null) parts.push('max ' + cfg.max_tokens); else parts.push('max —');
+    if (cfg.top_p != null) parts.push('top_p ' + cfg.top_p); else parts.push('top_p —');
+    decoded = '<span class="llm-ver-cfg">' + escH(parts.join(' · ')) + '</span>';
+  }
+  return '<span class="llm-ver">' + escH(v) + '</span>' + decoded;
 }
 
 function renderCostByModelPanel(data) {
@@ -1740,13 +1809,13 @@ function renderCostByModelPanel(data) {
   var rows = (data && data.by_model) || [];
   if (!rows.length) { el.innerHTML = '<div class="empty-state">No model usage recorded yet</div>'; return; }
   var body = rows.map(function(row) {
-    return '<tr><td style="font-weight:500;color:var(--t1)">' + escH(row.model || 'unknown') + '</td>'
-      + '<td>' + escH(row.model_version || 'unknown') + '</td>'
-      + '<td>' + (row.calls || 0) + '</td>'
-      + '<td>' + Number(row.total_tokens || 0).toLocaleString() + '</td>'
-      + '<td>$' + Number(row.estimated_cost_usd || 0).toFixed(6) + '</td></tr>';
+    return '<tr><td class="llm-model-cell">' + escH(row.model || 'unknown') + '</td>'
+      + '<td>' + llmVersionCell(row) + '</td>'
+      + '<td class="llm-num">' + (row.calls || 0) + '</td>'
+      + '<td class="llm-num">' + Number(row.total_tokens || 0).toLocaleString() + '</td>'
+      + '<td class="llm-num llm-cost">$' + Number(row.estimated_cost_usd || 0).toFixed(6) + '</td></tr>';
   }).join('');
-  el.innerHTML = '<table class="mini-table"><thead><tr><th>Model</th><th>Version</th><th>Calls</th><th>Tokens</th><th>Cost</th></tr></thead><tbody>' + body + '</tbody></table>';
+  el.innerHTML = '<table class="mini-table llm-model-table"><thead><tr><th>Model</th><th>Version</th><th class="llm-num">Calls</th><th class="llm-num">Tokens</th><th class="llm-num">Cost</th></tr></thead><tbody>' + body + '</tbody></table>';
 }
 
 function renderLatencyByModelPanel(data) {
@@ -1755,12 +1824,12 @@ function renderLatencyByModelPanel(data) {
   var rows = (data && data.by_model) || [];
   if (!rows.length) { el.innerHTML = '<div class="empty-state">No model usage recorded yet</div>'; return; }
   var body = rows.map(function(row) {
-    return '<tr><td style="font-weight:500;color:var(--t1)">' + escH(row.model || 'unknown') + '</td>'
-      + '<td>' + escH(row.model_version || 'unknown') + '</td>'
-      + '<td>' + (row.calls || 0) + '</td>'
-      + '<td>' + Number(row.avg_latency_ms || 0).toFixed(0) + ' ms</td></tr>';
+    return '<tr><td class="llm-model-cell">' + escH(row.model || 'unknown') + '</td>'
+      + '<td>' + llmVersionCell(row) + '</td>'
+      + '<td class="llm-num">' + (row.calls || 0) + '</td>'
+      + '<td class="llm-num">' + Number(row.avg_latency_ms || 0).toFixed(0) + ' ms</td></tr>';
   }).join('');
-  el.innerHTML = '<table class="mini-table"><thead><tr><th>Model</th><th>Version</th><th>Calls</th><th>Avg latency</th></tr></thead><tbody>' + body + '</tbody></table>';
+  el.innerHTML = '<table class="mini-table llm-model-table"><thead><tr><th>Model</th><th>Version</th><th class="llm-num">Calls</th><th class="llm-num">Avg latency</th></tr></thead><tbody>' + body + '</tbody></table>';
 }
 
 function renderResolutionLevelPanel(data) {
@@ -1775,31 +1844,44 @@ function renderResolutionLevelPanel(data) {
   });
 }
 
-function renderSolutionStats(overview, llmSummary) {
+function renderSolutionStats(sp) {
   var el = document.getElementById('solutionStatsGrid');
   if (!el) return;
-  var d = overview || {};
-  var escRate = d.total_conversations ? Math.round((d.total_escalated / d.total_conversations) * 100) : 0;
-  var frt = d.avg_first_response_minutes || 0;
-  var frtOld = d.avg_first_response_last_week_minutes || 0;
-  var frtLabel = frt >= 60 ? (frt / 60).toFixed(1) + ' hr' : frt.toFixed(1) + ' min';
-  var frtDelta = Math.round((frt - frtOld) * 10) / 10;
-  var frtSub = frtOld ? ((frtDelta <= 0 ? '↓ ' : '↑ +') + Math.abs(frtDelta) + ' min vs last week') : '';
-
-  var levels = (llmSummary && llmSummary.by_resolution_level) || [];
-  var l1 = levels.find(function(r) { return r.resolution_level === 'L1'; });
-  var totalLevelCalls = levels.reduce(function(sum, r) { return sum + (r.calls || 0); }, 0);
-  var autoPct = totalLevelCalls ? Math.round(((l1 ? l1.calls : 0) / totalLevelCalls) * 100) : null;
+  var d = sp || {};
+  var rate = d.escalation_rate_pct != null ? d.escalation_rate_pct : 0;
+  var avgRisk = d.avg_risk_score != null ? d.avg_risk_score : 0;
 
   var cards = [
-    { val: escRate + '%', lbl: 'Escalation rate', sub: d.total_escalated + ' of ' + d.total_conversations + ' conversations', clr: escRate > 20 ? 'var(--red-t)' : 'var(--t1)' },
-    { val: d.sla_breach_count || 0, lbl: 'Open SLA breaches', sub: '', clr: (d.sla_breach_count || 0) > 0 ? 'var(--amb-t)' : 'var(--grn-t)' },
-    { val: frtLabel, lbl: 'Avg first response time', sub: frtSub, clr: 'var(--t1)' },
-    { val: autoPct === null ? '—' : autoPct + '%', lbl: 'Fully automated (L1) resolutions', sub: autoPct === null ? 'No data yet' : '', clr: 'var(--grn-t)' },
+    { val: rate + '%', lbl: 'Escalation rate',
+      sub: (d.escalations || 0) + ' escalations / ' + (d.inbound_queries || 0) + ' queries',
+      tone: 'red', icon: '&#8599;', clr: rate > 40 ? 'var(--red-t)' : 'var(--t1)',
+      tip: 'Escalated tickets ÷ total inbound customer queries × 100. Counts every query the customer sent (not just tickets), so routine non-escalating queries pull the rate down — it is a real 0–100% rate, not a count that only climbs.' },
+    { val: avgRisk, lbl: 'Avg risk score',
+      sub: 'open tickets (0–100)',
+      tone: 'amb', icon: '&#9888;', clr: avgRisk >= 70 ? 'var(--red-t)' : (avgRisk >= 40 ? 'var(--amb-t)' : 'var(--t1)'),
+      tip: 'Average of priority_score across OPEN tickets (from the ticket priority-scoring engine). One number for how hot the current queue is; 0 = calm, 100 = severe.' },
+    { val: d.critical_open || 0, lbl: 'Critical load',
+      sub: 'critical open tickets',
+      tone: 'red', icon: '&#128293;', clr: (d.critical_open || 0) > 0 ? 'var(--red-t)' : 'var(--grn-t)',
+      tip: 'Count of OPEN tickets with priority = critical. Immediate triage signal — how many high-severity issues are live right now.' },
+    { val: d.drafts_handled || 0, lbl: 'Drafts handled',
+      sub: 'human-in-the-loop replies sent',
+      tone: 'grn', icon: '&#9998;', clr: 'var(--grn-t)',
+      tip: 'Reply drafts an agent reviewed and sent (reply_drafts with status = sent). Throughput of the human-in-the-loop review gate.' },
   ];
-  el.innerHTML = cards.map(function(c) {
-    return '<div class="stat-card"><div class="stat-val" style="color:' + c.clr + '">' + c.val + '</div><div class="stat-lbl">' + c.lbl + '</div>' + (c.sub ? '<div class="stat-sub">' + c.sub + '</div>' : '') + '</div>';
-  }).join('');
+  el.innerHTML = renderKpiTiles(cards);
+}
+
+// Two charts for the Solution Performance section: open tickets by risk band, and why
+// tickets escalate. Both driven by /analytics/solution-performance (LabelCount lists).
+function renderSolutionCharts(sp) {
+  var d = sp || {};
+  var riskColors = { Critical: 'var(--red)', High: 'var(--amb)', Medium: 'var(--blue)', Low: 'var(--grn)' };
+  var riskItems = (d.by_risk_band || []).map(function(b){ return { label: b.label, count: b.count }; });
+  renderBars('riskBandPanel', riskItems, 'label', 'count', function(lbl){ return riskColors[lbl] || 'var(--t3)'; });
+
+  var reasonItems = (d.by_escalation_reason || []).map(function(b){ return { label: b.label, count: b.count }; });
+  renderBars('escReasonPanel', reasonItems, 'label', 'count', null);
 }
 
 function renderSentimentPanel(data) {
@@ -1809,9 +1891,11 @@ function renderSentimentPanel(data) {
   var pos = Math.round((data.positive/total)*100);
   var neg = Math.round((data.negative/total)*100);
   var neu = Math.max(0, 100-pos-neg);
-  el.innerHTML = '<div style="font-size:22px;font-weight:600;margin-bottom:4px">' + total + ' messages</div>'
+  el.innerHTML = '<div class="sent-total">' + total + '<span class="sent-total-lbl"> messages</span></div>'
     + '<div class="sent-bar"><div class="sent-pos" style="flex:'+pos+'"></div><div class="sent-neu" style="flex:'+neu+'"></div><div class="sent-neg" style="flex:'+neg+'"></div></div>'
-    + '<div class="sent-row"><span class="sent-lbl" style="color:var(--grn-t)">'+pos+'% positive</span><span class="sent-lbl">'+neu+'% neutral</span><span class="sent-lbl" style="color:var(--red-t)">'+neg+'% negative</span></div>';
+    + '<div class="sent-row"><span class="sent-lbl"><span class="sent-key sent-key-pos"></span>'+pos+'% positive</span>'
+    + '<span class="sent-lbl"><span class="sent-key sent-key-neu"></span>'+neu+'% neutral</span>'
+    + '<span class="sent-lbl"><span class="sent-key sent-key-neg"></span>'+neg+'% negative</span></div>';
 }
 function renderTrendPanel(data) {
   var el = document.getElementById('trendPanel');
@@ -1831,11 +1915,14 @@ function renderTrendPanel(data) {
 function renderAgentPanel(data) {
   var el = document.getElementById('agentPanel');
   if (!data||!data.length) { el.innerHTML = '<div class="empty-state">No agent data yet</div>'; return; }
-  var rows = data.map(function(a) {
+  var TEAM_CLR = ['--blue','--pur','--grn','--amb','--pnk','--red'];
+  var rows = data.map(function(a, i) {
     var avg = a.avg_handle_minutes>=60 ? (a.avg_handle_minutes/60).toFixed(1)+' hr' : a.avg_handle_minutes.toFixed(0)+' min';
-    return '<tr><td style="font-weight:500;color:var(--t1)">'+escH(a.agent)+'</td><td>'+a.handled+'</td><td>'+avg+'</td></tr>';
+    var dot = 'var(' + TEAM_CLR[i % TEAM_CLR.length] + ')';
+    return '<tr><td class="llm-op-cell"><span class="llm-op-dot" style="background:'+dot+'"></span>'+escH(a.agent)+'</td>'
+      + '<td class="llm-num">'+a.handled+'</td><td class="llm-num">'+avg+'</td></tr>';
   }).join('');
-  el.innerHTML = '<table class="mini-table"><thead><tr><th>Team/Agent</th><th>Handled</th><th>Avg handle time</th></tr></thead><tbody>'+rows+'</tbody></table>';
+  el.innerHTML = '<table class="mini-table llm-op-table"><thead><tr><th>Team/Agent</th><th class="llm-num">Handled</th><th class="llm-num">Avg handle time</th></tr></thead><tbody>'+rows+'</tbody></table>';
 }
 
 function feedDotColor(evType) {
