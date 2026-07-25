@@ -594,7 +594,13 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .dash-refresh svg{width:12px;height:12px;fill:var(--t3)}
 .spinning{animation:spin .8s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
-.section-lbl{font-size:11px;font-weight:600;color:var(--t2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px}
+/* Analytics section headers — coloured left accent bar + icon chip + label */
+.section-lbl{display:flex;align-items:center;gap:10px;font-size:13px;font-weight:700;color:var(--t1);letter-spacing:.2px;margin-bottom:14px;padding-left:12px;position:relative}
+.section-lbl::before{content:"";position:absolute;left:0;top:1px;bottom:1px;width:4px;border-radius:3px;background:var(--blue)}
+.section-ico{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:7px;font-size:14px;background:var(--blue-bg);border:1px solid var(--blue-bd);line-height:1}
+.sec-finops::before{background:linear-gradient(var(--grn),var(--grn-t))}.sec-finops .section-ico{background:var(--grn-bg);border-color:var(--grn-bd)}
+.sec-care::before{background:linear-gradient(var(--blue),var(--blue-t))}.sec-care .section-ico{background:var(--blue-bg);border-color:var(--blue-bd)}
+.sec-solution::before{background:linear-gradient(var(--amb),var(--amb-t))}.sec-solution .section-ico{background:var(--amb-bg);border-color:var(--amb-bd)}
 .stat-grid{display:grid;gap:12px}
 .stat-card{background:var(--surf);border:1px solid var(--bdr);border-radius:var(--r);padding:14px 16px}
 .stat-val{font-size:26px;font-weight:600;color:var(--t1);margin-bottom:2px}

@@ -1534,6 +1534,15 @@ Removed the two orphaned dead render functions (`renderTrendPanel`, `renderResol
 the now-unused `/analytics/trend` fetch from `loadAnalytics`; re-indexed the Promise.all results
 (solution-performance moved 8→7). Asset version `app.js?v=20260726-4`. `node --check` OK.
 
+### Analytics — section headers restyled (accent bar + icon)
+The three section labels (FinOps / Customer Care / Solution Performance) were plain 11px grey
+uppercase text that read as captions, not structure. Restyled `.section-lbl` into a coloured
+gradient left accent bar + an icon chip + a larger/bolder/darker label (13px/700), colour-coded
+per section (FinOps green 💰, Customer Care blue 🎧, Solution Performance amber ⚡). Heading-only
+(no description line, per user). Frontend-only (`apps/admin-ui/index.html` + `style.css`,
+`style.css?v=20260726-4`); `.section-lbl` is used only on these three headers (verified). Live via
+bind mount, reload only.
+
 ### Tests + commits
 New `tests/test_analytics_observability.py` (8 tests, 0 Groq): version-tag changes/determinism/None,
 escalation denominator = inbound turns, reason-merge, and channels-exclude-fake. Full suite:
