@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Omnichannel CX Accelerator - Ticket Operations</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/admin-ui/assets/style.css?v=20260726-4">
+<link rel="stylesheet" href="/admin-ui/assets/style.css?v=20260726-9">
 </head>
 <body>
 
@@ -364,8 +364,17 @@
           </div>
 
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
-            <div class="chart-card"><div class="chart-title">Cost by model / model version</div><div id="costByModelPanel"><div class="empty-state">Loading…</div></div></div>
-            <div class="chart-card"><div class="chart-title">Latency by model / model version</div><div id="latencyByModelPanel"><div class="empty-state">Loading…</div></div></div>
+            <div class="chart-card"><div class="chart-title">Avg cost per call — by model / version</div><div id="costByModelPanel"><div class="empty-state">Loading…</div></div></div>
+            <div class="chart-card"><div class="chart-title">Avg latency per call — by model / version</div><div id="latencyByModelPanel"><div class="empty-state">Loading…</div></div></div>
+          </div>
+
+          <div class="chart-card">
+            <div class="chart-title">Usage over time — by model / version</div>
+            <div id="llmTimeLegend" class="llm-tl-legend"></div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:18px">
+              <div><div class="llm-tl-sub">Cost ($) per hour</div><div id="llmCostTrend"><div class="empty-state">Loading…</div></div></div>
+              <div><div class="llm-tl-sub">Tokens per hour</div><div id="llmTokenTrend"><div class="empty-state">Loading…</div></div></div>
+            </div>
           </div>
         </div>
 
@@ -380,13 +389,9 @@
             <div class="kpi-tile kpi-amb"><div class="kpi-val">—</div><div class="kpi-lbl">Loading…</div></div>
           </div>
 
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px">
             <div class="chart-card"><div class="chart-title">Tickets by channel</div><div id="channelBars"><div class="empty-state">Loading…</div></div></div>
             <div class="chart-card"><div class="chart-title">Top intent trends (BFSI)</div><div id="intentBars"><div class="empty-state">Loading…</div></div></div>
-          </div>
-
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
-            <div class="chart-card"><div class="chart-title">Customer sentiment</div><div id="sentimentPanel"><div class="empty-state">Loading…</div></div></div>
             <div class="chart-card"><div class="chart-title">Agent / team performance</div><div id="agentPanel"><div class="empty-state">Loading…</div></div></div>
           </div>
         </div>
@@ -581,6 +586,6 @@
   </div>
 </div>
 
-<script src="/admin-ui/assets/app.js?v=20260726-4"></script>
+<script src="/admin-ui/assets/app.js?v=20260726-6f"></script>
 </body>
 </html>

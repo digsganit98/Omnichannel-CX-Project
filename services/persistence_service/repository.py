@@ -889,6 +889,27 @@ class SQLiteCXRepository:
                 args,
             ).fetchall()
 
+            # Hourly time-series per (model, version) — feeds the two side-by-side
+            # cost-over-time / tokens-over-time line charts (one line per model+version).
+            # created_at is stored UTC; bucket by IST (UTC+5:30) so the hour labels match
+            # the operator's local clock. (India-only deployment — same assumption as the
+            # WhatsApp +91 normalization.)
+            time_series = conn.execute(
+                f"""
+                SELECT strftime('%Y-%m-%dT%H:00', created_at, '+5 hours', '+30 minutes') AS hour,
+                       model,
+                       COALESCE(model_version, 'unknown') AS model_version,
+                       COUNT(*) AS calls,
+                       SUM(total_tokens) AS total_tokens,
+                       SUM(estimated_cost_usd) AS estimated_cost_usd
+                FROM llm_usage_events
+                {where}
+                GROUP BY hour, model, COALESCE(model_version, 'unknown')
+                ORDER BY hour
+                """,
+                args,
+            ).fetchall()
+
         return {
             "window_days": days,
             "totals": {
@@ -905,6 +926,7 @@ class SQLiteCXRepository:
             "by_channel": [self._usage_group(row) for row in by_channel],
             "by_intent": [self._usage_group(row) for row in by_intent],
             "by_resolution_level": [self._usage_group(row) for row in by_resolution_level],
+            "time_series": [self._usage_group(row) for row in time_series],
         }
 
     def get_conversation(self, conversation_id: str) -> dict | None:

@@ -1543,6 +1543,32 @@ per section (FinOps green 💰, Customer Care blue 🎧, Solution Performance am
 `style.css?v=20260726-4`); `.section-lbl` is used only on these three headers (verified). Live via
 bind mount, reload only.
 
+### Analytics — LLM observability panels reworked (per user review)
+Several rounds of iteration on the FinOps LLM section:
+- **Operations table:** Calls, Token share, Cost AND Avg latency each now render as their own meter
+  bar (bar + value), each scaled to that column's max, coloured by the operation. (Fixed a layout
+  bug where `display:flex` on the `<td>` broke table columns — the flex row moved to an inner
+  `.llm-meter-wrap` so the cells keep their columns.)
+- **Cost/Latency by model-version tables → comparison strips:** one bar row per model+version,
+  **normalized PER CALL** (cost = total÷calls; latency already avg) so versions with different call
+  counts compare fairly instead of a volume race. Same bar colour for every row (the metric is the
+  same; version identity is carried by the tag chip, not bar colour). Label = model name + the
+  version tag as an inline chip, with the human-readable config on the line below (no more
+  duplicated version stacked above its own hash). Card titles state the basis: "Avg cost per call —
+  by model / version" / "Avg latency per call — …".
+- **Usage-over-time line charts (new):** two side-by-side hourly line charts (Cost | Tokens), one
+  coloured line per model+version, shared X-axis + colour legend. Backend adds a `time_series` block
+  to the observability summary (hourly × model × version). Rewrote the renderer: large viewBox (true
+  small axis fonts), gradient area fill, soft dashed grid, a JS crosshair + tooltip (native `<title>`
+  was unreliable) showing every series' value at the hovered hour. **Timezone bug fixed:**
+  `created_at` is stored UTC; the SQL now buckets by **IST (+5:30)** and the axis is labelled
+  "Time (IST)" (India-only deployment, same assumption as the WhatsApp `+91` normalization).
+- **Removed the Customer sentiment card;** the remaining three (Tickets by channel · Top intent
+  trends · Agent/team performance) now sit side by side in one row. `renderSentimentPanel` guarded
+  for the missing container.
+- A granularity selector (hourly/daily/weekly/monthly/quarterly) was discussed and **deferred** (data
+  is currently one day; coarse grains need per-grain time ranges — noted for later).
+
 ### Tests + commits
 New `tests/test_analytics_observability.py` (8 tests, 0 Groq): version-tag changes/determinism/None,
 escalation denominator = inbound turns, reason-merge, and channels-exclude-fake. Full suite:

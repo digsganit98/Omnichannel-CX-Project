@@ -1644,7 +1644,7 @@ window.loadAnalytics = async function() {
     renderLlmUsagePanel(results[5]);
     renderCostByModelPanel(results[5]);
     renderLatencyByModelPanel(results[5]);
-    renderSentimentPanel(results[6]);
+    renderLlmTimeTrends(results[5]);
     renderSolutionStats(results[7]);
     renderSolutionCharts(results[7]);
   } catch(e) {
@@ -1729,6 +1729,17 @@ function llmOpColor(name, idx) {
   return 'var(' + LLM_OP_COLORS[idx % LLM_OP_COLORS.length] + ')';
 }
 
+// A table cell that is a mini meter: a proportional bar + the value beside it.
+// frac = 0..1 (share of the column max), color = css colour, valueLabel = printed text.
+// The <td> stays a real table cell; the flex row lives on an inner wrapper so the
+// four metric cells keep their own table columns.
+function llmMeterCell(frac, color, valueLabel) {
+  var pct = Math.max(2, Math.round((frac || 0) * 100));
+  return '<td class="llm-meter-cell"><div class="llm-meter-wrap">'
+    + '<div class="llm-meter"><div class="llm-meter-fill" style="width:' + pct + '%;background:' + color + '"></div></div>'
+    + '<span class="llm-meter-val">' + valueLabel + '</span></div></td>';
+}
+
 function renderLlmUsagePanel(data) {
   var el = document.getElementById('llmUsagePanel');
   if (!el) return;
@@ -1747,21 +1758,27 @@ function renderLlmUsagePanel(data) {
     { val: avg.toFixed(0) + ' ms', lbl: 'Avg latency', tone: 'amb', icon: '&#9201;' },
   ];
 
-  // Operation rows become mini bar-chart rows: a coloured dot + a token-share meter,
-  // so relative token weight reads at a glance instead of hunting the numbers column.
+  // Every metric column becomes its own meter (bar + value), each scaled to that column's
+  // max across operations, coloured by the row's operation colour — so Calls, Token share,
+  // Cost and Latency all read as mini bar charts, not bare numbers.
   var ops = (data.by_operation || []).slice();
-  var maxTok = ops.reduce(function(m, r) { return Math.max(m, Number(r.total_tokens || 0)); }, 0) || 1;
+  var maxTok   = ops.reduce(function(m, r){ return Math.max(m, Number(r.total_tokens || 0)); }, 0) || 1;
+  var maxCalls = ops.reduce(function(m, r){ return Math.max(m, Number(r.calls || 0)); }, 0) || 1;
+  var maxCost  = ops.reduce(function(m, r){ return Math.max(m, Number(r.estimated_cost_usd || 0)); }, 0) || 1;
+  var maxLat   = ops.reduce(function(m, r){ return Math.max(m, Number(r.avg_latency_ms || 0)); }, 0) || 1;
   var opRows = ops.map(function(row, i) {
     var clr = llmOpColor(row.operation, i);
     var tok = Number(row.total_tokens || 0);
-    var pct = Math.max(2, Math.round((tok / maxTok) * 100));
+    var cl  = Number(row.calls || 0);
+    var co  = Number(row.estimated_cost_usd || 0);
+    var lat = Number(row.avg_latency_ms || 0);
     return '<tr>'
       + '<td class="llm-op-cell"><span class="llm-op-dot" style="background:' + clr + '"></span>'
         + escH((row.operation || 'unknown').replace(/_/g, ' ')) + '</td>'
-      + '<td class="llm-num">' + (row.calls || 0) + '</td>'
-      + '<td class="llm-meter-cell"><div class="llm-meter"><div class="llm-meter-fill" style="width:' + pct + '%;background:' + clr + '"></div></div>'
-        + '<span class="llm-meter-val">' + tok.toLocaleString() + '</span></td>'
-      + '<td class="llm-num llm-cost">$' + Number(row.estimated_cost_usd || 0).toFixed(6) + '</td>'
+      + llmMeterCell(cl / maxCalls, clr, cl.toLocaleString())
+      + llmMeterCell(tok / maxTok, clr, tok.toLocaleString())
+      + llmMeterCell(co / maxCost, clr, '$' + co.toFixed(6))
+      + llmMeterCell(lat / maxLat, clr, lat.toFixed(0) + ' ms')
       + '</tr>';
   }).join('');
 
@@ -1776,9 +1793,9 @@ function renderLlmUsagePanel(data) {
     }).join('')
     + '</div>'
     + '<table class="mini-table llm-op-table"><thead><tr>'
-      + '<th>Operation</th><th class="llm-num">Calls</th><th>Token share</th><th class="llm-num">Cost</th>'
+      + '<th>Operation</th><th>Calls</th><th>Token share</th><th>Cost</th><th>Avg latency</th>'
       + '</tr></thead><tbody>'
-    + (opRows || '<tr><td colspan="4">No operation breakdown yet</td></tr>')
+    + (opRows || '<tr><td colspan="5">No operation breakdown yet</td></tr>')
     + '</tbody></table>';
 }
 
@@ -1802,33 +1819,207 @@ function llmVersionCell(row) {
   return '<span class="llm-ver">' + escH(v) + '</span>' + decoded;
 }
 
-function renderCostByModelPanel(data) {
-  var el = document.getElementById('costByModelPanel');
+// A version label for a by_model row: MODEL name as the heading with the version tag as an
+// inline chip beside it, and the human-readable config on the line below. The tag is an id
+// FOR the config shown — never a duplicate of it stacked above.
+function llmVerStripLabel(row) {
+  var v = row.model_version || 'unknown';
+  var isUnknown = (v === 'unknown' || !v);
+  var cfg = row.model_config || null;
+  var sub;
+  if (cfg && typeof cfg === 'object') {
+    var parts = [];
+    if (cfg.temperature != null) parts.push('temp ' + cfg.temperature);
+    parts.push(cfg.max_tokens != null ? 'max ' + cfg.max_tokens : 'max —');
+    parts.push(cfg.top_p != null ? 'top_p ' + cfg.top_p : 'top_p —');
+    sub = escH(parts.join(' · '));
+  } else {
+    sub = 'config not recorded';  // legacy 'unknown' rows predate the version feature
+  }
+  return '<div class="llm-strip-head">'
+    + '<span class="llm-strip-model">' + escH(row.model || 'unknown') + '</span>'
+    + '<span class="llm-ver ' + (isUnknown ? 'llm-ver-unknown' : '') + '">' + escH(v) + '</span>'
+    + '</div>'
+    + '<span class="llm-strip-sub">' + sub + '</span>';
+}
+
+// Comparison strips: one row per model-version, a bar normalized to the metric's max + the value.
+// valueOf(row) -> the number to plot (PER-CALL, so versions used a different number of times
+// compare fairly — comparing raw totals would just reward whichever version ran more).
+function renderVersionStrips(containerId, rows, valueOf, fmt) {
+  var el = document.getElementById(containerId);
   if (!el) return;
-  var rows = (data && data.by_model) || [];
   if (!rows.length) { el.innerHTML = '<div class="empty-state">No model usage recorded yet</div>'; return; }
-  var body = rows.map(function(row) {
-    return '<tr><td class="llm-model-cell">' + escH(row.model || 'unknown') + '</td>'
-      + '<td>' + llmVersionCell(row) + '</td>'
-      + '<td class="llm-num">' + (row.calls || 0) + '</td>'
-      + '<td class="llm-num">' + Number(row.total_tokens || 0).toLocaleString() + '</td>'
-      + '<td class="llm-num llm-cost">$' + Number(row.estimated_cost_usd || 0).toFixed(6) + '</td></tr>';
+  var max = rows.reduce(function(m, r){ return Math.max(m, Number(valueOf(r) || 0)); }, 0) || 1;
+  el.innerHTML = rows.map(function(row) {
+    var val = Number(valueOf(row) || 0);
+    var pct = Math.max(3, Math.round((val / max) * 100));
+    // Same colour for every row — the bars encode the same metric; different colours would
+    // wrongly imply different meaning. (Version identity is carried by the tag chip, not the bar.)
+    var fill = 'var(--pur)';
+    return '<div class="llm-strip">'
+      + '<div class="llm-strip-label">' + llmVerStripLabel(row) + '</div>'
+      + '<div class="llm-strip-bar"><div class="llm-strip-track"><div class="llm-strip-fill" style="width:' + pct + '%;background:' + fill + '"></div></div>'
+      + '<span class="llm-strip-val">' + fmt(val, row) + '</span></div>'
+      + '</div>';
   }).join('');
-  el.innerHTML = '<table class="mini-table llm-model-table"><thead><tr><th>Model</th><th>Version</th><th class="llm-num">Calls</th><th class="llm-num">Tokens</th><th class="llm-num">Cost</th></tr></thead><tbody>' + body + '</tbody></table>';
+}
+
+function renderCostByModelPanel(data) {
+  // Avg cost PER CALL (total ÷ calls) — a fair per-config comparison, not a volume race.
+  // ("per call" is stated in the card title, so the value stays clean.)
+  renderVersionStrips('costByModelPanel', (data && data.by_model) || [],
+    function(r){ var c = Number(r.calls || 0); return c ? Number(r.estimated_cost_usd || 0) / c : 0; },
+    function(v){ return '$' + v.toFixed(6); });
 }
 
 function renderLatencyByModelPanel(data) {
-  var el = document.getElementById('latencyByModelPanel');
-  if (!el) return;
-  var rows = (data && data.by_model) || [];
-  if (!rows.length) { el.innerHTML = '<div class="empty-state">No model usage recorded yet</div>'; return; }
-  var body = rows.map(function(row) {
-    return '<tr><td class="llm-model-cell">' + escH(row.model || 'unknown') + '</td>'
-      + '<td>' + llmVersionCell(row) + '</td>'
-      + '<td class="llm-num">' + (row.calls || 0) + '</td>'
-      + '<td class="llm-num">' + Number(row.avg_latency_ms || 0).toFixed(0) + ' ms</td></tr>';
-  }).join('');
-  el.innerHTML = '<table class="mini-table llm-model-table"><thead><tr><th>Model</th><th>Version</th><th class="llm-num">Calls</th><th class="llm-num">Avg latency</th></tr></thead><tbody>' + body + '</tbody></table>';
+  // avg_latency_ms is already an average per call.
+  renderVersionStrips('latencyByModelPanel', (data && data.by_model) || [],
+    function(r){ return Number(r.avg_latency_ms || 0); },
+    function(v){ return v.toFixed(0) + ' ms'; });
+}
+
+// Two side-by-side hourly line charts (Cost | Tokens), one coloured line per model+version.
+// Shared X-axis (hours, IST) and a shared colour legend above both. Interactive crosshair +
+// tooltip driven in JS (native <title> was unreliable and only on the tiny dot).
+var LLM_TL_COLORS = ['#2563eb', '#7c3aed', '#16a34a', '#d97706', '#db2777', '#dc2626', '#0ea5e9', '#65a30d'];
+function renderLlmTimeTrends(data) {
+  var series = (data && data.time_series) || [];
+  var legendEl = document.getElementById('llmTimeLegend');
+  var costEl = document.getElementById('llmCostTrend');
+  var tokEl = document.getElementById('llmTokenTrend');
+  if (!costEl || !tokEl) return;
+  if (!series.length) {
+    if (legendEl) legendEl.innerHTML = '';
+    costEl.innerHTML = tokEl.innerHTML = '<div class="empty-state">No time-series data yet</div>';
+    return;
+  }
+  var hours = []; var hourSet = {};
+  var keys = []; var keyIndex = {};
+  series.forEach(function(r) {
+    if (!hourSet[r.hour]) { hourSet[r.hour] = 1; hours.push(r.hour); }
+    var key = (r.model || 'unknown') + ' · ' + (r.model_version || 'unknown');
+    if (keyIndex[key] == null) { keyIndex[key] = keys.length; keys.push(key); }
+  });
+  hours.sort();
+  var byKey = {};
+  keys.forEach(function(k){ byKey[k] = {}; });
+  series.forEach(function(r) {
+    var key = (r.model || 'unknown') + ' · ' + (r.model_version || 'unknown');
+    byKey[key][r.hour] = { cost: Number(r.estimated_cost_usd || 0), tok: Number(r.total_tokens || 0) };
+  });
+  if (legendEl) {
+    legendEl.innerHTML = keys.map(function(k, i) {
+      return '<span class="llm-tl-lg"><span class="llm-tl-sw" style="background:' + LLM_TL_COLORS[i % LLM_TL_COLORS.length] + '"></span>' + escH(k) + '</span>';
+    }).join('');
+  }
+  _llmLineChart(costEl, hours, keys, byKey, 'cost', function(v){ return '$' + v.toFixed(6); });
+  _llmLineChart(tokEl, hours, keys, byKey, 'tok', function(v){ return v.toLocaleString() + ' tokens'; });
+}
+
+// hour string is "YYYY-MM-DDTHH:00" already in IST (converted in SQL). Show "HH:00".
+function _llmHourLabel(h){ return h.slice(11, 16); }
+
+// Compact axis tick label (cost in $, tokens as k).
+function _llmShort(v, metric) {
+  if (metric === 'cost') return '$' + (v >= 0.01 ? v.toFixed(3) : v.toFixed(5));
+  return v >= 1000 ? (v/1000).toFixed(v >= 10000 ? 0 : 1) + 'k' : Math.round(v);
+}
+
+// Render an interactive line chart into `host`. Uses a big viewBox (so text renders at true
+// size), an area gradient under each line, a soft dashed grid, and a JS crosshair+tooltip.
+function _llmLineChart(host, hours, keys, byKey, metric, fmt) {
+  var W = 720, H = 300, mL = 64, mR = 18, mT = 16, mB = 46;
+  var pw = W - mL - mR, ph = H - mT - mB;
+  var maxV = 0;
+  keys.forEach(function(k){ hours.forEach(function(h){ var d = byKey[k][h]; if (d) maxV = Math.max(maxV, d[metric]); }); });
+  if (maxV <= 0) maxV = 1;
+  maxV = maxV * 1.12; // headroom so the peak isn't glued to the top
+  var n = hours.length;
+  var X = function(i){ return n <= 1 ? mL + pw/2 : mL + pw*i/(n-1); };
+  var Y = function(v){ return mT + ph - (ph*v/maxV); };
+  var uid = 'g' + Math.random().toString(36).slice(2,7);
+  var s = '<svg viewBox="0 0 ' + W + ' ' + H + '" class="llm-tl-svg" preserveAspectRatio="xMidYMid meet">';
+  s += '<defs>';
+  keys.forEach(function(k, ki){
+    var c = LLM_TL_COLORS[ki % LLM_TL_COLORS.length];
+    s += '<linearGradient id="' + uid + '-' + ki + '" x1="0" y1="0" x2="0" y2="1">'
+      + '<stop offset="0%" stop-color="' + c + '" stop-opacity="0.18"/>'
+      + '<stop offset="100%" stop-color="' + c + '" stop-opacity="0"/></linearGradient>';
+  });
+  s += '</defs>';
+  // soft dashed gridlines + y ticks
+  for (var g = 0; g <= 4; g++) {
+    var yy = mT + ph*g/4, val = maxV*(1 - g/4);
+    s += '<line x1="' + mL + '" y1="' + yy + '" x2="' + (W-mR) + '" y2="' + yy + '" class="llm-tl-grid"/>';
+    s += '<text x="' + (mL-10) + '" y="' + (yy+4) + '" text-anchor="end" class="llm-tl-tick">' + _llmShort(val, metric) + '</text>';
+  }
+  // x tick labels + baseline
+  s += '<line x1="' + mL + '" y1="' + (mT+ph) + '" x2="' + (W-mR) + '" y2="' + (mT+ph) + '" class="llm-tl-axis"/>';
+  hours.forEach(function(h, i){
+    s += '<text x="' + X(i) + '" y="' + (mT+ph+20) + '" text-anchor="middle" class="llm-tl-tick">' + escH(_llmHourLabel(h)) + '</text>';
+  });
+  s += '<text x="' + (W-mR) + '" y="' + (H-6) + '" text-anchor="end" class="llm-tl-axislbl">Time (IST)</text>';
+  // area + line + dots per series
+  keys.forEach(function(k, ki){
+    var color = LLM_TL_COLORS[ki % LLM_TL_COLORS.length];
+    var segs = [], cur = [];
+    hours.forEach(function(h, i){
+      var d = byKey[k][h];
+      if (d) cur.push([X(i), Y(d[metric])]);
+      else if (cur.length){ segs.push(cur); cur = []; }
+    });
+    if (cur.length) segs.push(cur);
+    segs.forEach(function(pts){
+      if (pts.length > 1){
+        // area
+        var ap = 'M ' + pts[0][0] + ' ' + (mT+ph);
+        pts.forEach(function(p){ ap += ' L ' + p[0] + ' ' + p[1]; });
+        ap += ' L ' + pts[pts.length-1][0] + ' ' + (mT+ph) + ' Z';
+        s += '<path d="' + ap + '" fill="url(#' + uid + '-' + ki + ')"/>';
+        // line
+        s += '<polyline points="' + pts.map(function(p){return p[0]+','+p[1];}).join(' ') + '" fill="none" stroke="' + color + '" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>';
+      }
+    });
+    hours.forEach(function(h, i){
+      var d = byKey[k][h];
+      if (d) s += '<circle cx="' + X(i) + '" cy="' + Y(d[metric]) + '" r="3.6" fill="' + color + '" stroke="#fff" stroke-width="1.6"/>';
+    });
+  });
+  // invisible crosshair layer (one vertical guide + hit rects per hour)
+  s += '<line class="llm-tl-cross" x1="0" y1="' + mT + '" x2="0" y2="' + (mT+ph) + '" style="display:none"/>';
+  s += '</svg>';
+  host.innerHTML = s;
+  host.style.position = 'relative';
+
+  // JS hover: nearest-hour tooltip listing every series' value at that hour.
+  var svg = host.querySelector('svg');
+  var cross = svg.querySelector('.llm-tl-cross');
+  var tip = host.querySelector('.llm-tl-tip');
+  if (!tip){ tip = document.createElement('div'); tip.className = 'llm-tl-tip'; tip.style.display = 'none'; host.appendChild(tip); }
+  function pt(evt){ var r = svg.getBoundingClientRect(); return (evt.clientX - r.left) / r.width * W; }
+  svg.addEventListener('mousemove', function(evt){
+    if (n === 0) return;
+    var vx = pt(evt);
+    var i = n <= 1 ? 0 : Math.round((vx - mL) / (pw/(n-1)));
+    i = Math.max(0, Math.min(n-1, i));
+    var h = hours[i], cx = X(i);
+    cross.setAttribute('x1', cx); cross.setAttribute('x2', cx); cross.style.display = '';
+    var rows = keys.map(function(k, ki){
+      var d = byKey[k][h]; if (!d) return '';
+      var c = LLM_TL_COLORS[ki % LLM_TL_COLORS.length];
+      return '<div class="llm-tl-tip-row"><span class="llm-tl-tip-sw" style="background:' + c + '"></span>'
+        + escH(k) + ' <b>' + fmt(d[metric]) + '</b></div>';
+    }).filter(Boolean).join('');
+    tip.innerHTML = '<div class="llm-tl-tip-h">' + escH(_llmHourLabel(h)) + ' IST</div>' + rows;
+    tip.style.display = 'block';
+    var rect = svg.getBoundingClientRect();
+    var px = cx / W * rect.width;
+    tip.style.left = Math.min(rect.width - tip.offsetWidth - 8, px + 12) + 'px';
+    tip.style.top = '8px';
+  });
+  svg.addEventListener('mouseleave', function(){ cross.style.display = 'none'; tip.style.display = 'none'; });
 }
 
 function renderSolutionStats(sp) {
@@ -1873,6 +2064,7 @@ function renderSolutionCharts(sp) {
 
 function renderSentimentPanel(data) {
   var el = document.getElementById('sentimentPanel');
+  if (!el) return;  // Customer sentiment card removed from the layout
   var total = data.total || 0;
   if (!total) { el.innerHTML = '<div class="empty-state">No sentiment data yet</div>'; return; }
   var pos = Math.round((data.positive/total)*100);
