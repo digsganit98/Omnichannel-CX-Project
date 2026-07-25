@@ -7,6 +7,24 @@ from shared.schemas.messages import Channel, InboundMessage
 from shared.utils.ids import new_id
 
 
+def _normalize_wa_recipient(to_id: str) -> str:
+    """Ensure the WhatsApp recipient number is in Meta's expected format.
+
+    A customer's number can be stored bare ('7890864700') because the inbound
+    path only does `.lstrip('+')` — but Meta rejects a bare 10-digit number with
+    400 '(#131030) Recipient phone number not in allowed list'. Prepend the Indian
+    country code (91) when the number is a bare 10-digit; leave an already-prefixed
+    number (12-digit starting '91') or any other format unchanged. India-only
+    assumption — safe here because all BFSI data is Indian.
+    """
+    digits = "".join(c for c in (to_id or "") if c.isdigit())
+    if not digits:
+        return to_id
+    if len(digits) == 10:
+        return "91" + digits
+    return digits
+
+
 class WhatsAppMetaAdapter(BaseChannelAdapter):
     channel = Channel.WHATSAPP
 
@@ -51,7 +69,7 @@ class WhatsAppMetaAdapter(BaseChannelAdapter):
                 headers={"Authorization": f"Bearer {access_token}"},
                 json={
                     "messaging_product": "whatsapp",
-                    "to": message.to_id,
+                    "to": _normalize_wa_recipient(message.to_id),
                     "type": "text",
                     "text": {"body": message.text},
                 },

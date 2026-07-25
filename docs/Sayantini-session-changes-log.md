@@ -88,6 +88,8 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 53 — Offer send: dedupe push channels by destination:** The offer send loop messaged every whatsapp/email identifier, so a customer whose WhatsApp number was stored both bare (`7890864700`) and with the country code (`917890864700`) got the offer TWICE on WhatsApp. Added `_dedupe_push_identifiers` (normalize phone → strip non-digits + drop leading `91`; email → lowercased) so one message goes per real destination. Backend; symptom fix — the duplicate-identifier root (identity normalization on write) is a separate deferred item.
 - **Fix 55 — Line breaks render in the Detailed conversation view:** `.det-q-text` / `.det-r-text` were missing `white-space:pre-wrap` (every other reply surface — spine, portal, modal — had it), so multi-line/multi-paragraph AI replies collapsed to one run-on block. Added `pre-wrap` to both; CSS-only, display-only.
 - **Fix 56 — Graceful fallback when the LLM is unavailable (no more raw KB dump to the customer):** when generation returns `llm_used=False` (e.g. Groq 429/error), `rag_pipeline.answer` used to send the customer the raw top KB passage + an internal `Source: [1] InboxIQ_BFSI_KB.pdf:p1` citation. Replaced that branch with a clean holding message ("I'm having trouble accessing that information right now. Let me connect you with a support specialist…"); collapsed the two non-LLM branches into one and dropped the old `else`'s false "a support ticket has been created" promise. Backend; `retrieval_backend`/`citations` telemetry unchanged.
+- **Fix 58 — WhatsApp offer failed to deliver (bare number → Meta 400):** an approved offer's WhatsApp turn 400'd (`#131030 Recipient phone number not in allowed list`) because the send loop used the customer's number stored **bare** (`7890864700`) — Meta needs the country code. Normal replies were unaffected (they mirror the sender's already-`91` inbound number). Added `_normalize_wa_recipient()` in [whatsapp_meta.py](../services/channel_adapter/whatsapp_meta.py) `send_outbound` (bare 10-digit → prepend `91`; already-prefixed/`+91` → digits; empty/None passthrough) so ALL WhatsApp sends use a Meta-valid format. Symptom fix (Level 1) — the duplicate-number ROW (identity normalization on write) is still the deferred root, same as Fix 53. Backend (api rebuilt); India-only `91` assumption (safe: all BFSI data Indian).
+- **Fix 57 — Customer name now correct in admin inbox + all reply greetings:** `display_name` (which drives BOTH the admin inbox and the reply salutation) was being set to the customer's **email** for whatsapp/email channels — discarding the real `name` Neo4j already returned — so the admin showed an email-derived name and the email greeting reconstructed a mangled "Sayantini S 55" from `sayantini.s.55@…`; WhatsApp/web replies had **no** greeting at all. Now stores the real Neo4j `name` in `display_name` ([graph.py:257](../services/orchestration_service/graph.py)), and WhatsApp/web replies open with `Hi {name},` (falls back to "Customer" for unknowns) ([orchestration_agents.py:628](../services/agent_service/orchestration_agents.py)). Backend (api rebuilt); pre-existing test_phase1 failures unchanged (proven by stash-baseline).
 - **Fix 54 — Connectors page: added Web Chat card + trimmed Email card:** Added a **Web Chat** connector card (customer-portal in-app chat, always Connected) as the 3rd card so order is WhatsApp · Email · Web Chat · Call · Jira — completing the channel story. Trimmed the Email card to just the badge + Inbound/Outbound Active rows (dropped Mailbox / Poll interval / Last poll / Emails processed + Poll-now button — demo-noisy, and "Last poll: Never / 0 processed" looked broken). Frontend-only; `triggerEmailInboxPoll` now dead (button gone) but left in place.
 
 ---
@@ -1282,10 +1284,121 @@ test asserted the old fallback text — checked before applying). Backend change
 rebuild to persist** (hot-copied into the running container for verification this session).
 
 ### Open / follow-ups
-- **api rebuild pending** to bake Fix 56 (backend) — until rebuilt it's only hot-copied into the live
-  container and a `--force-recreate` would revert it.
+- ~~**api rebuild pending** to bake Fix 56 (backend)~~ **RESOLVED** — the api image was rebuilt +
+  recreated after the fix (image built 2026-07-25T08:34:02Z, container recreated 12s later off it).
+  Verified: source is committed (`81e90ed`) AND the running container carries the fix (grep inside
+  `omnichannel-cx-project-api-1` → `/app/services/rag_service/rag_pipeline.py:64` = the holding
+  message; no `Source:[1]` dump, no false "ticket has been created" promise). Fix 56 is baked in;
+  a `--force-recreate` no longer reverts it.
 - Permanent WhatsApp **System User token** (never-expires) recommended before the real demo to avoid
   recurring token expiry.
 - Groq **spare key** held in reserve; single key = ~100+ conversations/day of headroom — don't burn it
   on rehearsals. Watch `opportunity_generation` (biggest per-message token cost).
 - Option 2 (LLM-failure → held draft for agent) deferred.
+
+### Addendum (later 2026-07-25) — token expiry recurrence + fresh-start runbook
+- **WhatsApp token expired AGAIN** (3rd time). Sayantini's WhatsApp dispute reply never reached her
+  phone: AI generated it fine + ticket `tkt_6b8277693831` created, but outbound Meta delivery
+  **401'd** (`graph.facebook.com/v19.0/1161808003684702/messages`). Investigated properly this time
+  (not assumed): confirmed the container **was** using the updated `.env` token (prefix match) and
+  the phone-id matched — then Meta `debug_token` gave the authoritative cause: **code 190, "Session
+  has expired 25-Jul-26 03:00 PDT."** So the recently-updated token was **short-lived** and died
+  within hours. User swapped in another token + `--force-recreate api` (from clean shell) → verified
+  valid, BUT `debug_token` shows it expires **2026-07-25 12:00 UTC (17:30 IST)** — still temporary.
+  **The permanent fix remains the System User token** (never-expires) — this keeps recurring until
+  that's done. Also spotted (not the cause, logged for later): a latent async bug in
+  `services/channel_service/delivery.py::_run_async` (`RuntimeError: no running event loop` on one
+  send path) — separate from the token 401.
+- **NEW: [docs/fresh-start-runbook.md](fresh-start-runbook.md)** — verified, repeatable full-wipe +
+  real-WhatsApp procedure. Written because "fresh start" kept hitting DIFFERENT deps each time (Groq
+  quota, ngrok domain, WhatsApp token). Covers: which 3 volumes to wipe vs 2 to keep (exact names),
+  Neo4j **auto-reseeds on api startup** (only when graph empty — no manual seed needed), KB re-index
+  is manual, the clean-shell env-precedence trap, and an **⑧ verification checklist covering ALL 7
+  external deps** (Groq key+quota, Ollama, WhatsApp token, ngrok, Neo4j, OpenSearch/KB, SMTP/IMAP/CRM)
+  — each with its real `:8888` status endpoint. Honest caveat documented: after wiping `cx-data` the
+  local Groq usage table is empty, so it can't report the *account's* server-side rolling-24h quota;
+  a single `max_tokens=1` probe is the one deliberate real Groq call to confirm key+quota.
+- **Nothing wiped yet** — runbook authored + reviewed; the destructive wipe was NOT executed this
+  session (awaiting user go-ahead + a permanent token).
+
+### Fix 57 — Customer name correct in admin inbox + reply greetings (backend, api rebuilt)
+**Symptoms (user):** admin portal customer names displayed wrong; email AI reply used a wrong name;
+WhatsApp/web-chat replies didn't use the customer's name. **Root cause (traced, not assumed — one bug
+underlies all three):** `display_name` feeds BOTH the admin inbox and the reply salutation
+(`graph.py` → `compose_answer(customer_name=state.customer["display_name"])`). At
+`_resolve_identity`, for whatsapp/email channels the code set `message.display_name =
+neo4j_profile["email"]` — **discarding the real `name` that `get_customer_by_identifier` already
+returns** (`queries.py` selects `c.name`). Downstream `_salutation()` then reconstructs a name from
+that email's local-part → `sayantini.s.55@…` becomes **"Sayantini S 55"** (Symptom 2), and the admin
+inbox shows the email-derived string (Symptom 1). Separately, `compose_answer` only added a greeting
+on the **email** branch — WhatsApp/web (`return body`) had **no greeting/name at all** (Symptom 3).
+**Fix (2 edits):**
+1. `services/orchestration_service/graph.py` (~L246-257) — when the Neo4j profile has a real `name`,
+   set `display_name = neo4j_profile["name"]` (still only overriding generic/blank names; `linked_email`
+   still stored in metadata). Fixes Symptoms 1 + 2 at the source.
+2. `services/agent_service/orchestration_agents.py` (`compose_answer`, ~L625) — WhatsApp/web now
+   prepend `Hi {salutation_name},` using the same real name; `_salutation` falls back to "Customer"
+   for unknowns, so nothing breaks for unregistered senders. Fixes Symptom 3.
+**Verification (ZERO real Groq calls — per user's quota reminder):** `_salutation` unit probe (real
+name→"Sayantini Sarkar", email→old mangled value on the now-dead path, empty→"Customer");
+`tests/test_user_portal.py` 12/12 pass; the 3 failing `test_phase1.py` tests
+(`test_email_complaint_escalates_and_sends_reply`, `..._webhook_e2e...`, `..._masks_pii..._restores_name`)
+proven **pre-existing** by stashing the changes and reproducing the identical
+`Recorder.send_text() got an unexpected keyword argument 'reply_to_message_id'` mock-signature error on
+baseline (documented since Session 1). Both edits confirmed live inside the rebuilt+recreated api
+container; `/health` ok. **Not yet done:** a real end-to-end message (would hit Groq) to visually
+confirm "Hi Sayantini," + inbox "Sayantini Sarkar" — deferred to the next organic run to save quota.
+Changes **uncommitted** (user: log now, commit later).
+
+### Fresh start executed (2026-07-25) + Fix 58
+**Fresh start done** (full wipe + real WhatsApp), following `docs/fresh-start-runbook.md`: wiped
+`cx-data`/`neo4j-data`/`opensearch-data` (kept ollama/huggingface), rebuilt api (bakes Fixes 56, 57,
+and the C-side of the name work — `/graph` route now returns `name`), brought up, 5 BFSI customers
+auto-reseeded, KB re-indexed (9 docs). Verified all deps: 5 customers, empty inbox, ngrok up
+(domain unchanged `tactical-dribble-booting…`, so Meta webhook needed no change), Groq key valid +
+quota (one `max_tokens=1` probe), WhatsApp token valid. **Note:** the token used was still a
+**temporary** token (expires 20:30 IST 25-Jul), not the recommended System User token — user chose to
+proceed. **Ollama false-alarm caught:** `ollama list` empty after the wipe looked like a missing model,
+but `OLLAMA_ENABLED=false` — the stack runs on **Groq**, so Ollama's empty volume is irrelevant and no
+`ollama-pull` is needed (this is why prior fresh starts never needed it either).
+
+**Two behaviours surfaced during post-reseed testing (diagnosed, see Fix 58 for the one fixed):**
+1. **Vague follow-up mis-answered + mis-grouped (NOT fixed — pre-existing design limit):** a WhatsApp
+   follow-up "Do I have any next steps before this due date?" was (a) answered with the PREVIOUS reply
+   (health-policy due date) verbatim, and (b) classified `loan_status` instead of continuing
+   `policy_status` — so Lineage split it into a separate LOAN STATUS group. **Root cause (traced in
+   `groq_generator.classify_message`, ~L206-210):** the history passed to the classifier includes only
+   `direction == "inbound"` turns (the customer's prior *questions*) — the AI's prior *answers* are
+   excluded. So a follow-up referring to something the AI *said* ("this due date") can't be grounded →
+   the model guesses the intent (wrong group) and reuses/misfires the answer. Answer-side cousin of the
+   Session-7 ticket-continuity work; deferred.
+
+### Fix 58 — WhatsApp offer 400 (bare number not in Meta allowed list)
+**Symptom (user):** an approved offer showed as sent on Email + WhatsApp in Lineage, but the WhatsApp
+one never reached her phone. **Diagnosed (live, authoritative):** api logs showed the offer's WhatsApp
+send 400'd 3× on `graph.facebook.com/.../messages`. Reproduced the send to read Meta's actual error:
+**`(#131030) Recipient phone number not in allowed list`** — NOT the token (token is valid; a test send
+to `917890864700` returned HTTP 200 and delivered). Root: her record stores the number **two ways** —
+`7890864700` (bare) and `917890864700` — and the send hit the **bare** one, which Meta rejects (needs
+the country code). **Why normal replies were unaffected:** `delivery.send` sends a reply to
+`message.channel_identifier` — the number the customer messaged *from*, which Meta always delivers with
+the `91` prefix; only **bank-initiated** sends (offers) pick a stored identifier and can hit the bad
+variant. The dedupe from Fix 53 correctly collapses the two to one send but keeps the **first**
+(=bare) → 400. **Fix (Level 1, backend):** `_normalize_wa_recipient()` in
+`services/channel_adapter/whatsapp_meta.py::send_outbound` — bare 10-digit → prepend `91`; already
+`91…`/`+91…` → digits; empty/None passthrough. Placed in `send_outbound` so it covers offers, replies,
+and held drafts. **Verified (no Groq):** normalizer table (bare→`91`, prefixed unchanged, `+91`
+normalized, empty/None safe) all pass — an early `+91` edge case was caught by the test and fixed
+BEFORE rebuild; fix confirmed baked into the rebuilt image; api healthy. **Not proven:** an actual
+offer landing on her phone (needs triggering an offer = Groq + real send) — deferred to next organic
+test. **Level 2 (root) still deferred:** normalize phone on write so duplicate rows never exist (Fix 53
+territory; needs identity-path change + reseed). Two diagnostic test WhatsApp sends were delivered to
+her real phone during diagnosis (the `91` ones, HTTP 200). Changes **uncommitted**.
+
+### WhatsApp token — permanent(ish) fix installed (2026-07-25)
+The recurring hours-long token expiry (3+ times this session) is resolved: a **SYSTEM_USER** token was
+generated via business.facebook.com → System users ("Omnichannel_WhatsApp_Backend"), 60-day expiry,
+scopes `whatsapp_business_messaging` + `whatsapp_business_management`. Verified in the running container
+(`debug_token`: valid, `type: SYSTEM_USER`, **expires 2026-09-23** ~59 days). No more few-hour tokens —
+**refresh before ~23 Sep 2026**. (A "Never" expiry option exists at the Set-expiry step if a
+truly-permanent token is wanted later.) See memory [[whatsapp-token-expiry]].

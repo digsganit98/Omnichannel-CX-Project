@@ -244,14 +244,15 @@ class OrchestrationGraph:
                 if neo4j_profile:
                     if neo4j_profile.get("email"):
                         message.metadata["linked_email"] = neo4j_profile["email"]
-                        # Use the email as display_name so the frontend can infer a
-                        # readable name (e.g. "Fathima Devasahayam") from it.  Only
-                        # override generic channel-provided names like "Local WhatsApp
-                        # Tester"; a real name already set should be kept as-is.
-                        generic = {"local whatsapp tester", "whatsapp user", "unknown", ""}
-                        if (not message.display_name or
-                                message.display_name.lower() in generic):
-                            message.display_name = neo4j_profile["email"]
+                    # Use the customer's REAL name from Neo4j as display_name (drives both
+                    # the admin inbox and the reply greeting).  Neo4j is the verified BFSI
+                    # master record, so its name is AUTHORITATIVE and always wins over the
+                    # channel-provided profile string — which is self-set and often junk
+                    # (".", "whatsapp user", or an email that would mangle the greeting into
+                    # "Sayantini S 55").  A prior narrower version only overrode a fixed
+                    # allow-list of generic names and left junk like "." untouched.
+                    if neo4j_profile.get("name"):
+                        message.display_name = neo4j_profile["name"]
                     if neo4j_profile.get("phone"):
                         message.metadata["linked_phone"] = neo4j_profile["phone"]
             except Exception:

@@ -100,6 +100,7 @@ def customer_graph(customer_id: str) -> dict:
 
     identifiers = repo.list_customer_identifiers(customer_id)
     base = {
+        "name": None,
         "loan_count": 0, "claim_count": 0, "identifiers": identifiers or [],
         "registration_date": None, "segment": None,
         "contacts_30d": contacts_30d, "upcoming_event": None, "attrition": None,
@@ -112,6 +113,7 @@ def customer_graph(customer_id: str) -> dict:
         neo4j_cid = None
         registration_date = None
         segment = None
+        graph_name = None
         for row in identifiers:
             customer = (
                 get_customer_by_id(client, row["identifier"])
@@ -122,6 +124,7 @@ def customer_graph(customer_id: str) -> dict:
                 neo4j_cid = customer["customer_id"]
                 registration_date = customer.get("registration_date")
                 segment = customer.get("segment")
+                graph_name = customer.get("name")
                 break
 
         if not neo4j_cid:
@@ -152,6 +155,7 @@ def customer_graph(customer_id: str) -> dict:
 
         return {
             **base,
+            "name": graph_name,
             "loan_count": len(loans),
             "claim_count": len(claims),
             "registration_date": registration_date,

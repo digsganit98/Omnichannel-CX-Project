@@ -622,8 +622,10 @@ class WorkflowAutomationAgent:
                 "Thank you for reaching out to us. We are committed to resolving your query promptly.\n\n"
                 "Warm regards,\nCustomer Support Team"
             )
-        # WhatsApp and default: LLM body is the full reply
-        return body
+        # WhatsApp and default: prepend a short greeting with the customer's real name
+        # (falls back to "Customer" when no name is known), then the LLM body.
+        salutation_name = _salutation(customer_name)
+        return f"Hi {salutation_name},\n\n{body}" if body else body
 
     def send_reply(self, message: InboundMessage, answer: str) -> dict:
         return self.delivery.send(message, answer)

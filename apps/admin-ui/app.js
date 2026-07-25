@@ -443,9 +443,9 @@ function inferNameFromEmail(email) {
 
 function customerLabel(conv) {
   var dn = conv.display_name;
-  if (!dn || dn === 'None' || dn === 'null') return 'Customer #' + (conv.customer_id || '').slice(-6);
-  // If display_name is an email address, infer a readable name from it
-  if (dn.indexOf('@') !== -1) return inferNameFromEmail(dn);
+  // Unregistered/unmatched sender: display_name is empty, junk, or a raw email.
+  // Never fabricate a name from an email — show an honest "Unverified" instead.
+  if (!dn || dn === 'None' || dn === 'null' || dn.indexOf('@') !== -1) return 'Unverified';
   return dn;
 }
 
@@ -1407,19 +1407,14 @@ function renderRight(conv, tickets) {
         if (id.channel === 'whatsapp') phoneId = id.identifier;
       });
 
-      // Infer name from email: "fathima.devasahayam@..." → "Fathima Devasahayam"
-      function inferName(email) {
-        if (!email) return null;
-        return email.split('@')[0].split(/[._-]/).map(function(w) {
-          return w.charAt(0).toUpperCase() + w.slice(1);
-        }).join(' ');
-      }
-      var inferredName = inferName(emailId);
-
-      // Update name and avatar initials
-      if (inferredName) {
-        document.getElementById('rpnm').textContent = inferredName;
-        var ini = inferredName.split(' ').slice(0,2).map(function(w){return w[0];}).join('').toUpperCase();
+      // Use the REAL name from the Neo4j graph payload ONLY if present. Do NOT
+      // overwrite the name already set by renderRight/customerLabel (which reads
+      // the SQLite display_name) — otherwise a missing g.name would clobber a
+      // correct name. Never fabricate a name from the email.
+      if (g.name && String(g.name).trim()) {
+        var displayName = String(g.name).trim();
+        document.getElementById('rpnm').textContent = displayName;
+        var ini = displayName.split(' ').slice(0,2).map(function(w){return w[0];}).join('').toUpperCase();
         document.getElementById('rpav').textContent = ini;
       }
       // Customer ID row (no prefix)
