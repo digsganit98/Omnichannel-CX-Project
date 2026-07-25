@@ -147,6 +147,7 @@ def record_llm_call(
 ) -> dict:
     usage = _extract_usage(response)
     estimated_cost = _estimate_cost_usd(model, usage["prompt_tokens"], usage["completion_tokens"])
+    model_version = _extract_model_version(response)
     context = dict(_LLM_CONTEXT.get() or {})
     langfuse_context = _current_langfuse_context()
     safe_metadata = {
@@ -162,6 +163,7 @@ def record_llm_call(
         "operation": operation,
         "provider": provider,
         "model": model,
+        "model_version": model_version,
         "llm_used": llm_used,
         "prompt_tokens": usage["prompt_tokens"],
         "completion_tokens": usage["completion_tokens"],
@@ -282,6 +284,16 @@ def _extract_usage(response: Any) -> dict[str, Any]:
         "total_tokens": total,
         "source": "provider_usage" if usage else "not_available",
     }
+
+
+def _extract_model_version(response: Any) -> str | None:
+    """Best-effort model build/version identifier (e.g. OpenAI-compatible system_fingerprint).
+
+    Model name alone (e.g. "llama-3.1-8b-instant") doesn't capture which underlying
+    build served the request; providers that rev their weights/serving stack expose
+    that here so cost/latency can be sliced by exact model build over time.
+    """
+    return _get(response, "system_fingerprint", None)
 
 
 def _estimate_cost_usd(model: str, prompt_tokens: int, completion_tokens: int) -> dict[str, Any]:

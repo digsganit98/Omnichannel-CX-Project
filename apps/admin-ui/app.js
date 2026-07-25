@@ -1633,6 +1633,8 @@ window.loadAnalytics = async function() {
       fetch('/analytics/agents',   { headers: adminHeaders() }).then(function(r){return r.json();}),
       fetch('/admin/audit-events', { headers: adminHeaders() }).then(function(r){return r.json();}),
       fetch('/admin/llm-observability/summary?days=7', { headers: adminHeaders() }).then(function(r){return r.json();}),
+      fetch('/analytics/sentiment', { headers: adminHeaders() }).then(function(r){return r.json();}),
+      fetch('/analytics/trend',     { headers: adminHeaders() }).then(function(r){return r.json();}),
     ]);
     renderOverview(results[0]);
     renderChannelBars(results[1]);
@@ -1640,6 +1642,12 @@ window.loadAnalytics = async function() {
     renderAgentPanel(results[3]);
     renderFeedList(results[4], false);
     renderLlmUsagePanel(results[5]);
+    renderCostByModelPanel(results[5]);
+    renderLatencyByModelPanel(results[5]);
+    renderResolutionLevelPanel(results[5]);
+    renderSentimentPanel(results[6]);
+    renderTrendPanel(results[7]);
+    renderSolutionStats(results[0], results[5]);
   } catch(e) {
     console.error('Analytics load error:', e.message);
   } finally {
@@ -1724,6 +1732,74 @@ function renderLlmUsagePanel(data) {
     + '<table class="mini-table"><thead><tr><th>Operation</th><th>Calls</th><th>Tokens</th><th>Cost</th></tr></thead><tbody>'
     + (opRows || '<tr><td colspan="4">No operation breakdown yet</td></tr>')
     + '</tbody></table>';
+}
+
+function renderCostByModelPanel(data) {
+  var el = document.getElementById('costByModelPanel');
+  if (!el) return;
+  var rows = (data && data.by_model) || [];
+  if (!rows.length) { el.innerHTML = '<div class="empty-state">No model usage recorded yet</div>'; return; }
+  var body = rows.map(function(row) {
+    return '<tr><td style="font-weight:500;color:var(--t1)">' + escH(row.model || 'unknown') + '</td>'
+      + '<td>' + escH(row.model_version || 'unknown') + '</td>'
+      + '<td>' + (row.calls || 0) + '</td>'
+      + '<td>' + Number(row.total_tokens || 0).toLocaleString() + '</td>'
+      + '<td>$' + Number(row.estimated_cost_usd || 0).toFixed(6) + '</td></tr>';
+  }).join('');
+  el.innerHTML = '<table class="mini-table"><thead><tr><th>Model</th><th>Version</th><th>Calls</th><th>Tokens</th><th>Cost</th></tr></thead><tbody>' + body + '</tbody></table>';
+}
+
+function renderLatencyByModelPanel(data) {
+  var el = document.getElementById('latencyByModelPanel');
+  if (!el) return;
+  var rows = (data && data.by_model) || [];
+  if (!rows.length) { el.innerHTML = '<div class="empty-state">No model usage recorded yet</div>'; return; }
+  var body = rows.map(function(row) {
+    return '<tr><td style="font-weight:500;color:var(--t1)">' + escH(row.model || 'unknown') + '</td>'
+      + '<td>' + escH(row.model_version || 'unknown') + '</td>'
+      + '<td>' + (row.calls || 0) + '</td>'
+      + '<td>' + Number(row.avg_latency_ms || 0).toFixed(0) + ' ms</td></tr>';
+  }).join('');
+  el.innerHTML = '<table class="mini-table"><thead><tr><th>Model</th><th>Version</th><th>Calls</th><th>Avg latency</th></tr></thead><tbody>' + body + '</tbody></table>';
+}
+
+function renderResolutionLevelPanel(data) {
+  var el = document.getElementById('resolutionLevelPanel');
+  if (!el) return;
+  var rows = (data && data.by_resolution_level) || [];
+  var known = rows.filter(function(r) { return r.resolution_level !== 'unknown'; });
+  if (!known.length) { el.innerHTML = '<div class="empty-state">No resolution-level data yet</div>'; return; }
+  var items = known.map(function(r) { return { level: r.resolution_level, calls: r.calls || 0 }; });
+  renderBars('resolutionLevelPanel', items, 'level', 'calls', function(lvl) {
+    return lvl === 'L1' ? '#16a34a' : (lvl === 'L2' ? '#d97706' : '#dc2626');
+  });
+}
+
+function renderSolutionStats(overview, llmSummary) {
+  var el = document.getElementById('solutionStatsGrid');
+  if (!el) return;
+  var d = overview || {};
+  var escRate = d.total_conversations ? Math.round((d.total_escalated / d.total_conversations) * 100) : 0;
+  var frt = d.avg_first_response_minutes || 0;
+  var frtOld = d.avg_first_response_last_week_minutes || 0;
+  var frtLabel = frt >= 60 ? (frt / 60).toFixed(1) + ' hr' : frt.toFixed(1) + ' min';
+  var frtDelta = Math.round((frt - frtOld) * 10) / 10;
+  var frtSub = frtOld ? ((frtDelta <= 0 ? '↓ ' : '↑ +') + Math.abs(frtDelta) + ' min vs last week') : '';
+
+  var levels = (llmSummary && llmSummary.by_resolution_level) || [];
+  var l1 = levels.find(function(r) { return r.resolution_level === 'L1'; });
+  var totalLevelCalls = levels.reduce(function(sum, r) { return sum + (r.calls || 0); }, 0);
+  var autoPct = totalLevelCalls ? Math.round(((l1 ? l1.calls : 0) / totalLevelCalls) * 100) : null;
+
+  var cards = [
+    { val: escRate + '%', lbl: 'Escalation rate', sub: d.total_escalated + ' of ' + d.total_conversations + ' conversations', clr: escRate > 20 ? 'var(--red-t)' : 'var(--t1)' },
+    { val: d.sla_breach_count || 0, lbl: 'Open SLA breaches', sub: '', clr: (d.sla_breach_count || 0) > 0 ? 'var(--amb-t)' : 'var(--grn-t)' },
+    { val: frtLabel, lbl: 'Avg first response time', sub: frtSub, clr: 'var(--t1)' },
+    { val: autoPct === null ? '—' : autoPct + '%', lbl: 'Fully automated (L1) resolutions', sub: autoPct === null ? 'No data yet' : '', clr: 'var(--grn-t)' },
+  ];
+  el.innerHTML = cards.map(function(c) {
+    return '<div class="stat-card"><div class="stat-val" style="color:' + c.clr + '">' + c.val + '</div><div class="stat-lbl">' + c.lbl + '</div>' + (c.sub ? '<div class="stat-sub">' + c.sub + '</div>' : '') + '</div>';
+  }).join('');
 }
 
 function renderSentimentPanel(data) {

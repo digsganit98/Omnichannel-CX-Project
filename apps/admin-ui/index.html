@@ -351,28 +351,61 @@
           </div>
         </div>
 
-        <div>
+        <!-- ═══ SECTION 1: FINOPS ═══ -->
+        <div class="analytics-section">
+          <div class="section-lbl">FinOps — LLM Cost &amp; Usage</div>
+
+          <div class="chart-card">
+            <div class="chart-title">LLM usage and cost</div>
+            <div class="metric-note">1 LLM call = 1 model invocation — intent classification, an answer-generation
+              step, a tool call, or a subagent step each count separately. A single customer conversation
+              typically spans several LLM calls across these steps, so "calls" here will exceed the conversation count.</div>
+            <div id="llmUsagePanel"><div class="empty-state">Loading...</div></div>
+          </div>
+
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+            <div class="chart-card"><div class="chart-title">Cost by model / model version</div><div id="costByModelPanel"><div class="empty-state">Loading…</div></div></div>
+            <div class="chart-card"><div class="chart-title">Latency by model / model version</div><div id="latencyByModelPanel"><div class="empty-state">Loading…</div></div></div>
+          </div>
+        </div>
+
+        <!-- ═══ SECTION 2: CUSTOMER CARE ANALYTICS ═══ -->
+        <div class="analytics-section">
+          <div class="section-lbl">Customer Care Analytics</div>
+
           <div class="stat-grid" style="grid-template-columns:repeat(4,1fr)" id="overviewGrid">
             <div class="stat-card"><div class="stat-val">—</div><div class="stat-lbl">Loading…</div></div>
             <div class="stat-card"><div class="stat-val">—</div><div class="stat-lbl">Loading…</div></div>
             <div class="stat-card"><div class="stat-val">—</div><div class="stat-lbl">Loading…</div></div>
             <div class="stat-card"><div class="stat-val">—</div><div class="stat-lbl">Loading…</div></div>
           </div>
+
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+            <div class="chart-card"><div class="chart-title">Tickets by channel</div><div id="channelBars"><div class="empty-state">Loading…</div></div></div>
+            <div class="chart-card"><div class="chart-title">Top intent trends (BFSI)</div><div id="intentBars"><div class="empty-state">Loading…</div></div></div>
+          </div>
+
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+            <div class="chart-card"><div class="chart-title">Customer sentiment</div><div id="sentimentPanel"><div class="empty-state">Loading…</div></div></div>
+            <div class="chart-card"><div class="chart-title">Agent / team performance</div><div id="agentPanel"><div class="empty-state">Loading…</div></div></div>
+          </div>
         </div>
 
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
-          <div class="chart-card"><div class="chart-title">Tickets by channel</div><div id="channelBars"><div class="empty-state">Loading…</div></div></div>
-          <div class="chart-card"><div class="chart-title">Top intent trends (BFSI)</div><div id="intentBars"><div class="empty-state">Loading…</div></div></div>
-        </div>
+        <!-- ═══ SECTION 3: SOLUTION PERFORMANCE ANALYTICS ═══ -->
+        <div class="analytics-section">
+          <div class="section-lbl">Solution Performance Analytics</div>
 
-        <div class="chart-card">
-          <div class="chart-title">LLM usage and cost</div>
-          <div id="llmUsagePanel"><div class="empty-state">Loading...</div></div>
-        </div>
+          <div class="stat-grid" style="grid-template-columns:repeat(4,1fr)" id="solutionStatsGrid">
+            <div class="stat-card"><div class="stat-val">—</div><div class="stat-lbl">Loading…</div></div>
+            <div class="stat-card"><div class="stat-val">—</div><div class="stat-lbl">Loading…</div></div>
+            <div class="stat-card"><div class="stat-val">—</div><div class="stat-lbl">Loading…</div></div>
+            <div class="stat-card"><div class="stat-val">—</div><div class="stat-lbl">Loading…</div></div>
+          </div>
 
-        <div class="chart-card">
-          <div class="chart-title">Agent / team performance</div>
-          <div id="agentPanel"><div class="empty-state">Loading…</div></div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+            <div class="chart-card"><div class="chart-title">Tickets created vs resolved (14d)</div><div id="trendPanel"><div class="empty-state">Loading…</div></div></div>
+            <div class="chart-card"><div class="chart-title">Resolution level mix (L1 auto / L2 / L3 escalation)</div><div id="resolutionLevelPanel"><div class="empty-state">Loading…</div></div></div>
+          </div>
         </div>
 
         <div class="chart-card">
