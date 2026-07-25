@@ -86,6 +86,8 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 51 — Ticket scope refinement (vague→specific, omnichannel):** A specific-scope follow-up ("...on my Mastercard") now refines the open `:other` dispute ticket instead of forking a duplicate; two different specific scopes (card vs upi) still get separate tickets. Backend; had been sitting uncommitted+unlogged from a prior manual test.
 - **Fix 52 — Tier-4 LLM ticket referee (specific→vague, omnichannel):** When a message's scope label matches no open ticket (e.g. a vague "any update on my dispute?" arriving on another channel after the ticket was refined to `:card`), an LLM picks among code-vetted candidates (active, same intent, same conversation) or says NEW; any doubt/error/absent-LLM forks. Refining a scope now also appends the new details to the ticket description (was frozen at the vague opener). Fixes the live 23 Jul duplicate-ticket found during omnichannel demo testing.
 - **Fix 53 — Offer send: dedupe push channels by destination:** The offer send loop messaged every whatsapp/email identifier, so a customer whose WhatsApp number was stored both bare (`7890864700`) and with the country code (`917890864700`) got the offer TWICE on WhatsApp. Added `_dedupe_push_identifiers` (normalize phone → strip non-digits + drop leading `91`; email → lowercased) so one message goes per real destination. Backend; symptom fix — the duplicate-identifier root (identity normalization on write) is a separate deferred item.
+- **Fix 55 — Line breaks render in the Detailed conversation view:** `.det-q-text` / `.det-r-text` were missing `white-space:pre-wrap` (every other reply surface — spine, portal, modal — had it), so multi-line/multi-paragraph AI replies collapsed to one run-on block. Added `pre-wrap` to both; CSS-only, display-only.
+- **Fix 56 — Graceful fallback when the LLM is unavailable (no more raw KB dump to the customer):** when generation returns `llm_used=False` (e.g. Groq 429/error), `rag_pipeline.answer` used to send the customer the raw top KB passage + an internal `Source: [1] InboxIQ_BFSI_KB.pdf:p1` citation. Replaced that branch with a clean holding message ("I'm having trouble accessing that information right now. Let me connect you with a support specialist…"); collapsed the two non-LLM branches into one and dropped the old `else`'s false "a support ticket has been created" promise. Backend; `retrieval_backend`/`citations` telemetry unchanged.
 - **Fix 54 — Connectors page: added Web Chat card + trimmed Email card:** Added a **Web Chat** connector card (customer-portal in-app chat, always Connected) as the 3rd card so order is WhatsApp · Email · Web Chat · Call · Jira — completing the channel story. Trimmed the Email card to just the badge + Inbound/Outbound Active rows (dropped Mailbox / Poll interval / Last poll / Emails processed + Poll-now button — demo-noisy, and "Last poll: Never / 0 processed" looked broken). Frontend-only; `triggerEmailInboxPoll` now dead (button gone) but left in place.
 
 ---
@@ -1198,3 +1200,92 @@ card showed "so many info" — too much plumbing for a client-facing page.
   edit before the demo. Unused vars (`lastPollTxt`/`processedTxt`/`intervalTxt`/`mailboxTxt`/
   `errorHtml`) likewise left.
 **Verified:** `node --check` (throwaway node:20-alpine) — JS OK. Live via bind mount; reload only.
+
+---
+
+## Session 8 — 2026-07-25
+
+Branch: `Sayantini-phase2-ui-changes`. Omnichannel WhatsApp demo debugging. The session was mostly
+**diagnosis of environment/ops issues** (no code bug in most of them), plus two small code fixes.
+
+### Diagnosis 1 — "AI responses became poor after a fresh start" = Groq daily token quota exhausted (NOT a code bug)
+**Symptom (user, live demo):** after a ~10am fresh start, WhatsApp/portal AI replies turned poor —
+unrelated to the query, dumping random KB facts and a `Source: [1] InboxIQ_BFSI_KB.pdf:p1` line to
+the customer, and omnichannel ticket continuity broke (duplicate dispute tickets). Fine at ~11:53am,
+bad again at ~12pm.
+**Root cause (proven from the `llm_usage_events` table in the api container):** all 32 of the day's
+LLM failures were the identical Groq error — **HTTP 429, "tokens per day (TPD): Limit 500000, Used
+499508."** The free-tier **500K-tokens/day** cap was exhausted. One quota feeds EVERY LLM call
+(answer generation, intent classification, resolution-level, ticket referee, opportunity generation),
+so when it's dry they all fail together — explaining all three symptoms at once. The intermittent
+on/off (fine 11:53, bad 12:00) is sitting right at the rolling-window edge. The chronological log
+matched the screenshots exactly (times are UTC; ~10am–12pm IST = ~04:30–06:30 UTC).
+**The fresh start did NOT burn tokens** — verified: reseed makes ZERO Groq calls (Neo4j loader has no
+LLM refs; KB indexing uses a LOCAL `SentenceTransformer`, not Groq). What drained the cap was the
+round of demo **test conversations** (~4–5 large Groq calls each; opportunity_generation was the
+heaviest — 24 calls). **Quota is a rolling 24h window, not a midnight reset** — tokens fall off ~24h
+after spend. By later the same day the window had fully rolled off (0 tokens used in trailing 24h →
+full 500K/500K again), and the ORIGINAL key worked again — no key swap needed. A spare Groq key was
+obtained and held in reserve (a second key on the SAME org shares the 500K; only a different account
+gives a fresh 500K).
+
+### Diagnosis 2 — ngrok kept using the OLD domain after `.env` edit = PowerShell env-var precedence (NOT a rebuild issue)
+**Symptom:** user changed `NGROK_DOMAIN`/`NGROK_AUTHTOKEN` in `.env` and rebuilt, but ngrok logs still
+showed the old `smartly-shredder-overhang…` domain. **Root cause:** the ngrok `command:` `--url` is
+interpolated by `docker compose` at container-create time (stock image — `docker compose build` does
+nothing for it), AND a **stale `NGROK_DOMAIN` was exported in the user's PowerShell session**. Compose
+ranks **shell env > `.env`**, so the old shell value shadowed the corrected `.env`. `docker compose
+config` (run from a clean Bash shell) resolved the NEW value, proving `.env` was right — the shell was
+the culprit. Also caught a stray trailing slash in the new value (removed). **Fix:** recreate from a
+shell where `NGROK_DOMAIN` is not exported → `docker compose up -d --force-recreate ngrok` → tunnel
+came up on `tactical-dribble-booting.ngrok-free.dev`. (Same precedence lesson applied to every
+subsequent container recreate this session.) User updated + verified the WhatsApp webhook URL.
+
+### Diagnosis 3 — WhatsApp reply not arriving = expired Meta access token (NOT the LOCAL_TEST_MODE flag)
+**Symptom:** inbound WhatsApp message appeared in admin-ui and the LLM answered correctly (FD maturity,
+NO TICKET — correct L1), but nothing arrived on the customer's phone. **Root cause (from api logs):**
+outbound delivery failed 3× with **`httpx.HTTPStatusError: 401 Unauthorized`** on
+`graph.facebook.com/v19.0/{phone_id}/messages`; Meta `debug_token` confirmed **"Session has expired on
+23-Jul"** (OAuthException code 190). The `WHATSAPP_ACCESS_TOKEN` had expired ~2 days earlier.
+**Correction to a prior belief (memory `connectors-page-truth` updated):** `WHATSAPP_LOCAL_TEST_MODE=true`
+does NOT simulate the production outbound path — verified it's read only in `security.py` (inbound
+signature relax) and the `/test/whatsapp/*-simulate` endpoints; the real adapter
+`channel_adapter/whatsapp_meta.py::send_outbound` always calls Meta. So real replies really send, and a
+bad token surfaces as a live 401. **Fix:** user generated a new token (validated via `debug_token`:
+`is_valid:true`, scopes `whatsapp_business_messaging`+`management`, expires ~7 Aug) → put in `.env` →
+recreated api from clean shell → **outbound confirmed: reply arrived on the customer's WhatsApp phone.**
+Note for durability: this token still expires (~2 wks); a permanent System User token would avoid recurrence.
+
+### Fix 55 — Line breaks render in the Detailed conversation view (CSS-only)
+`.det-q-text` (customer query) and `.det-r-text` (AI reply) in the Detailed 3-column view were missing
+`white-space:pre-wrap`, while every other reply surface (`.spine-reply-text`, portal `.portal-chat-msg`,
+ticket modal `.utd-resp`, old flow view) had it. So a multi-line AI reply / multi-paragraph email answer
+collapsed into one run-on block **only in Detailed**. Added `white-space:pre-wrap` to both classes
+([style.css:520,527](../apps/admin-ui/style.css)); cache-bust `style.css?v=20260723-15 → 20260725-1`.
+Frontend-only, display-only, live via bind mount (reload only). The `*bold*` asterisks the user asked
+about are intentional WhatsApp markdown (renders bold on the phone; admin-ui shows them raw in all
+views — not a bug).
+
+### Fix 56 — Graceful fallback when the LLM is unavailable (no more raw KB dump to the customer)
+The defect Diagnosis 1 exposed: when generation returns `llm_used=False`,
+[rag_pipeline.py](../services/rag_service/rag_pipeline.py) `answer()` sent the customer the **raw top KB
+passage + internal `Source: [1] …` citation** (the ugly 12pm output). Replaced that branch — collapsed
+the two non-LLM branches into one clean holding message ("I'm having trouble accessing that information
+right now. Let me connect you with a support specialist who can help you further."), and dropped the old
+`else`'s false "a support ticket has been created" promise (this path creates no ticket). Backend, but
+happy-path unchanged (only the LLM-failure text changed); `retrieval_backend`/`citations` telemetry
+intact. **Chose Option 1 (fix the text)** over Option 2 (route LLM-failure into the human-in-the-loop
+draft hold) — Option 2 is the stronger real-ops behaviour but touches orchestration; noted as a
+follow-up. **Verified:** forced-failure in-container → holding message returned, `Source:[1]` gone,
+citations/backend still populated; `tests/test_phase1.py -k "rag or fallback or keyword"` 8/8 pass (no
+test asserted the old fallback text — checked before applying). Backend change: **needs an api image
+rebuild to persist** (hot-copied into the running container for verification this session).
+
+### Open / follow-ups
+- **api rebuild pending** to bake Fix 56 (backend) — until rebuilt it's only hot-copied into the live
+  container and a `--force-recreate` would revert it.
+- Permanent WhatsApp **System User token** (never-expires) recommended before the real demo to avoid
+  recurring token expiry.
+- Groq **spare key** held in reserve; single key = ~100+ conversations/day of headroom — don't burn it
+  on rehearsals. Watch `opportunity_generation` (biggest per-message token cost).
+- Option 2 (LLM-failure → held draft for agent) deferred.

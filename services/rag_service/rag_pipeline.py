@@ -54,10 +54,16 @@ class RAGPipeline:
         ]
         if generation["llm_used"] and generation["text"]:
             answer = generation["text"]
-        elif contexts:
-            answer = f"{contexts[0]['text']}\n\nSource: [1] {citations[0]['source']}"
         else:
-            answer = "I could not find enough verified knowledge to answer this request. A support ticket has been created."
+            # LLM unavailable (e.g. provider rate-limit/error) or produced no text.
+            # Never surface a raw KB passage + internal "Source: [1] ..." citation to the
+            # customer — that leaks internals and often doesn't match the question. Degrade
+            # to a clean holding message; the system decides separately whether to ticket,
+            # so we do not promise one here.
+            answer = (
+                "I'm having trouble accessing that information right now. "
+                "Let me connect you with a support specialist who can help you further."
+            )
         return {
             "answer": answer,
             "confidence": contexts[0]["score"] if contexts else 0.0,
