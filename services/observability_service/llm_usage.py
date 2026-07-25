@@ -144,10 +144,16 @@ def record_llm_call(
     input_text: str = "",
     error: str | None = None,
     metadata: dict | None = None,
+    params: dict | None = None,
 ) -> dict:
     usage = _extract_usage(response)
     estimated_cost = _estimate_cost_usd(model, usage["prompt_tokens"], usage["completion_tokens"])
-    model_version = _extract_model_version(response)
+    # model_version = a short fingerprint of OUR config (model + the sampling params actually
+    # sent to the provider). Changing any param → a new version tag, so cost/latency can be
+    # sliced by exact configuration over time. Falls back to the provider's system_fingerprint
+    # when no params are supplied (keeps older call sites working).
+    model_config = _normalize_params(model, params)
+    model_version = _config_version(model_config) if model_config else _extract_model_version(response)
     context = dict(_LLM_CONTEXT.get() or {})
     langfuse_context = _current_langfuse_context()
     safe_metadata = {
@@ -158,6 +164,9 @@ def record_llm_call(
         "usage_source": usage["source"],
         "cost_rate_source": estimated_cost["source"],
     }
+    # Log the full config alongside the tag so v-xxxx is always decodable ("log it somewhere").
+    if model_config:
+        safe_metadata["model_config"] = model_config
     event = {
         **context,
         "operation": operation,
@@ -284,6 +293,35 @@ def _extract_usage(response: Any) -> dict[str, Any]:
         "total_tokens": total,
         "source": "provider_usage" if usage else "not_available",
     }
+
+
+def _normalize_params(model: str, params: dict | None) -> dict | None:
+    """Build the config dict that defines a 'version': model + the sampling params actually sent.
+
+    Only includes keys that were genuinely passed (per the user's 'hash what's actually sent'
+    choice), so adding a param later naturally produces a new version. Returns None when no
+    params dict is supplied at all (older call sites), so behaviour is unchanged there.
+    """
+    if params is None:
+        return None
+    allowed = ("temperature", "max_tokens", "top_p", "frequency_penalty", "presence_penalty")
+    cfg: dict[str, Any] = {"model": model}
+    for key in allowed:
+        if key in params and params[key] is not None:
+            cfg[key] = params[key]
+    return cfg
+
+
+def _config_version(model_config: dict) -> str:
+    """Short, stable tag for a config dict — 'v-' + first 4 hex of a sha256 over the sorted config.
+
+    Deterministic: same config → same tag; any change to model or a param → a new tag.
+    """
+    import hashlib
+
+    payload = json.dumps(model_config, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return "v-" + digest[:4]
 
 
 def _extract_model_version(response: Any) -> str | None:

@@ -1634,7 +1634,6 @@ window.loadAnalytics = async function() {
       fetch('/admin/audit-events', { headers: adminHeaders() }).then(function(r){return r.json();}),
       fetch('/admin/llm-observability/summary?days=7', { headers: adminHeaders() }).then(function(r){return r.json();}),
       fetch('/analytics/sentiment', { headers: adminHeaders() }).then(function(r){return r.json();}),
-      fetch('/analytics/trend',     { headers: adminHeaders() }).then(function(r){return r.json();}),
       fetch('/analytics/solution-performance', { headers: adminHeaders() }).then(function(r){return r.json();}),
     ]);
     renderOverview(results[0]);
@@ -1646,8 +1645,8 @@ window.loadAnalytics = async function() {
     renderCostByModelPanel(results[5]);
     renderLatencyByModelPanel(results[5]);
     renderSentimentPanel(results[6]);
-    renderSolutionStats(results[8]);
-    renderSolutionCharts(results[8]);
+    renderSolutionStats(results[7]);
+    renderSolutionCharts(results[7]);
   } catch(e) {
     console.error('Analytics load error:', e.message);
   } finally {
@@ -1832,18 +1831,6 @@ function renderLatencyByModelPanel(data) {
   el.innerHTML = '<table class="mini-table llm-model-table"><thead><tr><th>Model</th><th>Version</th><th class="llm-num">Calls</th><th class="llm-num">Avg latency</th></tr></thead><tbody>' + body + '</tbody></table>';
 }
 
-function renderResolutionLevelPanel(data) {
-  var el = document.getElementById('resolutionLevelPanel');
-  if (!el) return;
-  var rows = (data && data.by_resolution_level) || [];
-  var known = rows.filter(function(r) { return r.resolution_level !== 'unknown'; });
-  if (!known.length) { el.innerHTML = '<div class="empty-state">No resolution-level data yet</div>'; return; }
-  var items = known.map(function(r) { return { level: r.resolution_level, calls: r.calls || 0 }; });
-  renderBars('resolutionLevelPanel', items, 'level', 'calls', function(lvl) {
-    return lvl === 'L1' ? '#16a34a' : (lvl === 'L2' ? '#d97706' : '#dc2626');
-  });
-}
-
 function renderSolutionStats(sp) {
   var el = document.getElementById('solutionStatsGrid');
   if (!el) return;
@@ -1896,21 +1883,6 @@ function renderSentimentPanel(data) {
     + '<div class="sent-row"><span class="sent-lbl"><span class="sent-key sent-key-pos"></span>'+pos+'% positive</span>'
     + '<span class="sent-lbl"><span class="sent-key sent-key-neu"></span>'+neu+'% neutral</span>'
     + '<span class="sent-lbl"><span class="sent-key sent-key-neg"></span>'+neg+'% negative</span></div>';
-}
-function renderTrendPanel(data) {
-  var el = document.getElementById('trendPanel');
-  if (!data||!data.length) { el.innerHTML = '<div class="empty-state">No trend data yet</div>'; return; }
-  var maxVal = Math.max.apply(null, data.map(function(d){return Math.max(d.created,d.resolved);}));
-  el.innerHTML = data.map(function(d) {
-    var cPct = maxVal>0 ? Math.round((d.created/maxVal)*100) : 0;
-    var rPct = maxVal>0 ? Math.round((d.resolved/maxVal)*100) : 0;
-    return '<div class="bar-row" style="margin-bottom:5px"><span class="bar-label" style="width:80px">' + d.date.slice(5) + '</span>'
-      + '<div style="flex:1;display:flex;flex-direction:column;gap:2px">'
-      + '<div class="bar-track" style="height:5px"><div class="bar-fill" style="width:'+cPct+'%;background:var(--blue)"></div></div>'
-      + '<div class="bar-track" style="height:5px"><div class="bar-fill" style="width:'+rPct+'%;background:var(--grn)"></div></div>'
-      + '</div><span class="bar-val" style="font-size:10px">'+d.created+'/'+d.resolved+'</span></div>';
-  }).join('')
-    + '<div style="display:flex;gap:12px;margin-top:6px"><span style="font-size:10px;color:var(--blue)">■ Created</span><span style="font-size:10px;color:var(--grn)">■ Resolved</span></div>';
 }
 function renderAgentPanel(data) {
   var el = document.getElementById('agentPanel');

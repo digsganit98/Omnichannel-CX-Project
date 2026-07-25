@@ -1501,9 +1501,42 @@ the new aggregator against a copy of the real DB (38.9% / 60 / 4 / 14; bands + m
 api rebuilt + recreated; `GET /analytics/solution-performance` live returns the expected JSON;
 `/health` ok; served assets carry the new code. `node --check` OK; backend byte-compiles.
 
-**Open / deferred at this point in the session:**
-- **"Tickets by channel" chart still shows fake `graph`/`portal` channels** + inflated per-identity
-  join counts (Image-1 bug) — a *different* chart (`get_channel_metrics`), not yet fixed.
-- **LLM-panel version tag** (`v-xxxx` config-hash) frontend is ready but the backend hash logic isn't
-  built — version still reads "unknown".
-- Two orphaned dead render functions (trend / resolution-level) pending a cleanup pass.
+### Analytics — "Tickets by channel" fake-channel bug fixed (backend)
+**Bug (from the user's Image-1 question):** the chart showed `graph` and `portal` as channels and a
+flat inflated "7" on every channel. **Root cause:** `get_channel_metrics` joined
+`tickets → conversations → channel_identities` and grouped by `ci.channel` — so (a) it surfaced
+internal identifier *types* (`graph`/`portal`) that are not contact channels, and (b) it counted each
+ticket once **per identity the customer had**, inflating every channel to the same number.
+**Fix (`services/analytics_service/aggregator.py`):** count each ticket ONCE on the channel it actually
+arrived on — the channel of the turn(s) carrying its `ticket_id` (`MIN(ct.channel)` per ticket) — and
+filter both ticket + message queries to non-empty channels. **Verified on real data (0 Groq):** now
+only the 3 real channels (email 1 / web_chat 5 / whatsapp 1 tickets), no `graph`/`portal`, no inflation.
+
+### LLM-panel version tag — config-hash `v-xxxx` implemented (backend)
+**Design (user's earlier decisions):** version = fingerprint of OUR config (model + the sampling params
+actually sent), "hash what's actually sent" so adding a param later makes a new version; short tag in
+the table + full config logged so the tag is decodable.
+**Impl:** `services/observability_service/llm_usage.py` — `_normalize_params(model, params)` (keeps only
+params genuinely passed; None → passthrough so old call sites are unchanged) + `_config_version(cfg)`
+(`v-` + first 4 hex of sha256 over the sorted config, deterministic). `record_llm_call` gained a
+`params` kwarg → sets `model_version` from the config hash (falls back to the provider
+`system_fingerprint` when no params) AND stores the full config in `metadata.model_config`
+("log it somewhere"). `services/rag_service/groq_generator.py::_generate` passes `params={temperature:0.2}`
+to all 3 record sites. `services/persistence_service/repository.py` — the `by_model` summary now samples
+`metadata_json` per (model, version) group and decodes `model_config` so the panel can show the params
+behind each tag. **Verified (0 Groq):** temp 0.2 → `v-1412`, temp 0.5 → `v-1df4`, +max_tokens → `v-942f`
+(each change → new tag), deterministic, None-passthrough. **Note:** the existing 104 rows pre-date the
+feature → they still read version `unknown`/`model_config` null (correct); only NEW LLM calls carry a
+`v-xxxx` — visible after the next real message through the system (deferred to save Groq quota).
+
+### Cleanup (D)
+Removed the two orphaned dead render functions (`renderTrendPanel`, `renderResolutionLevelPanel`) and
+the now-unused `/analytics/trend` fetch from `loadAnalytics`; re-indexed the Promise.all results
+(solution-performance moved 8→7). Asset version `app.js?v=20260726-4`. `node --check` OK.
+
+### Tests + commits
+New `tests/test_analytics_observability.py` (8 tests, 0 Groq): version-tag changes/determinism/None,
+escalation denominator = inbound turns, reason-merge, and channels-exclude-fake. Full suite:
+**145 pass, 5 pre-existing `test_phase1` failures** (identical set proven pre-existing). The redesign +
+KPI work was committed as `36f0d4c`; the channel fix + version feature + cleanup + tests as a follow-up
+commit. api rebuilt + recreated for all backend changes; endpoints verified live. **Not pushed** yet.

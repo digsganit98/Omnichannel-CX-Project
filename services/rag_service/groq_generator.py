@@ -295,6 +295,9 @@ class GroqGenerator:
         operation: str = "llm_generation",
         metadata: dict | None = None,
     ) -> dict:
+        # The sampling config that defines this call's "version" (see llm_usage._config_version).
+        # Kept in one place so every record_llm_call below stamps the same version tag.
+        call_params = {"temperature": 0.2}
         if not self.api_key:
             result = {"text": "", "model": self.model, "llm_used": False, "error": "GROQ_API_KEY not set"}
             record_llm_call(
@@ -306,6 +309,7 @@ class GroqGenerator:
                 input_text=user_prompt,
                 error=result["error"],
                 metadata=metadata,
+                params=call_params,
             )
             return result
         started = time.perf_counter()
@@ -316,7 +320,7 @@ class GroqGenerator:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
-                temperature=0.2,
+                temperature=call_params["temperature"],
                 timeout=self.timeout,
             )
             text = response.choices[0].message.content.strip()
@@ -331,6 +335,7 @@ class GroqGenerator:
                 input_text=user_prompt,
                 output_text=text,
                 metadata=metadata,
+                params=call_params,
             )
             return {"text": text, "model": self.model, "llm_used": True}
         except Exception as exc:
@@ -344,6 +349,7 @@ class GroqGenerator:
                 input_text=user_prompt,
                 error=str(exc),
                 metadata=metadata,
+                params=call_params,
             )
             return {"text": "", "model": self.model, "llm_used": False, "error": str(exc)}
 

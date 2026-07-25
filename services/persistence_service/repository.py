@@ -842,7 +842,8 @@ class SQLiteCXRepository:
                 f"""
                 SELECT model, COALESCE(model_version, 'unknown') AS model_version,
                        COUNT(*) AS calls, SUM(total_tokens) AS total_tokens,
-                       SUM(estimated_cost_usd) AS estimated_cost_usd, AVG(latency_ms) AS avg_latency_ms
+                       SUM(estimated_cost_usd) AS estimated_cost_usd, AVG(latency_ms) AS avg_latency_ms,
+                       MAX(metadata_json) AS _meta_sample
                 FROM llm_usage_events
                 {where}
                 GROUP BY model, COALESCE(model_version, 'unknown')
@@ -1021,6 +1022,14 @@ class SQLiteCXRepository:
         for key in ("calls", "total_tokens"):
             if key in value:
                 value[key] = value[key] or 0
+        # Decode the config behind a version tag (for the "Cost/Latency by model / version" panels).
+        # All rows in a (model, version) group share the same config, so any sample suffices.
+        if "_meta_sample" in value:
+            sample = value.pop("_meta_sample")
+            try:
+                value["model_config"] = (json.loads(sample) or {}).get("model_config")
+            except (TypeError, ValueError):
+                value["model_config"] = None
         return value
 
     @staticmethod

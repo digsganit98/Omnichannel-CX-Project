@@ -153,18 +153,33 @@ def get_overview(db_path: str) -> OverviewMetrics:
 
 def get_channel_metrics(db_path: str) -> ChannelMetrics:
     with _connect(db_path) as conn:
+        # Count each ticket ONCE, on the real channel it arrived on. The ticket's channel is the
+        # channel of the turn(s) carrying its ticket_id (email / web_chat / whatsapp).
+        # (The old query joined tickets → channel_identities, which (a) surfaced internal identifier
+        #  types like 'graph'/'portal' that are NOT contact channels, and (b) counted a ticket once
+        #  per identity the customer had, inflating every channel to a flat identical number.)
         ticket_rows = conn.execute(
             """
-            SELECT ci.channel, COUNT(*) AS cnt
-            FROM tickets t
-            JOIN conversations c ON t.conversation_id = c.conversation_id
-            JOIN channel_identities ci ON c.customer_id = ci.customer_id
-            GROUP BY ci.channel
+            SELECT channel, COUNT(*) AS cnt
+            FROM (
+                SELECT t.ticket_id, MIN(ct.channel) AS channel
+                FROM tickets t
+                JOIN conversation_turns ct ON ct.ticket_id = t.ticket_id
+                WHERE ct.channel IS NOT NULL AND ct.channel != ''
+                GROUP BY t.ticket_id
+            )
+            GROUP BY channel
             """
         ).fetchall()
 
+        # Real customer-facing channels only (exclude internal identifier types).
         msg_rows = conn.execute(
-            "SELECT channel, COUNT(*) AS cnt FROM conversation_turns GROUP BY channel"
+            """
+            SELECT channel, COUNT(*) AS cnt
+            FROM conversation_turns
+            WHERE channel IS NOT NULL AND channel != ''
+            GROUP BY channel
+            """
         ).fetchall()
 
     ticket_map = {r["channel"]: r["cnt"] for r in ticket_rows}
