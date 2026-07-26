@@ -53,6 +53,21 @@ ACCOUNT_VERIFICATION_REQUIRED_INTENTS = {
 }
 
 
+def _is_real_bfsi_customer(graph_ctx: dict) -> bool:
+    """True only for a genuinely seeded BFSI customer, not a bare phantom portal node.
+
+    A real customer carries profile identity (name/segment) and/or actual product holdings.
+    A phantom `cust_…` node created for an unmatched portal signup has a customer_id but
+    name=None, no segment, and empty product lists — it must be treated as unregistered.
+    """
+    if graph_ctx.get("name") or graph_ctx.get("segment"):
+        return True
+    return any(
+        graph_ctx.get(k)
+        for k in ("loans", "claims", "policies", "credit_cards", "accounts", "fixed_deposits")
+    )
+
+
 class QueryResolution(BaseModel):
     answer: str
     confidence: float = Field(ge=0.0, le=1.0)
@@ -113,7 +128,11 @@ class CustomerValidationAgent:
                 is_registered=True, validation_required=False, reason="neo4j_unavailable_skip_validation"
             )
         graph_ctx = context.get("graph_context") or {}
-        if graph_ctx.get("customer_id"):
+        # Registered ONLY if this is a REAL seeded BFSI customer — not merely any node with a
+        # customer_id. A phantom portal node (cust_… with name=NULL and no products) has a
+        # customer_id but no real profile; it must NOT pass validation, or an unverified user
+        # gets a generic LLM answer + ticket instead of the clean reject-unregistered message.
+        if graph_ctx.get("customer_id") and _is_real_bfsi_customer(graph_ctx):
             return CustomerValidationResult(is_registered=True, validation_required=True)
         return CustomerValidationResult(
             is_registered=False, validation_required=True, reason="no_matching_bfsi_customer_record"

@@ -1569,6 +1569,44 @@ Several rounds of iteration on the FinOps LLM section:
 - A granularity selector (hourly/daily/weekly/monthly/quarterly) was discussed and **deferred** (data
   is currently one day; coarse grains need per-grain time ranges — noted for later).
 
+### Confidence-score pills on held-reply cards (backend + UI)
+**User ask:** show the confidence / retrieval score to the admin on the "Held for review — AI-proposed
+reply" card, so they know how much to trust the drafted answer. **Two real scores exist** (a third,
+"response confidence", does NOT — `rag_pipeline` sets response `confidence` = the retrieval score, so
+it'd be a duplicate; not shown): **retrieval confidence** (`state.resolution.confidence` = top KB-match
+score, explains "no knowledge found") and **intent confidence** (`state.analysis.confidence`).
+**Impl:** migration `011_reply_draft_confidence.sql` (nullable `retrieval_confidence` + `intent_confidence`
+on `reply_drafts`); `add_reply_draft` stores them; `graph.py` passes both at hold time; `list_reply_drafts`
+returns them via `SELECT *` (automatic); UI `confPill(label,score)` renders a coloured pill per score
+(green ≥70 / amber ≥40 / red <40) on the draft-card header, next to the escalation reason. Legacy drafts
+(pre-migration) have NULL scores → no pill. **Verified (0 Groq):** migration applied, store+read-back of
+0.12/0.84 correct, served assets carry `confPill`; api rebuilt.
+
+### Unverified-customer validation fix — phantom Neo4j nodes bypassed reject-unregistered
+**Bug (user spotted):** a NEW/unverified portal customer ("Hariwork423") asking an account-specific
+question (`loan_status`) got a generic LLM ramble opening "Dear Hariwork423" **+ a ticket**, instead of
+the clean "we couldn't verify your account" rejection. **Root cause (traced live):** Neo4j held 4
+**phantom `cust_…` Customer nodes** (name=NULL, no products) created for unmatched portal signups. The
+validation gate (`CustomerValidationAgent.validate`) passed anyone whose `graph_context` had ANY
+`customer_id` — so a phantom node satisfied it → treated as registered → normal answer + ticket, and the
+reject path (which hardcodes "Dear Customer", no name) never ran. So the "Dear <name>" was a *symptom* of
+the routing bug, not a greeting bug.
+**Fix (Layer 1, read-side — `services/agent_service/orchestration_agents.py`):** new
+`_is_real_bfsi_customer(graph_ctx)` — registered ONLY if the context has real profile identity
+(name/segment) OR any product holdings (loans/accounts/cards/policies/claims/FDs). A bare phantom fails →
+routed to `_reject_unregistered_customer` → clean "Dear Customer" message, no ticket, no name.
+**Layer 3 (cleanup):** DETACH DELETE'd the 4 phantom `cust_` nodes + the junk Ticket/Interaction nodes
+they owned (scoped strictly to the `cust_` prefix; the 5 real `CRN` customers + their products verified
+intact before AND after).
+**Layer 2 (write-source):** traced live with a fresh unmatched signup + `loan_status` message — **no
+phantom was created** by current code (signup returns "unregistered" without writing; the pipeline
+write-guard held). So the phantoms were **legacy junk** from older code, not an active leak — Layer 2
+effectively closed. **Verified live (1 Groq test msg):** unmatched user → exact rejection message
+(no name), 0 phantoms after, `customer_validation_failed` audit fired (was 0 before). General intents
+still answerable by anyone (unchanged). api rebuilt.
+**Deferred/logged to memory:** thread feature ([[thread-feature-plan]]), Langfuse retrieval-as-a-span
+([[langfuse-retrieval-instrumentation]]); Langfuse `CAPTURE_IO` flipped true (`.env`, untracked).
+
 ### Tests + commits
 New `tests/test_analytics_observability.py` (8 tests, 0 Groq): version-tag changes/determinism/None,
 escalation denominator = inbound turns, reason-merge, and channels-exclude-fake. Full suite:
