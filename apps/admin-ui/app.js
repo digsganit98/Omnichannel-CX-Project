@@ -1195,6 +1195,17 @@ function renderCentre(conv) {
 // Render the human-in-the-loop editable draft card if this conversation has a pending
 // held reply. The AI's proposed answer is shown in an editable box; the agent can correct
 // it and Send (delivers to the customer + persists the outbound turn), or Discard it.
+// A confidence pill for the held-reply card: label + %, coloured by band
+// (≥70 green, ≥40 amber, else red). Renders nothing when the score is absent
+// (legacy drafts predate the feature).
+function confPill(label, score) {
+  if (score == null || isNaN(score)) return '';
+  var pct = Math.round(Number(score) * 100);
+  var cls = pct >= 70 ? 'conf-hi' : (pct >= 40 ? 'conf-mid' : 'conf-lo');
+  return '<span class="conf-pill ' + cls + '" title="' + escH(label) + ' confidence: ' + pct + '%">'
+    + escH(label) + ' ' + pct + '%</span>';
+}
+
 function renderDraftCard(conv) {
   var mount = document.getElementById('draftMount');
   if (!mount) return;
@@ -1214,7 +1225,9 @@ function renderDraftCard(conv) {
     ? '<span>💡 Approved offer — edit &amp; send</span>'
     + '<span class="draft-reason">Delivers via WhatsApp + Email</span>'
     : '<span>✋ Held for review — edit &amp; send manually</span>'
-    + '<span class="draft-reason">' + escH(draft.hold_reason || 'Escalated') + '</span>';
+    + '<span class="draft-reason">' + escH(draft.hold_reason || 'Escalated') + '</span>'
+    + confPill('Retrieval', draft.retrieval_confidence)
+    + confPill('Intent', draft.intent_confidence);
   mount.innerHTML =
     '<div class="draft-card' + (isOffer ? ' draft-card--offer' : '') + '" data-draft-id="' + escH(draft.draft_id) + '">'
     + '<div class="draft-hdr">' + hdr + '</div>'

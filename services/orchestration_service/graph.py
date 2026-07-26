@@ -622,6 +622,9 @@ class OrchestrationGraph:
                     reason_code=gate.reason_code,
                     channel_identifier=state.message.channel_identifier,
                     provider=state.message.provider,
+                    # Confidence scores live at hold time — surface them to the reviewing admin.
+                    retrieval_confidence=(state.resolution.confidence if state.resolution else None),
+                    intent_confidence=(state.analysis.confidence if state.analysis else None),
                 )
                 state.held_for_review = True
                 state.draft_id = draft["draft_id"]
