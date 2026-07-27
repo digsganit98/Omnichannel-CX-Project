@@ -173,6 +173,11 @@ def _send_offer_draft(repository, draft: dict, draft_id: str, text: str, actor: 
             correlation_id=draft_id,
         )
         delivery = delivery_service.send(outbound_message, text)
+        offer_metadata = {"source": "opportunity_offer", "draft_id": draft_id, "actor": actor}
+        # The product (captured at approve time) lets the conversation view group
+        # this offer under its own theme instead of the unrelated preceding query.
+        if draft.get("offer_product"):
+            offer_metadata["product"] = draft["offer_product"]
         turn = repository.append_turn(
             conversation_id=draft["conversation_id"],
             customer_id=draft["customer_id"],
@@ -181,7 +186,7 @@ def _send_offer_draft(repository, draft: dict, draft_id: str, text: str, actor: 
             text=text,
             ticket_id=None,
             delivery_status=delivery.get("status", "sent"),
-            metadata={"source": "opportunity_offer", "draft_id": draft_id, "actor": actor},
+            metadata=offer_metadata,
         )
         deliveries.append({"channel": identity["channel"],
                            "identifier": identity["identifier"],

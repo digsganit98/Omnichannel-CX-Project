@@ -98,6 +98,7 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fresh start executed (2026-07-27):** full wipe (cx-data/neo4j-data/opensearch-data) + reseed of the 5 BFSI customers + KB re-index (9 docs), following the fresh-start runbook; all 7 deps verified; WhatsApp SYSTEM_USER token valid (expires 2026-09-23); ngrok unchanged domain (no Meta webhook change). Verified the email pipeline end-to-end live (background poller ingests an inbound email in ~20s → Groq reply → SMTP send). Prepared `docs/demo-practice-script.md` grounded in the real reseeded customer data.
 - **Fix 59 — "Dear Customer" for unverified/name-less senders (greeting, not just reject path):** `_salutation` no longer fabricates a name from an email local-part (`demoaccforoff@…` → "Demoaccforoff"); if the only identifier is an email it returns **"Customer"**. Fixes the greeting on the *general-answer* path for unverified senders (Fix in Session 9 only covered the *reject* path — general questions from unverified users still got a mangled name). Verified customers keep their real Neo4j name (Fix 57), so only name-less senders change. Backend; api rebuilt.
 - **Fix 60 — Phantom Neo4j node write-guard extended to ALL channels (not just portal):** Session 9's "Layer 2" write-guard that skips Neo4j customer/interaction writes for unverified senders was gated to `is_portal_message` only, so an unverified **email/WhatsApp** sender still MERGE-created a bare `cust_…` phantom node (found live this session as the 6th Neo4j customer). Both write-guards in `graph.py` (customer upsert + Phase-2 interaction/ticket) now run the `get_customer_by_id` existence check on **every** channel: a known customer resolves to a real `CRN…` id → write proceeds unchanged; an unverified sender resolves to a synthetic `cust_…` id not in the graph → write skipped. **Corrects a Session-9 scoping mistake:** "email paths unaffected" was written meaning "not changed" but read as "safe" — the guard was never tested on the email/WhatsApp write path. Verified behaviorally (fakes + real Neo4j, 0 Groq): unverified email → no phantom; known WhatsApp customer → writes still work, count stays 5. Backend; api rebuilt.
+- **Fix 61 — Offers grouped by their OWN theme (reuse the app's intent-grouping) + multi-channel offer = ONE unit:** an admin-approved cross-sell offer used to be "glued" to whatever query immediately preceded it (Fix 42e), so an unrelated health-insurance offer rendered as a continuation of a "savings balance" query. Root cause: offers are holding-driven (built from the customer's product gaps), not query-driven, so the preceding query rarely relates. **Fix (reuses existing machinery, per user):** the offer's **product** is now captured at approve time → carried on the draft (`offer_product`, migration 012) → stamped onto the sent offer turn's metadata; the frontend maps product→intent (`OFFER_PRODUCT_INTENT`, e.g. `health_insurance→policy_status`) so the offer flows through the **existing `themeOf` grouping** — joins the matching topic group, else forms its own themed group. Also fixed multi-channel offers splitting into a box per channel: the offer's `draft_id` is now its grouping key (the role `ticket_id` plays for a ticket), so the same offer delivered to WhatsApp+email collapses into ONE unit with a dot per channel — the same omnichannel rendering a multi-channel ticket gets. Verified live (0 Groq — seeded a recommendation, drove approve→send endpoints): product flows recommendation→draft→turn on both channels; multi-channel merge confirmed visually in Detailed + Lineage. Backend + migration 012 + frontend; api rebuilt. **Note (test-hygiene miss, logged honestly):** the live verification ran the real *send* path against a real customer (Digvijay), which likely emailed him the test offer — should have stopped at approve or used a throwaway; the test artifacts were then deleted (scoped: my 2 turns + draft + recommendation + audits; pre-existing rows preserved).
 
 ---
 
@@ -1695,8 +1696,45 @@ was inert graph junk, not a data leak. This fix stops the phantom being *written
 (2 turns, 1 evidence, 17 audit, 2 agent-assist, channel identity, runtime customer) deleted in one
 transaction (before/after counts all → 0). A pre-delete SQLite backup sits inert in the session scratchpad.
 
+### Fix 61 — Offers grouped by their own theme + multi-channel offer as ONE unit
+**Symptom (user, screenshots):** an admin-approved **health-insurance** offer rendered as a continuation
+of an unrelated **"savings account balance"** query in the conversation view; and the same offer delivered
+to WhatsApp + email showed as **two separate boxes**. **Root cause 1 (grouping):** Fix 42e made an offer
+"transparent" — it glued to whatever request came *immediately before* it. But offers are **holding-driven**
+(the engine builds candidates from the customer's product gaps — Digvijay has no health policy → health
+offer), NOT query-driven, so the preceding query rarely relates. A first attempt ("group by real trigger"
+= the query that prompted the offer) was **reverted** after the user pointed out the trigger genuinely IS
+the unrelated savings query (the offer engine grounds on holdings + a sentiment gate, not the query topic),
+so it would still glue under savings. **Fix (per user: reuse the app's existing intent-grouping):** give
+the offer its **own theme** from its product, then let the SAME `themeOf` machinery every turn uses do the
+grouping. (1) Backend: capture the offer's `product` at approve time (`agent_assist.py`) → store it on the
+draft as `offer_product` (migration `012_reply_draft_offer_product.sql` + `add_reply_draft` param) → stamp
+it onto the sent offer turn's metadata (`reply_drafts.py`). (2) Frontend (`app.js`): `OFFER_PRODUCT_INTENT`
+maps each product to an intent (`health_insurance→policy_status`, `credit_card→card_management`, …); the
+offer step's `rawIntent` uses it, so the offer joins the matching topic group or forms its own themed group
+— removed the special "glue to prev" block entirely. **Root cause 2 (multi-channel split):** the same offer
+is delivered to every push channel as separate turns; unticketed, they couldn't ride the existing
+`ticket_id`-based unit merge. **Fix (reuse omnichannel grouping):** use the offer's `draft_id` as the unit
+**grouping key** — exactly the role `ticket_id` plays for a ticket — so WhatsApp+email deliveries of one
+offer collapse into ONE unit rendered with a dot per channel (the same as a multi-channel ticket). Rewrote
+`buildUnits` to key on `it.offer ? draft_id : ticket_id`; each channel-delivery is its own exchange within
+the merged unit. **Verified:** `node --check` OK; python compiles; migration 012 applies to the test DB;
+offer/agent-assist/opportunity suites **50 pass**; full suite **145 pass** (same 5 pre-existing failures,
+proven with graph.py stashed earlier). Backend chain proven **live, 0 Groq** (seeded a `credit_card`
+recommendation, drove the real approve→send endpoints): `recommendation.product → draft.offer_product →
+offer turn metadata.product` on **both** channels. User confirmed the multi-channel merge visually in both
+Detailed + Lineage on the pre-existing offer (which merges by `draft_id` even without a product).
+**Test-hygiene miss (owned):** the live send ran against a REAL customer (Digvijay), so his email likely
+received the test offer — should have stopped at approve or used a throwaway customer. The test artifacts
+were deleted in one transaction (my 2 offer turns + draft + recommendation + 2 `verify` audits → 0);
+pre-existing rows (an 08:06 pending `credit_card` rec, the old health offer's turns) verified preserved.
+**Behavioral note:** a NEW offer themes correctly (Insurance/Card Services); OLD offers predating the fix
+carry no `product` → they fall back to `general_inquiry` theme (expected, not a bug).
+
 ### State at end of session
-Both fixes live in the rebuilt api image. The user then ran their own verification (2 unverified test
-emails) — confirmed live: 2 conversations in the inbox, **Neo4j still exactly 5 CRN customers, 0
-phantoms**. **Uncommitted** at time of logging (2 files: `graph.py`, `orchestration_agents.py`, + the new
-demo script). Pre-existing `test_phase1` 5-failure set unchanged throughout.
+Fixes 59, 60, 61 live in the rebuilt api image (migration 012 applied). The user confirmed Fixes 59/60 with
+their own verification (unverified test emails: Neo4j stays exactly 5 CRN customers, 0 phantoms) and Fix 61's
+multi-channel merge visually. **Committed** this offer-grouping work (Fix 61) as its own commit; Fixes 59/60
+were committed earlier as `35e043c`. Pre-existing `test_phase1` 5-failure set unchanged throughout.
+Housekeeping left for the user: a few test conversations remain in the inbox (demoaccforoff / workuseonly16
+test emails + Digvijay's older health offer) — clear before the demo if a pristine inbox is wanted.

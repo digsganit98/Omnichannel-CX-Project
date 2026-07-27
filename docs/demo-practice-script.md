@@ -75,13 +75,42 @@ WhatsApp and email channels, oldest→newest.
 
 ## Flow 4 — Suggested Offers (cross-sell / up-sell)
 
-Sayantini is HNI with an entry-level Classic card → a natural card-upgrade offer. (Note: her card is
-dpd 45, so the dpd<30 guard on the HNI-upgrade rule may suppress it — good honesty moment, or use
-Hirithi who is dpd 0 for a cleaner offer.)
+How offers work (so you know WHY each query fires one): the engine precomputes **candidate offers from
+each customer's real BFSI holdings** ("eligible-but-not-owned" + upgrade rules), the LLM picks 1–2 and
+writes the pitch, and the **only gate is sentiment** — if the customer's latest message is *negative*,
+offers are suppressed. So: **keep the lead-in message neutral/positive**, and pick a query that maps to
+a candidate the customer's data actually produces. The most reliable trigger is **Rule 10** — asking
+about a product family the customer does NOT hold surfaces that product as a cross-sell.
 
-- *(as Hirithi, whose card is current)* ask a **positive/neutral** product question, e.g.
-  **"What benefits does my platinum card give me?"** → after answering, the **Suggested Offers** card
-  appears in the right panel.
+Per-customer queries below are grounded in the reseeded data — each one produces at least one real
+candidate. Send them as a neutral product question (WhatsApp / email / portal).
+
+### Sayantini Sarkar (HNI · Classic card dpd 45 · Health policy · 2 charges · no loan)
+> Her card is **dpd 45**, so both card-upgrade rules are correctly *suppressed* (dpd<30 guard) — a good
+> honesty beat. Her live offers come from the loan gap + repeated charges.
+- **"Can you tell me about your personal loan options?"** → *personal_loan_info* cross-sell (holds no loan).
+- **"Why do I keep getting these late/penalty charges on my card?"** → *charge_waiver account upgrade*
+  (she has 2 unreversed charges → "an upgraded tier waives these"). Keep it a calm question, not a rant
+  (a negative-sentiment message suppresses offers).
+
+### Hirithi Nandha (HNI · Platinum card dpd 0, 13,438 pts · Loan Against Property · Auto policy only)
+> The richest offer target — three candidates fire.
+- **"What benefits does my platinum card give me?"** → *premium_card_upgrade* (13k+ reward points, on-time).
+- **"Do I have any life or term insurance with you?"** → *term_insurance* cross-sell (has a loan, no life cover).
+- **"Am I covered for health / hospital expenses?"** → *health_insurance* cross-sell (no health policy).
+
+### Digvijay Yadav (Affluent · accounts but NO credit card · Home Insurance · no loan)
+- **"What credit cards can I apply for?"** → *credit_card* cross-sell (active account holder, no card — fires automatically).
+- **"Tell me about your personal loan options."** → *personal_loan_info* cross-sell (holds no loan).
+
+### Fathima Devasahayam (Affluent · Personal Loan · Term + Auto policies · no card · no health policy)
+> Already has term cover, so no life cross-sell — health + card are her gaps.
+- **"Do I have any health insurance cover?"** → *health_insurance* cross-sell (no health policy on record).
+- **"What credit card would suit me?"** → *credit_card* cross-sell via Rule 10 (asks about a card, holds none).
+
+### Sireesha (Mass Affluent · Signature card dpd 0, 13,164 pts · Auto + Home policies · no loan)
+- **"What perks come with my signature card?"** → *premium_card_upgrade* (13k+ points, payments on time).
+- **"Can you share your personal loan options?"** → *personal_loan_info* cross-sell (holds no loan).
 
 **What to point at:**
 1. The **Suggested Offers** card (purple heading) with the LLM-written pitch.

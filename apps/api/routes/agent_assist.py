@@ -218,6 +218,10 @@ def decide_recommendation(recommendation_id: str, payload: NBADecisionUpdate) ->
             raise HTTPException(
                 status_code=409,
                 detail="A pending reply draft already exists — send or discard it first.")
+        # Carry the offer's product (health_insurance, credit_card, …) onto the
+        # draft so the sent offer turn can be grouped by its own theme in the
+        # conversation view (matching topic group, else its own group).
+        offer_product = (existing.get("metadata") or {}).get("product")
         draft = repository.add_reply_draft(
             conversation_id=conversation_id,
             customer_id=customer_id,
@@ -227,6 +231,7 @@ def decide_recommendation(recommendation_id: str, payload: NBADecisionUpdate) ->
             reason_code=existing.get("action_type") or "cross_sell",
             channel_identifier=None,
             provider="opportunity_engine",
+            offer_product=offer_product,
         )
 
     updated = repository.update_agent_assist_recommendation(

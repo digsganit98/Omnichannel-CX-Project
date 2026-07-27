@@ -86,6 +86,42 @@ function themeOf(intent) {
   return { theme: themeKey, themeLabel: intentLabel(key), color: THEME_COLOR[team] || THEME_COLOR.general };
 }
 
+// A bank-initiated offer has no customer intent of its own, so map its product
+// to the intent whose theme it belongs to. This lets an offer be grouped by the
+// app's existing intent→theme machinery: it joins the matching topic group when
+// one exists, else forms its own themed group (never glued under an unrelated
+// query). Products not listed fall back to 'general_inquiry'.
+var OFFER_PRODUCT_INTENT = {
+  term_insurance: 'policy_status',
+  health_insurance: 'policy_status',
+  insurance_policy: 'policy_status',
+  credit_card: 'card_management',
+  premium_card_upgrade: 'card_management',
+  personal_loan_info: 'loan_status',
+  fixed_deposit: 'account_balance_inquiry',
+  fd_renewal: 'account_balance_inquiry',
+  premium_account_tier: 'account_balance_inquiry',
+  charge_waiver_account_upgrade: 'account_balance_inquiry'
+};
+function offerIntentOf(step) {
+  var o = step.outbound;
+  var product = o && o.metadata && o.metadata.product;
+  return OFFER_PRODUCT_INTENT[(product || '').toLowerCase()] || 'general_inquiry';
+}
+// True for an admin-approved bank-initiated offer turn (Opportunities flow):
+// an outbound turn tagged opportunity_offer with no paired customer message.
+function isOfferStep(step) {
+  var o = step.outbound;
+  return !!(o && o.metadata && o.metadata.source === 'opportunity_offer' && !step.inbound);
+}
+// The draft_id shared by every delivery of ONE offer — its grouping key, the
+// role ticket_id plays for a ticket (the same offer goes to WhatsApp + email as
+// separate turns sharing this id).
+function offerDraftId(step) {
+  var o = step.outbound;
+  return (o && o.metadata && o.metadata.draft_id) || null;
+}
+
 // ── Auth state ────────────────────────────────────────────────────────────────
 var adminKey = sessionStorage.getItem('cx-admin-key') || '';
 var adminToken = sessionStorage.getItem('cx-admin-jwt') || '';
@@ -695,6 +731,9 @@ function renderCentre(conv) {
   // customer topic — treat it as unthemed (via topicOrEmpty) so it never forms
   // its own group and instead inherits the intent of the ticket/turns around it.
   var rawIntent = steps.map(function(step) {
+    // A bank-initiated offer carries no query intent; theme it by its product so
+    // it groups with the matching topic (or forms its own themed group).
+    if (isOfferStep(step)) return offerIntentOf(step);
     return topicOrEmpty((step.inbound && step.inbound.intent) || (step.outbound && step.outbound.intent) || '');
   });
   var stepTicket = steps.map(function(step) {
@@ -734,14 +773,12 @@ function renderCentre(conv) {
     carried = stepThemes[si];
   }
   // An admin-approved offer turn (Opportunities flow) is bank-initiated and
-  // unticketed. It is "transparent" to grouping: it never starts a group/unit
-  // of its own, and it does NOT break ticket adjacency — so a ticket whose
-  // conversation continues after the offer (customer replies to it) stays ONE
-  // request: question → offer → reply. (User rule, 2026-07-23.)
-  function isOfferStep(step) {
-    var o = step.outbound;
-    return !!(o && o.metadata && o.metadata.source === 'opportunity_offer' && !step.inbound);
-  }
+  // unticketed. It is themed by its product (see offerIntentOf / rawIntent), so
+  // it flows through the SAME theme-grouping as any other turn: it joins the
+  // group of the matching topic when the customer discussed it, otherwise it
+  // forms its own themed group — never glued under an unrelated preceding query.
+  // (Supersedes the 2026-07-23 "offer is transparent, glue to prev" rule, which
+  // made unrelated offers look like a continuation of whatever came before.)
 
   var groups = [];
   var prevTicket = null;
@@ -750,13 +787,8 @@ function renderCentre(conv) {
     var tkt = stepTicket[idx];
     var prev = groups[groups.length - 1];
     var offer = isOfferStep(step);
-    if (offer && prev) {
-      // Glue the offer to the current group; prevTicket carries through so the
-      // same ticket on both sides of the offer reunites.
-      prev.items.push({ step: step, idx: idx, ticket: tkt, offer: true });
-      return;
-    }
-    // Same ticket as the previous step → always stay in the same group.
+    // Same ticket as the previous step → always stay in the same group. An offer
+    // is unticketed (tkt is null), so it can only join a group by matching theme.
     var sameTicket = tkt && prevTicket && tkt === prevTicket;
     if (!prev || (prev.theme !== th.theme && !sameTicket)) {
       groups.push({ theme: th.theme, themeLabel: th.themeLabel, color: th.color, items: [{ step: step, idx: idx, ticket: tkt, offer: offer }] });
@@ -795,22 +827,18 @@ function renderCentre(conv) {
     var units = [];
     items.forEach(function(it) {
       var last = units[units.length - 1];
-      if (it.offer && last) {
-        // Offer glues to the current unit and is transparent to ticket
-        // adjacency: last.ticket is untouched, so the same ticket on the far
-        // side of the offer merges back into this unit (question → offer →
-        // customer's reply-to-offer = ONE request).
+      // A unit's grouping key: ticket_id for a query/ticket, or — for a
+      // bank-initiated offer (unticketed) — its draft_id. The same offer is
+      // delivered to every push channel (WhatsApp + email) as separate turns
+      // sharing one draft_id, so this key makes those deliveries collapse into
+      // ONE unit (each channel = one exchange/dot), exactly the omnichannel
+      // grouping a multi-channel ticket already gets.
+      var key = it.offer ? offerDraftId(it.step) : it.ticket;
+      var lastKey = last ? last.key : null;
+      if (last && key && lastKey === key) {
         last.items.push(it);
-      } else if (last && it.ticket && last.ticket === it.ticket) {
-        last.items.push(it);
-      } else if (last && !last.ticket && last.items.every(function(x){ return x.offer; })) {
-        // The newest turn(s) were the offer itself (customer hasn't replied
-        // yet): the offer belongs to the request that TRIGGERED it — the next
-        // older item. Adopt that item (and its ticket) into the offer's unit.
-        last.items.push(it);
-        last.ticket = it.ticket;
       } else {
-        units.push({ ticket: it.ticket, items: [it] });
+        units.push({ key: key, ticket: it.offer ? null : it.ticket, items: [it] });
       }
     });
     return units.map(function(u) {
