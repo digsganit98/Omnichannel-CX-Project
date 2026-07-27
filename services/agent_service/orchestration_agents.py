@@ -670,14 +670,19 @@ def _strip_email_boilerplate(body: str) -> str:
 
 
 def _salutation(customer_name: str) -> str:
-    """Derive a safe salutation name from the customer's display_name."""
+    """Derive a safe salutation name from the customer's display_name.
+
+    If the only thing we have is an email address, we do NOT actually know the
+    person's real name, so we greet them as "Customer" rather than fabricating a
+    name from the email local-part (e.g. demoaccforoff@… → "Demoaccforoff"). A
+    verified BFSI customer's real name comes from Neo4j (see graph.py display_name
+    handling), so they never hit the email branch; only unverified / name-less
+    senders fall back to "Customer".
+    """
     name = (customer_name or "").strip()
-    if not name:
+    if not name or "@" in name:
         return "Customer"
-    # If it looks like an email address, extract and title-case the local part
-    if "@" in name:
-        name = name.split("@")[0].replace(".", " ").replace("_", " ").title()
-    return name or "Customer"
+    return name
 
 
 def _derive_product_id_for_memory(intent: str, graph_ctx: dict) -> str:

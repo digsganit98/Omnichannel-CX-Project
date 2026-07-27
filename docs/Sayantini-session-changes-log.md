@@ -95,6 +95,9 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Analytics page — whole-page creative redesign (frontend-only):** one shared `.kpi-tile` design system (gradient-accent tiles + top accent bar + icon + hover lift) applied to all 8 KPI tiles AND the LLM panel; bar charts → taller rounded gradient meters with row hover; sentiment bar → rounded gradient segments + keyed legend; Agent table → colour dots + tabular numerals; chart-card hover. No backend/data change.
 - **Analytics — formula tooltips on every KPI card:** each KPI tile now shows its exact formula on hover (native `title` + a `?` affordance), across both the Customer Care set and the Solution Performance set.
 - **Analytics — Solution Performance section rebuilt with practical, data-backed KPIs (backend + frontend):** replaced the broken/empty metrics (233% escalation bug, always-empty resolution-mix, single-day trend) with 4 KPIs that compute on real present-state data — **Escalation rate** (escalated tickets ÷ inbound customer queries = 7/18 = 38.9%; denominator is inbound turns so routine queries pull it down, never saturates), **Avg risk score** (AVG priority_score over open tickets = 60), **Critical load** (open critical tickets = 4), **Drafts handled** (reply_drafts sent = 14) — and 2 real charts: **Open tickets by risk band** + **Why tickets escalate**. New `/analytics/solution-performance` endpoint + `get_solution_performance` aggregator; api rebuilt.
+- **Fresh start executed (2026-07-27):** full wipe (cx-data/neo4j-data/opensearch-data) + reseed of the 5 BFSI customers + KB re-index (9 docs), following the fresh-start runbook; all 7 deps verified; WhatsApp SYSTEM_USER token valid (expires 2026-09-23); ngrok unchanged domain (no Meta webhook change). Verified the email pipeline end-to-end live (background poller ingests an inbound email in ~20s → Groq reply → SMTP send). Prepared `docs/demo-practice-script.md` grounded in the real reseeded customer data.
+- **Fix 59 — "Dear Customer" for unverified/name-less senders (greeting, not just reject path):** `_salutation` no longer fabricates a name from an email local-part (`demoaccforoff@…` → "Demoaccforoff"); if the only identifier is an email it returns **"Customer"**. Fixes the greeting on the *general-answer* path for unverified senders (Fix in Session 9 only covered the *reject* path — general questions from unverified users still got a mangled name). Verified customers keep their real Neo4j name (Fix 57), so only name-less senders change. Backend; api rebuilt.
+- **Fix 60 — Phantom Neo4j node write-guard extended to ALL channels (not just portal):** Session 9's "Layer 2" write-guard that skips Neo4j customer/interaction writes for unverified senders was gated to `is_portal_message` only, so an unverified **email/WhatsApp** sender still MERGE-created a bare `cust_…` phantom node (found live this session as the 6th Neo4j customer). Both write-guards in `graph.py` (customer upsert + Phase-2 interaction/ticket) now run the `get_customer_by_id` existence check on **every** channel: a known customer resolves to a real `CRN…` id → write proceeds unchanged; an unverified sender resolves to a synthetic `cust_…` id not in the graph → write skipped. **Corrects a Session-9 scoping mistake:** "email paths unaffected" was written meaning "not changed" but read as "safe" — the guard was never tested on the email/WhatsApp write path. Verified behaviorally (fakes + real Neo4j, 0 Groq): unverified email → no phantom; known WhatsApp customer → writes still work, count stays 5. Backend; api rebuilt.
 
 ---
 
@@ -1613,3 +1616,87 @@ escalation denominator = inbound turns, reason-merge, and channels-exclude-fake.
 **145 pass, 5 pre-existing `test_phase1` failures** (identical set proven pre-existing). The redesign +
 KPI work was committed as `36f0d4c`; the channel fix + version feature + cleanup + tests as a follow-up
 commit. api rebuilt + recreated for all backend changes; endpoints verified live. **Not pushed** yet.
+
+---
+
+## Session 10 — 2026-07-27
+
+Branch: `Sayantini-phase2-ui-changes`. Pre-demo fresh start, then two greeting/phantom fixes found
+during live testing.
+
+### Fresh start executed (full wipe + reseed)
+Following `docs/fresh-start-runbook.md`: `docker compose down` → wiped `cx-data`/`neo4j-data`/
+`opensearch-data` (kept ollama/huggingface) → up → 5 BFSI customers auto-reseeded → KB re-indexed
+(9 docs, 0 errors). Verified all 7 deps live: API ok, Neo4j 5 customers, RAG healthy, Groq key valid +
+quota (one `max_tokens=1` probe), Ollama runtime (provider=groq), WhatsApp **SYSTEM_USER** token valid
+(expires 2026-09-23), ngrok up on the **unchanged** domain `tactical-dribble-booting…` (so the Meta
+webhook needed no change), email SMTP/IMAP + Jira CRM configured, inbox empty. Shell env-var trap checked
+(both empty). **`docs/demo-practice-script.md` authored** — practice questions grounded in the real
+reseeded customer data (per-customer product holdings pulled from Neo4j), organized by flow + channel.
+
+### Email pipeline verified end-to-end (live)
+Diagnosed a "sent an email, saw a reply, but nothing in the portal" confusion. Traced to ground truth
+(not assumed): the reply the user saw was from the OLD (pre-wipe) stack — its Gmail copy survived, its DB
+record was wiped; and the user was viewing the **customer portal** (shows only the logged-in customer's
+own threads), not the admin inbox. Then proved the CURRENT stack's email path works by sending a fresh
+test email: the **background poller** (`services/channel_service/email_poller.py`) ingested it in ~20s,
+the pipeline ran, Groq generated a reply, SMTP sent it (`delivery_status=sent`), conversation + 2 turns
+persisted. **Two-poller note:** the background loop that actually runs at boot is `email_poller.py`
+(`IMAPEmailReader.fetch_unseen`); the `last_poll_ts`/`emails_processed` counters on
+`/admin/email-inbox/status` belong to a SEPARATE `EmailInboxPoller` used only by the on-demand
+`POST /admin/email-inbox/poll` — so `last_poll_ts: null` does NOT mean the background poller is idle
+(it's just a different object). **Demo rule:** the poller only reads UNSEEN mail, so don't open the
+support mailbox before it reads new mail (opening marks it Seen → skipped).
+
+### Fix 59 — "Dear Customer" for unverified / name-less senders (greeting on the general-answer path)
+**Symptom (user, screenshot):** an unverified email sender (`demoaccforoff@gmail.com`) asking a GENERAL
+question ("What documents do I need for a home loan?") got a correct answer (no ticket, general KB) but
+the greeting read **"Dear Demoaccforoff,"**. **Why this wasn't the Session-9 fix:** that fix routes
+unverified senders asking *account-specific* questions to `_reject_unregistered_customer` ("Dear
+Customer"). A **general** question is deliberately answerable by anyone, so it does NOT hit the reject
+path — it goes through the normal answer + `compose_answer` → `_salutation`, which title-cased the email
+local-part into a fake name (same class of bug as Fix 57, which only covered *verified* customers).
+**Correction to my own earlier statement:** in Flow 7 I told the user "unverified → always Dear Customer"
+without the *account-specific-only* scope — an overstatement; general questions were never covered.
+**Fix:** `_salutation` (`services/agent_service/orchestration_agents.py`) now returns **"Customer"** when
+the name is empty OR contains `@` (an email = we don't actually know a real name), instead of deriving a
+pseudo-name from the local-part. Verified customers keep their real Neo4j name (Fix 57), so they never
+hit the `@` branch. **Verified (0 Groq):** 7-case unit table (emails→"Customer", real names unchanged,
+None/empty safe); imported live from the running container post-rebuild → `demoaccforoff@gmail.com` →
+"Customer". Full suite 72 pass, the 5 `test_phase1` failures proven pre-existing (stash-baseline). api
+rebuilt + recreated.
+
+### Fix 60 — Phantom Neo4j node write-guard extended to ALL channels (Session-9 scoping mistake corrected)
+**Symptom (user):** after the greeting fix + cleanup, Neo4j showed **6** customers, not 5 — a phantom
+`cust_40e074ce9a51` (name=NULL, no products, the test sender's email) + its 1 orphan Interaction.
+**Root cause (traced in `graph.py`):** Session 9's Layer-2 write-guard — which skips ALL Neo4j customer/
+interaction writes when the resolved graph id isn't a real seeded customer — was gated to
+`is_portal_message` only (**both** guard blocks: the customer upsert ~L301 and the Phase-2 interaction/
+ticket write ~L681). For an **email** (or WhatsApp) message `is_portal_message` is False, so the guard
+was skipped, `neo4j_customer_exists` stayed at its `True` default, and `neo4j_writer.upsert_customer`
+MERGE-created a bare phantom node for the unverified sender. **This is a Session-9 mistake, owned:** I
+tested Layer 2 only on the PORTAL path, saw the guard hold, and wrote "Non-portal (whatsapp/email)
+messages unaffected" — meaning "not changed" but effectively claiming "safe." The email/WhatsApp write
+path was never tested; it had the hole all along. **Fix:** both guard blocks now gate on
+`self.neo4j_client` alone, so the `get_customer_by_id(graph_customer_id)` existence check runs on EVERY
+channel. A known customer resolves to a real `CRN…` id → found → write proceeds unchanged; an unverified
+sender resolves to a synthetic `cust_…` id absent from the graph → write skipped. Removed the now-dead
+local `is_portal_message` re-declaration in the second block (grep-confirmed no downstream use).
+**Verified behaviorally (fakes + REAL Neo4j, 0 Groq):** `OrchestrationGraph` with `NoLLM`/`FakeRAG`/
+`FakeResolutionEngine` — (1) unverified email `totallyunknown_test@example.com` → **no phantom**, count
+stays 5, non-CRN nodes `[]`; (2) known WhatsApp customer (Fathima `+917538870992`) → pipeline runs, writes
+still happen, count stays 5, no orphans. Byte-compiles; full suite 72 pass; the 5 `test_phase1` failures
+proven pre-existing with **graph.py specifically** stashed out. api rebuilt + recreated.
+**Note (read-side unchanged, still correct):** even before this fix, the Session-9 `_is_real_bfsi_customer`
+read-guard rejected phantoms at answer time, so no fake account data ever reached a customer — the phantom
+was inert graph junk, not a data leak. This fix stops the phantom being *written* in the first place.
+**Cleanup done this session:** the pre-fix phantom (`cust_40e074…`) + its Interaction DETACH DELETE'd
+(scoped to the `cust_` id); the wrong "Dear Demoaccforoff" test conversation + all its SQLite child rows
+(2 turns, 1 evidence, 17 audit, 2 agent-assist, channel identity, runtime customer) deleted in one
+transaction (before/after counts all → 0). A pre-delete SQLite backup sits inert in the session scratchpad.
+
+### State at end of session
+Both fixes live in the rebuilt api image. The user then ran their own verification (2 unverified test
+emails) — confirmed live: 2 conversations in the inbox, **Neo4j still exactly 5 CRN customers, 0
+phantoms**. **Uncommitted** at time of logging (2 files: `graph.py`, `orchestration_agents.py`, + the new
+demo script). Pre-existing `test_phase1` 5-failure set unchanged throughout.

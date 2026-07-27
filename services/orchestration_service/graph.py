@@ -292,13 +292,17 @@ class OrchestrationGraph:
 
         state.customer = self.repository.resolve_customer(message)
         state.conversation = self.repository.get_or_create_conversation(state.customer_id)
-        # For a portal message whose graph id does NOT match a real seeded BFSI customer,
-        # skip ALL Neo4j customer/interaction writes. Writing a bare node would make an
-        # unknown user look "registered" (with no data) and bypass the reject-unregistered
-        # flow. Non-portal (whatsapp/email) messages are unaffected. Cached per-request.
+        # Skip ALL Neo4j customer/interaction writes when the resolved graph id is NOT a real
+        # seeded BFSI customer. Writing a bare node would make an unknown sender look
+        # "registered" (with no data) and bypass the reject-unregistered flow. This must apply
+        # on EVERY channel: an unverified email/WhatsApp sender resolves to a synthetic cust_…
+        # id that does not exist in the graph, so the guard skips the write; a known customer
+        # resolves to their real CRN… id, is found, and the write proceeds unchanged.
+        # (Previously this check ran for portal messages only, which let email/WhatsApp create
+        # phantom cust_… nodes for unverified senders.) Cached per-request.
         graph_customer_id = _neo4j_customer_id(state)
         neo4j_customer_exists = True
-        if is_portal_message and self.neo4j_client:
+        if self.neo4j_client:
             try:
                 from services.neo4j_service.queries import get_customer_by_id
                 neo4j_customer_exists = bool(get_customer_by_id(self.neo4j_client, graph_customer_id))
@@ -676,11 +680,12 @@ class OrchestrationGraph:
         if state.resolution:
             self.repository.add_retrieval_evidence(outbound_turn["turn_id"], state.resolution.contexts)
         self.repository.update_conversation_summary(state.conversation_id, self._summary(state.conversation_id))
-        # Skip Phase-2 Neo4j writes for unregistered portal users (no real customer node),
-        # so we don't leave orphan Interaction/Ticket nodes for senders we rejected.
-        is_portal_message = bool(state.message.metadata.get("portal_graph_customer_id"))
+        # Skip Phase-2 Neo4j writes for unregistered senders (no real customer node) on ANY
+        # channel, so we don't leave orphan Interaction/Ticket nodes for senders we rejected.
+        # An unverified email/WhatsApp/portal sender resolves to a synthetic cust_… id that is
+        # not in the graph → skipped; a known customer resolves to their real CRN… id → written.
         neo4j_customer_exists = True
-        if is_portal_message and self.neo4j_client:
+        if self.neo4j_client:
             try:
                 from services.neo4j_service.queries import get_customer_by_id
                 neo4j_customer_exists = bool(get_customer_by_id(self.neo4j_client, _neo4j_customer_id(state)))
