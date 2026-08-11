@@ -101,6 +101,7 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 61 — Offers grouped by their OWN theme (reuse the app's intent-grouping) + multi-channel offer = ONE unit:** an admin-approved cross-sell offer used to be "glued" to whatever query immediately preceded it (Fix 42e), so an unrelated health-insurance offer rendered as a continuation of a "savings balance" query. Root cause: offers are holding-driven (built from the customer's product gaps), not query-driven, so the preceding query rarely relates. **Fix (reuses existing machinery, per user):** the offer's **product** is now captured at approve time → carried on the draft (`offer_product`, migration 012) → stamped onto the sent offer turn's metadata; the frontend maps product→intent (`OFFER_PRODUCT_INTENT`, e.g. `health_insurance→policy_status`) so the offer flows through the **existing `themeOf` grouping** — joins the matching topic group, else forms its own themed group. Also fixed multi-channel offers splitting into a box per channel: the offer's `draft_id` is now its grouping key (the role `ticket_id` plays for a ticket), so the same offer delivered to WhatsApp+email collapses into ONE unit with a dot per channel — the same omnichannel rendering a multi-channel ticket gets. Verified live (0 Groq — seeded a recommendation, drove approve→send endpoints): product flows recommendation→draft→turn on both channels; multi-channel merge confirmed visually in Detailed + Lineage. Backend + migration 012 + frontend; api rebuilt. **Note (test-hygiene miss, logged honestly):** the live verification ran the real *send* path against a real customer (Digvijay), which likely emailed him the test offer — should have stopped at approve or used a throwaway; the test artifacts were then deleted (scoped: my 2 turns + draft + recommendation + audits; pre-existing rows preserved).
 - **Fix 62 — Client-demo solution overview doc:** New `docs/client-demo-solution-overview.md` — capabilities plus deep dives on LLM, RAG, agent architecture, WhatsApp, email, and the knowledge layer (graph DB + KB); architecture, 13-step flow, demo path, per-area production scope, prepared answers to 4 anticipated client questions (guardrails / local-LLM / human-review cost / TAM), and verified live-state/risk list; plus a Word export (`.docx`) via a new reusable `infra/scripts/md2docx.py`.
 - **Fix 63 — Tickets never reached Neo4j (id-namespace mismatch):** `_neo4j_customer_id` returned the SQLite `cust_…` id for whatsapp/email, so the graph's `MATCH (c:Customer {customer_id:'CRN…'})` matched nothing and every ticket/interaction write silently produced no node; now resolves the sender's phone/email to the real `CRN…` (backfill script added for the 8 pre-existing tickets).
+- **Fix 64 — Knowledge-graph view in the admin UI:** New read-only `/admin/customers/{id}/graph-view` endpoint returns the customer neighbourhood as `{nodes, edges}`; a "View knowledge graph" button at the top of the right panel opens a modal rendering it as a deterministic radial SVG, coloured by derived health.
 
 ---
 
@@ -2103,6 +2104,48 @@ not tickets. The correct figure is 8 of 9 tickets across 3 customers.
 **Backups taken before any write:** `/app/data/_bak_fix63.db` in-container plus a host copy in the
 session scratchpad.
 
+### Fix 64 — Knowledge-graph view in the admin UI (Track B, phases 1-2)
+**Built:** (1) `GET /admin/customers/{id}/graph-view` ([customers.py](../apps/api/routes/customers.py))
+— reshapes the customer neighbourhood into `{nodes, edges, counts}`, reusing the existing per-product
+query helpers (`get_accounts`/`get_credit_cards`/`get_claim_status`/...) rather than new Cypher. Each
+node carries a derived `health` (ok / warn / crit / neutral) so the renderer colours by "needs
+attention", not by node type. Claims attach to their owning Policy, giving the two-hop
+`Policy → HAS_CLAIM → Claim` shape a flat list cannot show; tickets appear as nodes (possible only
+because of Fix 63). Sender→graph id resolution mirrors Fix 63's `cust_… → CRN…` lookup, so an
+unverified sender returns `resolved:false` with zero nodes.
+(2) `renderGraphSvg()` + `openGraphModal()` in [app.js](../apps/admin-ui/app.js) — a radial
+hub-and-spoke SVG with a **deterministic** layout (positions from a stable type-then-id sort, never a
+physics sim, because the inbox re-polls every ~3s and a jittering graph is unreadable).
+(3) A "View knowledge graph · N nodes" button at the **top** of the right panel (user's placement
+call — above Sentiment), shown only when the customer resolves to a graph node.
+(4) `.kg-*` rules in [style.css](../apps/admin-ui/style.css), all built from the existing token set.
+
+**Verified:** endpoint correct on all 4 live customers (Sayantini 12 nodes / Digvijay 11 / Fathima 10 /
+unverified 0 → button hidden); a layout checker replicating the JS geometry reports 0 node overlaps,
+0 hub collisions and 0 off-canvas boxes for every customer and for ring sizes 5–24. 0 Groq calls.
+
+**Layout iteration (recorded because the reasoning matters):** the first radius formula sized the ring
+by *node count* (`62 * n`), which is a linear budget applied to a **circular** layout — it inflated the
+canvas to 1326×912 with enormous edges. Corrected to derive `rx` from the arc budget (circumference
+must fit n boxes) and `ry` from the per-side vertical pitch; deriving *both* from circumference
+over-corrected and flattened the ellipse until nodes collided. Gap values 22/24 are the tightest
+collision-free pair across n=5..24 (swept exhaustively).
+
+**Known limitation — the view still renders smaller than the user wants.** `.kg-modal-card` uses
+`width:max-content`, so the modal sizes itself to the graph; that removed the gutters but means a
+larger window needs the *graph* to grow, not the container. The fix (agreed, not yet built) is a fixed
+large modal + SVG filling it + **font sizes divided by the computed scale factor** so text renders at a
+constant apparent size regardless of zoom — the step missing from every attempt so far. Also pending:
+claims currently join the main ring sort instead of clustering under their policy, which wastes
+horizontal space and crosses edges through the hub.
+
+**Process note (owned):** five deploy-and-check rounds were spent on this layout, each reported
+"CLEAN" by a checker that only measured geometric overlap — never apparent size, which is what the
+user was actually asking about. Verifying the easy-to-measure property and treating it as proof of the
+requested one is the failure mode; the renderer should have been eyeballed locally before deploying.
+
 ### State at end of session
 Fix 63 live in the rebuilt api image; graph now holds 8 Ticket nodes linked to their real customers.
-Uncommitted. The knowledge-graph UI itself is still **not built** — design agreed, mockup only.
+Fix 64 (graph endpoint + renderer + modal) live in the rebuilt image and **committed as the
+pre-resize restore point** — the user explicitly wanted a recoverable version before further visual
+changes. Phase 3 (answer-path highlight) not started.
