@@ -300,7 +300,7 @@ class OrchestrationGraph:
         # resolves to their real CRN… id, is found, and the write proceeds unchanged.
         # (Previously this check ran for portal messages only, which let email/WhatsApp create
         # phantom cust_… nodes for unverified senders.) Cached per-request.
-        graph_customer_id = _neo4j_customer_id(state)
+        graph_customer_id = _neo4j_customer_id(state, self.neo4j_client)
         neo4j_customer_exists = True
         if self.neo4j_client:
             try:
@@ -688,7 +688,9 @@ class OrchestrationGraph:
         if self.neo4j_client:
             try:
                 from services.neo4j_service.queries import get_customer_by_id
-                neo4j_customer_exists = bool(get_customer_by_id(self.neo4j_client, _neo4j_customer_id(state)))
+                neo4j_customer_exists = bool(
+                    get_customer_by_id(self.neo4j_client, _neo4j_customer_id(state, self.neo4j_client))
+                )
             except Exception:
                 neo4j_customer_exists = False
         if neo4j_writer and self.neo4j_client and state.analysis and neo4j_customer_exists:
@@ -696,7 +698,7 @@ class OrchestrationGraph:
             neo4j_writer.update_interaction_resolution(
                 self.neo4j_client,
                 conversation_id=state.conversation_id,
-                customer_id=_neo4j_customer_id(state),
+                customer_id=_neo4j_customer_id(state, self.neo4j_client),
                 resolution=state.answer or "",
                 intent=state.analysis.intent.value,
                 sentiment=state.analysis.sentiment,
@@ -708,7 +710,7 @@ class OrchestrationGraph:
                 neo4j_writer.upsert_ticket_node(
                     self.neo4j_client,
                     ticket_id=state.ticket.ticket_id,
-                    customer_id=_neo4j_customer_id(state),
+                    customer_id=_neo4j_customer_id(state, self.neo4j_client),
                     intent=state.analysis.intent.value,
                     priority=state.ticket.priority.value if hasattr(state.ticket.priority, "value") else str(state.ticket.priority),
                     status=state.ticket.status.value if hasattr(state.ticket.status, "value") else str(state.ticket.status),
@@ -823,11 +825,68 @@ def _try_neo4j():
         return None
 
 
-def _neo4j_customer_id(state: "OrchestrationState") -> str:  # type: ignore[name-defined]
-    """Use portal graph CustomerID for Neo4j writes when the message came from the portal."""
+def _neo4j_customer_id(state: "OrchestrationState", client=None) -> str:  # type: ignore[name-defined]
+    """Resolve the id to use for Neo4j writes, in the graph's own ``CRN…`` namespace.
+
+    Portal messages already carry the resolved graph id. For whatsapp/email the state's
+    ``customer_id`` is the SQLite ``cust_…`` hash, which is a DIFFERENT namespace from the
+    graph's ``CRN…`` ids — writing it means ``MATCH (c:Customer {customer_id: 'cust_…'})``
+    matches nothing, so ticket/interaction writes silently produced no nodes. Resolve the
+    sender's phone/email against the graph (same lookup the agent panel uses) to get the
+    real ``CRN…``.
+
+    Falls back to the ``cust_…`` id when no graph customer matches — an unverified sender,
+    which the callers' existence check then correctly skips (no phantom nodes).
+    """
     if state.message and state.message.metadata.get("portal_graph_customer_id"):
         return str(state.message.metadata["portal_graph_customer_id"])
-    return state.customer_id or ""
+
+    fallback = state.customer_id or ""
+    if client is None:
+        return fallback
+
+    # Cached per message — this helper is called on several write paths per turn.
+    cached = state.context.get("_neo4j_graph_customer_id") if state.context is not None else None
+    if cached is not None:
+        return str(cached)
+
+    resolved = fallback
+    try:
+        from services.neo4j_service.queries import get_customer_by_identifier
+        for identifier in _graph_identifiers(state):
+            found = get_customer_by_identifier(client, identifier)
+            if found and found.get("customer_id"):
+                resolved = str(found["customer_id"])
+                break
+    except Exception:
+        logger.warning("neo4j_customer_id_resolve_failed", exc_info=True)
+        resolved = fallback
+
+    if state.context is not None:
+        state.context["_neo4j_graph_customer_id"] = resolved
+    return resolved
+
+
+def _graph_identifiers(state: "OrchestrationState") -> list[str]:  # type: ignore[name-defined]
+    """Candidate phone/email identifiers for resolving the sender to a graph Customer."""
+    meta = state.message.metadata if state.message else {}
+    candidates = [
+        meta.get("linked_email"),
+        meta.get("portal_contact_identifier"),
+        state.message.channel_identifier if state.message else None,
+        (state.customer or {}).get("metadata_json", {}).get("email")
+        if isinstance((state.customer or {}).get("metadata_json"), dict) else None,
+    ]
+    seen: set[str] = set()
+    out: list[str] = []
+    for c in candidates:
+        c = str(c).strip() if c else ""
+        # web_session:<user> is a portal session handle, never a graph identifier.
+        if not c or c.startswith("web_session:") or c in seen:
+            continue
+        seen.add(c)
+        out.append(c)
+    return out
 
 
 def _extract_product_ref(state: "OrchestrationState") -> str:  # type: ignore[name-defined]

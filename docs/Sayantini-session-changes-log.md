@@ -99,6 +99,8 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 59 — "Dear Customer" for unverified/name-less senders (greeting, not just reject path):** `_salutation` no longer fabricates a name from an email local-part (`demoaccforoff@…` → "Demoaccforoff"); if the only identifier is an email it returns **"Customer"**. Fixes the greeting on the *general-answer* path for unverified senders (Fix in Session 9 only covered the *reject* path — general questions from unverified users still got a mangled name). Verified customers keep their real Neo4j name (Fix 57), so only name-less senders change. Backend; api rebuilt.
 - **Fix 60 — Phantom Neo4j node write-guard extended to ALL channels (not just portal):** Session 9's "Layer 2" write-guard that skips Neo4j customer/interaction writes for unverified senders was gated to `is_portal_message` only, so an unverified **email/WhatsApp** sender still MERGE-created a bare `cust_…` phantom node (found live this session as the 6th Neo4j customer). Both write-guards in `graph.py` (customer upsert + Phase-2 interaction/ticket) now run the `get_customer_by_id` existence check on **every** channel: a known customer resolves to a real `CRN…` id → write proceeds unchanged; an unverified sender resolves to a synthetic `cust_…` id not in the graph → write skipped. **Corrects a Session-9 scoping mistake:** "email paths unaffected" was written meaning "not changed" but read as "safe" — the guard was never tested on the email/WhatsApp write path. Verified behaviorally (fakes + real Neo4j, 0 Groq): unverified email → no phantom; known WhatsApp customer → writes still work, count stays 5. Backend; api rebuilt.
 - **Fix 61 — Offers grouped by their OWN theme (reuse the app's intent-grouping) + multi-channel offer = ONE unit:** an admin-approved cross-sell offer used to be "glued" to whatever query immediately preceded it (Fix 42e), so an unrelated health-insurance offer rendered as a continuation of a "savings balance" query. Root cause: offers are holding-driven (built from the customer's product gaps), not query-driven, so the preceding query rarely relates. **Fix (reuses existing machinery, per user):** the offer's **product** is now captured at approve time → carried on the draft (`offer_product`, migration 012) → stamped onto the sent offer turn's metadata; the frontend maps product→intent (`OFFER_PRODUCT_INTENT`, e.g. `health_insurance→policy_status`) so the offer flows through the **existing `themeOf` grouping** — joins the matching topic group, else forms its own themed group. Also fixed multi-channel offers splitting into a box per channel: the offer's `draft_id` is now its grouping key (the role `ticket_id` plays for a ticket), so the same offer delivered to WhatsApp+email collapses into ONE unit with a dot per channel — the same omnichannel rendering a multi-channel ticket gets. Verified live (0 Groq — seeded a recommendation, drove approve→send endpoints): product flows recommendation→draft→turn on both channels; multi-channel merge confirmed visually in Detailed + Lineage. Backend + migration 012 + frontend; api rebuilt. **Note (test-hygiene miss, logged honestly):** the live verification ran the real *send* path against a real customer (Digvijay), which likely emailed him the test offer — should have stopped at approve or used a throwaway; the test artifacts were then deleted (scoped: my 2 turns + draft + recommendation + audits; pre-existing rows preserved).
+- **Fix 62 — Client-demo solution overview doc:** New `docs/client-demo-solution-overview.md` — capabilities plus deep dives on LLM, RAG, agent architecture, WhatsApp, email, and the knowledge layer (graph DB + KB); architecture, 13-step flow, demo path, per-area production scope, prepared answers to 4 anticipated client questions (guardrails / local-LLM / human-review cost / TAM), and verified live-state/risk list; plus a Word export (`.docx`) via a new reusable `infra/scripts/md2docx.py`.
+- **Fix 63 — Tickets never reached Neo4j (id-namespace mismatch):** `_neo4j_customer_id` returned the SQLite `cust_…` id for whatsapp/email, so the graph's `MATCH (c:Customer {customer_id:'CRN…'})` matched nothing and every ticket/interaction write silently produced no node; now resolves the sender's phone/email to the real `CRN…` (backfill script added for the 8 pre-existing tickets).
 
 ---
 
@@ -1738,3 +1740,369 @@ multi-channel merge visually. **Committed** this offer-grouping work (Fix 61) as
 were committed earlier as `35e043c`. Pre-existing `test_phase1` 5-failure set unchanged throughout.
 Housekeeping left for the user: a few test conversations remain in the inbox (demoaccforoff / workuseonly16
 test emails + Digvijay's older health offer) — clear before the demo if a pristine inbox is wanted.
+
+---
+
+## Session 11 — 2026-07-30 (docs only)
+
+### Fix 62 — Client-demo solution overview doc
+
+**Need:** a single end-to-end reference for a client demo call — capabilities, features,
+architecture, and solution flow in one place.
+
+**Problem:** the existing docs were split and partly stale. `README.md` still describes the
+Phase-1/2 era (Ollama-primary LLM, port 8000, SQLite-only, no portal / offers / analytics /
+Neo4j-first retrieval), while the newer reality lives scattered across
+`demo-practice-script.md`, `omnichannel-demo-script.md`, and this changelog. Nothing described
+the current architecture as a whole.
+
+**Added:** `docs/client-demo-solution-overview.md` — pitch, capability inventory (channels,
+4-agent LangGraph orchestration, 16-intent taxonomy, 4-tier retrieval cascade, L1/L2/L3 engine +
+deterministic safety net, 11-rule escalation policy, HIL review gate, 4-tier ticket continuity,
+10-rule offer engine, attrition scorer, security/PII/governance, observability/FinOps, UI
+surfaces), architecture diagram + runtime service/port table, Neo4j data model with live node
+counts, the 13-step solution flow, 5 seeded customers, 5-min and 15-min demo paths, talking
+points, live-state/risk table, pre-call checklist, and known limitations.
+
+**Verification (no Groq spend — read-only endpoints + code reads only):** every runtime claim was
+pulled from the live stack rather than from memory or the stale README —
+`/health`, `/admin/orchestration/workflow` (confirmed `framework: LangGraph`),
+`/admin/orchestration/ai-runtime` (Groq `llama-3.1-8b-instant` reachable),
+`/admin/rag/health` (`active_backend: sentence_transformers`), `/admin/neo4j/status`
+(5 customers + full node/relationship counts), `/admin/crm/status`, `/admin/email/status`,
+`/admin/whatsapp/status`, `/admin/llm-observability/{status,summary}`, `/admin/tickets`,
+`/admin/conversations`, `/admin/reply-drafts`, plus `docker compose ps`. Decision logic was read
+end-to-end from `graph.py`, `orchestration_agents.py`, `classifier.py`, `ticket_manager.py`,
+`opportunity_engine.py`, `scorer.py`, `review_gate.py`, and `masker.py`.
+
+**Live-state findings worth carrying forward (surfaced by this pass, not fixed here):**
+- **Jira CRM sync is failing on all 8 tickets** — `crm_sync_status: failed`, Jira 400 *"target
+  project doesn't exist or you don't have permission"* for `CRM_PROJECT_KEY=OP`. Local ticket
+  lifecycle is unaffected; only the external mirror fails. Flagged as the top demo risk.
+- **The API is on port 8888**, not 8000 (compose maps `8888→8000`); the README's URLs are wrong.
+- `Ticket: 0` nodes in Neo4j despite 8 SQLite tickets (predate the current write path / non-graph
+  customers) — cosmetic for the demo, but don't show the Neo4j ticket count.
+- OpenSearch cluster status `yellow` is normal for single-node, not a fault.
+
+**Not changed:** no code, config, or data touched — documentation only.
+
+**Extended (same session, on user request):** added three sections the first pass under-covered —
+§3 **WhatsApp integration deep dive**, §4 **Email integration deep dive**, and §5 **the knowledge
+layer (graph DB + KB)**. The graph/KB concepts had been mentioned only in passing; nothing
+explained *why* a graph database, what the KB actually contains, or how the two retrieval systems
+divide the work. Downstream sections renumbered 6–14; all relative links verified to resolve from
+`docs/`.
+
+Each integration section covers: what it is, inbound flow, outbound flow, operating modes, known
+limitations, and a **prioritised production-scope list** (must-do vs should-do). The knowledge
+layer section covers the graph-vs-vector division of labour, five reasons a graph DB fits this
+problem (customer-as-neighbourhood, identity resolution, gap-traversal cross-sell, meaningful
+relationships, migration-free evolution), KB ingestion/governance, and production scope for both.
+
+**Additional verification for the extension (0 Groq — code reads + read-only queries):** read
+`whatsapp_cloud.py`, `integrations_whatsapp.py`, `email_inbox_poller.py`, `email_sender.py`,
+`delivery.py`, `documents.py`, `queries.py`, `query_library.py`, `opensearch_store.py`,
+`config.py`; queried the live OpenSearch index directly for the true corpus composition.
+
+**Two code facts surfaced by this pass (both left as-is, documented not changed):**
+- **The KB corpus is a single 2-page PDF.** `load_knowledge_documents()` calls `_load_pdf_kb()`
+  only — `_load_markdown_kb()` exists but is **dead code** (grep confirms zero callers), so the
+  six `*.md` files the README advertises are not indexed. `data/knowledge_base/` holds only
+  `InboxIQ_BFSI_KB.pdf`.
+- **Index composition:** `cx_knowledge_base` holds **60 vectors = 9 `knowledge_base` chunks +
+  51 `resolution_example` chunks**, one index separated by `metadata.doc_type` (aggregation on
+  `metadata.doc_type.keyword`; note `doc_type` is nested under `metadata`, not top-level).
+  `/admin/rag/diagnostics` reports `total_chunks_indexed: 9` because it counts only the KB
+  doc_type — not a bug, but the 9-vs-60 gap is worth knowing before quoting either number.
+  Chunking is 800 chars / 120 overlap; HNSW + Lucene + cosine.
+
+**Extended again (same session, second user request):** the doc covered *features* but had no
+dedicated treatment of the AI implementation itself — LLM, RAG, and agent internals existed only
+as scattered one-liners in §2. Added §3 **LLM layer**, §4 **RAG implementation**, and §5 **Agent
+architecture**, each with the same shape as the integration sections (implementation → known
+limitations → prioritised production scope). Sections renumbered again; final structure is 17
+sections. All `§x.y` cross-references and relative file links re-validated programmatically.
+
+Content grounded in reads of `groq_generator.py`, `rag_pipeline.py`, `cx_agent.py`,
+`shared/prompts/system.md`, `resolution_service/prompts.py`, `hybrid_search.py`,
+`opensearch_store.py`, `documents.py`, `llm_usage.py`, `intent_service/{sentiment,urgency}.py`,
+plus live `/admin/llm-observability/summary`.
+
+**Notable things documented (previously undocumented anywhere):**
+- **Every LLM call funnels through one method** (`GroqGenerator._generate`), which is what makes
+  PII masking, observability, error capture, and version stamping unbypassable.
+- **Prompt-engineering techniques** — rule ordering is load-bearing (`PROMPT-1: ... FIRST — LLMs
+  weight earlier rules more`); the `no_data_note` conditional is what prevents the "I've checked
+  your account" hallucination when no graph context was retrieved; each negative constraint maps
+  to a specific observed failure.
+- **Dynamic (retrieved) few-shot for L1/L2/L3** — the severity prompt's examples are the top-5
+  semantically-nearest labelled examples per query, not a static list. Distinct from intent
+  classification, which uses 7 fixed boundary-case examples.
+- **PII round trip** — mask → Groq → unmask, with fragments masked in one call (` `-joined) so
+  placeholder numbering stays unique; phone matched before plain 12-digit Aadhaar because
+  `+91<10-digit>` is 12 digits once `+` is stripped; Luhn check prevents internal 14-digit account
+  numbers being misread as cards.
+- **Guardrail asymmetry** in `CXAgent._apply_guardrails` — rules may only *raise* urgency, never
+  lower it; rule-detected negative sentiment always wins; intent is overridden only when LLM
+  confidence < 0.65 AND rule confidence > 0.70 AND it is a known boundary intent.
+- **Config-fingerprint versioning** — `model_version = "v-" + sha256(model + sampling params)[:4]`;
+  live tag `v-1412` for `{llama-3.1-8b-instant, temperature 0.2}`.
+- **`retrieval_backend` label as the auditability story** — six possible values, each answer
+  reports which produced it.
+- **The customer-safe filter** (`doc_type == "knowledge_base"`) is the single line preventing a
+  resolution example from being retrieved into a customer answer — and the reason diagnostics
+  reports 9 while the index holds 60.
+- **Hybrid rerank rule** — promote the keyword hit when `local_score >= 0.35 AND >=
+  vector_lexical_score`, with a BFSI synonym-expansion table (`stolen↔lost↔block`, `card↔debit↔credit`).
+- **Weak retrieval escalates rather than guessing** — confidence < 0.3 → Rule 8; no contexts →
+  Rule 7. The most important RAG safety property.
+- **Agent framing stated honestly:** a deterministic multi-agent pipeline, NOT an autonomous
+  ReAct loop — no LLM-chosen tool calls, no self-planning, code owns all routing. Positioned as
+  the correct trade for regulated finance (auditable, latency-bounded, certifiable) rather than a
+  gap. Also documented that the answer-writing agent is deliberately not the escalation-deciding
+  agent, which is why the LLM cannot talk past the review gate.
+- **`TicketManager` has no default generator** — without injection the tier-4 referee is skipped
+  and unmatched messages fork; fail-safe by construction, not configuration.
+- **Agent-layer gaps for production:** synchronous single-process execution (the main scale
+  blocker), no LangGraph checkpointing (the review gate is a side-table hold, not a native
+  `interrupt`, so held drafts aren't resumable graph states), no node-level retry/compensation, no
+  parallel nodes, no circuit breakers.
+
+**Not changed:** still documentation only — no code, config, or data touched; no Groq calls made
+(all figures from the existing usage ledger).
+
+**Extended a third time (same session, user asked whether 4 specific client questions were
+covered).** Audited the doc against them; result: guardrails were **scattered** across 5 sections
+with no consolidated answer, local-LLM appeared only as a config table row (never as a *decision*),
+and **TAM + human-review cost were absent entirely**. Added §14 "Anticipated client questions"
+with a prepared answer each; sections renumbered to 18 total; refs re-validated.
+
+- **§14.1 Guardrails** — consolidated into **6 layers** (deterministic-before-LLM → constraining
+  the LLM's choices → correcting its output → human control → fail-safe defaults → audit), each a
+  table of guardrail→effect, plus a one-sentence version for verbal delivery. Content already
+  existed in the codebase and doc; the contribution is the single organised answer.
+- **§14.2 Local LLM** — reframed as a *tested, reversible decision*, not an assumption: Ollama
+  `qwen2.5:0.5b` IS in the stack as fallback and was primary in the earlier phase. Cloud-primary
+  justified on measured latency (477 ms vs seconds on CPU — the Ollama-primary build needed a UI
+  progress spinner), quality-per-hardware (0.5B laptop fallback is 16× smaller and weak at
+  JSON-schema classification), cost, ops, and model flexibility. Privacy objection answered
+  directly (masked egress only; embeddings and graph never leave), plus 3 named triggers for
+  switching to local and the honest caveat that it needs real GPU hosting.
+- **§14.3 Human-review cost** — **measured from the live DB**, not estimated: 16 inbound turns,
+  12 held drafts = **75% hold rate**, 8 tickets, 12/12 drafts actioned. Flagged prominently NOT to
+  quote 75% as steady state (demo traffic is deliberately dispute/escalation-weighted; L1 lookups
+  auto-send and were run in earlier wiped sessions) — correct framing is "hold rate is a policy
+  dial, not a fixed property". Critically, states where the saving does and does **not** come from:
+  the gate does NOT save decision time on escalated cases; it saves L1 deflection, drafting time,
+  context assembly, and triage. Gives a cost/saving formula plus the 3 inputs to ask the client for
+  rather than asserting benchmark numbers. Certain fact: AI cost ~$0.00006/call is negligible, so
+  the whole economic question is hold rate × review-time delta.
+- **§14.4 TAM** — **explicitly marked UNVERIFIED** with a 🚩, the only such section in the doc,
+  since TAM cannot be derived from the repo. Provides the bottom-up TAM/SAM/SOM method, honest
+  fit/poor-fit qualifying criteria (poor fit: voice-dominant institutions, non-WhatsApp regions, no
+  structured product data, clients wanting no human review), value-metric options, expansion
+  segments tied to real roadmap items, and safe things to say if pressed without numbers.
+
+**Not changed:** documentation only; no code, config, or data. No Groq calls (hold-rate figures
+came from a read-only SQLite query inside the api container; cost figures from the existing ledger).
+
+**Extended a fourth time (user asked whether ngrok was covered).** It was mentioned 6 times but
+only as fragments — a box in a diagram, a service-table row, a one-line limitation — with **no
+explanation of what it is or why it's in the stack**, which is a gap if a client asks "what's this
+tunnel in your architecture?". Added **§6.6 "ngrok — what it is and why it's in the stack"**
+(WhatsApp subsections renumbered: limitations 6.6→6.7, production scope 6.7→6.8).
+
+Covers: what a reverse tunnel does and why Meta requires one (it cannot call `localhost`), the
+traffic path, the `:4040` inspect/replay dashboard, a scripted answer for a client asking about it
+("a development tunnel; in production the API sits behind a real domain and load balancer — the
+tunnel disappears and nothing else about the integration changes"), failure modes, and the
+production replacement.
+
+**Live-state finding worth carrying forward — a real demo risk:** the **live ngrok domain is NOT
+the compose default**. `docker-compose.yml` defaults to `smartly-shredder-overhang…` but `.env`
+sets `NGROK_DOMAIN=https://tactical-dribble-booting.ngrok-free.dev`, which is what the tunnel is
+actually serving (verified via `curl http://localhost:4040/api/tunnels`; tunnel established 05:37
+UTC, forwarding to `api:8000`). Meta inbound traffic confirmed live in the ngrok logs (connections
+from Meta ranges `2a03:2880:…`). **If the Meta App webhook points at the compose default, real
+WhatsApp inbound fails silently** — no error surfaces in the app. Propagated to: the §16 risk table
+(rewritten from "shared domain annoyance" to "domain mismatch breaks inbound", with the verify
+command), the §13 Live URLs block (now lists the real public URL), the §9.1 service table
+("dev-only … not part of production"), and a new pre-call checklist item.
+
+**Not changed:** documentation only; no code, config, or data. No Groq calls (ngrok state read from
+the local tunnel API and container logs).
+
+**Condensed (fifth pass, user: "too big — shorten but do not remove any important point").**
+Reduced **1,599 → 1,040 lines (-35%)** with **zero fact loss**, verified by grepping 35 key
+facts/figures/identifiers against a pre-edit backup (all present). 18 sections → 16.
+
+**What was cut (padding and duplication only):**
+- **Duplication** — §2.4 (retrieval cascade) and §2.5 (L1/L2/L3 detail) restated what §3/§4 cover
+  in full. The cascade moved to a compact paragraph under §10 step 7; the severity detail stayed in
+  §2.4 with the deep dive in §3.
+- **Meta-commentary** — "worth calling out", "the point to lead with", "a strong talking point",
+  "this is what clients care about". The whole doc is talking points; labelling them added lines
+  without information.
+- **Redundant framing sentences** — section intros that restated the heading, and closing lines that
+  repeated the point just made.
+- **Prose → tables/inline lists** — production-scope lists went from 11 numbered paragraph-style
+  bullets to ①②③ inline runs; verbose bullet explanations compressed to `·`-separated lines.
+- **Structural trims** — merged §11 (customers) into §12 (demo path) as one §11; merged the
+  §14/§15 talking-points overlap; collapsed the "Working now / Risks / Checklist" sub-headings in the
+  risk section into one flowing section; §18 related-docs list → one inline paragraph.
+
+**Explicitly preserved:** every measured figure (103 calls / 119,209 tokens / $0.0062 / 477 ms /
+75% hold rate / 60 vectors / v-1412), every threshold (0.65, 0.70, 0.35, 0.3, 0.6, dpd 30, 25-word
+cap), all 11 escalation rules, all 10 offer rules, all 6 guardrail layers, all 4 continuity tiers,
+every known limitation, every production-scope item, all live-state risks, and the two ⚠️/🚩
+warnings (ngrok domain mismatch, unverified TAM). All `§x.y` cross-references and all 10 file links
+re-validated programmatically after renumbering.
+
+**Backup** of the pre-condense version kept in the session scratchpad (not committed) in case any
+cut needs reverting.
+
+**Not changed:** documentation only; no code, config, or data; no Groq calls.
+
+**Extended (sixth pass, user asked whether Langfuse integration was written anywhere).** It was
+mentioned 6 times but with only **one line of substance** — no explanation of what a trace contains,
+how it differs from the in-house ledger, or the PII posture. Added **§3.7 "Langfuse tracing + the
+in-house ledger"** (production scope became §3.8; +3 observability scope items).
+
+Grounded in a full read of `services/observability_service/llm_usage.py` plus live verification.
+
+**Documented (previously nowhere):**
+- **Two layers on purpose** — Langfuse answers *"what happened in this conversation?"*, the SQLite
+  ledger answers *"what did we spend in total?"*. Both fed from the single `record_llm_call()` choke
+  point so they cannot disagree.
+- **Trace structure** — one `omnichannel_message` span per message, with each LLM call nested as a
+  typed `generation` observation carrying `usage_details`, `cost_details`, and `level: ERROR` +
+  `status_message` on failure.
+- **Native Langfuse semantics, not just metadata** — `conversation_id` → **`session_id`** (so
+  cross-channel conversations group under Sessions) and `customer_id` → **`user_id`** (so cost rolls
+  up per customer under Users), channel/intent → tags, all via `propagate_attributes()` so nested
+  calls inherit them.
+- **Bidirectional linking** — `langfuse_trace_id` + a deep-link `langfuse_trace_url` are written
+  back into the local ledger metadata, so our own analytics rows can jump to the Langfuse trace.
+- **PII posture** — `LANGFUSE_CAPTURE_IO` gates prompt/response capture (`None` when off), and even
+  when ON what ships is the **already-masked** prompt, because masking happens upstream in
+  `GroqGenerator` before the call is recorded.
+- **Reliability** — every Langfuse path try/except-wrapped (export failure can never fail a customer
+  reply); `nullcontext()` when unconfigured so code runs identically with it off; non-LLM messages
+  still produce a tagged trace; **explicit flush on FastAPI shutdown** (the SDK batches async, so
+  without it pre-shutdown traces are silently dropped).
+
+**Live verification (0 Groq — read-only status endpoint + SQLite query):**
+- `/admin/llm-observability/status?check_auth=true` → **`authenticated: true`** (real `auth_check()`
+  round trip), `capture_io: true`, cloud base URL.
+- **Trace-coverage gap found and documented:** only **57/103** ledger events carry a Langfuse trace
+  ID. Per-operation: `intent_classification` 17/17, `resolution_level_classification` 16/16,
+  `llm_generation` 8/8, `answer_generation` 16/17 — but **`opportunity_generation` 0/45**, because
+  offers are generated from an admin endpoint *outside* the message workflow trace. Those calls are
+  still fully costed in the ledger; they just aren't nested under a message trace. Logged as scope
+  item ⑬ (wrap the offers endpoint in its own trace) — small and obvious.
+- Schema note for future queries: the metadata column is **`metadata_json`** (not `metadata`), and
+  trace IDs live inside it as `langfuse_trace_id`.
+
+**Not changed:** documentation only; no code, config, or data.
+
+**Word export added (seventh pass, user asked for a .docx).** No pandoc/LibreOffice on this machine,
+but `python-docx` 1.2.0 is installed, so wrote a purpose-built converter:
+**`infra/scripts/md2docx.py`** (reusable: `python infra/scripts/md2docx.py <in.md> <out.docx>`).
+Output: **`docs/client-demo-solution-overview.docx`** (76 KB, valid `Microsoft Word 2007+`).
+
+Handles what this document actually uses - ATX headings (H2/H3 outline levels so navigation and the
+TOC work), **39 pipe tables** with shaded header rows and grid borders, **fenced code blocks**
+rendered as shaded single-cell tables in Consolas 7.5pt to keep the ASCII diagrams aligned,
+blockquotes as amber callout boxes (the warning/flag callouts), inline bold/italic/code/links,
+horizontal rules as bottom borders, nested lists, an auto-generated **TOC field** (levels 1-2,
+populates on open or F9), and footer page numbers.
+
+**Verified:** zip integrity OK, required OOXML parts present, 337 paragraphs / 39 tables /
+16 Heading-2 + 60 Heading-3, 120 monospace runs (code preserved), and **all 25 spot-checked
+facts/figures present** in the extracted text including table cells (8888, tactical-dribble-booting,
+v-1412, 119209, "57 of 103", session_id/user_id, ...) - nothing lost in conversion.
+
+**Note:** the .docx is a GENERATED artifact sitting next to its source .md. Regenerate it after
+editing the markdown or it will drift. (Console-only gotcha: piping the verification script output on
+Windows needs `PYTHONIOENCODING=utf-8`, else cp1252 chokes on the emoji - the file itself is fine.)
+
+**Not changed:** documentation + one new build script; no application code, config, or data.
+
+---
+
+## Session 12 — 2026-08-11
+
+Branch: `Sayantini-phase2-ui-changes`. Investigating how to render the knowledge graph in the UI;
+found and fixed the reason the graph held no tickets.
+
+### Context — knowledge-graph UI exploration (design only, nothing built)
+Explored approaches for showing the Neo4j graph in the admin UI. Six ideas were weighed; the agreed
+line of work is **customer-360 neighbourhood graph → highlight the answer path**, which are ONE build
+(the second is the first plus a `highlight` set), with a graph-vs-KB split view deferred. A static
+mockup was produced (session scratchpad + published artifact) using the real `style.css` tokens and
+the real seeded neighbourhood for Sayantini Sarkar. **No application code was written for this.**
+
+**Two design questions settled by inspection, not opinion:**
+- **Empty highlight state is the COMMON case, not an edge case.** Graph reads only happen for the 6
+  `TRANSACTIONAL_INTENTS`; general inquiries, FAQs and `transaction_dispute` (explicitly excluded)
+  retrieve from OpenSearch. So a "dim everything not used" design would render an all-grey graph most
+  of the time. Resolution: gate the affordance on `retrieval_backend` and show KB chunks when the
+  answer wasn't graph-backed — which is the deferred split-view idea reframed as provenance.
+- **Intent-level highlighting is CORRECT, not a cheap approximation.** `neo4j_answer` fetches and
+  formats *all* records for an intent (e.g. every claim) into the string handed to the LLM — it does
+  not select. So "all three claims were read" is accurate. The finer question (which record the LLM
+  chose to mention) is a different problem and not solvable at the query layer. No backend change needed.
+
+### Fix 63 — Tickets never reached Neo4j (SQLite/graph id-namespace mismatch)
+**Symptom:** live Neo4j showed `Ticket: 0` and `HAS_TICKET: 0` despite 9 tickets in SQLite — first
+noted in Session 11 and assumed cosmetic ("predate the current write path").
+
+**Root cause (traced, not assumed):** `_neo4j_customer_id` ([graph.py:826](../services/orchestration_service/graph.py))
+returned `state.customer_id` — the SQLite `cust_…` hash — for every non-portal message. Only portal
+messages carried a real graph id (`portal_graph_customer_id`). `upsert_ticket_node` uses a strict
+`MATCH (c:Customer {customer_id: $customer_id})`, which matches nothing for a `cust_…` id, so the whole
+Cypher statement wrote **zero rows** — no node, no edge, and no exception (the `try/except` never fired;
+Cypher simply matched nothing). All 9 live tickets were whatsapp/email, hence exactly 0.
+
+**Wider than tickets (verified):** the same helper feeds three writes in the Phase-2 block
+([graph.py:694-715](../services/orchestration_service/graph.py)) — `upsert_ticket_node`,
+`update_interaction_resolution`, and the `neo4j_customer_exists` guard. Because the guard resolves
+`get_customer_by_id('cust_…')` → None, the **entire Phase-2 Neo4j block was skipped** for whatsapp/email.
+So WhatsApp/email conversations had never written their resolution or ResolutionMemory back to the graph
+either; only portal ones did. (`Interaction: 20` comes from the separately-gated Phase-1 write.)
+
+**Fix:** `_neo4j_customer_id(state, client=None)` now resolves the sender's phone/email against the graph
+via the existing `get_customer_by_identifier` — the same lookup the agent panel already uses (no new
+mechanism, per the reuse rule). Order: portal id → per-message cache → identifier lookup → `cust_…`
+fallback. Candidate identifiers come from a new `_graph_identifiers` helper (`linked_email`,
+`portal_contact_identifier`, `channel_identifier`, customer metadata email), skipping `web_session:` handles.
+Result cached on `state.context` because the helper runs on 4 write paths per turn. The `client=None`
+default preserves the old behaviour for any caller that doesn't pass one.
+
+**Fix 60 preserved (explicitly tested):** an unverified sender resolves to no graph customer, still
+returns the `cust_…` id, still fails the existence check, still writes nothing. No phantom nodes.
+
+**Verified (0 Groq, fakes + real Neo4j):** 6-case resolver table — verified WhatsApp (Sayantini) →
+`CRN00010001`; verified email (Digvijay) → `CRN00010003`; verified email (Fathima) → `CRN00010005`;
+**unverified email → `cust_e2e5e9d2c099` (unchanged)**; portal path → unchanged; `client=None` → legacy
+behaviour. Cache confirmed populated. Full suite **145 pass / 5 fail** — byte-identical to the
+pre-edit baseline captured in the same session (the 5 known pre-existing `test_phase1` failures).
+api rebuilt; fix confirmed present in the rebuilt image.
+
+### Backfill — 8 pre-existing tickets written to the graph
+New `infra/scripts/backfill_ticket_nodes.py` (dry-run by default, `--apply` to write) resolves each
+SQLite ticket's customer to a `CRN…` and calls the same `upsert_ticket_node`. Dry run first, then applied.
+
+**Result:** `Ticket: 0 → 8`, `HAS_TICKET: 0 → 8` — Sayantini 4, Digvijay 3, Fathima 1. The 9th ticket
+(`tkt_d91f784422c0`, the unverified `demoaccforoff@gmail.com` test sender) was **correctly skipped**.
+Post-write checks: Customer count still **5**, non-CRN customers `[]` (no phantoms).
+
+**Correction to my own estimate:** I predicted "3 of 9 would map" — that counted distinct *customers*,
+not tickets. The correct figure is 8 of 9 tickets across 3 customers.
+
+**Backups taken before any write:** `/app/data/_bak_fix63.db` in-container plus a host copy in the
+session scratchpad.
+
+### State at end of session
+Fix 63 live in the rebuilt api image; graph now holds 8 Ticket nodes linked to their real customers.
+Uncommitted. The knowledge-graph UI itself is still **not built** — design agreed, mockup only.
