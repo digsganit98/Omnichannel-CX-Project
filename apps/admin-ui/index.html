@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Omnichannel CX Accelerator - Ticket Operations</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/admin-ui/assets/style.css?v=20260811-restored">
+<link rel="stylesheet" href="/admin-ui/assets/style.css?v=20260812-why5">
 </head>
 <body>
 
@@ -225,6 +225,20 @@
       <span class="kg-counts" id="graphModalCounts"></span>
     </div>
     <div class="kg-modal-body" id="graphModalBody"></div>
+  </div>
+</div>
+
+<!-- Why this answer (per-reply provenance) -->
+<div class="modal-overlay hidden" id="whyModal" onclick="if(event.target===this)closeWhyModal()">
+  <div class="modal-card why-modal-card">
+    <div class="kg-modal-head">
+      <div>
+        <div class="kg-modal-title">Why this answer</div>
+        <div class="kg-modal-sub" id="whyModalSub"></div>
+      </div>
+      <button class="ticket-modal-close" onclick="closeWhyModal()" aria-label="Close">&times;</button>
+    </div>
+    <div class="why-modal-body" id="whyModalBody"></div>
   </div>
 </div>
 
@@ -607,6 +621,6 @@
   </div>
 </div>
 
-<script src="/admin-ui/assets/app.js?v=20260811-restored"></script>
+<script src="/admin-ui/assets/app.js?v=20260812-why5"></script>
 </body>
 </html>

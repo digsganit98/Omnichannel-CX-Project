@@ -851,3 +851,29 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .kg-crit .kg-type{fill:var(--red-t)}
 .kg-neutral rect{fill:var(--surf2);stroke:var(--bdr2)}
 .kg-neutral .kg-type{fill:var(--t3)}
+
+/* ── "Why this answer" — per-reply provenance ─────────────────────────────── */
+.det-why{margin-top:7px;padding:3px 8px;font:inherit;font-size:10px;font-weight:600;cursor:pointer;
+  background:transparent;border:1px solid var(--bdr2);border-radius:999px;color:var(--t2)}
+.det-why:hover{border-color:var(--blue);color:var(--blue-t);background:var(--blue-bg)}
+.det-why:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+.why-modal-card{width:min(940px,92vw);max-height:88vh;display:flex;flex-direction:column;padding:0;overflow:hidden}
+.why-modal-body{flex:1;min-height:0;overflow:auto;padding:14px 16px 18px;background:var(--bg)}
+.why-loading,.why-none{padding:22px;text-align:center;color:var(--t3);font-size:12px}
+.why-banner{font-size:11.5px;line-height:1.5;color:var(--t1);background:var(--surf);
+  border:1px solid var(--bdr);border-left:3px solid var(--bdr2);border-radius:var(--rs);
+  padding:9px 12px;margin-bottom:12px}
+.why-banner--graph{border-left-color:var(--amb);background:var(--amb-bg);border-color:var(--amb-bd)}
+.why-banner code{font-family:ui-monospace,Consolas,monospace;font-size:10.5px;
+  background:var(--surf2);border:1px solid var(--bdr);border-radius:3px;padding:0 3px}
+.why-chunk{border:1px solid var(--bdr);border-radius:var(--rs);background:var(--surf);
+  padding:9px 11px;margin-bottom:8px}
+.why-chunk-h{display:flex;justify-content:space-between;gap:10px;font-size:10px;
+  color:var(--t3);margin-bottom:4px;font-variant-numeric:tabular-nums}
+.why-score{color:var(--t2)}
+.why-chunk-t{font-size:11.5px;line-height:1.5;color:var(--t2);white-space:pre-wrap}
+/* Dimmed = present in the graph but not read for this answer. */
+.kg-node.kg-dim{opacity:.26}
+.kg-edge.kg-dim{opacity:.22}
+.why-pts{margin:5px 0 0;padding-left:16px;list-style:disc}
+.why-pts li{font-size:11px;line-height:1.45;color:var(--t2);margin-top:2px}

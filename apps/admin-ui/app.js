@@ -984,11 +984,21 @@ function renderCentre(conv) {
         +   '<div class="det-r">'
         +     '<span class="det-lbl det-r-lbl">AI Agent Reply</span>'
         +     replyInner
+        +     // Only on a real answer. A holding message ("Support Agent will help you
+              // shortly") explains nothing — the actual reply is still a pending draft, so
+              // any retrieval shown against it would be unrelated to what the customer read.
+              (ex.reply && ex.reply.turn_id && !isHolding(ex.reply.text)
+                ? '<button class="det-why" type="button" data-turn="' + escH(ex.reply.turn_id) + '"'
+                  + ' title="Show where this answer\'s information came from">Why this answer?</button>'
+                : '')
         +   '</div>'
         + '</div>';
     });
 
     el.innerHTML = rowsHtml;
+    Array.prototype.forEach.call(el.querySelectorAll('.det-why'), function(b) {
+      b.onclick = function() { openWhyModal(b.getAttribute('data-turn')); };
+    });
 
     if (state.highlightTicketId && u.ticket === state.highlightTicketId) {
       el.classList.add('flow-step--highlight');
@@ -2610,6 +2620,99 @@ window.closeGraphModal = function() {
 
 function kgEsc(s) { return escH(String(s == null ? '' : s)); }
 
+// ── "Why this answer" — per-reply provenance ────────────────────────────────
+// Every reply comes from ONE of two places: the customer's own records in the graph
+// (transactional intents) or passages from the knowledge base (everything else). Which
+// one is a per-message fact, so this shows the real source rather than implying every
+// answer came from the graph — most don't.
+window.closeWhyModal = function() {
+  document.getElementById('whyModal').classList.add('hidden');
+};
+
+async function openWhyModal(turnId) {
+  var modal = document.getElementById('whyModal');
+  var body = document.getElementById('whyModalBody');
+  document.getElementById('whyModalSub').textContent = '';
+  body.innerHTML = '<div class="why-loading">Loading…</div>';
+  modal.classList.remove('hidden');
+  try {
+    var p = await api('/admin/conversations/turns/' + encodeURIComponent(turnId) + '/provenance');
+    document.getElementById('whyModalSub').textContent =
+      [p.intent ? 'intent · ' + p.intent : '', p.retrieval_backend ? 'retrieval · ' + p.retrieval_backend : '']
+        .filter(Boolean).join(' · ');
+    if (p.source === 'graph') {
+      body.innerHTML = await renderWhyGraph(p);
+    } else if (p.source === 'kb') {
+      body.innerHTML = renderWhyKb(p);
+    } else if (p.source === 'holding') {
+      body.innerHTML = '<div class="why-none">Automatic holding message, not an answer.<br>'
+        + 'The real reply is a draft awaiting agent review.</div>';
+    } else {
+      body.innerHTML = '<div class="why-none">No lookup ran for this message.<br>'
+        + 'A holding message, an offer, or a reply that needed none.'
+        + (p.account_context ? '<br>Account records were still available to the model.' : '')
+        + '</div>';
+    }
+  } catch (e) {
+    body.innerHTML = '<div class="why-none">Could not load provenance: ' + escH(e.message) + '</div>';
+  }
+}
+
+// Graph-backed: reuse the customer's own graph, dimming everything the answer didn't read.
+async function renderWhyGraph(p) {
+  var head = '<div class="why-banner why-banner--graph"><b>Read from this customer\'s records</b>'
+    + '<ul class="why-pts">'
+    + '<li>Highlighted nodes = what a <code>' + escH(p.intent || '') + '</code> question looks up.</li>'
+    + '<li>Every record of those types is read.</li>'
+    + '</ul></div>';
+  var custId = (state.convDetail || {}).customer_id
+    || ((state.convs || []).find(function(c) { return c.conversation_id === state.selectedConvId; }) || {}).customer_id;
+  if (!custId) return head;
+  var gv = await api('/admin/customers/' + encodeURIComponent(custId) + '/graph-view');
+  if (!gv || !gv.resolved) return head;
+  var keep = {};
+  (p.graph_types || []).forEach(function(t) { keep[t] = true; });
+  gv.nodes.forEach(function(n) { n.dim = !(n.health === 'hub' || keep[n.type]); });
+  gv.edges.forEach(function(e) {
+    var t = gv.nodes.filter(function(n) { return n.id === e.target; })[0];
+    e.dim = !t || t.dim;
+  });
+  return head + renderGraphSvg(gv);
+}
+
+// KB-backed: the passages retrieved, with their retrieval confidence.
+function renderWhyKb(p) {
+  var cites = p.citations || [];
+  // Deliberately reports ONLY what retrieval did. An earlier version said "no account
+  // records were read", which was false whenever graph_context fed the model anyway.
+  var acct = p.account_context
+    ? '<li>Account records were also in the model\'s context.</li>' : '';
+  if (!cites.length) {
+    return '<div class="why-banner"><b>Nothing retrieved for this reply</b>'
+      + '<ul class="why-pts"><li>Answered without a knowledge-base lookup.</li>'
+      + acct + '</ul></div>';
+  }
+  // The caveat is real — retrieval returns its nearest neighbour even when nothing relevant
+  // exists, and measured on this data wrong citations (0.62-0.63) and right ones (0.63-0.67)
+  // overlap, so a high score is not proof. But nobody reads a five-line paragraph in a modal,
+  // so it goes in as scannable points.
+  var head = '<div class="why-banner"><b>Retrieved from the knowledge base</b>'
+    + '<ul class="why-pts">'
+    + '<li>Closest matches found — not proof the answer used them.</li>'
+    // The mechanism, kept as its own point: it is what explains a confident-looking score
+    // on an off-topic passage, so folding it into the line above loses the useful half.
+    + '<li>Always returns a nearest match, even when nothing relevant exists — the model may '
+    + 'have answered from general knowledge.</li>'
+    + acct
+    + '</ul></div>';
+  return head + cites.map(function(c, i) {
+    return '<div class="why-chunk">'
+      + '<div class="why-chunk-h"><span>' + escH(c.source || 'source ' + (i + 1)) + '</span>'
+      + '<span class="why-score">retrieval confidence ' + (c.score == null ? '—' : Number(c.score).toFixed(2)) + '</span></div>'
+      + '<div class="why-chunk-t">' + escH(c.text || '') + '</div></div>';
+  }).join('');
+}
+
 function openGraphModal(gv) {
   var modal = document.getElementById('graphModal');
   var hub = (gv.nodes || []).filter(function(n) { return n.health === 'hub'; })[0] || {};
@@ -2678,7 +2781,7 @@ function renderGraphSvg(gv) {
   edges.forEach(function(e) {
     var s = pos[e.source], t = pos[e.target];
     if (!s || !t) return;
-    out += '<line class="kg-edge" x1="' + s.x.toFixed(1) + '" y1="' + s.y.toFixed(1)
+    out += '<line class="kg-edge' + (e.dim ? ' kg-dim' : '') + '" x1="' + s.x.toFixed(1) + '" y1="' + s.y.toFixed(1)
         + '" x2="' + t.x.toFixed(1) + '" y2="' + t.y.toFixed(1) + '"/>';
     var mx = (s.x + t.x) / 2, my = (s.y + t.y) / 2;
     out += '<text class="kg-elabel" x="' + mx.toFixed(1) + '" y="' + (my - 3).toFixed(1)
@@ -2688,7 +2791,7 @@ function renderGraphSvg(gv) {
   function box(node, w, h, isHub) {
     var p = pos[node.id];
     var x = p.x - w / 2, y = p.y - h / 2;
-    var cls = 'kg-node kg-' + (node.health || 'neutral');
+    var cls = 'kg-node kg-' + (node.health || 'neutral') + (node.dim ? ' kg-dim' : '');
     var title = [node.type, node.label, node.sub].filter(Boolean).join(' — ');
     // Baselines are fractions of the box height, not fixed offsets, so changing the
     // type scale + box size keeps the three lines evenly seated instead of drifting out.
