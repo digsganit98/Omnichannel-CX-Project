@@ -6,6 +6,7 @@ from typing import Literal, TypedDict
 from langgraph.graph import END, START, StateGraph
 from services.agent_service.cx_agent import CXAgent
 from services.agent_service.orchestration_agents import (
+    CustomerValidationAgent,
     IntentClassificationAgent,
     QueryResolutionAgent,
     TicketAction,
@@ -15,9 +16,11 @@ from services.agent_service.orchestration_agents import (
 from services.channel_service.delivery import OutboundDeliveryService
 from services.crm_service.client import CRMClient
 from services.orchestration_service.state import OrchestrationState, WorkflowStep
+from services.observability_service import langfuse_workflow_trace, llm_observation_context
 from services.persistence_service.repository import CXRepository
 from services.rag_service.rag_pipeline import RAGPipeline
 from services.ticket_service.ticket_manager import TicketManager
+from services.workflow_service.review_gate import should_hold_for_review
 from shared.schemas.messages import InboundMessage
 from shared.schemas.responses import ChannelResponse
 
@@ -30,6 +33,10 @@ logger = logging.getLogger(__name__)
 
 ORCHESTRATION_ENGINE = "langgraph_state_graph"
 
+# Human-in-the-loop: customer-facing message sent when the review gate HOLDS the AI reply
+# for a human agent to review. The AI's real answer is kept as an editable reply_draft.
+HOLDING_MESSAGE = "Support Agent will help you with this shortly ..."
+
 # Human-readable edge map shown in /admin/orchestration/definition
 WORKFLOW_EDGES = [
     ("__start__", "receive_message"),
@@ -38,7 +45,9 @@ WORKFLOW_EDGES = [
     ("load_conversation_context", "detect_ticket_action"),
     ("detect_ticket_action", "resolve_ticket | classify_intent [Agent 1]"),
     ("resolve_ticket", "send_outbound_reply"),
-    ("classify_intent [Agent 1]", "resolve_query [Agent 2]"),
+    ("classify_intent [Agent 1]", "validate_customer"),
+    ("validate_customer", "resolve_query [Agent 2] | reject_unregistered_customer"),
+    ("reject_unregistered_customer", "send_outbound_reply"),
     ("resolve_query [Agent 2]", "decide_ticket [Agent 3]"),
     ("decide_ticket [Agent 3]", "create_ticket | skip_ticket"),
     ("create_ticket", "send_outbound_reply"),
@@ -53,9 +62,10 @@ class GraphState(TypedDict):
 
 
 class OrchestrationGraph:
-    """LangGraph workflow with 3 BFSI agents:
+    """LangGraph workflow with 4 BFSI agents:
 
     Agent 1 – IntentClassificationAgent  (classify intent + Neo4j enrichment)
+    Agent 1b – CustomerValidationAgent   (confirm registered customer for account-specific intents)
     Agent 2 – QueryResolutionAgent       (KB / Neo4j answer)
     Agent 3 – TicketCreationAgent        (JIRA ticket decision + creation)
     """
@@ -68,6 +78,7 @@ class OrchestrationGraph:
         delivery: OutboundDeliveryService | None = None,
         crm: CRMClient | None = None,
         neo4j_client=None,
+        resolution_engine=None,
     ) -> None:
         self.repository = repository
         self.crm = crm or CRMClient()
@@ -75,9 +86,10 @@ class OrchestrationGraph:
 
         self.neo4j_client = neo4j_client or _try_neo4j()
 
-        # 3 named agents
+        # Named agents
         self.intent_agent = IntentClassificationAgent(agent, neo4j_client=self.neo4j_client)
-        self.resolution_agent = QueryResolutionAgent(rag, neo4j_client=self.neo4j_client)
+        self.validation_agent = CustomerValidationAgent(neo4j_client=self.neo4j_client)
+        self.resolution_agent = QueryResolutionAgent(rag, neo4j_client=self.neo4j_client, resolution_engine=resolution_engine)
         self.ticket_agent = TicketCreationAgent(self.tickets)
 
         # Outbound delivery wrapper (not a named agent, infrastructure concern)
@@ -98,9 +110,37 @@ class OrchestrationGraph:
             raise RuntimeError("Duplicate message is still being processed")
 
         try:
-            result = self.workflow.invoke({"runtime": state})
-            state = result["runtime"]
-            response = self._response(state)
+            with langfuse_workflow_trace(
+                name="omnichannel_message",
+                input_text=message.text,
+                tags=[message.channel.value],
+                metadata={
+                    "correlation_id": state.message.correlation_id,
+                    "message_id": state.message_id,
+                    "channel": message.channel.value,
+                    "provider": message.provider,
+                },
+            ) as trace:
+                result = self.workflow.invoke({"runtime": state})
+                state = result["runtime"]
+                response = self._response(state)
+                if trace:
+                    trace.update(
+                        output=response.message if _capture_langfuse_io() else None,
+                        metadata={
+                            "correlation_id": response.correlation_id,
+                            "conversation_id": response.conversation_id,
+                            "customer_id": response.customer_id,
+                            "channel": message.channel.value,
+                            "intent": response.intent,
+                            "sentiment": response.sentiment,
+                            "urgency": response.urgency,
+                            "ticket_id": response.ticket_id,
+                            "retrieval_backend": response.retrieval_backend,
+                            "llm_used": response.llm_used,
+                            "workflow_steps": [entry["step"] for entry in response.workflow_trace],
+                        },
+                    )
             self.repository.save_idempotent_response(message.provider, state.message_id, response.model_dump())
             logger.info(
                 "message_processed",
@@ -134,6 +174,9 @@ class OrchestrationGraph:
 
         # Agent 1
         workflow.add_node("classify_intent", self._classify_intent)
+        # Agent 1b
+        workflow.add_node("validate_customer", self._validate_customer)
+        workflow.add_node("reject_unregistered_customer", self._reject_unregistered_customer)
         # Agent 2
         workflow.add_node("resolve_query", self._resolve_query)
         # Agent 3 – two sub-nodes: decide + execute
@@ -157,7 +200,13 @@ class OrchestrationGraph:
         )
         workflow.add_edge("resolve_ticket", "send_outbound_reply")
         # Agent chain
-        workflow.add_edge("classify_intent", "resolve_query")
+        workflow.add_edge("classify_intent", "validate_customer")
+        workflow.add_conditional_edges(
+            "validate_customer",
+            self._route_customer_validation,
+            {"proceed": "resolve_query", "unregistered": "reject_unregistered_customer"},
+        )
+        workflow.add_edge("reject_unregistered_customer", "send_outbound_reply")
         workflow.add_edge("resolve_query", "decide_ticket")
         workflow.add_conditional_edges(
             "decide_ticket",
@@ -204,6 +253,23 @@ class OrchestrationGraph:
                         message.metadata["linked_phone"] = neo4j_profile["phone"]
             except Exception:
                 logger.exception("neo4j_cross_channel_lookup_failed")
+
+        # Portal/web-chat messages carry portal_graph_customer_id but skip the block above.
+        # Pull the matched customer's real name from Neo4j so the SQLite display_name (and
+        # therefore the admin inbox) shows "Sayantini Sarkar" instead of the raw portal
+        # username ("sayantini_v2"). Only override a username-style/generic display_name.
+        if self.neo4j_client and is_portal_message:
+            try:
+                from services.neo4j_service.queries import get_customer_by_id
+                graph_id = message.metadata.get("portal_graph_customer_id")
+                neo4j_profile = get_customer_by_id(self.neo4j_client, str(graph_id)) if graph_id else None
+                if neo4j_profile and neo4j_profile.get("name"):
+                    portal_user = str(message.metadata.get("portal_user_id", "")).lower()
+                    current = (message.display_name or "").lower()
+                    if not current or current == portal_user:
+                        message.display_name = neo4j_profile["name"]
+            except Exception:
+                logger.exception("neo4j_portal_name_lookup_failed")
         crm_profile = self.crm.lookup_customer(message.channel.value, message.channel_identifier)
         if crm_profile.status == "synced":
             message.profile_metadata["crm"] = crm_profile.data
@@ -222,14 +288,41 @@ class OrchestrationGraph:
 
         state.customer = self.repository.resolve_customer(message)
         state.conversation = self.repository.get_or_create_conversation(state.customer_id)
-        if neo4j_writer and self.neo4j_client:
+        # For a portal message whose graph id does NOT match a real seeded BFSI customer,
+        # skip ALL Neo4j customer/interaction writes. Writing a bare node would make an
+        # unknown user look "registered" (with no data) and bypass the reject-unregistered
+        # flow. Non-portal (whatsapp/email) messages are unaffected. Cached per-request.
+        graph_customer_id = _neo4j_customer_id(state)
+        neo4j_customer_exists = True
+        if is_portal_message and self.neo4j_client:
+            try:
+                from services.neo4j_service.queries import get_customer_by_id
+                neo4j_customer_exists = bool(get_customer_by_id(self.neo4j_client, graph_customer_id))
+            except Exception:
+                neo4j_customer_exists = False
+        write_neo4j = bool(neo4j_writer and self.neo4j_client and neo4j_customer_exists)
+        if write_neo4j:
+            # Only write a real email. For email-channel messages the channel_identifier
+            # IS the email; for whatsapp/web_chat it is a phone/session id, so fall back to
+            # linked_email (or portal contact) and never write the raw identifier — otherwise
+            # a value like "web_session:<user>" would overwrite the real customer's email.
+            linked_email = message.metadata.get("linked_email", "")
+            portal_contact = message.metadata.get("portal_contact_identifier", "")
+            if message.channel.value == "email":
+                neo4j_email = message.channel_identifier
+            elif "@" in str(linked_email):
+                neo4j_email = linked_email
+            elif "@" in str(portal_contact):
+                neo4j_email = portal_contact
+            else:
+                neo4j_email = ""
             neo4j_writer.upsert_customer(
                 self.neo4j_client,
-                customer_id=_neo4j_customer_id(state),
+                customer_id=graph_customer_id,
                 phone=message.channel_identifier if message.channel.value == "whatsapp" else "",
                 name=state.customer.get("display_name", ""),
                 channel=message.channel.value,
-                email=message.metadata.get("linked_email", "") if message.channel.value == "whatsapp" else message.channel_identifier,
+                email=neo4j_email,
             )
         self._audit("inbound_received", state, details={"provider": message.provider})
         if crm_profile.status != "not_configured":
@@ -245,13 +338,18 @@ class OrchestrationGraph:
             subject=message.subject,
             metadata=message.metadata,
         )
+        # Remember the inbound turn so later steps can reference it (sentiment metadata, and
+        # the held-draft's inbound_turn_id used to thread the manual email reply — see
+        # apps/api/routes/reply_drafts.py). Previously unset, leaving inbound_turn_id None.
+        state.inbound_turn_id = inbound_turn["turn_id"]
         # Phase 1 of 2-phase Neo4j write: create Interaction node immediately ("open")
-        # so the graph always has a record even if the AI pipeline fails.
-        if neo4j_writer and self.neo4j_client:
+        # so the graph always has a record even if the AI pipeline fails. Skipped for
+        # unregistered portal users (write_neo4j is False) — no customer node to link to.
+        if write_neo4j:
             neo4j_writer.write_incoming_interaction(
                 self.neo4j_client,
                 conversation_id=state.conversation_id,
-                customer_id=_neo4j_customer_id(state),
+                customer_id=graph_customer_id,
                 channel=message.channel.value,
                 message_text=message.text,
                 timestamp=datetime.now(timezone.utc).isoformat(),
@@ -324,7 +422,8 @@ class OrchestrationGraph:
 
     def _classify_intent(self, graph_state: GraphState) -> dict:
         state = graph_state["runtime"]
-        state.analysis = self.intent_agent.run(state.message, state.context)
+        with llm_observation_context(**self._llm_context(state, "intent_classification_agent")):
+            state.analysis = self.intent_agent.run(state.message, state.context)
         if state.inbound_turn_id:
             self.repository.update_turn_metadata(state.inbound_turn_id, {"sentiment": state.analysis.sentiment})
             self.repository.update_turn_intent_urgency(
@@ -339,6 +438,46 @@ class OrchestrationGraph:
                        urgency=state.analysis.urgency.value, source=state.analysis.analysis_source)
         return {"runtime": state}
 
+    # ── Agent 1b: Customer Validation ─────────────────────────────────────
+
+    def _validate_customer(self, graph_state: GraphState) -> dict:
+        state = graph_state["runtime"]
+        intent = state.analysis.intent if state.analysis else None
+        state.customer_validation = self.validation_agent.validate(intent, state.context)
+        self._complete(state, WorkflowStep.VALIDATE_CUSTOMER, self.validation_agent.name,
+                       validation_required=state.customer_validation.validation_required,
+                       is_registered=state.customer_validation.is_registered,
+                       reason=state.customer_validation.reason)
+        return {"runtime": state}
+
+    @staticmethod
+    def _route_customer_validation(graph_state: GraphState) -> Literal["proceed", "unregistered"]:
+        validation = graph_state["runtime"].customer_validation
+        if validation.validation_required and not validation.is_registered:
+            return "unregistered"
+        return "proceed"
+
+    def _reject_unregistered_customer(self, graph_state: GraphState) -> dict:
+        state = graph_state["runtime"]
+        if state.message.channel.value == "email":
+            state.answer = (
+                "Dear Customer,\n\n"
+                "We were unable to verify your account using the email address you contacted us from. "
+                "For your security, please write to us again using the email address or mobile number "
+                "registered with your account so we can look into this for you.\n\n"
+                "Warm regards,\nCustomer Support Team"
+            )
+        else:
+            state.answer = (
+                "We couldn't verify your account with this contact number. Please reach out to us "
+                "using the mobile number or email address registered with your account so we can help."
+            )
+        self._audit("customer_validation_failed", state, intent=self._intent(state),
+                    details={"reason": state.customer_validation.reason})
+        self._complete(state, WorkflowStep.REJECT_UNREGISTERED_CUSTOMER, self.validation_agent.name,
+                       reason=state.customer_validation.reason)
+        return {"runtime": state}
+
     # ── Agent 2: Query / Complaint Resolution ─────────────────────────────
 
     def _resolve_query(self, graph_state: GraphState) -> dict:
@@ -350,7 +489,8 @@ class OrchestrationGraph:
             "language": state.analysis.language if state.analysis else "en",
             "sentiment": state.analysis.sentiment if state.analysis else "neutral",
         }
-        state.resolution = self.resolution_agent.run(state.message, enriched_context, intent=intent_str)
+        with llm_observation_context(**self._llm_context(state, "query_resolution_agent", intent=intent_str)):
+            state.resolution = self.resolution_agent.run(state.message, enriched_context, intent=intent_str)
         self._audit("retrieval_performed", state,
                     intent=intent_str or "unknown",
                     details={
@@ -385,6 +525,7 @@ class OrchestrationGraph:
         state.ticket = self.ticket_agent.create_or_get(
             state.conversation_id, state.customer_id, state.message,
             state.analysis, state.ticket_decision, state.customer,
+            graph_context=state.context.get("graph_context", {}) if state.context else {},
         )
         if (
             state.ticket_decision.reason
@@ -436,7 +577,8 @@ class OrchestrationGraph:
         # distinct intent that requires manual review (e.g. "check loan AND report fraud"),
         # create a separate ticket for it and append a note so the customer knows both
         # issues are being tracked.  Primary resolution and ticket are unaffected.
-        if state.analysis and getattr(state.analysis, "secondary_intent", None):
+        customer_rejected = state.customer_validation.validation_required and not state.customer_validation.is_registered
+        if state.analysis and getattr(state.analysis, "secondary_intent", None) and not customer_rejected:
             try:
                 from services.agent_service.orchestration_agents import MANUAL_REVIEW_INTENTS, TicketDecision
                 from shared.schemas.intents import Intent
@@ -457,6 +599,7 @@ class OrchestrationGraph:
                     sec_ticket = self.ticket_agent.create_or_get(
                         state.conversation_id, state.customer_id, state.message,
                         sec_analysis, sec_decision, state.customer,
+                        graph_context=state.context.get("graph_context", {}) if state.context else {},
                     )
                     team = sec_ticket.assigned_team.replace("_", " ")
                     ref = (
@@ -473,6 +616,42 @@ class OrchestrationGraph:
                 pass
         self._audit("answer_generated", state, intent=self._intent(state),
                     ticket_id=state.ticket.ticket_id if state.ticket else None)
+
+        # ── Human-in-the-loop review gate ──────────────────────────────────────
+        # If a ticket is required (escalation / L2 / L3 / L1-via-rule), HOLD the AI answer as
+        # an editable draft for a human agent instead of auto-delivering it. The customer
+        # receives a holding message now; the agent edits + sends the real answer manually
+        # (see services/workflow_service/review_gate.py and apps/api/routes/reply_drafts.py).
+        gate = should_hold_for_review(state.ticket_decision, state.resolution)
+        if gate.hold and state.answer:
+            try:
+                draft = self.repository.add_reply_draft(
+                    conversation_id=state.conversation_id,
+                    customer_id=state.customer_id,
+                    channel=state.message.channel.value,
+                    draft_text=state.answer,
+                    ticket_id=state.ticket.ticket_id if state.ticket else None,
+                    inbound_turn_id=state.inbound_turn_id,
+                    hold_reason=gate.reason,
+                    reason_code=gate.reason_code,
+                    channel_identifier=state.message.channel_identifier,
+                    provider=state.message.provider,
+                )
+                state.held_for_review = True
+                state.draft_id = draft["draft_id"]
+                # Replace the outbound text with the holding message: this is what actually
+                # gets delivered to the customer AND persisted as the outbound turn.
+                state.answer = HOLDING_MESSAGE
+                self._audit("reply_held_for_review", state, intent=self._intent(state),
+                            ticket_id=state.ticket.ticket_id if state.ticket else None,
+                            details={"draft_id": draft["draft_id"], "hold_reason": gate.reason,
+                                     "reason_code": gate.reason_code})
+            except Exception:
+                # If draft persistence fails, fall back to the original auto-send behavior
+                # rather than dropping the customer's reply entirely.
+                logger.exception("reply_draft_hold_failed", extra={"conversation_id": state.conversation_id})
+                state.held_for_review = False
+
         state.delivery = self.workflow_automation_agent.send_reply(state.message, state.answer)
         self._audit(
             "outbound_sent" if state.delivery["status"] == "sent" else "outbound_failed",
@@ -509,7 +688,17 @@ class OrchestrationGraph:
         if state.resolution:
             self.repository.add_retrieval_evidence(outbound_turn["turn_id"], state.resolution.contexts)
         self.repository.update_conversation_summary(state.conversation_id, self._summary(state.conversation_id))
-        if neo4j_writer and self.neo4j_client and state.analysis:
+        # Skip Phase-2 Neo4j writes for unregistered portal users (no real customer node),
+        # so we don't leave orphan Interaction/Ticket nodes for senders we rejected.
+        is_portal_message = bool(state.message.metadata.get("portal_graph_customer_id"))
+        neo4j_customer_exists = True
+        if is_portal_message and self.neo4j_client:
+            try:
+                from services.neo4j_service.queries import get_customer_by_id
+                neo4j_customer_exists = bool(get_customer_by_id(self.neo4j_client, _neo4j_customer_id(state)))
+            except Exception:
+                neo4j_customer_exists = False
+        if neo4j_writer and self.neo4j_client and state.analysis and neo4j_customer_exists:
             # Phase 2 of 2-phase write: close the Interaction node and create ResolutionMemory.
             neo4j_writer.update_interaction_resolution(
                 self.neo4j_client,
@@ -552,8 +741,12 @@ class OrchestrationGraph:
             urgency=state.analysis.urgency.value if state.analysis else "low",
             confidence=state.resolution.confidence if state.resolution else 1.0,
             ticket_id=state.ticket.ticket_id if state.ticket else None,
-            next_best_action="ticket_closed" if state.ticket_action.action == TicketAction.RESOLVE else (
-                "human_follow_up" if state.ticket else "answer_delivered"
+            workflow_status=(
+                "ticket_closed" if state.ticket_action.action == TicketAction.RESOLVE else
+                "customer_validation_required" if (
+                    state.customer_validation.validation_required and not state.customer_validation.is_registered
+                ) else
+                ("human_follow_up" if state.ticket else "answer_delivered")
             ),
             analysis_source=state.analysis.analysis_source if state.analysis else "operational_command",
             rag_contexts=state.resolution.contexts if state.resolution else [],
@@ -563,6 +756,7 @@ class OrchestrationGraph:
             llm_used=state.resolution.llm.get("llm_used", False) if state.resolution else False,
             outbound_status=state.delivery["status"],
             outbound_error=state.delivery.get("error"),
+            held_for_review=state.held_for_review,
             workflow_trace=[entry.model_dump(mode="json") for entry in state.workflow_trace],
         )
 
@@ -591,10 +785,26 @@ class OrchestrationGraph:
             "channel": state.message.channel.value,
         }
 
+    def _llm_context(self, state: OrchestrationState, agent: str, intent: str | None = None) -> dict:
+        return {
+            **self._common(state),
+            "agent": agent,
+            "intent": intent or (state.analysis.intent.value if state.analysis else None),
+            "ticket_id": state.ticket.ticket_id if state.ticket else None,
+            "resolution_level": (
+                state.resolution.resolution_decision.get("resolution_level")
+                if state.resolution and state.resolution.resolution_decision
+                else None
+            ),
+            "retrieval_backend": state.resolution.retrieval_backend if state.resolution else None,
+        }
+
     @staticmethod
     def _intent(state: OrchestrationState) -> str:
         if state.ticket_action.action == TicketAction.RESOLVE:
             return "ticket_resolution"
+        if state.customer_validation.validation_required and not state.customer_validation.is_registered:
+            return "customer_not_registered"
         return state.analysis.intent.value if state.analysis else "unknown"
 
     @staticmethod
@@ -657,3 +867,9 @@ def _extract_embedding(resolution) -> str:
                 return ",".join(str(round(float(v), 6)) for v in emb[:384])
             return str(emb)[:2000]
     return ""
+
+
+def _capture_langfuse_io() -> bool:
+    import os
+
+    return os.getenv("LANGFUSE_CAPTURE_IO", "false").lower() == "true"

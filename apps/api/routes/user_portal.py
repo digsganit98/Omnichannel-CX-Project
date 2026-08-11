@@ -10,8 +10,9 @@ import jwt
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
 
-from apps.api.dependencies.runtime import get_repository
-from shared.schemas.messages import EmailWebhookPayload, WhatsAppWebhookPayload
+from apps.api.dependencies.runtime import get_repository, get_router
+from services.channel_service.adapters.web_chat_adapter import WebChatAdapter
+from shared.schemas.messages import EmailWebhookPayload, WebChatWebhookPayload, WhatsAppWebhookPayload
 from shared.utils.ids import new_id
 
 from .webhooks import handle_email_message, handle_whatsapp_message
@@ -37,6 +38,10 @@ class UserMessageRequest(BaseModel):
     channel: str
     message: str = Field(min_length=1, max_length=5000)
     contact_identifier: str | None = Field(default=None, max_length=320)
+
+
+class UserChatMessageRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=5000)
 
 
 def _make_token(user_id: str) -> str:
@@ -101,6 +106,35 @@ def _graph_customer_id(user_id: str) -> str:
     return "CUST" + digits
 
 
+def _resolve_graph_customer_id(user_id: str, email: str = "", phone: str = "") -> str:
+    """Return the graph customer_id to use in message metadata.
+
+    Prefers an EXISTING BFSI customer matched by email/phone (so account queries
+    find real loans/cards/FD). Falls back to the deterministic hash id for
+    brand-new portal users who aren't in the BFSI dataset. Deterministic for a
+    given (email/phone), so the GET history path and the POST send path always
+    resolve to the SAME customer_id — avoiding split conversations.
+    """
+    if os.getenv("NEO4J_ENABLED", "true").lower() == "true":
+        client = None
+        try:
+            from services.neo4j_service.client import Neo4jClient
+            from services.neo4j_service.queries import get_customer_by_identifier
+
+            client = Neo4jClient()
+            for candidate in (email, phone):
+                if candidate:
+                    existing = get_customer_by_identifier(client, candidate)
+                    if existing and existing.get("customer_id"):
+                        return str(existing["customer_id"])
+        except Exception:
+            logger.warning("portal_resolve_graph_customer_id_failed", extra={"user_id": user_id}, exc_info=True)
+        finally:
+            if client is not None:
+                client.close()
+    return _graph_customer_id(user_id)
+
+
 def _xlsx_date_today() -> str:
     today = datetime.now()
     return f"{today.month}/{today.day}/{str(today.year)[-2:]}"
@@ -112,36 +146,55 @@ def _upsert_customer_graph_user(user_id: str, email: str, phone: str = "", chann
     client = None
     try:
         from services.neo4j_service.client import Neo4jClient
-        from services.neo4j_service.writer import seed_synthetic_bfsi_records, upsert_customer
+        from services.neo4j_service.queries import get_customer_by_identifier
+        from services.neo4j_service.writer import upsert_customer
 
         client = Neo4jClient()
-        graph_customer_id = _graph_customer_id(user_id)
         today = _xlsx_date_today()
-        upsert_customer(
-            client,
-            customer_id=graph_customer_id,
-            phone=phone,
-            email=email,
-            secondary_email="",
-            city="",
-            country="India",
-            registration_date=today,
-            last_activity_date=today,
-            name=user_id,
-            channel=channel,
-        )
-        synthetic = seed_synthetic_bfsi_records(
-            client,
-            customer_id=graph_customer_id,
-            registration_date=today,
-            email=email,
-            phone=phone,
-        )
+
+        # Match an EXISTING BFSI customer (loaded from the dataset) by email/phone
+        # before minting a synthetic hash-based id. Otherwise the portal creates a
+        # phantom Customer node with no loans/cards/FD, and account-specific queries
+        # falsely escalate ("no details found") even though the real customer has data.
+        existing = None
+        for candidate in (email, phone):
+            if candidate:
+                existing = get_customer_by_identifier(client, candidate)
+                if existing:
+                    break
+
+        if existing and existing.get("customer_id"):
+            graph_customer_id = str(existing["customer_id"])
+            # Refresh only runtime fields; do NOT seed synthetic records over the
+            # real customer's existing BFSI data.
+            upsert_customer(
+                client,
+                customer_id=graph_customer_id,
+                phone=phone,
+                email=email,
+                secondary_email="",
+                city="",
+                country="India",
+                registration_date="",
+                last_activity_date=today,
+                name=existing.get("name") or user_id,
+                channel=channel,
+            )
+            return {
+                "enabled": True,
+                "status": "matched_existing",
+                "customer_id": graph_customer_id,
+            }
+
+        # No existing BFSI customer matched this email/phone. Do NOT fabricate a
+        # customer node or synthetic loans/cards/FD — that would make an unknown user
+        # look "registered" (with fake data) and bypass CustomerValidationAgent's
+        # reject-unregistered flow. Leaving no node means account-specific intents are
+        # correctly routed to _reject_unregistered_customer; general FAQs still work.
         return {
             "enabled": True,
-            "status": "upserted",
-            "customer_id": graph_customer_id,
-            "synthetic_records": synthetic,
+            "status": "unregistered",
+            "customer_id": _graph_customer_id(user_id),
         }
     except Exception as exc:
         logger.warning("portal_customer_graph_upsert_failed", extra={"user_id": user_id}, exc_info=True)
@@ -156,6 +209,57 @@ def _owns_conversation(conversation: dict, user_id: str) -> bool:
         turn.get("metadata", {}).get("portal_user_id") == user_id
         for turn in conversation.get("turns", [])
     )
+
+
+# Interim acknowledgement injected before a human-reviewed reply (mirrors
+# HOLDING_MESSAGE in services/orchestration_service/graph.py). Detected so it can
+# be shown as a demoted "auto-ack" line rather than the substantive answer.
+_HOLDING_MARKER = "will help you with this shortly"
+
+
+def _build_ticket_exchanges(turns: list[dict], ticket_id: str) -> list[dict]:
+    """Reconstruct a ticket's full exchange history from a conversation's turns.
+
+    In this data only OUTBOUND turns carry ``ticket_id``; the customer's inbound
+    turns have none. An inbound belongs to ``ticket_id`` when the next outbound
+    carries that ticket. Each customer message plus the reply(ies) that follow it
+    (until the next customer message) becomes one exchange:
+    ``{message, holding, response, created_at}``. ``turns`` must be chronological.
+    """
+    n = len(turns)
+    belongs = [False] * n
+    for i, turn in enumerate(turns):
+        if turn.get("direction") == "outbound":
+            belongs[i] = turn.get("ticket_id") == ticket_id
+        elif turn.get("direction") == "inbound":
+            for j in range(i + 1, n):
+                if turns[j].get("direction") == "outbound":
+                    belongs[i] = turns[j].get("ticket_id") == ticket_id
+                    break
+
+    exchanges: list[dict] = []
+    current: dict | None = None
+    for i, turn in enumerate(turns):
+        if not belongs[i]:
+            if turn.get("direction") == "inbound":
+                current = None  # a non-ticket customer message ends the ticket run
+            continue
+        text = turn.get("text") or ""
+        if turn.get("direction") == "inbound":
+            current = {"message": text, "holding": None, "response": None,
+                       "created_at": turn.get("created_at")}
+            exchanges.append(current)
+        else:  # outbound belonging to this ticket
+            if current is None:
+                current = {"message": None, "holding": None, "response": None,
+                           "created_at": turn.get("created_at")}
+                exchanges.append(current)
+            if _HOLDING_MARKER in text:
+                current["holding"] = text
+            else:
+                current["response"] = text
+            current["created_at"] = turn.get("created_at")
+    return exchanges
 
 
 def _ticket_view(conversation: dict, tickets: list[dict]) -> dict:
@@ -249,7 +353,7 @@ def submit_user_message(
             raise HTTPException(status_code=400, detail="Enter a valid WhatsApp number with country code")
     metadata = {
         "portal_user_id": user_id,
-        "portal_graph_customer_id": _graph_customer_id(user_id),
+        "portal_graph_customer_id": _resolve_graph_customer_id(user_id, email, phone),
         "portal_contact_identifier": email if channel == "email" else phone,
         "source": "user_portal",
         "provider": "whatsapp_cloud" if channel == "whatsapp" else "email_user_portal",
@@ -290,17 +394,100 @@ def submit_user_message(
     }
 
 
+def _web_chat_identity(user_id: str, user: dict) -> tuple[dict, str]:
+    """Metadata that ties a web-chat message to the SAME customer as this user's
+    other portal channels (see resolve_customer's portal/graph identifier priority
+    in services/persistence_service/repository.py)."""
+    email = str(user.get("email") or _portal_email(user_id)).strip().lower()
+    metadata = {
+        "portal_user_id": user_id,
+        "portal_graph_customer_id": _resolve_graph_customer_id(user_id, email, _portal_phone(user_id)),
+        "portal_contact_identifier": email,
+        "linked_email": email,
+        "source": "user_portal",
+        "provider": "web_chat_portal",
+    }
+    return metadata, email
+
+
+@router.get("/chat/messages")
+def get_user_chat_messages(authorization: str | None = Header(default=None)) -> dict:
+    user_id = _require_user(authorization)
+    repo = get_repository()
+    user = repo.get_customer_user_by_id(user_id)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid user session")
+    metadata, _ = _web_chat_identity(user_id, user)
+    lookup_message = WebChatAdapter().normalize(
+        WebChatWebhookPayload(session_id=user_id, text="", metadata=metadata)
+    )
+    customer = repo.resolve_customer(lookup_message)
+    conversation = repo.get_or_create_conversation(customer["customer_id"])
+    turns = repo.list_recent_turns(conversation["conversation_id"], limit=50, channel="web_chat")
+    return {"conversation_id": conversation["conversation_id"], "turns": turns}
+
+
+@router.post("/chat/messages")
+def send_user_chat_message(
+    request: UserChatMessageRequest,
+    authorization: str | None = Header(default=None),
+) -> dict:
+    user_id = _require_user(authorization)
+    repo = get_repository()
+    user = repo.get_customer_user_by_id(user_id)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid user session")
+    metadata, email = _web_chat_identity(user_id, user)
+    graph_status = _upsert_customer_graph_user(user_id, email, "", "web_chat")
+    payload = WebChatWebhookPayload(
+        session_id=user_id,
+        text=request.text.strip(),
+        display_name=user_id,
+        message_id=new_id("portal_webchat"),
+        metadata=metadata,
+    )
+    response = get_router().handle(WebChatAdapter().normalize(payload))
+    return {
+        **response.model_dump(mode="json"),
+        "contact_identifier": email,
+        "graph": graph_status,
+    }
+
+
+def _ticket_summary(ticket: dict) -> dict:
+    """One row per ticket for the customer portal — across all channels, open + closed.
+    Channel is read from ticket metadata (the tickets table has no channel column)."""
+    metadata = ticket.get("metadata") or {}
+    return {
+        "ticket_id": ticket.get("ticket_id"),
+        "conversation_id": ticket.get("conversation_id"),
+        "status": ticket.get("status") or "open",
+        "channel": metadata.get("channel") or "-",
+        "message": ticket.get("title") or (ticket.get("intent") or "").replace("_", " "),
+        "created_at": ticket.get("created_at"),
+        "updated_at": ticket.get("updated_at"),
+    }
+
+
 @router.get("/tickets")
 def list_user_tickets(authorization: str | None = Header(default=None)) -> list[dict]:
     user_id = _require_user(authorization)
     repo = get_repository()
     tickets = repo.list_tickets()
-    results = []
+
+    # Conversation ids this portal user owns (a turn tagged with their portal_user_id).
+    owned_conversation_ids = set()
     for summary in repo.list_conversations():
         conversation = repo.get_conversation(summary["conversation_id"])
         if conversation and _owns_conversation(conversation, user_id):
-            results.append(_ticket_view(conversation, tickets))
-    return results
+            owned_conversation_ids.add(conversation["conversation_id"])
+
+    # One row per ticket across ALL channels (open + closed): open group first, newest within.
+    open_states = {"open", "in_progress"}
+    owned_tickets = [t for t in tickets if t.get("conversation_id") in owned_conversation_ids]
+    owned_tickets.sort(key=lambda t: t.get("created_at") or "", reverse=True)  # newest first
+    owned_tickets.sort(key=lambda t: t.get("status") not in open_states)       # then open group first (stable)
+    return [_ticket_summary(t) for t in owned_tickets]
 
 
 @router.get("/tickets/{conversation_id}")
@@ -314,3 +501,38 @@ def get_user_ticket(
     if not conversation or not _owns_conversation(conversation, user_id):
         raise HTTPException(status_code=404, detail="Ticket conversation not found")
     return _ticket_view(conversation, repo.list_tickets())
+
+
+@router.get("/ticket-detail/{ticket_id}")
+def get_user_ticket_detail(
+    ticket_id: str,
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """Per-ticket detail (this ticket's own message + reply), not the conversation's latest.
+    Multiple tickets share one conversation, so keying detail on ticket_id is required."""
+    user_id = _require_user(authorization)
+    repo = get_repository()
+    ticket = repo.get_ticket(ticket_id)
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    conversation = repo.get_conversation(ticket.get("conversation_id"))
+    if not conversation or not _owns_conversation(conversation, user_id):
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    # The ticket's own originating message is stored in its description/title.
+    message = (ticket.get("description") or ticket.get("title") or "").replace(
+        "Customer portal request\n\n", ""
+    )
+    # Full exchange history for this ticket (each customer message + its reply),
+    # reconstructed from the conversation's chronological turns.
+    turns = repo.list_conversation_turns(ticket.get("conversation_id"))
+    exchanges = _build_ticket_exchanges(turns, ticket_id)
+    return {
+        "ticket_id": ticket_id,
+        "status": ticket.get("status"),
+        "channel": (ticket.get("metadata") or {}).get("channel"),
+        # message / latest_response kept for backward compatibility.
+        "message": message,
+        "latest_response": repo.get_ticket_reply(ticket_id),
+        "exchanges": exchanges,
+        "created_at": ticket.get("created_at"),
+    }

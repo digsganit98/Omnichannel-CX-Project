@@ -86,7 +86,8 @@ def cross_sell_candidates(limit: int = 50) -> dict:
 
 
 def _count_nodes(client) -> dict:
-    labels = ["Customer", "Loan", "Claim", "Product", "Policy", "KYC",
+    labels = ["Customer", "Account", "CreditCard", "FixedDeposit", "Loan", "Claim",
+              "Transaction", "ChargePenalty", "Product", "Policy", "KYC",
               "Agent", "Interaction", "Ticket", "ResolutionMemory"]
     counts = {}
     for label in labels:
@@ -99,7 +100,8 @@ def _count_nodes(client) -> dict:
 
 
 def _count_relationships(client) -> dict:
-    rel_types = ["HAS_LOAN", "HAS_CLAIM", "HAS_POLICY", "HAS_INTERACTION",
+    rel_types = ["HAS_ACCOUNT", "HAS_CREDIT_CARD", "HAS_FD", "HAS_LOAN", "HAS_CLAIM",
+                 "HAS_POLICY", "HAS_TRANSACTION", "HAS_CHARGE", "HAS_INTERACTION",
                  "HAS_TICKET", "KYC_VERIFIED_BY", "PRODUCT_IS",
                  "CREATED_MEMORY", "HANDLED_BY"]
     counts = {}

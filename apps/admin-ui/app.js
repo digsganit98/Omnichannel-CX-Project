@@ -9,8 +9,67 @@ var CH = {
     svg:'<svg viewBox="0 0 24 24"><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/></svg>' },
   phone:    { label:'Phone', pill:'pcl', stripe:'ccl', bg:'#fffbeb', bd:'#fde68a', clr:'#d97706',
     svg:'<svg viewBox="0 0 24 24"><path d="M6.62 10.79c1.44 2.83 3.76 5.14 6.59 6.59l2.2-2.2c.27-.27.67-.36 1.02-.24 1.12.37 2.33.57 3.57.57.55 0 1 .45 1 1V20c0 .55-.45 1-1 1-9.39 0-17-7.61-17-17 0-.55.45-1 1-1h3.5c.55 0 1 .45 1 1 0 1.25.2 2.45.57 3.57.11.35.03.74-.25 1.02l-2.2 2.2z"/></svg>' },
+  web_chat: { label:'Web Chat', pill:'pwc', stripe:'cwc', bg:'#f5f3ff', bd:'#ddd6fe', clr:'#6d28d9',
+    svg:'<svg viewBox="0 0 24 24"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2z"/></svg>' },
 };
 function chMeta(ch) { return CH[(ch||'').toLowerCase()] || { label: ch||'?', pill:'pdef', stripe:'cdef', bg:'#f2f4f7', bd:'#e4e7ec', clr:'#98a2b3', svg:'' }; }
+
+// ── Theme / sub-theme grouping ────────────────────────────────────────────────
+// The conversation flow groups consecutive turns by THEME (the team an intent
+// maps to) with a labelled divider, and marks SUB-THEME (the intent) shifts
+// inside a theme with a lighter marker. Both are derived purely from the
+// `intent` already on each turn — no backend/schema change. Mirrors
+// INTENT_TO_TEAM in shared/constants/intents.py.
+var INTENT_TO_TEAM = {
+  account_balance_inquiry: 'retail_banking',
+  transaction_dispute:     'fraud_and_disputes',
+  fund_transfer:           'payments',
+  loan_status:             'loans',
+  loan_application:        'loans',
+  loan_default_notice:     'collections',
+  policy_status:           'insurance_operations',
+  claim_status:            'claims',
+  insurance_claim:         'claims',
+  card_management:         'card_services',
+  kyc_update:              'compliance',
+  fraud_report:            'fraud_and_disputes',
+  complaint:               'customer_care',
+  ticket_status:           'customer_care',
+  general_inquiry:         'customer_care',
+  human_escalation:        'customer_care'
+};
+var TEAM_LABEL = {
+  retail_banking:       'Retail Banking',
+  payments:             'Payments',
+  loans:                'Loans',
+  collections:          'Collections',
+  insurance_operations: 'Insurance Ops',
+  claims:               'Claims',
+  card_services:        'Card Services',
+  compliance:           'Compliance',
+  fraud_and_disputes:   'Fraud & Disputes',
+  customer_care:        'Customer Care'
+};
+// A stable colour per theme so dividers are visually distinct. Uses the same
+// token vocabulary as the rest of the flow view (border/bg/text triples).
+var THEME_COLOR = {
+  card_services:        { t:'var(--wc)',    bg:'var(--wc-bg)',   bd:'var(--wc-bd)' },
+  loans:                { t:'#db2777',      bg:'#fdf2f8',        bd:'#fbcfe8' },
+  collections:          { t:'#db2777',      bg:'#fdf2f8',        bd:'#fbcfe8' },
+  fraud_and_disputes:   { t:'var(--amb-t)', bg:'var(--amb-bg)',  bd:'var(--amb-bd)' },
+  retail_banking:       { t:'var(--grn-t)', bg:'var(--grn-bg)',  bd:'var(--grn-bd)' },
+  payments:             { t:'var(--grn-t)', bg:'var(--grn-bg)',  bd:'var(--grn-bd)' },
+  claims:               { t:'var(--blue-t)',bg:'var(--blue-bg)', bd:'var(--blue-bd)' },
+  insurance_operations: { t:'var(--blue-t)',bg:'var(--blue-bg)', bd:'var(--blue-bd)' },
+  compliance:           { t:'var(--t2)',    bg:'var(--surf2)',   bd:'var(--bdr)' },
+  customer_care:        { t:'var(--t2)',    bg:'var(--surf2)',   bd:'var(--bdr)' },
+  general:              { t:'var(--t3)',    bg:'var(--surf2)',   bd:'var(--bdr)' }
+};
+function themeOf(intent) {
+  var key = (intent || '').toLowerCase();
+  var team = INTENT_TO_TEAM[key] || 'general';
+  return { theme: team, themeLabel: TEAM_LABEL[team] || 'General', color: THEME_COLOR[team] || THEME_COLOR.general };
+}
 
 // ── Auth state ────────────────────────────────────────────────────────────────
 var adminKey = sessionStorage.getItem('cx-admin-key') || '';
@@ -28,7 +87,16 @@ try {
   if (savedPortalUser) portalUser = JSON.parse(savedPortalUser);
 } catch(e) {}
 
-var state = { convs: [], selectedConvId: null, convDetail: null, simTimer: null, sseSource: null };
+var state = { convs: [], selectedConvId: null, convDetail: null, simTimer: null, sseSource: null, pendingDrafts: {},
+  // Theme-group fold state. Keyed "<conversation_id>:<groupIndex>"; presence in
+  // the Set = collapsed. Persists across the inbox poll re-render. `themeSeeded`
+  // tracks which conversations have had their default (all-but-latest collapsed)
+  // applied, so re-renders don't re-collapse groups the agent opened.
+  collapsedThemes: {}, themeSeeded: {},
+  // Per-request-node fold state (spine). Keyed "<conversation_id>::<nodeKey>";
+  // presence in the map = collapsed. Seeded once per conversation (latest node
+  // expanded, rest collapsed) via nodeSeeded, and preserved across the poll.
+  collapsedNodes: {}, nodeSeeded: {} };
 var rtTimers = [];
 
 function isTokenExpired(token) {
@@ -378,9 +446,24 @@ function urgencyToStatus(conv) {
   return conv.status || 'open';
 }
 
+// Fetch all pending held drafts and index them by conversation_id (one card per conv;
+// if multiple drafts exist for a conv we surface the most recent, which sorts first).
+async function loadPendingDrafts() {
+  try {
+    var drafts = await api('/admin/reply-drafts?status=pending');
+    var byConv = {};
+    (drafts || []).forEach(function(d) {
+      if (!byConv[d.conversation_id]) byConv[d.conversation_id] = d;
+    });
+    state.pendingDrafts = byConv;
+  } catch(e) {
+    state.pendingDrafts = state.pendingDrafts || {};
+  }
+}
+
 window.loadConversations = async function() {
   try {
-    var results = await Promise.all([api('/admin/conversations'), api('/admin/tickets')]);
+    var results = await Promise.all([api('/admin/conversations'), api('/admin/tickets'), loadPendingDrafts()]);
     var convs = results[0], tks = results[1];
     _allTickets.open   = tks.filter(function(t) { return t.status === 'open' || t.status === 'in_progress'; });
     _allTickets.closed = tks.filter(function(t) { return t.status === 'resolved' || t.status === 'closed'; });
@@ -394,6 +477,13 @@ window.loadConversations = async function() {
     if (urgent.length > 0) { badge.style.display='flex'; badge.textContent = urgent.length > 9 ? '9+' : urgent.length; }
     else { badge.style.display = 'none'; }
     document.getElementById('qcnt').textContent = urgent.length + ' urgent';
+    // Needs Review badge: number of conversations with a pending held draft
+    var nrCount = Object.keys(state.pendingDrafts).length;
+    var nrBadge = document.getElementById('reviewBadge');
+    if (nrBadge) {
+      if (nrCount > 0) { nrBadge.style.display='flex'; nrBadge.textContent = nrCount > 9 ? '9+' : nrCount; }
+      else { nrBadge.style.display = 'none'; }
+    }
     if (hasNew && state.selectedConvId) refreshSelectedConv();
   } catch(e) {
     document.getElementById('qlist').innerHTML = '<div style="padding:20px;text-align:center;color:var(--red-t);font-size:12px">' + escH(e.message) + '</div>';
@@ -421,6 +511,7 @@ function renderQueue() {
   var filtered = state.convs.filter(function(c) {
     if (search && !customerLabel(c).toLowerCase().includes(search) && !(c.last_message||'').toLowerCase().includes(search)) return false;
     if (activeFilter === 'urgent' && urgencyToStatus(c) !== 'urgent') return false;
+    if (activeFilter === 'review' && !state.pendingDrafts[c.conversation_id]) return false;
     return true;
   });
   if (!filtered.length) {
@@ -442,6 +533,7 @@ function renderQueue() {
       + '<div class="qf">'
       + (c.last_channel ? '<span class="cp ' + ch.pill + '">' + ch.svg + ch.label + '</span>' : '<span class="cp pdef">Unknown</span>')
       + '<span class="sl"><span class="sd ' + stDot + '"></span>' + stLabel + '</span>'
+      + (state.pendingDrafts[c.conversation_id] ? '<span class="qi-review-dot" title="Held reply needs review"></span>' : '')
       + '</div></div>';
     div.addEventListener('click', function() { selectConv(c.conversation_id); });
     list.appendChild(div);
@@ -454,7 +546,6 @@ async function selectConv(convId) {
   var msgsEl = document.getElementById('msgs');
   msgsEl.className = 'msgs';
   msgsEl.innerHTML = '<div style="padding:20px;text-align:center;color:var(--t3);font-size:12px">Loading…</div>';
-  document.getElementById('aipanelwrap').innerHTML = '';
   document.getElementById('compwrap').style.display = 'none';
   document.getElementById('resbanner').style.display = 'none';
   try {
@@ -463,7 +554,8 @@ async function selectConv(convId) {
       : api('/admin/tickets');
     var results = await Promise.all([
       api('/admin/conversations/' + encodeURIComponent(convId)),
-      cachedTickets
+      cachedTickets,
+      loadPendingDrafts()
     ]);
     var detail = results[0], tickets = results[1];
     state.convDetail = detail;
@@ -485,8 +577,6 @@ function renderCentre(conv) {
   document.getElementById('convName').textContent = nm;
 
   var isDone = urgencyToStatus(conv_meta) === 'resolved';
-  document.getElementById('btnResolve').disabled = isDone;
-  document.getElementById('btnEsc').disabled = isDone;
   document.getElementById('resbanner').style.display = isDone ? 'flex' : 'none';
   document.getElementById('compwrap').style.display = isDone ? 'none' : 'block';
 
@@ -546,89 +636,376 @@ function renderCentre(conv) {
     tktStatusMap[t.ticket_id] = t.status;
   });
 
+  // ── Theme grouping (ticket-first, then theme) ────────────────────────────
+  // `steps` is newest-first (idx 0 = latest). Each step is an inbound+outbound
+  // pair; in this data the classified `intent` usually lives on the OUTBOUND
+  // turn, and a single request often spans multiple turns/steps that share ONE
+  // `ticket_id` (e.g. a "Support Agent will help…" holding turn + the full
+  // reply, sometimes with the intent flipping between them).
+  //
+  // Rules:
+  //  1. A ticket is one unit — turns sharing a ticket_id are NEVER split by a
+  //     divider, and a whole ticket run takes ONE theme (the first themed
+  //     intent seen in that ticket), so an intent flip inside a ticket (e.g.
+  //     KYC mis-labelled as fraud) can't change the theme mid-ticket.
+  //  2. Empty-intent steps otherwise inherit the surrounding theme
+  //     (carry-forward), and a leading empty step looks ahead to the first
+  //     themed step.
+  //  3. A new group starts only at a REAL boundary: the theme changed AND the
+  //     step does not share a ticket with the previous step.
+  var rawIntent = steps.map(function(step) {
+    return (step.inbound && step.inbound.intent) || (step.outbound && step.outbound.intent) || '';
+  });
+  var stepTicket = steps.map(function(step) {
+    return (step.inbound && step.inbound.ticket_id) || (step.outbound && step.outbound.ticket_id) || null;
+  });
+  // Per-ticket theme + intent: first themed intent seen for each ticket_id.
+  // ticketIntent is used to label the sub-theme marker shown between two
+  // different tickets inside the same theme group.
+  var ticketTheme = {};
+  var ticketIntent = {};
+  for (var ti = 0; ti < steps.length; ti++) {
+    var tk = stepTicket[ti];
+    if (tk && rawIntent[ti] && !ticketTheme[tk]) {
+      ticketTheme[tk] = themeOf(rawIntent[ti]);
+      ticketIntent[tk] = rawIntent[ti];
+    }
+  }
+  var stepThemes = new Array(steps.length);
+  var carried = null;
+  for (var si = 0; si < steps.length; si++) {
+    var tkt = stepTicket[si];
+    if (tkt && ticketTheme[tkt]) {
+      stepThemes[si] = ticketTheme[tkt];        // whole ticket = one theme
+    } else if (rawIntent[si]) {
+      stepThemes[si] = themeOf(rawIntent[si]);
+    } else if (carried) {
+      stepThemes[si] = carried;                 // inherit from previous themed step
+    } else {
+      // Leading empty step(s): look ahead to the first themed step.
+      var ahead = null;
+      for (var sj = si + 1; sj < steps.length; sj++) {
+        if (stepTicket[sj] && ticketTheme[stepTicket[sj]]) { ahead = ticketTheme[stepTicket[sj]]; break; }
+        if (rawIntent[sj]) { ahead = themeOf(rawIntent[sj]); break; }
+      }
+      stepThemes[si] = ahead || themeOf('');    // all-empty conversation → General
+    }
+    carried = stepThemes[si];
+  }
+  var groups = [];
+  var prevTicket = null;
   steps.forEach(function(step, idx) {
-    var isLast = idx === 0;
-    var ref = step.inbound || step.outbound;
-    var ch = chMeta(ref.channel);
+    var th = stepThemes[idx];
+    var tkt = stepTicket[idx];
+    var prev = groups[groups.length - 1];
+    // Same ticket as the previous step → always stay in the same group.
+    var sameTicket = tkt && prevTicket && tkt === prevTicket;
+    if (!prev || (prev.theme !== th.theme && !sameTicket)) {
+      groups.push({ theme: th.theme, themeLabel: th.themeLabel, color: th.color, items: [{ step: step, idx: idx, ticket: tkt }] });
+    } else {
+      prev.items.push({ step: step, idx: idx, ticket: tkt });
+    }
+    prevTicket = tkt;
+  });
 
-    var urgency = ((step.inbound && step.inbound.urgency) || '').toLowerCase();
+  // Seed default fold state ONCE per conversation: latest group (index 0)
+  // expanded, all older groups collapsed. Done only if not seeded yet, so a
+  // poll re-render never re-collapses a group the agent manually opened.
+  var convKey = conv.conversation_id;
+  if (!state.themeSeeded[convKey]) {
+    groups.forEach(function(g, gi) {
+      if (gi > 0) state.collapsedThemes[convKey + ':' + gi] = true;
+    });
+    state.themeSeeded[convKey] = true;
+  }
+
+  // Seed per-node fold state ONCE per conversation: ALL request nodes collapsed
+  // by default. Preserved across the poll via nodeSeeded, so re-renders don't
+  // reopen/re-collapse what the agent set.
+  if (!state.nodeSeeded[convKey]) {
+    groups.forEach(function(g) {
+      buildUnits(g.items).forEach(function(u) {
+        state.collapsedNodes[convKey + '::' + (u.ticket || ('u' + u.idx))] = true;
+      });
+    });
+    state.nodeSeeded[convKey] = true;
+  }
+
+  // The AI holding message injected when a reply is held for human review
+  // (mirrors HOLDING_MESSAGE in services/orchestration_service/graph.py). When a
+  // request's final outbound is only this stub, we demote it to an "auto-ack"
+  // pill rather than treating it as the substantive answer.
+  var HOLDING_PREFIX = 'support agent will help you with this shortly';
+  function isHolding(text) {
+    return (text || '').trim().toLowerCase().indexOf(HOLDING_PREFIX) === 0;
+  }
+
+  // ── Merge a group's items into request UNITS ────────────────────────────
+  // Consecutive items sharing a ticket_id collapse into one request node.
+  // Unticketed items each become their own unit. Each unit summarises: the
+  // customer's opening message, the FINAL substantive reply, whether a holding
+  // "auto-ack" was sent, plus channel/emotion/status/time for the header.
+  function buildUnits(items) {
+    var units = [];
+    items.forEach(function(it) {
+      var last = units[units.length - 1];
+      if (last && it.ticket && last.ticket === it.ticket) {
+        last.items.push(it);
+      } else {
+        units.push({ ticket: it.ticket, items: [it] });
+      }
+    });
+    return units.map(function(u) {
+      // `items` is newest-first; walk a CHRONOLOGICAL (oldest-first) copy so
+      // exchanges read in the order they happened. A ticket can span several
+      // exchanges (e.g. "Please transfer…" → holding → reply → "close it" →
+      // "resolved"); each customer message + the reply(ies) that follow it become
+      // one EXCHANGE sub-box inside the single ticket node.
+      var chrono = u.items.slice().reverse();
+      var exchanges = [];
+      var cur = null;
+      var lastTurn = null;
+      // Each exchange carries its own `ref` (its latest turn) for a per-box time.
+      function startExchange(inbound) { cur = { inbound: inbound, holdingText: null, reply: null, ref: inbound || null }; exchanges.push(cur); }
+      chrono.forEach(function(it) {
+        if (it.step.inbound) {
+          startExchange(it.step.inbound);
+          lastTurn = it.step.inbound;
+        }
+        if (it.step.outbound) {
+          if (!cur) startExchange(null);   // reply with no preceding inbound in this unit
+          if (isHolding(it.step.outbound.text)) cur.holdingText = it.step.outbound.text;
+          else cur.reply = it.step.outbound;   // latest substantive reply for this exchange
+          cur.ref = it.step.outbound;          // latest turn in this exchange
+          lastTurn = it.step.outbound;
+        }
+      });
+      var firstInbound = exchanges.length ? exchanges[0].inbound : null;
+      return {
+        ticket: u.ticket,
+        idx: u.items[0].idx,            // latest step's idx (items are newest-first)
+        exchanges: exchanges,           // ordered [{inbound, holdingText, reply, ref}]
+        firstInbound: firstInbound,     // customer's original message (summary/collapsed)
+        ref: lastTurn || firstInbound   // latest turn → node timestamp/status
+      };
+    });
+  }
+
+  // Renders one request unit as a spine node and returns the DOM element.
+  // themeColor {t,bg,bd} styles the "INTENT" badge before the title.
+  function renderUnit(u, themeColor) {
+    var src = u.firstInbound || u.ref;
+    var ch = chMeta((src && src.channel) || '');
+
+    var urgency = ((u.firstInbound && u.firstInbound.urgency) || '').toLowerCase();
     var emotion = EMOTION_MAP[urgency] || 'Neutral';
     var emotionCls = EMOTION_CLS[urgency] || 'fe-neutral';
 
-    var intent = ((step.inbound && step.inbound.intent) || (step.outbound && step.outbound.intent) || '').replace(/_/g, ' ');
+    var intentRaw = (u.firstInbound && u.firstInbound.intent)
+      || (u.ref && u.ref.intent)
+      || (u.ticket && ticketIntent[u.ticket]) || '';
+    var intent = intentRaw.replace(/_/g, ' ');
 
-    var d = ref.created_at ? new Date(ref.created_at) : null;
-    var tm = d ? d.toLocaleDateString([], {month:'short', day:'numeric', year:'numeric'})
-              + ' · ' + d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : '';
-
-    var stepTicketId = (step.inbound && step.inbound.ticket_id) || (step.outbound && step.outbound.ticket_id) || null;
-    var tktStatus = stepTicketId ? tktStatusMap[stepTicketId] : null;
-    var nodeStatus;
-    if (tktStatus === 'resolved' || tktStatus === 'closed') {
-      nodeStatus = 'resolved';
-    } else if (tktStatus === 'open' || tktStatus === 'in_progress') {
-      nodeStatus = 'active';
-    } else if (!isLast) {
-      nodeStatus = 'resolved';
-    } else {
-      nodeStatus = convIsResolved ? 'resolved' : (conv.status || 'active');
+    function fmtTime(turn) {
+      var dd = turn && turn.created_at ? new Date(turn.created_at) : null;
+      return dd ? dd.toLocaleDateString([], {month:'short', day:'numeric', year:'numeric'})
+                + ' · ' + dd.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : '';
     }
-    var nodeStatusCls = (nodeStatus === 'active' || nodeStatus === 'open' || nodeStatus === 'in_progress') ? 'fns-active' : 'fns-done';
+
+    var tktStatus = u.ticket ? tktStatusMap[u.ticket] : null;
+    var isLatestUnit = u.idx === 0;
+    var nodeStatus;
+    if (tktStatus === 'resolved' || tktStatus === 'closed') nodeStatus = 'resolved';
+    else if (tktStatus === 'open' || tktStatus === 'in_progress') nodeStatus = 'active';
+    else if (!isLatestUnit) nodeStatus = 'resolved';
+    else nodeStatus = convIsResolved ? 'resolved' : (conv.status || 'active');
+    var statusCls = (nodeStatus === 'active' || nodeStatus === 'open' || nodeStatus === 'in_progress') ? 'fns-active' : 'fns-done';
 
     var el = document.createElement('div');
-    el.className = 'flow-step';
+    el.className = 'spine-node' + (isLatestUnit ? ' spine-node--latest' : '');
+    el.style.setProperty('--spine-clr', ch.clr);
 
-    // LEFT — customer query
-    var inboundSubject = (step.inbound && step.inbound.subject) || '';
-    var inboundBody = (step.inbound && step.inbound.text) || '';
-    if (inboundSubject && inboundBody.startsWith(inboundSubject)) {
-      inboundBody = inboundBody.slice(inboundSubject.length).replace(/^\s+/, '');
+    // Header pill order: ticket → status → sentiment → channel (title stays the
+    // heading; Latest stays last).
+    var tc = themeColor || { t:'var(--t2)', bg:'var(--surf2)', bd:'var(--bdr)' };
+    var titleStyle = 'style="--th-t:' + tc.t + ';--th-bg:' + tc.bg + ';--th-bd:' + tc.bd + '"';
+    // Foldable per node. Collapsed = header + customer query only; replies
+    // (auto-sent + AI agent) reveal on click. Stable key so the poll preserves it.
+    var nodeKey = convKey + '::' + (u.ticket || ('u' + u.idx));
+    var nodeCollapsed = !!state.collapsedNodes[nodeKey];
+
+    var headHtml = '<div class="spine-head">'
+      + '<svg class="spine-chev" viewBox="0 0 24 24" width="11" height="11"><path d="M8 5l8 7-8 7z"/></svg>'
+      + '<span class="spine-title-wrap" ' + titleStyle + '>'
+      +   '<span class="spine-kind">Intent</span>'
+      +   '<span class="spine-title">' + escH(intent || 'Conversation') + '</span>'
+      + '</span>'
+      + (u.ticket ? '<span class="spine-tkt">' + escH(u.ticket) + '</span>' : '')
+      + '<span class="flow-node-status ' + statusCls + '">' + escH(nodeStatus) + '</span>'
+      + (urgency ? '<span class="flow-emotion ' + emotionCls + '">' + escH(emotion) + '</span>' : '')
+      + '<span class="cp ' + ch.pill + '" style="font-size:10px">' + ch.svg + ch.label + '</span>'
+      + (isLatestUnit ? '<span class="flow-node-latest">Latest</span>' : '')
+      + '</div>';
+
+    // Renders one customer message (strips a leading duplicated subject line).
+    function custMsgHtml(inbound) {
+      if (!inbound) return '';
+      var s = inbound.subject || '';
+      var b = inbound.text || '';
+      if (s && b.startsWith(s)) b = b.slice(s.length).replace(/^\s+/, '');
+      return (s ? '<div class="spine-subject">' + escH(s) + '</div>' : '')
+        + '<div class="spine-msg"><span class="spine-cust-lbl">Customer Query</span>' + escH(b) + '</div>';
     }
-    var leftHtml = step.inbound
-      ? '<div class="flow-query-card">'
-        + '<div class="flow-query-hdr"><span>Customer Query</span>'
-        + (urgency ? '<span class="flow-emotion ' + emotionCls + '">' + escH(emotion) + '</span>' : '')
-        + '</div>'
-        + (inboundSubject ? '<div class="flow-query-subject">' + escH(inboundSubject) + '</div>' : '')
-        + '<div class="flow-query-text">' + escH(inboundBody) + '</div>'
-        + (intent ? '<span class="flow-intent-pill">' + escH(intent) + '</span>' : '')
-        + '</div>'
-      : '';
+    function replyBlockHtml(ex) {
+      var holding = ex.holdingText
+        ? '<div class="spine-holding">↳ Auto-sent: “' + escH(ex.holdingText.trim()) + '”</div>' : '';
+      var reply;
+      if (ex.reply) {
+        reply = '<div class="spine-reply"><div class="spine-reply-hdr"><span>AI Agent</span></div>'
+          + '<div class="spine-reply-text">' + escH(ex.reply.text || '') + '</div></div>';
+      } else if (ex.holdingText) {
+        reply = '<div class="spine-reply spine-reply--pending"><span class="spine-pending">Awaiting agent reply…</span></div>';
+      } else {
+        return '';
+      }
+      // The reply(ies) live in a foldable wrapper; queries stay always visible.
+      return '<div class="spine-replies">' + holding + reply + '</div>';
+    }
 
-    // CENTER — metadata node
-    var ticketId = (step.inbound && step.inbound.ticket_id) || (step.outbound && step.outbound.ticket_id) || null;
-    var centerHtml = (ticketId ? '<div class="flow-ticket-label">TICKET: ' + escH(ticketId) + '</div>' : '')
-      + '<div class="flow-node" style="border-left-color:' + ch.clr + '">'
-      + '<div class="flow-node-top">'
-      + '<span class="flow-node-id">Turn ' + (steps.length - idx) + '</span>'
-      + (isLast ? '<span class="flow-node-latest">Latest</span>' : '')
-      + '</div>'
-      + '<div style="margin:3px 0"><span class="cp ' + ch.pill + '" style="font-size:10px">' + ch.svg + ch.label + '</span></div>'
-      + '<div class="flow-node-time">' + escH(tm) + '</div>'
-      + '<span class="flow-node-status ' + nodeStatusCls + '">' + escH(nodeStatus) + '</span>'
-      + '</div>'
-      + (idx < steps.length - 1 ? '<div class="flow-vline"></div>' : '');
+    var exchanges = u.exchanges || [];
 
-    // RIGHT — agent reply
-    var rightHtml = step.outbound
-      ? '<div class="flow-reply-card">'
-        + '<div class="flow-reply-hdr"><span>Resolution / Reply</span>'
-        + '<span class="flow-agent-pill">AI Agent</span>'
-        + '</div>'
-        + '<div class="flow-reply-text">' + escH(step.outbound.text || '') + '</div>'
-        + '</div>'
-      : '';
+    // Each exchange = one sub-box: query (ALWAYS visible) + replies (hidden when
+    // the node is collapsed) + the exchange's own timestamp.
+    var boxesHtml = '';
+    exchanges.forEach(function(ex, ei) {
+      boxesHtml += '<div class="spine-exchange' + (ei > 0 ? ' spine-exchange--next' : '') + '">'
+        + (ex.inbound ? '<div class="spine-cust">' + custMsgHtml(ex.inbound) + '</div>' : '')
+        + replyBlockHtml(ex)
+        + (fmtTime(ex.ref) ? '<div class="spine-time">' + escH(fmtTime(ex.ref)) + '</div>' : '')
+        + '</div>';
+    });
 
-    el.innerHTML = '<div class="flow-left">' + leftHtml + '</div>'
-      + '<div class="flow-center-col">' + centerHtml + '</div>'
-      + '<div class="flow-right">' + rightHtml + '</div>';
+    // Node is expandable iff any exchange actually has a reply/holding to hide.
+    var hasBody = exchanges.some(function(ex) { return ex.reply || ex.holdingText; });
 
-    if (state.highlightTicketId && stepTicketId === state.highlightTicketId) {
+    var summaryHtml = '<div class="spine-summary"' + (hasBody ? ' role="button" tabindex="0" aria-expanded="' + (nodeCollapsed ? 'false' : 'true') + '"' : '') + '>'
+      + headHtml
+      + boxesHtml
+      + '</div>';
+
+    el.innerHTML = '<div class="spine-card' + (nodeCollapsed ? ' collapsed' : '') + (hasBody ? '' : ' no-replies') + '">'
+      + summaryHtml
+      + '</div>';
+
+    if (hasBody) {
+      var summaryEl = el.querySelector('.spine-summary');
+      var toggleNode = function() {
+        if (state.collapsedNodes[nodeKey]) delete state.collapsedNodes[nodeKey];
+        else state.collapsedNodes[nodeKey] = true;
+        renderCentre(conv);
+      };
+      summaryEl.addEventListener('click', toggleNode);
+      summaryEl.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleNode(); }
+      });
+    }
+
+    if (state.highlightTicketId && u.ticket === state.highlightTicketId) {
       el.classList.add('flow-step--highlight');
     }
+    return el;
+  }
 
-    box.appendChild(el);
+  // ── Render theme groups with foldable headers ───────────────────────────
+  var allNodeKeys = [];   // every request-node key, for the Collapse/Expand All button
+  groups.forEach(function(g, gi) {
+    var groupKey = convKey + ':' + gi;
+    // If we're navigating to a specific ticket, force-open the group that holds
+    // it so the highlighted turn isn't hidden inside a collapsed group.
+    if (state.highlightTicketId) {
+      var hasHighlight = g.items.some(function(it) {
+        var tid = (it.step.inbound && it.step.inbound.ticket_id) || (it.step.outbound && it.step.outbound.ticket_id) || null;
+        return tid === state.highlightTicketId;
+      });
+      if (hasHighlight) delete state.collapsedThemes[groupKey];
+    }
+    var collapsed = !!state.collapsedThemes[groupKey];
+    var units = buildUnits(g.items);        // merged request units for this group
+    var reqCount = units.length;
+
+    var groupEl = document.createElement('div');
+    groupEl.className = 'flow-theme-group' + (collapsed ? ' collapsed' : '');
+
+    // Foldable theme header (divider). Clicking toggles this group's fold state.
+    var header = document.createElement('div');
+    header.className = 'flow-theme-divider';
+    header.setAttribute('role', 'button');
+    header.setAttribute('tabindex', '0');
+    header.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+    header.style.cssText = '--th-t:' + g.color.t + ';--th-bg:' + g.color.bg + ';--th-bd:' + g.color.bd;
+    header.innerHTML =
+        '<span class="ftd-line"></span>'
+      + '<span class="ftd-label">'
+      +   '<svg class="ftd-chev" viewBox="0 0 24 24" width="11" height="11"><path d="M8 5l8 7-8 7z"/></svg>'
+      +   '<span class="ftd-dot"></span>'
+      +   escH(g.themeLabel)
+      +   '<span class="ftd-count">' + reqCount + ' request' + (reqCount === 1 ? '' : 's') + '</span>'
+      + '</span>'
+      + '<span class="ftd-line r"></span>';
+    var toggle = function() {
+      if (state.collapsedThemes[groupKey]) delete state.collapsedThemes[groupKey];
+      else state.collapsedThemes[groupKey] = true;
+      renderCentre(conv);
+    };
+    header.addEventListener('click', toggle);
+    header.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
+    });
+    groupEl.appendChild(header);
+
+    // Group body — a vertical spine of request units + sub-theme markers.
+    var bodyEl = document.createElement('div');
+    bodyEl.className = 'flow-theme-body spine';
+
+    // Each unit is a request node; the intent is shown once, as its title
+    // (prefixed with an "INTENT" badge in the theme colour) inside renderUnit.
+    units.forEach(function(u) {
+      // Same key formula as renderUnit, so Collapse/Expand All targets each node.
+      allNodeKeys.push(convKey + '::' + (u.ticket || ('u' + u.idx)));
+      bodyEl.appendChild(renderUnit(u, g.color));
+    });
+
+    groupEl.appendChild(bodyEl);
+    box.appendChild(groupEl);
   });
+
+  // "Collapse/Expand all" toggle at the end of the channel-filter bar. Placed
+  // here (not with the other bar buttons) because it needs the final group +
+  // node lists. Collapses EVERYTHING — every theme section AND every request
+  // node — and flips to "Expand all" once everything is already collapsed.
+  if (groups.length) {
+    var allThemeKeys = groups.map(function(_, gi) { return convKey + ':' + gi; });
+    var everyCollapsed =
+      allThemeKeys.every(function(k) { return state.collapsedThemes[k]; }) &&
+      allNodeKeys.every(function(k) { return state.collapsedNodes[k]; });
+    var caBtn = document.createElement('button');
+    caBtn.className = 'chfilt chfilt-collapse';
+    caBtn.innerHTML = (everyCollapsed
+      ? '<svg viewBox="0 0 24 24" width="12" height="12"><path d="M7 10l5 5 5-5z"/></svg>Expand all'
+      : '<svg viewBox="0 0 24 24" width="12" height="12"><path d="M7 14l5-5 5 5z"/></svg>Collapse all');
+    caBtn.addEventListener('click', function() {
+      allThemeKeys.forEach(function(k) {
+        if (everyCollapsed) delete state.collapsedThemes[k];
+        else state.collapsedThemes[k] = true;
+      });
+      allNodeKeys.forEach(function(k) {
+        if (everyCollapsed) delete state.collapsedNodes[k];
+        else state.collapsedNodes[k] = true;
+      });
+      renderCentre(conv);
+    });
+    bar.appendChild(caBtn);
+  }
 
   // Scroll the highlighted turn into view and clear the pending highlight
   if (state.highlightTicketId) {
@@ -639,37 +1016,85 @@ function renderCentre(conv) {
     state.highlightTicketId = null;
   }
 
-  // Compose + AI panel
-  if (isDone) {
-    document.getElementById('aipanelwrap').innerHTML = '';
-  } else {
-    var compBtns = document.getElementById('compChBtns');
-    compBtns.innerHTML = '';
-    var activeChans = Object.keys(seenChs);
-    if (!activeChans.length) activeChans = ['whatsapp'];
-    activeChans.forEach(function(ch) {
-      var cm = chMeta(ch);
-      var btn = document.createElement('button');
-      btn.className = 'compose-ch-btn';
-      btn.innerHTML = cm.svg + cm.label;
-      compBtns.appendChild(btn);
-    });
+  // Compose
+  if (!isDone) {
     document.getElementById('cinput').placeholder = 'Reply to ' + nm + '…';
-
-    var wrap = document.getElementById('aipanelwrap');
-    var lastIntent = conv_meta.last_intent || '';
-    var suggestion = lastIntent
-      ? 'I can see you have a ' + lastIntent.replace(/_/g,' ') + ' inquiry. Let me pull up the details for you — could you please confirm your account number or registered phone number?'
-      : 'Thank you for contacting us. I can see your conversation history. How can I help you today?';
-    wrap.innerHTML = '<div class="aipanel"><div class="airbox">'
-      + '<div class="aihdr"><div class="aititle"><svg width="12" height="12" viewBox="0 0 24 24" fill="var(--pur)"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>AI suggested response</div>'
-      + '<span class="aibadge">Editable · Sendable</span></div>'
-      + '<textarea class="aita" id="aiSuggestion">' + escH(suggestion) + '</textarea>'
-      + '<div class="aibtns"><button class="aibtn send" onclick="sendAISuggestion()">Send</button>'
-      + '<button class="aibtn" onclick="toast(\'Translated\')">Translate</button></div>'
-      + '</div></div>';
   }
+
+  renderDraftCard(conv);
 }
+
+// Render the human-in-the-loop editable draft card if this conversation has a pending
+// held reply. The AI's proposed answer is shown in an editable box; the agent can correct
+// it and Send (delivers to the customer + persists the outbound turn), or Discard it.
+function renderDraftCard(conv) {
+  var mount = document.getElementById('draftMount');
+  if (!mount) return;
+  var draft = state.pendingDrafts[conv.conversation_id];
+  var compose = document.getElementById('compwrap');
+  if (!draft) {
+    mount.innerHTML = '';
+    return;  // no draft: leave the compose box as renderCentre() set it
+  }
+  // A held draft IS the reply surface — hide the generic compose box so there is only one
+  // (and the real one). renderCentre() runs before this and may have shown compwrap.
+  if (compose) compose.style.display = 'none';
+  mount.innerHTML =
+    '<div class="draft-card" data-draft-id="' + escH(draft.draft_id) + '">'
+    + '<div class="draft-hdr"><span>✋ Held for review — edit &amp; send manually</span>'
+    + '<span class="draft-reason">' + escH(draft.hold_reason || 'Escalated') + '</span></div>'
+    + '<div class="draft-body">'
+    + '<div class="draft-label">AI-proposed reply (editable)</div>'
+    + '<textarea class="draft-textarea" id="draftText">' + escH(draft.draft_text || '') + '</textarea>'
+    + '<div class="draft-actions">'
+    + '<button class="draft-send-btn" onclick="sendDraft(this)">Send reply</button>'
+    + '<button class="draft-discard-btn" onclick="discardDraft(this)">Discard</button>'
+    + '</div></div></div>';
+}
+
+window.sendDraft = function(btn) {
+  var card = btn.closest('.draft-card');
+  var draftId = card && card.getAttribute('data-draft-id');
+  var text = (document.getElementById('draftText').value || '').trim();
+  if (!draftId || !text) { toast('Reply text is required'); return; }
+  card.querySelectorAll('button').forEach(function(b){ b.disabled = true; });
+  api('/admin/reply-drafts/' + encodeURIComponent(draftId) + '/send', {
+    method: 'POST',
+    body: JSON.stringify({ text: text }),
+  }).then(function() {
+    toast('Reply sent to customer');
+    if (state.convDetail) {
+      delete state.pendingDrafts[state.convDetail.conversation_id];
+      renderCentre(state.convDetail);  // clears the card + restores the compose box
+    }
+    refreshSelectedConv();
+    loadConversations();
+  }).catch(function(err) {
+    toast('Failed: ' + err.message);
+    card.querySelectorAll('button').forEach(function(b){ b.disabled = false; });
+  });
+};
+
+window.discardDraft = function(btn) {
+  var card = btn.closest('.draft-card');
+  var draftId = card && card.getAttribute('data-draft-id');
+  if (!draftId) return;
+  card.querySelectorAll('button').forEach(function(b){ b.disabled = true; });
+  api('/admin/reply-drafts/' + encodeURIComponent(draftId) + '/discard', {
+    method: 'POST',
+    body: JSON.stringify({}),
+  }).then(function() {
+    toast('Draft discarded');
+    if (state.convDetail) {
+      delete state.pendingDrafts[state.convDetail.conversation_id];
+      renderCentre(state.convDetail);  // clears the card + restores the compose box
+    }
+    loadConversations();
+  }).catch(function(err) {
+    toast('Failed: ' + err.message);
+    card.querySelectorAll('button').forEach(function(b){ b.disabled = false; });
+  });
+};
 
 function renderRight(conv, tickets) {
   var conv_meta = state.convs.find(function(c) { return c.conversation_id === conv.conversation_id; }) || conv;
@@ -681,13 +1106,6 @@ function renderRight(conv, tickets) {
   document.getElementById('rpcontact').innerHTML = '';
 
   var turns = conv.turns || [];
-  var seenChs = {};
-  turns.forEach(function(t) { if (t.channel) seenChs[t.channel] = true; });
-  var rpchs = document.getElementById('rpchs');
-  rpchs.innerHTML = Object.keys(seenChs).map(function(ch) {
-    var cm = chMeta(ch);
-    return '<span class="cp ' + cm.pill + '" style="font-size:10px">' + cm.svg + cm.label + '</span>';
-  }).join('');
 
   var NEG_KW = ['angry','bad','terrible','frustrated','late','failed','problem','damaged','not received','not credited','charged twice','cancel','fraud','stolen','unauthorized','incorrect charge','overdue','default','claim rejected','policy lapsed','blocked account','money gone','wrong transfer','human agent','human representative'];
   var POS_KW = ['thanks','thank you','great','good','helpful','resolved','approved','credited','disbursed','processed','excellent','perfect','awesome'];
@@ -708,23 +1126,19 @@ function renderRight(conv, tickets) {
   var posPct = Math.round((sentCounts.positive / total) * 100);
   var neuPct = Math.max(0, 100 - negPct - posPct);
   var msgCount = Math.min(inbound.length, 5) || 1;
-  var sentLbl, sentClr, sentTrend;
+  var sentLbl, sentClr, sentCount;
   if (negPct >= 60) {
-    sentLbl = 'Very frustrated'; sentClr = '#dc2626';
-    sentTrend = 'Sharply declining · last ' + Math.min(msgCount, 4) + ' messages';
+    sentLbl = 'Very frustrated'; sentClr = '#dc2626'; sentCount = Math.min(msgCount, 4);
   } else if (negPct >= 30) {
-    sentLbl = 'Frustrated'; sentClr = 'var(--red-t)';
-    sentTrend = 'Trending negative · last ' + Math.min(msgCount, 3) + ' messages';
+    sentLbl = 'Frustrated'; sentClr = 'var(--red-t)'; sentCount = Math.min(msgCount, 3);
   } else if (posPct >= 55) {
-    sentLbl = 'Positive'; sentClr = 'var(--grn-t)';
-    sentTrend = 'Consistently positive';
+    sentLbl = 'Positive'; sentClr = 'var(--grn-t)'; sentCount = msgCount;
   } else {
-    sentLbl = 'Neutral'; sentClr = 'var(--amb-t)';
-    sentTrend = 'Stable over last ' + msgCount + ' messages';
+    sentLbl = 'Neutral'; sentClr = 'var(--amb-t)'; sentCount = msgCount;
   }
 
   var intents = turns.filter(function(t) { return t.intent; }).map(function(t) { return t.intent; });
-  var uniqueIntents = intents.filter(function(v,i,a){ return a.indexOf(v)===i; }).slice(0,3);
+  var uniqueIntents = intents.filter(function(v,i,a){ return a.indexOf(v)===i; }).slice(0,4);
 
   var _snapTickets = (tickets || [].concat(_allTickets.open, _allTickets.closed))
     .filter(function(t) { return t.conversation_id === conv.conversation_id && (t.status === 'open' || t.status === 'in_progress'); });
@@ -743,22 +1157,11 @@ function renderRight(conv, tickets) {
     return '< 1 mo';
   }
 
-  // Churn risk heuristic: negative sentiment + high-urgency turns + open tickets
-  var highUrgCount = turns.filter(function(t) {
-    var u = (t.urgency || '').toLowerCase();
-    return u === 'high' || u === 'critical';
-  }).length;
-  var churnScore = negPct + Math.min(highUrgCount * 15, 45) + Math.min(_snapTickets.length * 10, 30);
-  var churnLbl, churnClr;
-  if (churnScore >= 50) { churnLbl = 'High'; churnClr = 'var(--red-t)'; }
-  else if (churnScore >= 20) { churnLbl = 'Medium'; churnClr = 'var(--amb-t)'; }
-  else { churnLbl = 'Low'; churnClr = 'var(--grn-t)'; }
-
   var body = document.getElementById('rpbody');
   body.innerHTML = ''
-    + '<div class="rpcard"><div class="rplbl">Sentiment</div>'
-    + '<div class="ssc" style="color:' + sentClr + '">' + escH(sentLbl) + '</div>'
-    + '<div class="ssub">' + escH(sentTrend) + '</div>'
+    + '<div class="rpcard"><div class="ssent-head"><span class="rplbl">Sentiment</span>'
+    + '<span class="ssc" style="color:' + sentClr + '">' + escH(sentLbl) + '</span>'
+    + '<span class="ssent-count">(last ' + sentCount + ' message' + (sentCount === 1 ? '' : 's') + ')</span></div>'
     + '<div class="sbar">'
     + '<div class="sbp" style="flex:' + posPct + '"></div>'
     + '<div class="sbu" style="flex:' + neuPct + '"></div>'
@@ -770,11 +1173,15 @@ function renderRight(conv, tickets) {
     + '<span class="slbl" style="color:var(--red-t)">' + negPct + '% negative</span>'
     + '</div></div>'
     + '<div class="rpcard"><div class="rplbl">Profile snapshot</div>'
+    + '<div class="attrition-band" id="snap-attrition" style="display:none" title="Rule-based flag for whether this customer may leave. High if they mention leaving, OR 2+ strong signs (30+ days overdue, worsening mood, or a stuck ticket); Medium if 1 strong or 3+ weak signs; else Low. A transparent heuristic, not a prediction.">'
+    + '<span class="ab-lbl">Attrition risk</span>'
+    + '<span class="ab-band" id="snap-attrition-band"></span>'
+    + '<span class="ab-reasons" id="snap-attrition-reasons"></span>'
+    + '</div>'
     + '<div class="mgrid">'
-    + '<div class="mc"><div class="mv" id="snap-tenure">' + escH(tenureLbl) + '</div><div class="ml">Tenure</div></div>'
-    + '<div class="mc"><div class="mv" style="color:' + churnClr + '">' + escH(churnLbl) + '</div><div class="ml">Churn risk</div></div>'
-    + '<div class="mc"><div class="mv" id="snap-loans">—</div><div class="ml">Loans</div></div>'
-    + '<div class="mc"><div class="mv" id="snap-claims">—</div><div class="ml">Claims</div></div>'
+    + '<div class="mc" title="How long they have been a customer, from their account registration date."><div class="mv" id="snap-tenure">' + escH(tenureLbl) + '</div><div class="ml">Tenure</div></div>'
+    + '<div class="mc" title="Customer value tier set by the bank: HNI (High Net-worth Individual), Affluent, or Mass Affluent. — means no segment on record."><div class="mv mv-txt" id="snap-segment">—</div><div class="ml">Segment</div></div>'
+    + '<div class="mc mc-wide" title="Their most urgent product event within ~90 days: an overdue/upcoming card payment, FD maturity, or policy premium due. Overdue is shown in red."><div class="mv mv-txt" id="snap-event">—</div><div class="ml">Upcoming event</div></div>'
     + '</div></div>'
     + (uniqueIntents.length ? '<div class="rpcard"><div class="rplbl">Detected intents</div>'
     + uniqueIntents.map(function(i) { return '<div style="font-size:11px;font-weight:500;padding:4px 8px;background:var(--blue-bg);border:1px solid var(--blue-bd);color:var(--blue-t);border-radius:20px;display:inline-block;margin:2px">' + escH(i.replace(/_/g,' ')) + '</div>'; }).join('')
@@ -784,12 +1191,38 @@ function renderRight(conv, tickets) {
   var _snapCustId = conv_meta.customer_id;
   if (_snapCustId) {
     api('/admin/customers/' + encodeURIComponent(_snapCustId) + '/graph').then(function(g) {
-      var loansEl = document.getElementById('snap-loans');
-      var claimsEl = document.getElementById('snap-claims');
-      if (loansEl) loansEl.textContent = g.loan_count;
-      if (claimsEl) claimsEl.textContent = g.claim_count;
       var tenureEl = document.getElementById('snap-tenure');
       if (tenureEl && g.registration_date) tenureEl.textContent = calcTenure(g.registration_date);
+      var segEl = document.getElementById('snap-segment');
+      if (segEl) segEl.textContent = g.segment || '—';
+      var eventEl = document.getElementById('snap-event');
+      if (eventEl) {
+        var ev = g.upcoming_event;
+        if (ev) {
+          var when;
+          if (ev.overdue) when = Math.abs(ev.days) + 'd overdue';
+          else if (ev.days === 0) when = 'today';
+          else when = 'in ' + ev.days + 'd';
+          eventEl.textContent = ev.label + ' · ' + when;
+          eventEl.style.color = ev.overdue ? 'var(--red-t)' : 'var(--t1)';
+        } else {
+          eventEl.textContent = 'None';
+        }
+      }
+
+      // Attrition risk band (full-width, above the tiles)
+      var atr = g.attrition;
+      var atrWrap = document.getElementById('snap-attrition');
+      if (atrWrap && atr && atr.band) {
+        var bandEl = document.getElementById('snap-attrition-band');
+        var reasonsEl = document.getElementById('snap-attrition-reasons');
+        var band = atr.band;
+        bandEl.textContent = band;
+        bandEl.className = 'ab-band ab-' + band.toLowerCase();
+        var top = (atr.reasons || []).slice(0, 2);
+        reasonsEl.textContent = top.length ? '· ' + top.join(', ') : '';
+        atrWrap.style.display = 'flex';
+      }
 
       // Extract email and phone from channel identifiers
       var ids = g.identifiers || [];
@@ -832,30 +1265,80 @@ function renderRight(conv, tickets) {
   var allTickets = tickets || [].concat(_allTickets.open, _allTickets.closed);
   var convTickets = allTickets.filter(function(t) { return t.conversation_id === conv.conversation_id; });
   if (convTickets.length) {
-    var tktHtml = convTickets.slice(0,4).map(function(t) {
+    var tktHtml = convTickets.map(function(t) {
+      var isOpen = t.status === 'open' || t.status === 'in_progress';
       var stBg = t.status === 'resolved' ? 'background:var(--grn-bg);border-color:var(--grn-bd);color:var(--grn-t)' :
-                 t.status === 'open' || t.status === 'in_progress' ? 'background:var(--amb-bg);border-color:var(--amb-bd);color:var(--amb-t)' :
+                 isOpen ? 'background:var(--amb-bg);border-color:var(--amb-bd);color:var(--amb-t)' :
                  'background:var(--surf2);border-color:var(--bdr);color:var(--t3)';
-      return '<div class="tkt-item"><div class="tkt-head">'
+      return '<div class="tkt-item tkt-item--clickable" onclick="goToConversation(\'' + escH(conv.conversation_id) + '\',\'' + escH(t.ticket_id) + '\')"><div class="tkt-head">'
         + '<span class="tkt-id">' + escH(t.ticket_id.slice(0,16)) + '</span>'
         + '<span class="tkt-st" style="' + stBg + '">' + escH(t.status) + '</span>'
-        + '</div><div class="tkt-desc">' + escH((t.title||t.intent||'').slice(0,60)) + '</div></div>';
+        + '</div><div class="tkt-desc">' + escH((t.title||t.intent||'').slice(0,60)) + '</div>'
+        + '<div class="tkt-created">Created: ' + escH(fmtDateTime(t.created_at)) + '</div>'
+        + (isOpen ? '<button class="tkt-resolve-btn" onclick="event.stopPropagation();resolveTicket(this,\'' + escH(t.ticket_id) + '\')">Resolve ticket</button>' : '')
+        + '</div>';
     }).join('');
-    body.innerHTML += '<div class="rpcard"><div class="rplbl">Tickets (' + convTickets.length + ')</div>' + tktHtml + '</div>';
+    body.innerHTML += '<div class="rpcard"><div class="rplbl">Tickets (' + convTickets.length + ')</div>'
+      + '<div class="tkt-scroll">' + tktHtml + '</div></div>';
   }
+
+  body.innerHTML += '<div class="rpcard" id="rpNbaCard"><div class="rplbl">Recommended actions</div>'
+    + '<div id="rpNbaBody" style="font-size:11px;color:var(--t3)">Checking…</div></div>';
+  var nbaTicketId = convTickets.length ? convTickets[0].ticket_id : '';
+  var nbaUrl = '/admin/agent-assist/next-best-actions?conversation_id=' + encodeURIComponent(conv.conversation_id)
+    + (nbaTicketId ? '&ticket_id=' + encodeURIComponent(nbaTicketId) : '');
+  api(nbaUrl).then(function(result) {
+    renderNbaActions(result.actions || []);
+  }).catch(function() {
+    var el = document.getElementById('rpNbaBody');
+    if (el) el.textContent = 'Unavailable';
+  });
 }
+
+function renderNbaActions(actions) {
+  var el = document.getElementById('rpNbaBody');
+  if (!el) return;
+  if (!actions.length) {
+    el.textContent = 'No recommendations right now.';
+    return;
+  }
+  el.innerHTML = actions.map(function(a) {
+    var isCrossSell = a.action_type === 'cross_sell';
+    var badge = isCrossSell
+      ? '<span class="nba-badge nba-badge-crosssell">Cross-sell</span>'
+      : '<span class="nba-badge">' + escH(a.action_type.replace(/_/g,' ')) + '</span>';
+    return '<div class="nba-item" data-rec-id="' + escH(a.recommendation_id) + '">'
+      + badge
+      + '<div class="nba-reason">' + escH(a.reason) + '</div>'
+      + '<div class="nba-actions">'
+      + '<button class="nba-approve-btn" onclick="decideNba(this,\'approved\')">Approve</button>'
+      + '<button class="nba-dismiss-btn" onclick="decideNba(this,\'dismissed\')">Dismiss</button>'
+      + '</div></div>';
+  }).join('');
+}
+
+window.decideNba = function(btn, status) {
+  var item = btn.closest('.nba-item');
+  var recId = item ? item.getAttribute('data-rec-id') : null;
+  if (!recId) return;
+  btn.parentElement.querySelectorAll('button').forEach(function(b) { b.disabled = true; });
+  api('/admin/agent-assist/recommendations/' + encodeURIComponent(recId) + '/decision', {
+    method: 'POST',
+    body: JSON.stringify({ status: status }),
+  }).then(function() {
+    toast(status === 'approved' ? 'Recommendation approved' : 'Recommendation dismissed');
+    if (item) item.style.opacity = '0.4';
+  }).catch(function(err) {
+    toast('Failed: ' + err.message);
+    btn.parentElement.querySelectorAll('button').forEach(function(b) { b.disabled = false; });
+  });
+};
 
 window.doSend = function() {
   var txt = document.getElementById('cinput').value.trim();
   if (!txt || !state.convDetail) return;
   toast('Reply queued (simulation mode) · ' + txt.slice(0,30));
   document.getElementById('cinput').value = '';
-};
-
-window.sendAISuggestion = function() {
-  var ta = document.getElementById('aiSuggestion');
-  if (!ta) return;
-  toast('AI suggestion sent');
 };
 
 // ── Confirmation modal ────────────────────────────────────────────────────────
@@ -892,82 +1375,45 @@ window.confirmOk = async function() {
   }
 };
 
-window.doResolve = function() {
-  if (!state.convDetail) return;
-  if (state.convDetail.status === 'closed' || state.convDetail.status === 'resolved') return;
-  showConfirm({
-    icon: '<svg viewBox="0 0 24 24" width="36" height="36" fill="var(--grn)"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z"/></svg>',
-    title: 'Resolve conversation',
-    msg: 'This will close the latest open ticket and mark the conversation as resolved. This action cannot be undone.',
-    okLabel: 'Resolve',
-    okColor: 'var(--grn)',
-    onConfirm: execResolve
-  });
-};
+// Conversation-level Resolve/Escalate buttons were removed: resolution is per-ticket (see the
+// per-ticket Resolve control in renderRight), and conversation "resolved" is derived from having
+// no open tickets. The old Escalate was a non-functional UI stub (no backend action).
 
-async function execResolve() {
-  try {
-    var convId = state.convDetail.conversation_id;
-    var adminUser = currentUser ? currentUser.username : 'admin';
-
-    // Find the latest open ticket for this conversation
-    var tickets = await api('/admin/tickets');
-    var openTicket = tickets.filter(function(t) {
-      return t.conversation_id === convId && (t.status === 'open' || t.status === 'in_progress');
-    }).sort(function(a, b) { return new Date(b.created_at) - new Date(a.created_at); })[0];
-
-    if (openTicket) {
-      await api('/admin/tickets/' + openTicket.ticket_id + '/status', {
-        method: 'PATCH',
-        body: JSON.stringify({ status: 'resolved', actor: adminUser })
+// Resolve a single ticket from the Tickets panel, then refresh so the conversation-resolved
+// state is re-derived (a conversation is done only when it has no open tickets left).
+window.resolveTicket = function(btn, ticketId) {
+  if (!ticketId) return;
+  var adminUser = currentUser ? currentUser.username : 'admin';
+  btn.disabled = true;
+  api('/admin/tickets/' + encodeURIComponent(ticketId) + '/status', {
+    method: 'PATCH',
+    body: JSON.stringify({ status: 'resolved', actor: adminUser })
+  }).then(function() {
+    toast('Ticket ' + ticketId.slice(0,16) + ' resolved ✓');
+    return loadTickets ? loadTickets() : null;
+  }).then(function() {
+    // Re-derive: refresh conversations + tickets and re-render the open conversation.
+    return loadConversations();
+  }).then(function() {
+    if (state.convDetail) {
+      var all = [].concat(_allTickets.open, _allTickets.closed);
+      var stillOpen = all.some(function(t) {
+        return t.conversation_id === state.convDetail.conversation_id
+          && (t.status === 'open' || t.status === 'in_progress');
       });
-      // Update cached ticket lists immediately so right panel reflects the change
-      _allTickets.open = _allTickets.open.filter(function(t) { return t.ticket_id !== openTicket.ticket_id; });
-      openTicket.status = 'resolved';
-      _allTickets.closed = [openTicket].concat(_allTickets.closed);
+      state.convDetail.status = stillOpen ? 'active' : 'resolved';
+      state.convs.forEach(function(c) {
+        if (c.conversation_id === state.convDetail.conversation_id) c.status = state.convDetail.status;
+      });
+      renderCentre(state.convDetail);
+      renderRight(state.convDetail, all);
+      renderQueue();
     }
-
-    // Update local state
-    state.convDetail.status = 'resolved';
-    state.convs.forEach(function(c) { if (c.conversation_id === convId) c.status = 'resolved'; });
-    renderQueue();
-    renderCentre(state.convDetail);
-    renderRight(state.convDetail, [].concat(_allTickets.open, _allTickets.closed));
-
-    // Refresh tickets panel badge/table
-    api('/admin/tickets').then(function(tks) {
-      var open = tks.filter(function(t) { return t.status === 'open' || t.status === 'in_progress'; });
-      var badge = document.getElementById('ticketsBadge');
-      if (open.length > 0) { badge.style.display = 'flex'; badge.textContent = open.length > 9 ? '9+' : open.length; }
-      else { badge.style.display = 'none'; }
-      if (activePage === 'tickets') { _allTickets.open = open; _allTickets.closed = tks.filter(function(t) { return t.status === 'resolved' || t.status === 'closed'; }); filterTickets(); }
-    }).catch(function(){});
-
-    toast('Conversation resolved · ticket closed ✓');
-  } catch(e) {
+  }).catch(function(e) {
     toast('Error: ' + e.message);
-  }
-}
-
-window.doEscalate = function() {
-  if (!state.convDetail) return;
-  if (state.convDetail.status === 'closed' || state.convDetail.status === 'resolved') return;
-  showConfirm({
-    icon: '<svg viewBox="0 0 24 24" width="36" height="36" fill="var(--red)"><path d="M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z"/></svg>',
-    title: 'Escalate to senior support',
-    msg: 'This will escalate the conversation to the senior support team and add an escalation note to the chat.',
-    okLabel: 'Escalate',
-    okColor: 'var(--red)',
-    onConfirm: execEscalate
+    btn.disabled = false;
   });
 };
-
-function execEscalate() {
-  var turns = state.convDetail.turns || [];
-  turns.push({ direction: 'outbound', channel: null, text: '[Escalated to senior support team]', created_at: new Date().toISOString() });
-  renderCentre(state.convDetail);
-  toast('Escalated to senior support');
-}
 
 document.getElementById('ftags').addEventListener('click', function(e) {
   if (!e.target.dataset.f) return;
@@ -992,12 +1438,14 @@ window.loadAnalytics = async function() {
       fetch('/analytics/intents',  { headers: adminHeaders() }).then(function(r){return r.json();}),
       fetch('/analytics/agents',   { headers: adminHeaders() }).then(function(r){return r.json();}),
       fetch('/admin/audit-events', { headers: adminHeaders() }).then(function(r){return r.json();}),
+      fetch('/admin/llm-observability/summary?days=7', { headers: adminHeaders() }).then(function(r){return r.json();}),
     ]);
     renderOverview(results[0]);
     renderChannelBars(results[1]);
     renderIntentBars(results[2]);
     renderAgentPanel(results[3]);
     renderFeedList(results[4], false);
+    renderLlmUsagePanel(results[5]);
   } catch(e) {
     console.error('Analytics load error:', e.message);
   } finally {
@@ -1050,6 +1498,40 @@ function renderIntentBars(data) {
   var items = (data.intents||[]).map(function(i){return {intent:i.intent.replace(/_/g,' '),count:i.count};});
   renderBars('intentBars', items, 'intent', 'count', null);
 }
+
+function renderLlmUsagePanel(data) {
+  var el = document.getElementById('llmUsagePanel');
+  if (!el) return;
+  var totals = (data && data.totals) || {};
+  var calls = totals.calls || 0;
+  if (!calls) {
+    el.innerHTML = '<div class="empty-state">No LLM usage recorded yet</div>';
+    return;
+  }
+  var cost = Number(totals.estimated_cost_usd || 0);
+  var avg = Number(totals.avg_latency_ms || 0);
+  var cards = [
+    { val: calls, lbl: 'LLM calls' },
+    { val: (totals.total_tokens || 0).toLocaleString(), lbl: 'Tokens' },
+    { val: '$' + cost.toFixed(6), lbl: 'Estimated cost' },
+    { val: avg.toFixed(0) + ' ms', lbl: 'Avg latency' },
+  ];
+  var opRows = (data.by_operation || []).map(function(row) {
+    return '<tr><td style="font-weight:500;color:var(--t1)">' + escH((row.operation || 'unknown').replace(/_/g, ' ')) + '</td>'
+      + '<td>' + (row.calls || 0) + '</td>'
+      + '<td>' + Number(row.total_tokens || 0).toLocaleString() + '</td>'
+      + '<td>$' + Number(row.estimated_cost_usd || 0).toFixed(6) + '</td></tr>';
+  }).join('');
+  el.innerHTML = '<div class="stat-grid" style="grid-template-columns:repeat(4,1fr);margin-bottom:12px">'
+    + cards.map(function(c) {
+      return '<div class="stat-card"><div class="stat-val">' + c.val + '</div><div class="stat-lbl">' + c.lbl + '</div></div>';
+    }).join('')
+    + '</div>'
+    + '<table class="mini-table"><thead><tr><th>Operation</th><th>Calls</th><th>Tokens</th><th>Cost</th></tr></thead><tbody>'
+    + (opRows || '<tr><td colspan="4">No operation breakdown yet</td></tr>')
+    + '</tbody></table>';
+}
+
 function renderSentimentPanel(data) {
   var el = document.getElementById('sentimentPanel');
   var total = data.total || 0;
@@ -1355,7 +1837,6 @@ window.loadAudit = async function() {
 };
 
 // ── TICKETS ──────────────────────────────────────────────────────────────────
-var PRIORITY_ORDER = { critical: 0, high: 1, medium: 2, low: 3 };
 var _allTickets = { open: [], closed: [] };
 var _convMap = {};
 
@@ -1371,7 +1852,7 @@ window.loadTickets = async function() {
 
     var open   = tickets.filter(function(t) { return t.status === 'open' || t.status === 'in_progress'; });
     var closed = tickets.filter(function(t) { return t.status === 'resolved' || t.status === 'closed'; });
-    open.sort(function(a, b) { return (PRIORITY_ORDER[a.priority] || 9) - (PRIORITY_ORDER[b.priority] || 9); });
+    open.sort(function(a, b) { return (b.priority_score || 0) - (a.priority_score || 0); });
     closed.sort(function(a, b) { return new Date(b.updated_at) - new Date(a.updated_at); });
 
     _allTickets.open   = open;
@@ -1522,12 +2003,14 @@ function fmtDateTime(iso) {
     + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
-function goToConversation(conversationId, ticketId) {
+// Exposed on window so inline onclick= (Tickets panel rows) can reach it — the file is
+// wrapped in an IIFE, so a plain function declaration is NOT in global scope.
+window.goToConversation = function(conversationId, ticketId) {
   if (!conversationId) return;
   state.highlightTicketId = ticketId || null;
   switchPage('inbox');
   selectConv(conversationId);
-}
+};
 
 // ── SETTINGS (admin account) ──────────────────────────────────────────────────
 function userHeaders() {
@@ -1551,74 +2034,73 @@ function setUserStatus(message, type) {
   el.style.display = message ? 'block' : 'none';
 }
 
-function showUserLatest(item) {
-  if (!item) return;
-  document.getElementById('userLatestEmpty').style.display = 'none';
-  document.getElementById('userLatestResult').style.display = 'block';
-  document.getElementById('userConversationId').textContent = item.conversation_id || '-';
-  document.getElementById('userTicketId').textContent = item.ticket_id || 'Not required';
-  document.getElementById('userTicketStatus').textContent = item.status || 'active';
-  document.getElementById('userResultChannel').textContent = item.channel || '-';
-  document.getElementById('userResultContact').textContent = item.contact_identifier || '-';
-  document.getElementById('userLatestResponse').textContent = item.latest_response || item.message || 'Response pending';
-}
-
-function updateUserContactField() {
-  var channel = document.getElementById('userChannel').value;
-  document.getElementById('userWhatsAppField').style.display = channel === 'whatsapp' ? 'block' : 'none';
-  document.getElementById('userEmailField').style.display = channel === 'email' ? 'block' : 'none';
-}
-document.getElementById('userChannel').addEventListener('change', updateUserContactField);
-
-window.submitUserTicket = async function() {
-  var message = document.getElementById('userMessage').value.trim();
-  var channel = document.getElementById('userChannel').value;
-  var contactIdentifier = channel === 'email'
-    ? document.getElementById('userEmailInput').value.trim()
-    : document.getElementById('userWhatsAppInput').value.trim();
-  if (!message) {
-    setUserStatus('Please enter a query or message.', 'error');
+function renderPortalChatTurns(turns) {
+  var el = document.getElementById('portalChatMessages');
+  if (!turns.length) {
+    el.innerHTML = '<div class="user-empty">No messages yet — say hello!</div>';
     return;
   }
-  if (!contactIdentifier) {
-    setUserStatus(channel === 'email' ? 'Please enter an email address.' : 'Please enter a WhatsApp number.', 'error');
-    return;
-  }
-  var btn = document.getElementById('userSubmitBtn');
-  btn.disabled = true;
-  btn.textContent = 'Submitting...';
-  setUserStatus('Processing your request...', '');
+  el.innerHTML = turns.map(function(t) {
+    // In the customer portal the CUSTOMER'S own message (stored as 'inbound')
+    // belongs on the right (blue "you" bubble), and the AI reply (stored as
+    // 'outbound') on the left. This is inverted vs. the admin inbox.
+    var side = t.direction === 'inbound' ? 'outbound' : 'inbound';
+    return '<div class="portal-chat-msg ' + side + '">' + escH(t.text || '') + '</div>';
+  }).join('');
+  el.scrollTop = el.scrollHeight;
+}
+
+window.loadPortalChat = async function() {
   try {
-    var data = await userApi('/user/messages', {
+    var data = await userApi('/user/chat/messages');
+    renderPortalChatTurns(data.turns || []);
+  } catch(e) {
+    document.getElementById('portalChatMessages').innerHTML =
+      '<div class="user-empty" style="color:var(--red-t)">' + escH(e.message) + '</div>';
+  }
+};
+
+document.getElementById('portalChatForm').addEventListener('submit', async function(e) {
+  e.preventDefault();
+  var input = document.getElementById('portalChatInput');
+  var text = input.value.trim();
+  if (!text) return;
+  var btn = document.getElementById('portalChatSendBtn');
+  var messagesEl = document.getElementById('portalChatMessages');
+  var emptyState = messagesEl.querySelector('.user-empty');
+  if (emptyState) messagesEl.innerHTML = '';
+  var bubble = document.createElement('div');
+  bubble.className = 'portal-chat-msg outbound';
+  bubble.textContent = text;
+  messagesEl.appendChild(bubble);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+  input.value = '';
+  input.disabled = true;
+  btn.disabled = true;
+  try {
+    var data = await userApi('/user/chat/messages', {
       method: 'POST',
-      body: JSON.stringify({
-        channel: channel,
-        message: message,
-        contact_identifier: contactIdentifier
-      })
+      body: JSON.stringify({ text: text })
     });
-    showUserLatest({
-      conversation_id: data.conversation_id,
-      ticket_id: data.ticket_id,
-      status: data.resolved ? 'resolved' : (data.ticket_id ? 'open' : 'active'),
-      channel: channel,
-      contact_identifier: data.contact_identifier || contactIdentifier,
-      latest_response: data.message
-    });
-    document.getElementById('userMessage').value = '';
+    var reply = document.createElement('div');
+    reply.className = 'portal-chat-msg inbound';
+    reply.textContent = data.message || '...';
+    messagesEl.appendChild(reply);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
     if (data.outbound_status === 'failed') {
-      setUserStatus('Request processed, but delivery failed: ' + (data.outbound_error || 'provider rejected the message'), 'error');
+      setUserStatus('Message processed, but delivery failed: ' + (data.outbound_error || 'provider rejected the message'), 'error');
     } else {
-      setUserStatus('Request submitted successfully.', 'success');
+      setUserStatus('', '');
     }
     await loadUserTickets();
   } catch(e) {
     setUserStatus(e.message, 'error');
   } finally {
+    input.disabled = false;
     btn.disabled = false;
-    btn.textContent = 'Submit request';
+    input.focus();
   }
-};
+});
 
 window.loadUserTickets = async function() {
   var list = document.getElementById('userTicketList');
@@ -1634,39 +2116,111 @@ window.loadUserTickets = async function() {
       return;
     }
     list.innerHTML = '';
-    tickets.forEach(function(ticket) {
-      var row = document.createElement('div');
-      row.className = 'user-ticket-row';
-      row.innerHTML =
-        '<div class="user-ticket-main"><strong>' + escH(ticket.ticket_id || ticket.conversation_id) + '</strong>'
-        + '<span>' + escH((ticket.message || '').replace('Customer portal request\\n\\n', '')) + '</span></div>'
-        + '<div class="user-ticket-meta">' + escH(ticket.channel || '-') + '</div>'
-        + '<div><span class="user-status-pill">' + escH(ticket.status || 'active') + '</span></div>'
-        + '<div class="user-ticket-meta">' + escH(fmtDateTime(ticket.updated_at)) + '</div>';
-      row.addEventListener('click', function() { refreshUserTicket(ticket.conversation_id); });
-      list.appendChild(row);
-    });
-    showUserLatest(tickets[0]);
+    var isOpen = function(t) { return t.status === 'open' || t.status === 'in_progress'; };
+    var openTickets = tickets.filter(isOpen);
+    var closedTickets = tickets.filter(function(t) { return !isOpen(t); });
+
+    function renderGroup(heading, group) {
+      if (!group.length) return;
+      var hdr = document.createElement('div');
+      hdr.className = 'user-ticket-group';
+      hdr.textContent = heading + ' (' + group.length + ')';
+      list.appendChild(hdr);
+      group.forEach(function(ticket) {
+        var item = document.createElement('div');
+        item.className = 'user-ticket-item';
+        var row = document.createElement('div');
+        row.className = 'user-ticket-row';
+        var cm = chMeta(ticket.channel);
+        var chStyle = 'background:' + cm.bg + ';border-color:' + cm.bd + ';color:' + cm.clr;
+        var st = (ticket.status || 'active').toLowerCase();
+        var isResolvedSt = st === 'resolved' || st === 'closed';
+        var stCls = isResolvedSt ? 'user-status-pill user-status-pill--resolved' : 'user-status-pill';
+        row.innerHTML =
+          '<div class="user-ticket-main"><strong>' + escH(ticket.ticket_id || ticket.conversation_id) + '</strong>'
+          + '<span>' + escH((ticket.message || '').replace('Customer portal request\\n\\n', '')) + '</span>'
+          + '<span class="user-ticket-date">Created: ' + escH(fmtDateTime(ticket.created_at)) + '</span></div>'
+          + '<div class="user-ticket-pills">'
+          + '<span class="user-ch-pill" style="' + chStyle + '">' + escH(cm.label) + '</span>'
+          + '<span class="' + stCls + '">' + escH(ticket.status || 'active') + '</span>'
+          + '</div>';
+        item.appendChild(row);
+        row.addEventListener('click', function() { openTicketModal(ticket); });
+        list.appendChild(item);
+      });
+    }
+    renderGroup('Open', openTickets);
+    renderGroup('Resolved', closedTickets);
   } catch(e) {
     list.innerHTML = '<div class="user-empty" style="color:var(--red-t)">' + escH(e.message) + '</div>';
   } finally {
     refresh.disabled = false;
-    refresh.textContent = 'Refresh tickets';
+    refresh.textContent = 'Refresh';
   }
 };
 
-async function refreshUserTicket(conversationId) {
+window.closeTicketModal = function() {
+  document.getElementById('ticketModal').classList.add('hidden');
+};
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'Escape') {
+    var tm = document.getElementById('ticketModal');
+    if (tm && !tm.classList.contains('hidden')) closeTicketModal();
+  }
+});
+
+// Open a ticket's full detail (its own message + reply) in a roomy modal. Keyed on ticket_id
+// (many tickets share one conversation), fetched from /user/ticket-detail/{ticket_id}.
+async function openTicketModal(ticket) {
+  var modal = document.getElementById('ticketModal');
+  var cm = chMeta(ticket.channel);
+  document.getElementById('ticketModalId').textContent = ticket.ticket_id || ticket.conversation_id || 'Ticket';
+  var st = (ticket.status || 'active').toLowerCase();
+  var stCls = (st === 'resolved' || st === 'closed') ? 'user-status-pill user-status-pill--resolved' : 'user-status-pill';
+  document.getElementById('ticketModalMeta').innerHTML =
+    '<span class="user-ch-pill" style="background:' + cm.bg + ';border-color:' + cm.bd + ';color:' + cm.clr + '">' + escH(cm.label) + '</span>'
+    + '<span class="' + stCls + '">' + escH(ticket.status || 'active') + '</span>'
+    + '<span class="ticket-modal-date" style="font-size:10px;color:var(--t3)">Created: ' + escH(fmtDateTime(ticket.created_at)) + '</span>';
+  var body = document.getElementById('ticketModalBody');
+  body.innerHTML = '<span class="utd-loading">Loading…</span>';
+  modal.classList.remove('hidden');
   try {
-    var ticket = await userApi('/user/tickets/' + encodeURIComponent(conversationId));
-    showUserLatest(ticket);
+    var detail = await userApi('/user/ticket-detail/' + encodeURIComponent(ticket.ticket_id));
+    var exchanges = detail.exchanges || [];
+    if (exchanges.length) {
+      // One sub-box per exchange: the customer message, the auto-sent holding
+      // line (demoted), and the substantive response — in order.
+      body.innerHTML = exchanges.map(function(ex, i) {
+        var q = (ex.message || '').replace('Customer portal request\n\n', '');
+        var holding = ex.holding
+          ? '<p class="utd-holding">↳ Auto-sent: “' + escH(ex.holding.trim()) + '”</p>' : '';
+        var resp = ex.response
+          ? '<span class="utd-label">Response</span><p class="utd-resp">' + escH(ex.response) + '</p>'
+          : (ex.holding ? '<p class="utd-resp utd-resp--pending">Awaiting response…</p>' : '');
+        var when = ex.created_at ? fmtDateTime(ex.created_at) : '';
+        return '<div class="utd-exchange' + (i > 0 ? ' utd-exchange--next' : '') + '">'
+          + (q ? '<span class="utd-label">Your message</span><p class="utd-msg">' + escH(q) + '</p>' : '')
+          + holding + resp
+          + (when ? '<p class="utd-time">' + escH(when) + '</p>' : '')
+          + '</div>';
+      }).join('');
+    } else {
+      // Fallback (older payload without exchanges).
+      var msg = (detail.message || '').replace('Customer portal request\n\n', '') || '—';
+      var resp = detail.latest_response || 'Response pending';
+      body.innerHTML =
+        '<span class="utd-label">Your message</span><p class="utd-msg">' + escH(msg) + '</p>'
+        + '<span class="utd-label">Latest response</span><p class="utd-resp">' + escH(resp) + '</p>';
+    }
   } catch(e) {
-    setUserStatus(e.message, 'error');
+    body.innerHTML = '<span class="utd-loading" style="color:var(--red-t)">' + escH(e.message) + '</span>';
   }
 }
 
 window.doUserLogout = function() {
   userToken = '';
   portalUser = null;
+  if (portalChatTimer) { clearInterval(portalChatTimer); portalChatTimer = null; }
   sessionStorage.removeItem('cx-user-jwt');
   sessionStorage.removeItem('cx-user-account');
   document.getElementById('userIdInput').value = '';
@@ -1675,12 +2229,22 @@ window.doUserLogout = function() {
   showStage('apikey');
 };
 
+var portalChatTimer = null;
+
 function bootUserPortal() {
   var userId = portalUser && portalUser.user_id ? portalUser.user_id : 'Customer';
   document.getElementById('portalUserName').textContent = userId;
   document.getElementById('portalUserAv').textContent = userId.slice(0, 2).toUpperCase();
-  updateUserContactField();
+  loadPortalChat();
   loadUserTickets();
+  // Poll chat history so a support agent's manually-sent reply (held-draft flow) appears
+  // for the customer without a page refresh. loadPortalChat() re-renders the whole thread
+  // from the server (the source of truth), so this cannot duplicate optimistic bubbles.
+  if (portalChatTimer) clearInterval(portalChatTimer);
+  portalChatTimer = setInterval(function() {
+    if (userToken) loadPortalChat();
+    else { clearInterval(portalChatTimer); portalChatTimer = null; }
+  }, 8000);
 }
 
 function loadSettings() {

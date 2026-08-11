@@ -19,6 +19,12 @@ class OutboundDeliveryService:
         self.retries = retries
 
     def send(self, message: InboundMessage, text: str) -> dict:
+        if message.channel == Channel.WEB_CHAT:
+            # Web chat replies are returned synchronously in the HTTP response body
+            # (apps/api/routes/web_chat.py) — there is no outbound provider to push to.
+            # Without this branch, _connector()'s email fallback would attempt an SMTP
+            # send to a bogus "web_session:<uuid>" address whenever SMTP is configured.
+            return {"status": "sent", "provider": "web_chat_sync"}
         if (
             os.getenv("OUTBOUND_DELIVERY_MODE", "log") == "log"
             and message.provider != "whatsapp_local_test"

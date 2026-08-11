@@ -18,6 +18,9 @@ ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_EXAMPLES_PATH = ROOT / "data" / "resolution_kb" / "resolution_examples.json"
 
 
+VALID_LEVELS = {"L1", "L2", "L3"}
+
+
 @dataclass(frozen=True)
 class ResolutionExample:
     customer_query: str
@@ -77,7 +80,11 @@ class ResolutionExampleLoader:
             if not isinstance(item, dict):
                 continue
             example = ResolutionExample.from_dict(item)
-            if example.customer_query and example.resolution_level in {"L1", "L2", "L3"}:
+
+            # if example.customer_query and example.resolution_level in {"L1", "L2", "L3"}:
+
+            if example.customer_query and example.resolution_level in VALID_LEVELS:
+
                 examples.append(example)
         return examples
 

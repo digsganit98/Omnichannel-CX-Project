@@ -20,6 +20,8 @@ from shared.schemas.messages import EmailWebhookPayload
 from shared.schemas.responses import ChannelResponse
 
 from .routes.admin_auth import router as admin_auth_router
+from .routes.agent_assist import router as agent_assist_router
+from .routes.reply_drafts import router as reply_drafts_router
 from .routes.analytics import router as analytics_router
 from .routes.audit import router as audit_router
 from .routes.auth import router as auth_router
@@ -30,6 +32,7 @@ from .routes.email import router as email_router
 from .routes.email_inbox import router as email_inbox_router, set_poller as set_inbox_poller
 from .routes.integrations_whatsapp import router as integrations_whatsapp_router
 from .routes.integrations import router as integrations_router
+from .routes.llm_observability import router as llm_observability_router
 from .routes.neo4j_admin import router as neo4j_admin_router
 from .routes.orchestration import router as orchestration_router
 from .routes.rag import router as rag_router
@@ -74,7 +77,18 @@ def _seed_neo4j() -> None:
         client.close()
     except Exception:
         logger.exception("neo4j_seed_failed")
+
+
+@app.on_event("shutdown")
+def _flush_langfuse_on_shutdown() -> None:
+    from services.observability_service import flush_langfuse
+    flush_langfuse()
+    logger.info("langfuse_flushed")
+
+
 app.include_router(admin_auth_router)
+app.include_router(agent_assist_router)
+app.include_router(reply_drafts_router)
 app.include_router(auth_router)
 app.include_router(analytics_router)
 app.include_router(conversations_router)
@@ -89,6 +103,7 @@ app.include_router(neo4j_admin_router)
 app.include_router(orchestration_router)
 app.include_router(rag_router)
 app.include_router(audit_router)
+app.include_router(llm_observability_router)
 app.include_router(test_whatsapp_router)
 app.include_router(user_portal_router)
 app.include_router(whatsapp_router)
@@ -115,7 +130,7 @@ def root() -> dict:
         "name": "Omnichannel CX Accelerator",
         "phase": 2,
         "implemented_phases": [1, 2],
-        "channels": ["whatsapp", "email"],
+        "channels": ["whatsapp", "email", "web_chat"],
         "health": "/health",
         "admin_ui": "/admin-ui",
     }
@@ -129,7 +144,6 @@ def health() -> dict[str, str]:
 @app.get("/admin-ui", include_in_schema=False)
 def admin_ui() -> FileResponse:
     return FileResponse(ADMIN_UI_ROOT / "index.html")
-
 
 
 @app.post("/webhooks/email", response_model=ChannelResponse)

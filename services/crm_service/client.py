@@ -60,22 +60,12 @@ class CRMClient:
         if not self.configured:
             return CRMResult("not_configured", {})
         if self.provider == "jira":
-            payload = {
-                "fields": {
-                    "project": {"key": self.project_key},
-                    "summary": ticket.title,
-                    "description": self._adf_from_text(ticket.description),
-                    "issuetype": {"name": self.issue_type},
-                    "priority": {"name": ticket.priority.value.title()},
-                    "labels": [ticket.intent, "omnichannel-cx"],
-                }
-            }
-            result = self._request("POST", "/rest/api/3/issue", payload)
-            if result.status == "synced":
-                key = result.data.get("key")
-                result.data["external_ticket_id"] = key
-                result.data["external_ticket_url"] = f"{self.base_url}/browse/{key}" if key else None
-            return result
+            return self.create_jira_ticket(
+                summary=ticket.title,
+                description=ticket.description,
+                priority=ticket.priority.value.title(),
+                labels=[ticket.intent, "omnichannel-cx"],
+            )
         payload = {
             "external_reference": ticket.ticket_id,
             "customer": customer or {},
@@ -91,6 +81,40 @@ class CRMClient:
         if result.status == "synced":
             result.data["external_ticket_id"] = result.data.get("ticket_id") or result.data.get("id")
             result.data["external_ticket_url"] = result.data.get("url")
+        return result
+
+    def create_jira_ticket(
+        self,
+        summary: str,
+        description: str,
+        priority: str | None = None,
+        labels: list[str] | None = None,
+    ) -> CRMResult:
+        """Low-level Jira issue creation primitive (POST /rest/api/3/issue).
+
+        This is the single place that builds a Jira issue payload — create_ticket()'s
+        jira branch calls this too, so there is only one code path to fix if Atlassian's
+        API shape changes. Returns a CRMResult whose .data carries external_ticket_id
+        (the issue key, e.g. "OP-15") and external_ticket_url on success.
+        """
+        if not self.configured or self.provider != "jira":
+            return CRMResult("not_configured", {})
+        payload = {
+            "fields": {
+                "project": {"key": self.project_key},
+                "summary": summary,
+                "description": self._adf_from_text(description),
+                "issuetype": {"name": self.issue_type},
+                "labels": list(labels or []),
+            }
+        }
+        if priority:
+            payload["fields"]["priority"] = {"name": priority}
+        result = self._request("POST", "/rest/api/3/issue", payload)
+        if result.status == "synced":
+            key = result.data.get("key")
+            result.data["external_ticket_id"] = key
+            result.data["external_ticket_url"] = f"{self.base_url}/browse/{key}" if key else None
         return result
 
     def add_comment(self, external_ticket_id: str, comment: str) -> CRMResult:

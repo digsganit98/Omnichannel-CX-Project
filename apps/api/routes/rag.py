@@ -32,6 +32,16 @@ def build_rag_index(recreate: bool = False) -> dict:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
+@router.post("/index-resolution-examples")
+def build_resolution_examples_index(recreate: bool = False) -> dict:
+    """(Re)index the labeled L1/L2/L3 examples used by services.resolution_service."""
+    try:
+        from services.resolution_service import ResolutionDecisionEngine
+        return ResolutionDecisionEngine().index_examples(recreate=recreate)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
 @router.post("/query")
 def query_rag(payload: RAGQuery) -> dict:
     return RAGPipeline().answer(payload.query, top_k=payload.top_k)

@@ -80,13 +80,13 @@ class OpenSearchVectorStore:
         self.client.indices.refresh(index=self.index_name)
         return {"indexed": success, "errors": len(errors)}
 
-    def count_documents(self) -> int:
-        """Return total number of documents indexed in the knowledge base."""
+    def count_documents(self, doc_type: str = "knowledge_base") -> int:
+        """Return total number of documents indexed under the given doc_type."""
         if not self.client.indices.exists(index=self.index_name):
             return 0
         response = self.client.count(
             index=self.index_name,
-            body={"query": {"term": {"metadata.doc_type.keyword": "knowledge_base"}}},
+            body={"query": {"term": {"metadata.doc_type.keyword": doc_type}}},
         )
         return response.get("count", 0)
 
@@ -113,7 +113,7 @@ class OpenSearchVectorStore:
             for hit in hits
         ]
 
-    def similarity_search(self, query: str, k: int = 4) -> list[dict]:
+    def similarity_search(self, query: str, k: int = 4, doc_type: str = "knowledge_base") -> list[dict]:
         vector = self.embeddings.embed_query(query)
         response = self.client.search(
             index=self.index_name,
@@ -129,7 +129,7 @@ class OpenSearchVectorStore:
                                 }
                             }
                         }],
-                        "filter": [{"term": {"metadata.doc_type.keyword": "knowledge_base"}}],
+                        "filter": [{"term": {"metadata.doc_type.keyword": doc_type}}],
                     }
                 },
             },

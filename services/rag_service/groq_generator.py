@@ -1,7 +1,15 @@
 import json
 import os
+import time
 from pathlib import Path
 
+from services.observability_service import record_llm_call
+from services.pii_service.masker import mask_text, unmask_text
+
+# Separator used to mask several text fragments in a single mask_text() call so
+# placeholder numbering (PHONE_1, PHONE_2, ...) stays unique across the whole prompt
+# instead of colliding if each fragment were masked independently.
+_PII_JOIN = "\x00"
 
 _SYSTEM_MD = Path(__file__).resolve().parents[2] / "shared" / "prompts" / "system.md"
 
@@ -127,6 +135,15 @@ class GroqGenerator:
         # no recent_turns to avoid sending redundant and hard-to-parse content to the LLM.
         conv_summary = (ctx.get("conversation_summary") or "").strip() if not conv_history_text else ""
 
+        # Mask PII before it reaches the LLM. All fragments are masked in one call (joined
+        # by a separator) so placeholder numbering stays unique across the whole prompt;
+        # the mapping is used to restore the customer's own name/phone/email in the answer
+        # below, and discarded after — never persisted.
+        known_values = _known_values(ctx.get("graph_context"))
+        (query, graph_ctx_text, conv_history_text, conv_summary), pii_mapping = _mask_fragments(
+            [query, graph_ctx_text, conv_history_text, conv_summary], known_values
+        )
+
         no_data_note = (
             "- IMPORTANT: No customer account context is provided. Do NOT say 'I checked your account' or "
             "imply you have access to account data. Say: 'I am currently unable to access your account "
@@ -153,7 +170,10 @@ class GroqGenerator:
             "- When account data is provided, present it in natural sentences as a human CS agent would. "
             "Do NOT write 'Status: X' or 'Amount: Y' — say 'Your car loan has been approved' instead.\n"
             "- Address the customer's concern first — acknowledge worry or frustration before giving data.\n"
-            "- If context is insufficient, say: 'I need to escalate this to our support team.'\n"
+            "- If you cannot fully answer from the data below, give what you can and then say a "
+            "support specialist can help further with the rest. Do NOT promise that you are "
+            "escalating, raising, or logging anything — the system decides separately whether a "
+            "ticket is created, so never state or imply that an escalation/ticket has happened.\n"
             "- Never mention internal system names like OpenSearch, Neo4j, or RAG.\n"
             + no_data_note
             + "\n"
@@ -164,7 +184,17 @@ class GroqGenerator:
             f"Retrieved context:\n{sources or '(none)'}\n\n"
             "Answer (body only — no greeting, no sign-off):"
         )
-        return self._generate(system_prompt=_system_prompt(), user_prompt=user_prompt)
+        result = self._generate(
+            system_prompt=_system_prompt(),
+            user_prompt=user_prompt,
+            operation="answer_generation",
+            metadata={"context_count": len(contexts), "channel": channel},
+        )
+        if result.get("text"):
+            # Restore the customer's own masked values (e.g. name) if the LLM echoed a
+            # placeholder back — never send [NAME_1]-style tokens to the customer.
+            result = {**result, "text": unmask_text(result["text"], pii_mapping)}
+        return result
 
     def classify_message(self, message: str, context: dict | None = None) -> dict | None:
         ctx = context or {}
@@ -181,6 +211,13 @@ class GroqGenerator:
                 if len(history_lines) >= 3:
                     break
         history_text = "\n".join(history_lines)
+
+        # Mask PII before it reaches the LLM — see generate_answer() for why fragments are
+        # masked together in one call rather than independently.
+        known_values = _known_values(graph_ctx)
+        (message, graph_text, history_text), pii_mapping = _mask_fragments(
+            [message, graph_text, history_text], known_values
+        )
 
         user_prompt = (
             "## Intent Definitions\n"
@@ -217,11 +254,15 @@ class GroqGenerator:
         result = self._generate(
             system_prompt="You are a BFSI intent classifier. Return ONLY valid JSON. Never explain or add markdown.",
             user_prompt=user_prompt,
+            operation="intent_classification",
+            metadata={"has_graph_context": bool(graph_text), "history_turns": len(history_lines)},
         )
         if not result["llm_used"]:
             return None
         try:
-            text = result["text"].strip()
+            # Defensive: unmask before parsing in case a placeholder leaked into the
+            # "reason" field. intent/urgency/sentiment/language never contain PII.
+            text = unmask_text(result["text"].strip(), pii_mapping)
             return json.loads(text[text.find("{") : text.rfind("}") + 1])
         except (json.JSONDecodeError, ValueError):
             return None
@@ -247,9 +288,27 @@ class GroqGenerator:
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
-    def _generate(self, system_prompt: str, user_prompt: str) -> dict:
+    def _generate(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        operation: str = "llm_generation",
+        metadata: dict | None = None,
+    ) -> dict:
         if not self.api_key:
-            return {"text": "", "model": self.model, "llm_used": False, "error": "GROQ_API_KEY not set"}
+            result = {"text": "", "model": self.model, "llm_used": False, "error": "GROQ_API_KEY not set"}
+            record_llm_call(
+                provider="groq",
+                model=self.model,
+                operation=operation,
+                llm_used=False,
+                latency_ms=0.0,
+                input_text=user_prompt,
+                error=result["error"],
+                metadata=metadata,
+            )
+            return result
+        started = time.perf_counter()
         try:
             response = self._groq.chat.completions.create(
                 model=self.model,
@@ -260,8 +319,32 @@ class GroqGenerator:
                 temperature=0.2,
                 timeout=self.timeout,
             )
-            return {"text": response.choices[0].message.content.strip(), "model": self.model, "llm_used": True}
+            text = response.choices[0].message.content.strip()
+            latency_ms = round((time.perf_counter() - started) * 1000, 2)
+            record_llm_call(
+                provider="groq",
+                model=self.model,
+                operation=operation,
+                llm_used=True,
+                latency_ms=latency_ms,
+                response=response,
+                input_text=user_prompt,
+                output_text=text,
+                metadata=metadata,
+            )
+            return {"text": text, "model": self.model, "llm_used": True}
         except Exception as exc:
+            latency_ms = round((time.perf_counter() - started) * 1000, 2)
+            record_llm_call(
+                provider="groq",
+                model=self.model,
+                operation=operation,
+                llm_used=False,
+                latency_ms=latency_ms,
+                input_text=user_prompt,
+                error=str(exc),
+                metadata=metadata,
+            )
             return {"text": "", "model": self.model, "llm_used": False, "error": str(exc)}
 
 
@@ -301,6 +384,38 @@ def _format_conversation_history(recent_turns: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _mask_fragments(fragments: list[str], known_values: dict[str, str]) -> tuple[list[str], dict[str, str]]:
+    """Mask several text fragments in one mask_text() call (shared placeholder numbering),
+    then split back apart. Falls back to the original fragments (no masking) if anything
+    about the join/split round-trip goes wrong — e.g. a fragment containing the separator
+    byte itself — so a masking edge case can never break answer generation.
+    """
+    try:
+        combined = _PII_JOIN.join(fragments)
+        masked_combined, mapping = mask_text(combined, known_values)
+        parts = masked_combined.split(_PII_JOIN)
+        if len(parts) != len(fragments):
+            raise ValueError("fragment count mismatch after masking")
+        return parts, mapping
+    except Exception:
+        return fragments, {}
+
+
+def _known_values(graph_ctx: dict | None) -> dict[str, str]:
+    """Extract the resolved customer's own name/phone/email for PII masking.
+
+    Sourced from the same Neo4j graph_context dict already used elsewhere in this file —
+    no new lookup. Missing fields are simply omitted (mask_text handles that).
+    """
+    if not graph_ctx:
+        return {}
+    return {
+        "name": graph_ctx.get("name") or "",
+        "phone": graph_ctx.get("phone") or "",
+        "email": graph_ctx.get("email") or "",
+    }
+
+
 def _safe_amount(value) -> str:
     """Convert a currency value (int, float, or string) to a formatted rupee string."""
     try:
@@ -316,6 +431,12 @@ def _format_graph_context(graph_ctx: dict | None) -> str:
     lines = []
     if graph_ctx.get("customer_id"):
         lines.append(f"Customer ID: {graph_ctx['customer_id']}")
+    # Name is included (and PII-masked to [NAME_1] before this text reaches the LLM, then
+    # restored in the final answer — see generate_answer()/_mask_fragments()) purely so
+    # the LLM can address the customer by name. Phone/email are deliberately NOT included
+    # here — they add no value to answer generation, so there's no reason to expose them.
+    if graph_ctx.get("name"):
+        lines.append(f"Customer Name: {graph_ctx['name']}")
     if graph_ctx.get("city"):
         lines.append(f"City: {graph_ctx['city']}")
     loans = graph_ctx.get("loans") or []
@@ -350,5 +471,38 @@ def _format_graph_context(graph_ctx: dict | None) -> str:
                 f"Coverage: {_safe_amount(p.get('coverage_inr', 0))} | "
                 f"Premium: {_safe_amount(p.get('premium_inr', 0))}"
                 f"{maturity}{next_due}"
+            )
+    credit_cards = graph_ctx.get("credit_cards") or []
+    if credit_cards:
+        lines.append("Credit Cards:")
+        for cc in credit_cards:
+            lines.append(
+                f"  - {cc.get('card_network', 'Card')} {cc.get('card_variant', '')} "
+                f"(ID: {cc.get('card_id', '')}) | "
+                f"Credit limit: {_safe_amount(cc.get('credit_limit', 0))} | "
+                f"Balance due: {_safe_amount(cc.get('balance_due', 0))}"
+            )
+    accounts = graph_ctx.get("accounts") or []
+    if accounts:
+        lines.append("Accounts:")
+        for a in accounts:
+            lines.append(
+                f"  - {a.get('account_type', 'Account')} {a.get('account_sub_type', '')} "
+                f"(No: {a.get('account_number', '')}) | "
+                f"Status: {a.get('status', '')} | "
+                f"Avg monthly balance: {_safe_amount(a.get('avg_monthly_balance', 0))}"
+            )
+    fixed_deposits = graph_ctx.get("fixed_deposits") or []
+    if fixed_deposits:
+        lines.append("Fixed Deposits:")
+        for fd in fixed_deposits:
+            maturity = f" | Maturity: {fd['maturity_date']}" if fd.get("maturity_date") else ""
+            lines.append(
+                f"  - FD {fd.get('fd_id', '')} | "
+                f"Principal: {_safe_amount(fd.get('principal_amount', 0))} | "
+                f"Rate: {fd.get('interest_rate', 'N/A')}% | "
+                f"Tenure: {fd.get('tenure_months', 'N/A')} months | "
+                f"Status: {fd.get('status', '')}"
+                f"{maturity}"
             )
     return "\n".join(lines)

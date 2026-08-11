@@ -12,7 +12,7 @@ class ChannelResponse(BaseModel):
     urgency: str
     confidence: float
     ticket_id: str | None = None
-    next_best_action: str | None = None
+    workflow_status: str | None = None
     analysis_source: str | None = None
     rag_contexts: list[dict] = Field(default_factory=list)
     llm_model: str | None = None
@@ -22,4 +22,5 @@ class ChannelResponse(BaseModel):
     outbound_status: str = "pending"
     outbound_error: str | None = None
     duplicate: bool = False
+    held_for_review: bool = False
     workflow_trace: list[dict] = Field(default_factory=list)

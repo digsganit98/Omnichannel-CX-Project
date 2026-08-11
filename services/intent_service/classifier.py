@@ -11,6 +11,8 @@ KEYWORDS = {
     Intent.TRANSACTION_DISPUTE:     {"dispute", "wrong debit", "incorrect charge", "charge error", "not authorized", "unknown transaction"},
     Intent.FUND_TRANSFER:           {"transfer", "neft", "rtgs", "imps", "send money", "wire transfer", "beneficiary"},
     Intent.ACCOUNT_BALANCE_INQUIRY: {"balance", "account balance", "available funds", "how much in my account", "check balance"},
+    Intent.GENERAL_INQUIRY:         {"sip", "systematic investment plan", "elss", "equity linked savings scheme",
+                                     "mutual fund", "tax saving", "tax benefits", "investment plan"},
     Intent.LOAN_STATUS:             {"loan balance", "emi", "repayment", "outstanding loan", "loan status", "loan due", "emi due"},
     Intent.LOAN_APPLICATION:        {"apply loan", "new loan", "personal loan", "home loan", "loan eligibility", "loan apply"},
     Intent.LOAN_DEFAULT_NOTICE:     {"default", "overdue", "missed emi", "npa", "loan overdue", "pending emi"},
@@ -24,7 +26,9 @@ KEYWORDS = {
     Intent.TICKET_STATUS:           {"ticket status", "case status", "query status", "reference number",
                                      "status of my", "update on my", "what happened to my",
                                      "my complaint status", "follow up", "ticket number",
-                                     "is my request", "any update", "complaint reference"},
+                                     "is my request", "any update", "complaint reference",
+                                     "pending status", "pending ticket", "any pending",
+                                     "anything pending", "pending tickets"},
 }
 
 
@@ -58,6 +62,9 @@ def _process_or_status_intent(lowered: str) -> Intent | None:
     """Resolve process-vs-account-status phrases before broad keyword scoring."""
     if any(term in lowered for term in ("human", "agent", "representative", "speak to someone", "connect me")):
         return Intent.HUMAN_ESCALATION
+
+    if any(term in lowered for term in ("default", "overdue", "missed emi", "npa", "loan overdue", "default notice")):
+        return Intent.LOAN_DEFAULT_NOTICE
 
     status_terms = ("status", "track", "progress", "update on", "what happened")
     process_terms = ("how do i", "how can i", "steps", "process", "apply", "file", "submit")

@@ -28,7 +28,12 @@ class CXRepository(Protocol):
     def get_idempotent_response(self, provider: str, external_message_id: str) -> dict | None: ...
     def resolve_customer(self, message: InboundMessage) -> dict: ...
     def get_or_create_conversation(self, customer_id: str) -> dict: ...
-    def list_recent_turns(self, conversation_id: str, limit: int = 8) -> list[dict]: ...
+    def list_recent_turns(self, conversation_id: str, limit: int = 8, channel: str | None = None) -> list[dict]: ...
+    def list_conversation_turns(self, conversation_id: str) -> list[dict]: ...
+    def count_recent_inbound(self, customer_id: str, since_iso: str) -> int: ...
+    def list_customer_turns(self, customer_id: str, limit: int = 40) -> list[dict]: ...
+    def get_turn(self, turn_id: str) -> dict | None: ...
+    def get_ticket_reply(self, ticket_id: str) -> str | None: ...
     def append_turn(self, **values) -> dict: ...
     def update_turn_metadata(self, turn_id: str, extra: dict) -> None: ...
     def update_turn_intent_urgency(self, turn_id: str, intent: str, urgency: str) -> None: ...
@@ -36,6 +41,8 @@ class CXRepository(Protocol):
     def create_ticket(self, ticket: Ticket) -> Ticket: ...
     def update_ticket(self, ticket_id: str, **values) -> dict | None: ...
     def find_active_ticket(self, conversation_id: str) -> Ticket | None: ...
+    def find_active_ticket_for_intent(self, conversation_id: str, intent: str) -> Ticket | None: ...
+    def find_active_ticket_for_scope(self, conversation_id: str, intent: str, ticket_scope: str) -> Ticket | None: ...
     def find_open_tickets_for_customer(self, customer_id: str, limit: int = 5) -> list[dict]: ...
     def list_tickets(self) -> list[dict]: ...
     def get_ticket(self, ticket_id: str) -> dict | None: ...
@@ -47,6 +54,9 @@ class CXRepository(Protocol):
     def list_whatsapp_delivery_statuses(self, provider_message_id: str | None = None, limit: int = 50) -> list[dict]: ...
     def add_audit_event(self, event_type: str, correlation_id: str, **values) -> None: ...
     def list_audit_events(self, correlation_id: str | None = None) -> list[dict]: ...
+    def add_llm_usage_event(self, event: dict) -> dict: ...
+    def list_llm_usage_events(self, limit: int = 100, correlation_id: str | None = None) -> list[dict]: ...
+    def get_llm_usage_summary(self, days: int = 7) -> dict: ...
     def get_conversation(self, conversation_id: str) -> dict | None: ...
     def list_conversations(self) -> list[dict]: ...
     def list_customer_identifiers(self, customer_id: str) -> list[dict]: ...
@@ -57,6 +67,21 @@ class CXRepository(Protocol):
     def create_customer_user(self, user_id: str, email: str, password_hash: str) -> dict: ...
     def get_customer_user_by_id(self, user_id: str) -> dict | None: ...
     def get_customer_user_by_email(self, email: str) -> dict | None: ...
+    def add_agent_assist_recommendation(self, conversation_id: str, customer_id: str, ticket_id: str | None,
+                                         action_type: str, reason: str, confidence: float, priority: int = 0,
+                                         metadata: dict | None = None) -> dict: ...
+    def list_agent_assist_recommendations(self, conversation_id: str | None = None,
+                                           ticket_id: str | None = None,
+                                           status: str | None = None) -> list[dict]: ...
+    def update_agent_assist_recommendation(self, recommendation_id: str, status: str, actor: str) -> dict | None: ...
+    def add_reply_draft(self, conversation_id: str, customer_id: str, channel: str, draft_text: str,
+                        ticket_id: str | None = None, inbound_turn_id: str | None = None,
+                        hold_reason: str = "", reason_code: str = "",
+                        channel_identifier: str | None = None, provider: str | None = None) -> dict: ...
+    def list_reply_drafts(self, conversation_id: str | None = None, status: str | None = None) -> list[dict]: ...
+    def get_reply_draft(self, draft_id: str) -> dict | None: ...
+    def update_reply_draft(self, draft_id: str, status: str, actor: str,
+                           sent_text: str | None = None) -> dict | None: ...
 
 
 class SQLiteCXRepository:
@@ -223,13 +248,75 @@ class SQLiteCXRepository:
                 ).fetchone()
         return dict(row)
 
-    def list_recent_turns(self, conversation_id: str, limit: int = 8) -> list[dict]:
+    def list_recent_turns(self, conversation_id: str, limit: int = 8, channel: str | None = None) -> list[dict]:
+        with self.connection() as conn:
+            if channel:
+                rows = conn.execute(
+                    "SELECT * FROM conversation_turns WHERE conversation_id = ? AND channel = ? "
+                    "ORDER BY created_at DESC LIMIT ?",
+                    (conversation_id, channel, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM conversation_turns WHERE conversation_id = ? ORDER BY created_at DESC LIMIT ?",
+                    (conversation_id, limit),
+                ).fetchall()
+        return [self._turn_dict(row) for row in reversed(rows)]
+
+    def list_conversation_turns(self, conversation_id: str) -> list[dict]:
+        """All turns for a conversation, chronological (oldest first). Unlike
+        list_recent_turns there is no LIMIT — used to reconstruct a ticket's full
+        exchange history."""
         with self.connection() as conn:
             rows = conn.execute(
-                "SELECT * FROM conversation_turns WHERE conversation_id = ? ORDER BY created_at DESC LIMIT ?",
-                (conversation_id, limit),
+                "SELECT * FROM conversation_turns WHERE conversation_id = ? ORDER BY created_at ASC",
+                (conversation_id,),
             ).fetchall()
-        return [self._turn_dict(row) for row in reversed(rows)]
+        return [self._turn_dict(row) for row in rows]
+
+    def count_recent_inbound(self, customer_id: str, since_iso: str) -> int:
+        """Number of inbound (customer-sent) turns for a customer since since_iso
+        (ISO-8601). Used for the 'contacts in last N days' attrition signal."""
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM conversation_turns "
+                "WHERE customer_id = ? AND direction = 'inbound' AND created_at >= ?",
+                (customer_id, since_iso),
+            ).fetchone()
+        return row["n"] if row else 0
+
+    def list_customer_turns(self, customer_id: str, limit: int = 40) -> list[dict]:
+        """Most recent turns for a customer (any conversation), newest first —
+        used by the attrition scorer for sentiment/urgency and exit-language."""
+        with self.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM conversation_turns WHERE customer_id = ? "
+                "ORDER BY created_at DESC LIMIT ?",
+                (customer_id, limit),
+            ).fetchall()
+        return [self._turn_dict(row) for row in rows]
+
+    def get_turn(self, turn_id: str) -> dict | None:
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM conversation_turns WHERE turn_id = ?", (turn_id,)
+            ).fetchone()
+        return self._turn_dict(row) if row else None
+
+    def get_ticket_reply(self, ticket_id: str) -> str | None:
+        """Latest real outbound reply for a ticket — skips the interim 'holding' message so
+        the ticket detail shows the actual answer, not 'a support agent will help you...'."""
+        with self.connection() as conn:
+            rows = conn.execute(
+                "SELECT text FROM conversation_turns WHERE ticket_id = ? AND direction = 'outbound' "
+                "ORDER BY created_at DESC",
+                (ticket_id,),
+            ).fetchall()
+        for row in rows:
+            text = row["text"] or ""
+            if "will help you with this shortly" not in text:
+                return text
+        return rows[0]["text"] if rows else None
 
     def update_turn_metadata(self, turn_id: str, extra: dict) -> None:
         with self.connection() as conn:
@@ -290,14 +377,16 @@ class SQLiteCXRepository:
             conn.execute(
                 "INSERT INTO tickets(ticket_id, conversation_id, customer_id, title, description, intent, priority, "
                 "assigned_team, status, external_ticket_id, external_ticket_url, crm_sync_status, crm_sync_error, "
-                "approval_status, escalation_reason, sla_due_at, metadata_json, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "approval_status, escalation_reason, sla_due_at, priority_score, priority_breakdown_json, "
+                "metadata_json, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     ticket.ticket_id, ticket.conversation_id, ticket.customer_id, ticket.title, ticket.description,
                     ticket.intent, ticket.priority.value, ticket.assigned_team, ticket.status.value,
                     ticket.external_ticket_id, ticket.external_ticket_url, ticket.crm_sync_status,
                     ticket.crm_sync_error, ticket.approval_status, ticket.escalation_reason,
-                    ticket.sla_due_at.isoformat() if ticket.sla_due_at else None, json_text(ticket.metadata),
+                    ticket.sla_due_at.isoformat() if ticket.sla_due_at else None,
+                    ticket.priority_score, json_text(ticket.priority_breakdown), json_text(ticket.metadata),
                     ticket.created_at.isoformat(), ticket.updated_at.isoformat(),
                 ),
             )
@@ -305,8 +394,9 @@ class SQLiteCXRepository:
 
     def update_ticket(self, ticket_id: str, **values) -> dict | None:
         allowed = {
-            "status", "external_ticket_id", "external_ticket_url", "crm_sync_status", "crm_sync_error",
-            "approval_status", "escalation_reason", "sla_due_at", "metadata_json",
+            "status", "priority", "external_ticket_id", "external_ticket_url", "crm_sync_status", "crm_sync_error",
+            "approval_status", "escalation_reason", "sla_due_at", "priority_score", "priority_breakdown_json",
+            "metadata_json",
         }
         updates = {key: value for key, value in values.items() if key in allowed}
         if not updates:
@@ -326,6 +416,28 @@ class SQLiteCXRepository:
                 (conversation_id,),
             ).fetchone()
         return self._ticket(row) if row else None
+
+    def find_active_ticket_for_intent(self, conversation_id: str, intent: str) -> Ticket | None:
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM tickets WHERE conversation_id = ? AND intent = ? AND status != 'resolved' "
+                "ORDER BY created_at DESC LIMIT 1",
+                (conversation_id, intent),
+            ).fetchone()
+        return self._ticket(row) if row else None
+
+    def find_active_ticket_for_scope(self, conversation_id: str, intent: str, ticket_scope: str) -> Ticket | None:
+        with self.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM tickets WHERE conversation_id = ? AND intent = ? AND status != 'resolved' "
+                "ORDER BY created_at DESC",
+                (conversation_id, intent),
+            ).fetchall()
+        for row in rows:
+            ticket = self._ticket(row)
+            if ticket.metadata.get("ticket_scope") == ticket_scope:
+                return ticket
+        return None
 
     def find_open_tickets_for_customer(self, customer_id: str, limit: int = 5) -> list[dict]:
         """Return all open (non-resolved) tickets for a customer across all channels."""
@@ -366,6 +478,129 @@ class SQLiteCXRepository:
                 "SELECT * FROM ticket_events WHERE ticket_id = ? ORDER BY created_at", (ticket_id,)
             ).fetchall()
         return [self._json_fields(dict(row), "details_json") for row in rows]
+
+    def add_agent_assist_recommendation(
+        self,
+        conversation_id: str,
+        customer_id: str,
+        ticket_id: str | None,
+        action_type: str,
+        reason: str,
+        confidence: float,
+        priority: int = 0,
+        metadata: dict | None = None,
+    ) -> dict:
+        recommendation_id = new_id("nba")
+        with self.connection() as conn:
+            conn.execute(
+                "INSERT INTO agent_assist_recommendations(recommendation_id, conversation_id, ticket_id, "
+                "customer_id, action_type, reason, confidence, priority, metadata_json, status, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
+                (
+                    recommendation_id, conversation_id, ticket_id, customer_id, action_type, reason,
+                    confidence, priority, json_text(metadata), utc_now(),
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM agent_assist_recommendations WHERE recommendation_id = ?", (recommendation_id,)
+            ).fetchone()
+        return self._json_fields(dict(row), "metadata_json")
+
+    def list_agent_assist_recommendations(
+        self,
+        conversation_id: str | None = None,
+        ticket_id: str | None = None,
+        status: str | None = None,
+    ) -> list[dict]:
+        query = "SELECT * FROM agent_assist_recommendations WHERE 1=1"
+        args: list = []
+        if conversation_id:
+            query += " AND conversation_id = ?"
+            args.append(conversation_id)
+        if ticket_id:
+            query += " AND ticket_id = ?"
+            args.append(ticket_id)
+        if status:
+            query += " AND status = ?"
+            args.append(status)
+        query += " ORDER BY confidence DESC, created_at DESC"
+        with self.connection() as conn:
+            rows = conn.execute(query, args).fetchall()
+        return [self._json_fields(dict(row), "metadata_json") for row in rows]
+
+    def update_agent_assist_recommendation(self, recommendation_id: str, status: str, actor: str) -> dict | None:
+        with self.connection() as conn:
+            conn.execute(
+                "UPDATE agent_assist_recommendations SET status = ?, decided_by = ?, decided_at = ? "
+                "WHERE recommendation_id = ?",
+                (status, actor, utc_now(), recommendation_id),
+            )
+            row = conn.execute(
+                "SELECT * FROM agent_assist_recommendations WHERE recommendation_id = ?", (recommendation_id,)
+            ).fetchone()
+        return self._json_fields(dict(row), "metadata_json") if row else None
+
+    # ── Human-in-the-loop reply drafts ────────────────────────────────────────
+    def add_reply_draft(
+        self,
+        conversation_id: str,
+        customer_id: str,
+        channel: str,
+        draft_text: str,
+        ticket_id: str | None = None,
+        inbound_turn_id: str | None = None,
+        hold_reason: str = "",
+        reason_code: str = "",
+        channel_identifier: str | None = None,
+        provider: str | None = None,
+    ) -> dict:
+        draft_id = new_id("draft")
+        with self.connection() as conn:
+            conn.execute(
+                "INSERT INTO reply_drafts(draft_id, conversation_id, customer_id, ticket_id, channel, "
+                "channel_identifier, provider, inbound_turn_id, draft_text, hold_reason, reason_code, "
+                "status, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
+                (
+                    draft_id, conversation_id, customer_id, ticket_id, channel, channel_identifier,
+                    provider, inbound_turn_id, draft_text, hold_reason, reason_code, utc_now(),
+                ),
+            )
+            row = conn.execute("SELECT * FROM reply_drafts WHERE draft_id = ?", (draft_id,)).fetchone()
+        return dict(row)
+
+    def list_reply_drafts(
+        self, conversation_id: str | None = None, status: str | None = None
+    ) -> list[dict]:
+        query = "SELECT * FROM reply_drafts WHERE 1=1"
+        args: list = []
+        if conversation_id:
+            query += " AND conversation_id = ?"
+            args.append(conversation_id)
+        if status:
+            query += " AND status = ?"
+            args.append(status)
+        query += " ORDER BY created_at DESC"
+        with self.connection() as conn:
+            rows = conn.execute(query, args).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_reply_draft(self, draft_id: str) -> dict | None:
+        with self.connection() as conn:
+            row = conn.execute("SELECT * FROM reply_drafts WHERE draft_id = ?", (draft_id,)).fetchone()
+        return dict(row) if row else None
+
+    def update_reply_draft(
+        self, draft_id: str, status: str, actor: str, sent_text: str | None = None
+    ) -> dict | None:
+        with self.connection() as conn:
+            conn.execute(
+                "UPDATE reply_drafts SET status = ?, decided_by = ?, decided_at = ?, "
+                "sent_text = COALESCE(?, sent_text) WHERE draft_id = ?",
+                (status, actor, utc_now(), sent_text, draft_id),
+            )
+            row = conn.execute("SELECT * FROM reply_drafts WHERE draft_id = ?", (draft_id,)).fetchone()
+        return dict(row) if row else None
 
     def add_retrieval_evidence(self, turn_id: str, contexts: list[dict]) -> None:
         with self.connection() as conn:
@@ -477,6 +712,167 @@ class SQLiteCXRepository:
             rows = conn.execute(query, args).fetchall()
         return [self._json_fields(dict(row), "details_json") for row in rows]
 
+    def add_llm_usage_event(self, event: dict) -> dict:
+        event_id = event.get("event_id") or new_id("llm")
+        created_at = event.get("created_at") or utc_now()
+        values = {
+            "event_id": event_id,
+            "correlation_id": event.get("correlation_id"),
+            "conversation_id": event.get("conversation_id"),
+            "customer_id": event.get("customer_id"),
+            "message_id": event.get("message_id"),
+            "channel": event.get("channel"),
+            "agent": event.get("agent"),
+            "operation": event.get("operation") or "unknown",
+            "provider": event.get("provider") or "unknown",
+            "model": event.get("model") or "unknown",
+            "llm_used": 1 if event.get("llm_used") else 0,
+            "prompt_tokens": int(event.get("prompt_tokens") or 0),
+            "completion_tokens": int(event.get("completion_tokens") or 0),
+            "total_tokens": int(event.get("total_tokens") or 0),
+            "estimated_cost_usd": float(event.get("estimated_cost_usd") or 0.0),
+            "latency_ms": event.get("latency_ms"),
+            "status": event.get("status") or "unknown",
+            "error": event.get("error"),
+            "intent": event.get("intent"),
+            "resolution_level": event.get("resolution_level"),
+            "ticket_id": event.get("ticket_id"),
+            "retrieval_backend": event.get("retrieval_backend"),
+            "metadata_json": json_text(event.get("metadata")),
+            "created_at": created_at,
+        }
+        with self.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO llm_usage_events(
+                    event_id, correlation_id, conversation_id, customer_id, message_id, channel,
+                    agent, operation, provider, model, llm_used, prompt_tokens, completion_tokens,
+                    total_tokens, estimated_cost_usd, latency_ms, status, error, intent,
+                    resolution_level, ticket_id, retrieval_backend, metadata_json, created_at
+                )
+                VALUES (
+                    :event_id, :correlation_id, :conversation_id, :customer_id, :message_id, :channel,
+                    :agent, :operation, :provider, :model, :llm_used, :prompt_tokens, :completion_tokens,
+                    :total_tokens, :estimated_cost_usd, :latency_ms, :status, :error, :intent,
+                    :resolution_level, :ticket_id, :retrieval_backend, :metadata_json, :created_at
+                )
+                """,
+                values,
+            )
+        return self.get_llm_usage_event(event_id) or {}
+
+    def get_llm_usage_event(self, event_id: str) -> dict | None:
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM llm_usage_events WHERE event_id = ?",
+                (event_id,),
+            ).fetchone()
+        return self._llm_usage_dict(row) if row else None
+
+    def list_llm_usage_events(self, limit: int = 100, correlation_id: str | None = None) -> list[dict]:
+        query = "SELECT * FROM llm_usage_events"
+        args: tuple = ()
+        if correlation_id:
+            query += " WHERE correlation_id = ?"
+            args = (correlation_id,)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        args = (*args, max(1, min(int(limit or 100), 500)))
+        with self.connection() as conn:
+            rows = conn.execute(query, args).fetchall()
+        return [self._llm_usage_dict(row) for row in rows]
+
+    def get_llm_usage_summary(self, days: int = 7) -> dict:
+        cutoff = None
+        if days and days > 0:
+            from datetime import timedelta
+
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+        where = "WHERE created_at >= ?" if cutoff else ""
+        args: tuple = (cutoff,) if cutoff else ()
+        with self.connection() as conn:
+            totals = conn.execute(
+                f"""
+                SELECT
+                    COUNT(*) AS calls,
+                    SUM(CASE WHEN llm_used = 1 THEN 1 ELSE 0 END) AS successful_calls,
+                    SUM(prompt_tokens) AS prompt_tokens,
+                    SUM(completion_tokens) AS completion_tokens,
+                    SUM(total_tokens) AS total_tokens,
+                    SUM(estimated_cost_usd) AS estimated_cost_usd,
+                    AVG(latency_ms) AS avg_latency_ms
+                FROM llm_usage_events
+                {where}
+                """,
+                args,
+            ).fetchone()
+
+            by_operation = conn.execute(
+                f"""
+                SELECT operation, COUNT(*) AS calls, SUM(total_tokens) AS total_tokens,
+                       SUM(estimated_cost_usd) AS estimated_cost_usd, AVG(latency_ms) AS avg_latency_ms
+                FROM llm_usage_events
+                {where}
+                GROUP BY operation
+                ORDER BY estimated_cost_usd DESC, total_tokens DESC
+                """,
+                args,
+            ).fetchall()
+
+            by_model = conn.execute(
+                f"""
+                SELECT model, COUNT(*) AS calls, SUM(total_tokens) AS total_tokens,
+                       SUM(estimated_cost_usd) AS estimated_cost_usd
+                FROM llm_usage_events
+                {where}
+                GROUP BY model
+                ORDER BY estimated_cost_usd DESC, total_tokens DESC
+                """,
+                args,
+            ).fetchall()
+
+            by_channel = conn.execute(
+                f"""
+                SELECT COALESCE(channel, 'unknown') AS channel, COUNT(*) AS calls,
+                       SUM(total_tokens) AS total_tokens, SUM(estimated_cost_usd) AS estimated_cost_usd
+                FROM llm_usage_events
+                {where}
+                GROUP BY COALESCE(channel, 'unknown')
+                ORDER BY estimated_cost_usd DESC, total_tokens DESC
+                """,
+                args,
+            ).fetchall()
+
+            by_intent = conn.execute(
+                f"""
+                SELECT COALESCE(intent, 'unknown') AS intent, COUNT(*) AS calls,
+                       SUM(total_tokens) AS total_tokens, SUM(estimated_cost_usd) AS estimated_cost_usd
+                FROM llm_usage_events
+                {where}
+                GROUP BY COALESCE(intent, 'unknown')
+                ORDER BY estimated_cost_usd DESC, total_tokens DESC
+                LIMIT 10
+                """,
+                args,
+            ).fetchall()
+
+        return {
+            "window_days": days,
+            "totals": {
+                "calls": totals["calls"] or 0,
+                "successful_calls": totals["successful_calls"] or 0,
+                "prompt_tokens": totals["prompt_tokens"] or 0,
+                "completion_tokens": totals["completion_tokens"] or 0,
+                "total_tokens": totals["total_tokens"] or 0,
+                "estimated_cost_usd": round(totals["estimated_cost_usd"] or 0.0, 6),
+                "avg_latency_ms": round(totals["avg_latency_ms"] or 0.0, 2),
+            },
+            "by_operation": [self._usage_group(row) for row in by_operation],
+            "by_model": [self._usage_group(row) for row in by_model],
+            "by_channel": [self._usage_group(row) for row in by_channel],
+            "by_intent": [self._usage_group(row) for row in by_intent],
+        }
+
     def get_conversation(self, conversation_id: str) -> dict | None:
         with self.connection() as conn:
             row = conn.execute("SELECT * FROM conversations WHERE conversation_id = ?", (conversation_id,)).fetchone()
@@ -583,6 +979,25 @@ class SQLiteCXRepository:
         return self._json_fields(dict(row), "metadata_json")
 
     @staticmethod
+    def _usage_group(row: sqlite3.Row) -> dict:
+        value = dict(row)
+        if "estimated_cost_usd" in value:
+            value["estimated_cost_usd"] = round(value["estimated_cost_usd"] or 0.0, 6)
+        if "avg_latency_ms" in value:
+            value["avg_latency_ms"] = round(value["avg_latency_ms"] or 0.0, 2)
+        for key in ("calls", "total_tokens"):
+            if key in value:
+                value[key] = value[key] or 0
+        return value
+
+    @staticmethod
+    def _llm_usage_dict(row: sqlite3.Row) -> dict:
+        value = SQLiteCXRepository._json_fields(dict(row), "metadata_json")
+        value["llm_used"] = bool(value.get("llm_used"))
+        value["metadata"] = value.get("metadata") or {}
+        return value
+
+    @staticmethod
     def _ticket(row: sqlite3.Row) -> Ticket:
         value = SQLiteCXRepository._ticket_dict(row)
         value["priority"] = TicketPriority(value["priority"])
@@ -594,4 +1009,6 @@ class SQLiteCXRepository:
         value = dict(row)
         if "metadata_json" in value:
             value["metadata"] = json.loads(value.pop("metadata_json") or "{}")
+        if "priority_breakdown_json" in value:
+            value["priority_breakdown"] = json.loads(value.pop("priority_breakdown_json") or "{}")
         return value
