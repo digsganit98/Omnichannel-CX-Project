@@ -43,6 +43,7 @@ class QueryResolution(BaseModel):
     llm: dict = Field(default_factory=dict)
     retrieval_backend: str = "unknown"
     retrieval_error: str | None = None
+    resolution_decision: dict = Field(default_factory=dict)
 
 
 class TicketDecision(BaseModel):
@@ -128,6 +129,9 @@ class QueryResolutionAgent:
     def run(self, message: InboundMessage, context: dict, intent: str | None = None) -> QueryResolution:
         channel = context.get("channel", "")
 
+        def finalize(resolution: QueryResolution) -> QueryResolution:
+            return self._attach_resolution_decision(message, context, intent, resolution)
+
         # ── Priority 0: ResolutionMemory cache (agent-verified cross-customer answers) ──
         # Only for non-sensitive, non-ticket intents. Verified = human agent approved it.
         memory_excluded_intents = {
@@ -148,7 +152,7 @@ class QueryResolutionAgent:
                 memory = search_resolution_memory(self.neo4j_client, product_id, intent)
                 if memory and memory.get("verified") and memory.get("resolution"):
                     cached_answer = memory["resolution"]
-                    return QueryResolution(
+                    return finalize(QueryResolution(
                         answer=cached_answer,
                         confidence=0.92,
                         contexts=[{
@@ -164,7 +168,7 @@ class QueryResolutionAgent:
                         }],
                         citations=[{"index": 1, "source": "resolution_memory_cache", "score": 0.92}],
                         retrieval_backend="resolution_memory_cache",
-                    )
+                    ))
             except Exception:
                 pass
 
@@ -181,7 +185,7 @@ class QueryResolutionAgent:
                 # Route through Groq so the LLM produces a natural sentence
                 # ("Your home loan query is with our Loans team…") instead of a raw bullet list.
                 generation = self.rag.generator.generate_answer(message.text, ticket_ctx, context)
-                return QueryResolution(
+                return finalize(QueryResolution(
                     answer=generation.get("text") or raw_text,
                     confidence=0.98,
                     contexts=ticket_ctx,
@@ -191,7 +195,7 @@ class QueryResolutionAgent:
                         "model": generation.get("model"),
                         "llm_used": generation.get("llm_used", False),
                     },
-                )
+                ))
 
         # ── Priority 2: Neo4j transactional data (loans, claims, etc.) ───────
         if intent and self.neo4j_client:
@@ -216,7 +220,7 @@ class QueryResolutionAgent:
                             generation = self.rag.generator.generate_answer(
                                 message.text, neo4j_ctx, context
                             )
-                            return QueryResolution(
+                            return finalize(QueryResolution(
                                 answer=generation.get("text") or raw_data,
                                 confidence=0.95,
                                 contexts=neo4j_ctx,
@@ -226,13 +230,40 @@ class QueryResolutionAgent:
                                     "model": generation.get("model"),
                                     "llm_used": generation.get("llm_used", False),
                                 },
-                            )
+                            ))
             except Exception:
                 pass
 
         # ── Priority 3: RAG / Knowledge Base ──────────────────────────────────
         rag_context = {**context, "neo4j_attempted": bool(intent and self.neo4j_client)}
-        return QueryResolution(**self.rag.answer(message.text, rag_context))
+        return finalize(QueryResolution(**self.rag.answer(message.text, rag_context)))
+
+    @staticmethod
+    def _attach_resolution_decision(
+        message: InboundMessage,
+        context: dict,
+        intent: str | None,
+        resolution: QueryResolution,
+    ) -> QueryResolution:
+        try:
+            from services.resolution_service import resolve_query_level
+
+            decision = resolve_query_level(
+                message.text,
+                intent or "unknown",
+                context.get("sentiment", "neutral"),
+            )
+            return resolution.model_copy(update={"resolution_decision": decision})
+        except Exception as exc:
+            return resolution.model_copy(update={
+                "resolution_decision": {
+                    "intent": intent or "unknown",
+                    "sentiment": context.get("sentiment", "neutral"),
+                    "resolution_level": "L2",
+                    "confidence": 0.35,
+                    "reason": f"Resolution decision engine unavailable; assisted review selected. {exc}",
+                }
+            })
 
 
 def _format_ticket_status(tickets: list[dict], channel: str = "") -> str:
@@ -360,6 +391,13 @@ class TicketCreationAgent:
 
     @staticmethod
     def _escalation_reason(analysis: IntentResult, resolution: QueryResolution, context: dict) -> str | None:
+        decision = resolution.resolution_decision or {}
+        level = str(decision.get("resolution_level", "")).upper()
+        if level == "L3":
+            return f"critical_escalation:{analysis.intent.value}"
+        if level == "L2":
+            return f"assisted_resolution_required:{analysis.intent.value}"
+
         # Rule 1: Customer explicitly asked for human
         if analysis.intent == Intent.HUMAN_ESCALATION:
             return "customer_requested_human"
@@ -457,19 +495,33 @@ class WorkflowAutomationAgent:
         if ticket:
             ref = f"*{ticket.ticket_id}*" if channel == "whatsapp" else ticket.ticket_id
             team = ticket.assigned_team.replace("_", " ")
-            if getattr(ticket, "escalation_reason", None) == "customer_requested_human":
+            escalation_reason = getattr(ticket, "escalation_reason", None) or ""
+            if escalation_reason.startswith("critical_escalation:"):
+                ticket_note = (
+                    f"Your request has been escalated under reference {ref}. "
+                    f"Our {team} team will review it urgently and contact you."
+                )
+                body = ticket_note
+            elif escalation_reason.startswith("assisted_resolution_required:"):
+                ticket_note = (
+                    f"Your request needs verification and has been logged under reference {ref}. "
+                    f"Our {team} team will review the draft response and follow up with you."
+                )
+                body = ticket_note
+            elif escalation_reason == "customer_requested_human":
                 sla_eta = _relative_time(getattr(ticket, "sla_due_at", None))
                 eta_clause = f" You will be contacted {sla_eta}." if sla_eta else ""
                 ticket_note = (
                     f"Your request has been logged under reference {ref}. "
                     f"Our {team} team will be in touch with you.{eta_clause}"
                 )
+                body = f"{body}\n\n{ticket_note}".strip() if body else ticket_note
             else:
                 ticket_note = (
                     f"Your request has been logged under reference {ref}. "
                     f"Our {team} team will follow up with you."
                 )
-            body = f"{body}\n\n{ticket_note}".strip() if body else ticket_note
+                body = f"{body}\n\n{ticket_note}".strip() if body else ticket_note
 
         if channel == "email":
             salutation_name = _salutation(customer_name)

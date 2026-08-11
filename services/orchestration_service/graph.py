@@ -348,6 +348,7 @@ class OrchestrationGraph:
         enriched_context = {
             **state.context,
             "language": state.analysis.language if state.analysis else "en",
+            "sentiment": state.analysis.sentiment if state.analysis else "neutral",
         }
         state.resolution = self.resolution_agent.run(state.message, enriched_context, intent=intent_str)
         self._audit("retrieval_performed", state,
@@ -357,6 +358,7 @@ class OrchestrationGraph:
                         "citations": state.resolution.citations,
                         "retrieval_backend": state.resolution.retrieval_backend,
                         "retrieval_error": state.resolution.retrieval_error,
+                        "resolution_decision": state.resolution.resolution_decision,
                     })
         self._complete(state, WorkflowStep.RETRIEVE_KNOWLEDGE, self.resolution_agent.name,
                        confidence=state.resolution.confidence,
@@ -384,6 +386,22 @@ class OrchestrationGraph:
             state.conversation_id, state.customer_id, state.message,
             state.analysis, state.ticket_decision, state.customer,
         )
+        if (
+            state.ticket_decision.reason
+            and state.ticket_decision.reason.startswith("assisted_resolution_required:")
+            and state.resolution
+            and state.resolution.answer
+        ):
+            self.repository.add_ticket_event(
+                state.ticket.ticket_id,
+                "ai_draft_created",
+                "resolution_decision_engine",
+                {
+                    "draft_response": state.resolution.answer,
+                    "resolution_decision": state.resolution.resolution_decision,
+                    "requires_human_verification": True,
+                },
+            )
         self._audit("ticket_created", state, intent=state.analysis.intent.value,
                     ticket_id=state.ticket.ticket_id)
         self._audit("ticket_crm_sync_" + state.ticket.crm_sync_status, state,
@@ -483,6 +501,7 @@ class OrchestrationGraph:
             delivery_status=state.delivery["status"],
             metadata={
                 "citations": state.resolution.citations if state.resolution else [],
+                "resolution_decision": state.resolution.resolution_decision if state.resolution else {},
                 "provider_message_id": provider_message_id,
                 "provider_response": state.delivery.get("provider_response"),
             },
