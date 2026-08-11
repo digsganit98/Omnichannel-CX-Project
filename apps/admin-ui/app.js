@@ -1378,6 +1378,16 @@ function renderRight(conv, tickets) {
 
   var body = document.getElementById('rpbody');
   body.innerHTML = ''
+    // Knowledge graph first — the agent's fastest read of who this customer is.
+    + '<button class="kg-btn kg-btn-top" id="snap-kg-btn" type="button" style="display:none" title="See this customer\'s products, claims and tickets as a connected graph.">'
+    + '<span class="kg-btn-l">'
+    + '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">'
+    + '<circle cx="8" cy="3.2" r="2.1" stroke="currentColor" stroke-width="1.3"/>'
+    + '<circle cx="3" cy="12.4" r="2.1" stroke="currentColor" stroke-width="1.3"/>'
+    + '<circle cx="13" cy="12.4" r="2.1" stroke="currentColor" stroke-width="1.3"/>'
+    + '<path d="M6.7 4.9 4.2 10.6M9.3 4.9l2.5 5.7M5.1 12.4h5.8" stroke="currentColor" stroke-width="1.3"/>'
+    + '</svg>View knowledge graph</span>'
+    + '<span class="kg-btn-cnt" id="snap-kg-count"></span></button>'
     + '<div class="rpcard"><div class="ssent-head"><span class="rplbl">Sentiment</span>'
     + '<span class="ssc" style="color:' + sentClr + '">' + escH(sentLbl) + '</span>'
     + '<span class="ssent-count">(last ' + sentCount + ' message' + (sentCount === 1 ? '' : 's') + ')</span></div>'
@@ -1406,6 +1416,16 @@ function renderRight(conv, tickets) {
   // Async: fetch loans/claims count from Neo4j via customer graph endpoint
   var _snapCustId = conv_meta.customer_id;
   if (_snapCustId) {
+    // Knowledge-graph button: only shown once we know the customer resolves to a graph
+    // node (an unverified sender has none — same rule that keeps phantoms out).
+    api('/admin/customers/' + encodeURIComponent(_snapCustId) + '/graph-view').then(function(gv) {
+      var btn = document.getElementById('snap-kg-btn');
+      if (!btn || !gv || !gv.resolved || !(gv.nodes || []).length) return;
+      document.getElementById('snap-kg-count').textContent = gv.nodes.length + ' nodes';
+      btn.style.display = 'flex';
+      btn.onclick = function() { openGraphModal(gv); };
+    }).catch(function() { /* button stays hidden */ });
+
     api('/admin/customers/' + encodeURIComponent(_snapCustId) + '/graph').then(function(g) {
       var tenureEl = document.getElementById('snap-tenure');
       if (tenureEl && g.registration_date) tenureEl.textContent = calcTenure(g.registration_date);
@@ -2576,11 +2596,133 @@ window.loadUserTickets = async function() {
   }
 };
 
+// ── Knowledge graph (customer neighbourhood) ────────────────────────────────
+// Radial hub-and-spoke over the /graph-view payload. Layout is DETERMINISTIC —
+// positions derive from each node's index in a stable type order, never from a
+// physics sim — because the inbox re-polls every ~3s and a jittering graph is
+// unreadable. Health (not node type) drives colour, so "needs attention" reads
+// at a glance.
+var KG_TYPE_ORDER = ['Account', 'CreditCard', 'FixedDeposit', 'Loan', 'Policy', 'Claim', 'Ticket'];
+
+window.closeGraphModal = function() {
+  document.getElementById('graphModal').classList.add('hidden');
+};
+
+function kgEsc(s) { return escH(String(s == null ? '' : s)); }
+
+function openGraphModal(gv) {
+  var modal = document.getElementById('graphModal');
+  var hub = (gv.nodes || []).filter(function(n) { return n.health === 'hub'; })[0] || {};
+  document.getElementById('graphModalTitle').textContent = (hub.label || 'Customer') + ' · knowledge graph';
+  document.getElementById('graphModalSub').textContent =
+    [gv.graph_customer_id, hub.sub].filter(Boolean).join(' · ');
+  var counts = gv.counts || {};
+  var summary = Object.keys(counts).filter(function(k) { return k !== 'Customer'; })
+    .map(function(k) { return counts[k] + ' ' + k; }).join(' · ');
+  document.getElementById('graphModalCounts').textContent =
+    (gv.nodes || []).length + ' nodes · ' + (gv.edges || []).length + ' relationships'
+    + (summary ? '  —  ' + summary : '');
+  document.getElementById('graphModalBody').innerHTML = renderGraphSvg(gv);
+  modal.classList.remove('hidden');
+}
+
+function renderGraphSvg(gv) {
+  var nodes = gv.nodes || [], edges = gv.edges || [];
+  var hub = nodes.filter(function(n) { return n.health === 'hub'; })[0];
+  if (!hub) return '<div class="kg-empty">No graph data for this customer.</div>';
+
+  // Ring members in a stable order so the same customer always lays out the same.
+  var ring = nodes.filter(function(n) { return n !== hub; }).slice().sort(function(a, b) {
+    var ai = KG_TYPE_ORDER.indexOf(a.type), bi = KG_TYPE_ORDER.indexOf(b.type);
+    if (ai !== bi) return (ai < 0 ? 99 : ai) - (bi < 0 ? 99 : bi);
+    return String(a.id).localeCompare(String(b.id));
+  });
+
+  // Box size tracks the type scale in style.css (.kg-type/.kg-name/.kg-meta). Shrinking
+  // the text shrinks the boxes, which shrinks the arc budget below — so smaller type
+  // also pulls the ring in and shortens the edges.
+  var NW = 156, NH = 42, HW = 172, HH = 50;
+  var n = ring.length;
+  // Ellipse sized so NEIGHBOURING boxes clear each other. Two separate constraints:
+  //  - rx from the arc budget (circumference must fit n boxes side by side);
+  //  - ry from the vertical pitch of the nodes that stack down each side — those are
+  //    the ones that collide, and a circumference-derived ry flattens the ellipse
+  //    until they do. Sizing linearly by node count (the first attempt) inflated the
+  //    ring instead; sizing ry by circumference squashed it. This bounds both.
+  // Gaps of 22/24 are the tightest values that stay collision-free for n=5..24
+  // (swept exhaustively); anything smaller reintroduces overlaps on some ring sizes.
+  var rx = Math.max(HW / 2 + NW / 2 + 26, ((NW + 22) * n) / (2 * Math.PI));
+  // Nodes per side ≈ n/2; each needs NH + gap of vertical room across the diameter.
+  var perSide = Math.max(1, Math.ceil((n - 2) / 2));
+  var ry = Math.max(HH / 2 + NH / 2 + 34, ((NH + 24) * perSide) / 2 + NH / 2);
+  var cx = rx + NW / 2 + 12, cy = ry + NH / 2 + 12;
+  var W = cx * 2, H = cy * 2;
+
+  var pos = {};
+  pos[hub.id] = { x: cx, y: cy };
+  ring.forEach(function(node, i) {
+    // Start at the top and go clockwise; the half-step offset stops the first and
+    // last node overlapping when the count is even.
+    var a = -Math.PI / 2 + (2 * Math.PI * i) / n + (n % 2 === 0 ? Math.PI / n : 0);
+    pos[node.id] = { x: cx + rx * Math.cos(a), y: cy + ry * Math.sin(a) };
+  });
+
+  // Intrinsic width/height (not just a viewBox) so the CSS can bound it by height and
+  // let the width follow — without them the SVG has no natural size to scale down from.
+  var out = '<svg class="kg-svg" width="' + Math.round(W) + '" height="' + Math.round(H) + '" '
+    + 'viewBox="0 0 ' + Math.round(W) + ' ' + Math.round(H) + '" '
+    + 'preserveAspectRatio="xMidYMid meet" '
+    + 'role="img" aria-label="Knowledge graph for ' + kgEsc(hub.label) + '">';
+
+  // Edges first so node boxes paint over the lines.
+  edges.forEach(function(e) {
+    var s = pos[e.source], t = pos[e.target];
+    if (!s || !t) return;
+    out += '<line class="kg-edge" x1="' + s.x.toFixed(1) + '" y1="' + s.y.toFixed(1)
+        + '" x2="' + t.x.toFixed(1) + '" y2="' + t.y.toFixed(1) + '"/>';
+    var mx = (s.x + t.x) / 2, my = (s.y + t.y) / 2;
+    out += '<text class="kg-elabel" x="' + mx.toFixed(1) + '" y="' + (my - 3).toFixed(1)
+        + '" text-anchor="middle">' + kgEsc(String(e.rel || '').toLowerCase().replace(/_/g, ' ')) + '</text>';
+  });
+
+  function box(node, w, h, isHub) {
+    var p = pos[node.id];
+    var x = p.x - w / 2, y = p.y - h / 2;
+    var cls = 'kg-node kg-' + (node.health || 'neutral');
+    var title = [node.type, node.label, node.sub].filter(Boolean).join(' — ');
+    // Baselines are fractions of the box height, not fixed offsets, so changing the
+    // type scale + box size keeps the three lines evenly seated instead of drifting out.
+    var padX = 9;
+    var s = '<g class="' + cls + '"><title>' + kgEsc(title) + '</title>'
+      + '<rect x="' + x.toFixed(1) + '" y="' + y.toFixed(1) + '" width="' + w + '" height="' + h + '" rx="6"/>'
+      + '<text class="kg-type" x="' + (x + padX) + '" y="' + (y + h * 0.30).toFixed(1) + '">'
+      + kgEsc(isHub ? 'Customer' : node.type) + '</text>'
+      + '<text class="kg-name" x="' + (x + padX) + '" y="' + (y + h * (node.sub ? 0.60 : 0.70)).toFixed(1) + '">'
+      + kgEsc(kgTrim(node.label, isHub ? 30 : 28)) + '</text>';
+    if (node.sub) {
+      s += '<text class="kg-meta" x="' + (x + padX) + '" y="' + (y + h * 0.87).toFixed(1) + '">'
+        + kgEsc(kgTrim(node.sub, isHub ? 33 : 31)) + '</text>';
+    }
+    return s + '</g>';
+  }
+
+  ring.forEach(function(node) { out += box(node, NW, NH, false); });
+  out += box(hub, HW, HH, true);
+  return out + '</svg>';
+}
+
+function kgTrim(s, max) {
+  s = String(s == null ? '' : s);
+  return s.length > max ? s.slice(0, max - 1) + '…' : s;
+}
+
 window.closeTicketModal = function() {
   document.getElementById('ticketModal').classList.add('hidden');
 };
 document.addEventListener('keydown', function(e) {
   if (e.key === 'Escape') {
+    var gm = document.getElementById('graphModal');
+    if (gm && !gm.classList.contains('hidden')) { closeGraphModal(); return; }
     var tm = document.getElementById('ticketModal');
     if (tm && !tm.classList.contains('hidden')) closeTicketModal();
   }
