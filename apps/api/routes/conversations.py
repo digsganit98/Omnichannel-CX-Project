@@ -101,10 +101,19 @@ def turn_provenance(turn_id: str) -> dict:
     # whether this customer has records of the kind the answer mentions.
     account_context = _account_context_available(repo, turn)
 
+    # Is this reply part of an ongoing case, and which messages make up that case?
+    # Provenance answered only "graph or knowledge base" — a per-message fact — and could
+    # never show that a reply CONTINUES something. A follow-up on an open ticket rendered
+    # exactly like the first message of a brand-new one.
+    case = _case_for_turn(repo, turn)
+
     return {
         "turn_id": turn_id,
         "intent": intent,
         "retrieval_backend": backend,
+        # The ticket this reply belongs to, plus every message on it (oldest first) when
+        # there is more than one — i.e. only when there is real continuity to show.
+        "case": case,
         # "graph" → retrieval read this customer's records; "kb" → passages were retrieved;
         # "none" → no retrieval ran (a holding message, an offer, a canned reply).
         "source": "graph" if graph_backed else ("kb" if evidence else "none"),
@@ -121,6 +130,54 @@ def turn_provenance(turn_id: str) -> dict:
             }
             for ev in evidence
         ],
+    }
+
+
+def _case_for_turn(repo, turn: dict) -> dict | None:
+    """The ticket this reply belongs to and the customer messages on it, oldest first.
+
+    Read from SQLite rather than the graph: it is the system of record for ticket
+    attachment (the matching tiers all run against it), so it cannot drift out of sync
+    with what the conversation view shows.
+
+    Returns None when the reply has no ticket, or when the ticket has only one customer
+    message — a single message is not continuity, and claiming it is would overstate.
+    """
+    ticket_id = turn.get("ticket_id")
+    if not ticket_id:
+        return None
+    ticket = repo.get_ticket(ticket_id) or {}
+    # Only OUTBOUND turns carry ticket_id; the customer's own message does not. So walk the
+    # conversation in order and attribute each inbound message to the ticket of the reply
+    # that follows it — the same pairing the conversation view uses.
+    turns = repo.list_conversation_turns(turn.get("conversation_id") or "")
+    messages, pending = [], None
+    for t in turns:
+        if t.get("direction") == "inbound":
+            pending = t
+            continue
+        if pending is not None and t.get("ticket_id") == ticket_id:
+            messages.append({
+                "turn_id": pending.get("turn_id"),
+                "text": (pending.get("text") or "")[:200],
+                "channel": pending.get("channel"),
+                "created_at": pending.get("created_at"),
+                # Marks the exchange the agent clicked, so the panel can show where this
+                # reply sits within the case rather than just listing it.
+                "is_this_turn": t.get("turn_id") == turn.get("turn_id"),
+            })
+            pending = None
+    if len(messages) < 2:
+        return None
+    scope = (ticket.get("metadata") or {}).get("ticket_scope") or ""
+    return {
+        "ticket_id": ticket_id,
+        "status": ticket.get("status"),
+        "intent": ticket.get("intent"),
+        # "transaction_dispute:imps" → "imps": the specific matter this case narrowed to.
+        "scope": scope.split(":", 1)[1] if ":" in scope else "",
+        "channels": sorted({m["channel"] for m in messages if m.get("channel")}),
+        "messages": messages,
     }
 
 

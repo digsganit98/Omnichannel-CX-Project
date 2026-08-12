@@ -18,13 +18,17 @@ from shared.utils.ids import new_id
 
 
 class TicketManager:
-    def __init__(self, repository: CXRepository, crm: CRMClient | None = None, generator=None) -> None:
+    def __init__(self, repository: CXRepository, crm: CRMClient | None = None, generator=None,
+                 neo4j_client=None) -> None:
         self.repository = repository
         self.crm = crm or CRMClient()
         # Optional LLM used only by the tier-4 ticket referee (_referee_match).
         # Deliberately no default instance: without a generator the referee is
         # skipped and unmatched messages open a new ticket (pre-referee behavior).
         self.generator = generator
+        # Optional graph client, used only to keep a resolved ticket's status in step with
+        # the graph copy. Optional so every existing caller keeps working untouched.
+        self.neo4j_client = neo4j_client
 
     def create_or_get_ticket(
         self,
@@ -328,8 +332,44 @@ class TicketManager:
                 "crm_sync_error": result.error if result else None,
             },
         )
+        # Mirror the status onto the graph copy. Without this the Ticket node keeps
+        # status 'open' forever, and get_open_cases (which reads the GRAPH, not SQLite)
+        # keeps feeding a closed case to the model as trusted context — so a customer
+        # asking "anything pending?" after resolution would still be told their dispute
+        # is open. Best-effort: a graph failure must never block resolving a ticket.
+        if self.neo4j_client is not None:
+            try:
+                from services.neo4j_service import writer as neo4j_writer
+                neo4j_writer.upsert_ticket_node(
+                    self.neo4j_client,
+                    ticket_id=ticket_id,
+                    customer_id=self._graph_customer_id(ticket),
+                    intent=ticket.intent or "",
+                    priority=ticket.priority.value if hasattr(ticket.priority, "value") else str(ticket.priority),
+                    status=status.value,
+                    ticket_scope=(ticket.metadata or {}).get("ticket_scope"),
+                    title=ticket.title,
+                )
+            except Exception:
+                pass
         self._audit(ticket, "ticket_status_updated", {"status": status.value})
         return updated
+
+    def _graph_customer_id(self, ticket: Ticket) -> str:
+        """The ticket's customer as the GRAPH keys it (CRN…), not the SQLite id (cust_…).
+
+        upsert_ticket_node MATCHes on the graph id, so passing the SQLite one matches
+        nothing and writes zero rows silently — the same id-namespace trap as Fix 63.
+        """
+        try:
+            from services.neo4j_service.queries import get_customer_by_identifier
+            for row in self.repository.list_customer_identifiers(ticket.customer_id) or []:
+                found = get_customer_by_identifier(self.neo4j_client, row["identifier"])
+                if found:
+                    return found["customer_id"]
+        except Exception:
+            pass
+        return ticket.customer_id
 
     def _ticket(self, ticket_id: str) -> Ticket:
         ticket = self.repository.get_ticket(ticket_id)

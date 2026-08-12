@@ -58,6 +58,19 @@ def add_ticket_comment(ticket_id: str, payload: TicketComment) -> dict:
 @router.patch("/{ticket_id}/status")
 def update_ticket_status(ticket_id: str, payload: TicketStatusUpdate) -> dict:
     try:
-        return TicketManager(get_repository()).update_status(ticket_id, payload.status, payload.actor)
+        # Pass the graph client so resolving also updates the Ticket node — otherwise the
+        # graph keeps the ticket 'open' and the model is still told about a closed case.
+        return TicketManager(get_repository(), neo4j_client=_neo4j_client()).update_status(
+            ticket_id, payload.status, payload.actor
+        )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+def _neo4j_client():
+    """None when the graph is unreachable/disabled — status updates must still work."""
+    try:
+        from services.neo4j_service.client import Neo4jClient
+        return Neo4jClient()
+    except Exception:
+        return None

@@ -103,6 +103,8 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 63 — Tickets never reached Neo4j (id-namespace mismatch):** `_neo4j_customer_id` returned the SQLite `cust_…` id for whatsapp/email, so the graph's `MATCH (c:Customer {customer_id:'CRN…'})` matched nothing and every ticket/interaction write silently produced no node; now resolves the sender's phone/email to the real `CRN…` (backfill script added for the 8 pre-existing tickets).
 - **Fix 64 — Knowledge-graph view in the admin UI:** New read-only `/admin/customers/{id}/graph-view` endpoint returns the customer neighbourhood as `{nodes, edges}`; a "View knowledge graph" button at the top of the right panel opens a modal rendering it as a deterministic radial SVG, coloured by derived health.
 - **Fix 65 — "Why this answer" provenance panel:** New `/admin/conversations/turns/{id}/provenance` endpoint plus a per-reply button that shows whether an answer came from the customer's graph records or from retrieved KB passages; fixed a false "no account records were read" claim, a crash on the graph branch, and the button appearing on holding messages.
+- **Fix 77 — Resolving a ticket left the graph (and therefore the LLM) thinking it was still open:** `update_status` wrote only to SQLite, so the Neo4j Ticket node kept `status:'open'` forever. Because Fix 75's `get_open_cases` reads the **graph**, a resolved case was still handed to the model as trusted context — a customer asking *"anything pending?"* after resolution would be told their closed dispute was open. `update_status` now mirrors the status onto the graph node (best-effort; a graph failure never blocks resolving). Resolves the SQLite `cust_…` id to the graph `CRN…` first — passing the wrong namespace MATCHes nothing and writes zero rows silently, the same trap as Fix 63. Verified live: before → node `open`, LLM told about 2 cases; after → node `resolved`, LLM told about 1.
+- **Fix 76 — "Why this answer" now shows the CASE a reply continues, and stops drawing tickets it never read:** the provenance panel could say *where* an answer's data came from but never that a reply **continues** something — a follow-up on an open ticket rendered exactly like the first message of a new one. Added a `case` block (the reply's ticket, its scope, and every customer message on it, with the clicked exchange marked) rendered as a blue banner above the source section; suppressed when a ticket has only one message, since that is not continuity. Also **removed Ticket nodes from that graph**: it visualises the retrieval step, and `neo4j_answer` has no ticket branch — dimmed they implied "considered and not used", highlighted they would have been false. The case is stated by the banner instead. Separately, the right-panel 360 graph now shows **open tickets only** (resolved ones grew without bound on a canvas sized for ~12 nodes; history stays in Lineage and the portal).
 - **Fix 75 — The graph now tells the LLM what the customer is DEALING WITH, not just what they hold (Layer 2):** `get_customer_context_for_customer` loaded products only, so an open case reached the model **only if it happened to fall inside the 8-turn history window** — past that, a still-open ticket was invisible. Added `get_open_cases` (unresolved tickets, newest first, capped at 5) to the trusted account context. **Measured: 33 tokens when a case exists, 0 when none** (the block is omitted entirely). Verified live: *"Do I have anything pending with you?"* — a question naming nothing — returned *"you have an open support request regarding a transaction dispute… the Rs.20,766 POS purchase"*. Regression checked: an unrelated card question answered only the card question, with no drift into the dispute.
 - **Fix 74 — Conversation-view rows split when a customer interleaves topics:** a ticket's steps were grouped only while **consecutive**, at BOTH layers (theme grouping via `prevTicket`, and `buildUnits` via last-unit comparison). An unrelated question in the middle — dispute → loan → dispute — reset the run, so ONE ticket rendered as TWO rows under two separate theme headers, hiding the continuity the backend had just established. Now a returning ticket rejoins its original group (`ticketGroup` map) and `buildUnits` merges by key (`byKey` lookup). Verified by a simulation that first **reproduced the user's screenshots exactly** (3 groups / 3 rows) then showed the fix (2 groups / 2 rows). Frontend-only.
 - **Fix 73 — The knowledge graph knew what a customer HOLDS but not what they are DEALING WITH (write side):** `write_incoming_interaction` MERGEd on `conversation_id`, so every new message **overwrote the previous one** — a 12-turn conversation left a single Interaction node holding only the last sentence. Tickets and messages sat in the graph as disconnected islands, so continuity existed **only in SQLite** and the graph could never show a case history. Interactions are now keyed per **message** (`turn_id`), linked to their ticket by a new `HAS_MESSAGE` edge, and the Ticket node carries its `scope` and `title`. The graph can now answer "the whole case" in one query. Seeded per-conversation rows are untouched (the key falls back when no `turn_id` is passed).
@@ -2578,6 +2580,66 @@ transfer failed"*, goes to `fund_transfer` — arguably correct, and `fund_trans
 deliberately excluded as there is no payments integration); `neo4j_answer` returns real records for
 both tested customers; graph-view node slice confirmed (Sayantini 3 problem transactions of 8
 fetched, Fathima 1). Full suite **145 pass / 5 fail**, baseline exact.
+
+### Fix 76 — Continuity shown in "Why this answer"; tickets removed from that graph (Layer 3)
+**Built the wrong surface first, and the user caught it.** The ask was to show continuity *in the
+reply's provenance panel*. I built case-message nodes into the **right-panel 360 graph** instead —
+the surface I happened to be editing — and left the provenance panel untouched. Reverted, then built
+it where it was asked for.
+
+**What the panel could not do:** it reported *where* an answer's data came from (graph vs KB) but
+never that a reply **continues** an existing matter. The 2nd and 3rd replies of a dispute rendered
+exactly like the 1st message of a brand-new one.
+
+**Built:** `_case_for_turn` returns the reply's ticket, its scope, and every customer message on it
+(oldest first, the clicked exchange flagged) — rendered as a blue banner above the source section.
+Blue deliberately, not the amber used for a graph read: *"this continues a case"* is a different
+claim from *"this used your records"*, and both can be true at once. Returns nothing when the ticket
+has only one message, because one message is not continuity and showing a one-item "thread" would
+overstate it.
+
+**A bug caught mid-build:** I assumed inbound turns carry `ticket_id`. They do not — **only outbound
+turns do**. The first version would have returned zero messages every time. Fixed by pairing each
+customer message with the reply that follows it, the same pairing the conversation view uses.
+
+**Tickets removed from the provenance graph.** The user asked why a ticket node was drawn but never
+highlighted. The honest answer is that the picture visualises the **retrieval** step, and
+`neo4j_answer` has branches for accounts, cards, loans, policies, claims and transactions — **none
+for tickets**. Dimmed they implied "considered and not used"; highlighted they would have been false.
+The banner above states the case instead, so the two claims sit on the surfaces that own them.
+
+**Correcting myself on record:** I told the user *"tickets are never read"*. That was true of
+retrieval only, and it flatly contradicted Fix 75, which reads open tickets into the trusted context
+on **every** message. Tickets are read — at the context step, not the retrieval step.
+
+**Right-panel 360 graph: open tickets only** (user's decision). Resolved tickets accumulate forever
+while the radial layout is sized for ~12 nodes, so a long-standing customer's products would
+eventually be crowded out by their history. Matches the "Open Tickets (N)" card (Fix 47); resolved
+history stays in Lineage and the portal.
+
+### Fix 77 — Resolving a ticket left the graph, and the model, thinking it was open
+**Found by the user asking what happens when a ticket is resolved** — a path I had never tested.
+
+`update_status` wrote only to SQLite. The Neo4j Ticket node kept `status:'open'` permanently. Since
+Fix 75's `get_open_cases` reads the **graph**, a resolved case was still fed to the model as trusted
+context: resolve a dispute, ask *"anything pending?"*, and the reply would confidently say the closed
+case was open. **A bug I introduced with Fix 75 and missed by never exercising the resolve path.**
+
+`update_status` now mirrors the status onto the graph node — best-effort, so a graph failure can
+never block resolving a ticket, and the client is optional so every existing caller is unaffected.
+The ticket's SQLite `cust_…` id is resolved to the graph `CRN…` first: `upsert_ticket_node` MATCHes
+on the graph id, so passing the wrong namespace matches nothing and writes **zero rows silently** —
+the identical trap as Fix 63.
+
+**Verified live:** before → node `open`, `get_open_cases` returned 2 cases; after resolving → node
+`resolved`, 1 case. Full suite **145 pass / 5 fail**, baseline.
+
+**A second correction, recorded because the user had to ask twice.** Asked what resolving does, I
+described the endpoint's call chain and stopped there — presenting it as the complete picture. It was
+not. Analytics (open/resolved counts, resolution rate, avg resolution time, SLA breaches),
+agent-assist recommendation retirement (Fix 11), and the attrition scorer's "stuck ticket" signal all
+read ticket status **independently**, so tracing the call chain never reaches them. Same failure mode
+as earlier in the session: verified one path, described it as the whole.
 
 ### Fix 75 — Open cases added to the trusted account context (Layer 2 of 3)
 Layer 1 made the history exist in the graph; nothing read it. `get_customer_context_for_customer`

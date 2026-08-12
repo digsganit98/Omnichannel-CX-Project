@@ -877,3 +877,18 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .kg-edge.kg-dim{opacity:.22}
 .why-pts{margin:5px 0 0;padding-left:16px;list-style:disc}
 .why-pts li{font-size:11px;line-height:1.45;color:var(--t2);margin-top:2px}
+/* Continuity: the case this reply belongs to. Blue (not the amber used for a graph
+   read) so "this continues a case" is visibly a different claim from "this read your
+   records" — the two can appear together. */
+.why-banner--case{border-left-color:var(--blue);background:var(--blue-bg);border-color:var(--blue-bd)}
+.why-case-list{margin:8px 0 0;padding:0;list-style:none;counter-reset:none}
+.why-case-msg{display:grid;grid-template-columns:18px 1fr auto;gap:6px 8px;align-items:baseline;
+  padding:5px 7px;border-radius:var(--rs);background:var(--surf);border:1px solid var(--bdr);
+  margin-top:4px}
+/* The exchange the agent clicked, so its place in the case is obvious at a glance. */
+.why-case-msg.is-this{border-color:var(--blue-bd);background:#fff;box-shadow:inset 2px 0 0 var(--blue)}
+.why-case-n{font-size:9.5px;font-weight:700;color:var(--t3);font-variant-numeric:tabular-nums}
+.why-case-txt{font-size:11.5px;line-height:1.45;color:var(--t1)}
+.why-case-meta{font-size:9.5px;color:var(--t3);white-space:nowrap;font-variant-numeric:tabular-nums}
+.why-case-here{grid-column:2/-1;font-size:9px;font-weight:700;letter-spacing:.03em;
+  text-transform:uppercase;color:var(--blue-t)}

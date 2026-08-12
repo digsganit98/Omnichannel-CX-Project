@@ -10,6 +10,7 @@ from services.neo4j_service.client import Neo4jClient
 from services.attrition_service.scorer import score_attrition
 from services.neo4j_service.queries import (
     get_accounts,
+    get_case_messages,
     get_claim_status,
     get_credit_cards,
     get_customer_by_id,
@@ -218,17 +219,36 @@ def customer_graph_view(customer_id: str) -> dict:
             health, "HAS_CLAIM", source=parent, props=cl)
 
     # Tickets (Fix 63 put these in the graph; read them from SQLite, the system of record).
+    # OPEN ONLY — a resolved ticket is closed business, and including them let one node type
+    # grow without bound: a long-standing customer accumulates tickets forever while the
+    # radial layout is sized for ~12 nodes, so their products would eventually be crowded
+    # out by their history. Matches the right panel's "Open Tickets (N)" card (Fix 47).
+    # Resolved-ticket history stays visible in Lineage and the portal's My Tickets.
+    ticket_ids: list[str] = []
     try:
         for t in get_repository().list_tickets():
             if t.get("customer_id") != customer_id:
                 continue
             st = str(t.get("status") or "").lower()
+            if st in ("resolved", "closed"):
+                continue
+            scope = ((t.get("metadata") or {}).get("ticket_scope") or "")
+            # "transaction_dispute:imps" → "imps": the specific matter, so two disputes
+            # are distinguishable instead of rendering as identical nodes.
+            detail = scope.split(":", 1)[1] if ":" in scope else ""
             add(f"tkt:{t.get('ticket_id')}", "Ticket", t.get("ticket_id") or "Ticket",
-                f"{t.get('intent') or ''} · {t.get('status')}",
-                "neutral" if st in ("resolved", "closed") else "warn",
+                f"{t.get('intent') or ''}{' · ' + detail if detail else ''} · {t.get('status')}",
+                "warn",  # every ticket reaching here is open — resolved ones are skipped above
                 "HAS_TICKET", props={k: t.get(k) for k in ("ticket_id", "intent", "status", "priority")})
+            ticket_ids.append(t.get("ticket_id"))
     except Exception as exc:
         logger.warning("graph_view_tickets_failed customer=%s: %s", customer_id, exc)
+
+    # Case messages are deliberately NOT added here. This panel is the customer's
+    # 360 — what they hold and which cases are open — and per-message nodes crowd it
+    # without adding to that. They belong in the per-reply provenance view, where the
+    # question is "does THIS reply continue an existing case?" (see
+    # conversations.py::turn_provenance, which returns the reply's own ticket + messages).
 
     counts: dict[str, int] = {}
     for n in nodes:

@@ -220,6 +220,30 @@ def get_open_cases(client, customer_id: str, limit: int = 5) -> list[dict]:
         return []
 
 
+def get_case_messages(client, ticket_id: str, limit: int = 4) -> list[dict]:
+    """The messages attached to one ticket, newest first (see writer.link_interaction_to_ticket).
+
+    Only exists because Interactions are now written per message and linked to their
+    ticket; before that the graph held one node per conversation holding the newest
+    sentence, so "the messages of this case" was not answerable.
+    """
+    if client is None or not ticket_id:
+        return []
+    try:
+        return client.query(
+            """
+            MATCH (t:Ticket {ticket_id: $tid})-[:HAS_MESSAGE]->(i:Interaction)
+            RETURN i.turn_id AS turn_id, i.message AS message, i.channel AS channel,
+                   i.created_at AS created_at, i.status AS status
+            ORDER BY i.created_at DESC
+            LIMIT $limit
+            """,
+            {"tid": ticket_id, "limit": limit},
+        )
+    except Exception:
+        return []
+
+
 def get_customer_context_for_customer(client, customer: dict | None) -> dict:
     """Return a rich context dict for an already resolved Neo4j customer."""
     if not customer:

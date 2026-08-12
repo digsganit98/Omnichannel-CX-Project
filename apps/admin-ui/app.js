@@ -2638,7 +2638,11 @@ window.loadUserTickets = async function() {
 // physics sim — because the inbox re-polls every ~3s and a jittering graph is
 // unreadable. Health (not node type) drives colour, so "needs attention" reads
 // at a glance.
-var KG_TYPE_ORDER = ['Account', 'CreditCard', 'FixedDeposit', 'Loan', 'Policy', 'Claim', 'Ticket'];
+// Transaction and Message were missing, so those nodes sorted after every known type
+// and their ring position shifted as unrelated nodes appeared. Message sits last, right
+// after Ticket, so a case's messages render beside the ticket they belong to.
+var KG_TYPE_ORDER = ['Account', 'CreditCard', 'FixedDeposit', 'Loan', 'Policy', 'Claim',
+                     'Transaction', 'Ticket', 'Message'];
 
 window.closeGraphModal = function() {
   document.getElementById('graphModal').classList.add('hidden');
@@ -2666,10 +2670,14 @@ async function openWhyModal(turnId) {
     document.getElementById('whyModalSub').textContent =
       [p.intent ? 'intent · ' + p.intent : '', p.retrieval_backend ? 'retrieval · ' + p.retrieval_backend : '']
         .filter(Boolean).join(' · ');
+    // Continuity first: WHERE the data came from (graph vs KB) is a per-message fact, but
+    // whether this reply CONTINUES an existing case is the thing an agent needs first —
+    // and it renders above the source, not instead of it.
+    var caseHtml = renderWhyCase(p.case);
     if (p.source === 'graph') {
-      body.innerHTML = await renderWhyGraph(p);
+      body.innerHTML = caseHtml + await renderWhyGraph(p);
     } else if (p.source === 'kb') {
-      body.innerHTML = renderWhyKb(p);
+      body.innerHTML = caseHtml + renderWhyKb(p);
     } else if (p.source === 'holding') {
       body.innerHTML = '<div class="why-none">Automatic holding message, not an answer.<br>'
         + 'The real reply is a draft awaiting agent review.</div>';
@@ -2684,6 +2692,37 @@ async function openWhyModal(turnId) {
   }
 }
 
+// Continuity: the case this reply belongs to, and every customer message on it.
+// Absent (returns '') when the reply has no ticket or the ticket has a single message —
+// one message is not continuity, and showing a one-item "thread" would overstate it.
+function renderWhyCase(c) {
+  if (!c || !(c.messages || []).length) return '';
+  var chan = (c.channels || []).length > 1
+    ? ' · ' + c.channels.map(function(x) { return CH[x] ? CH[x].label : x; }).join(' + ')
+    : '';
+  var rows = c.messages.map(function(m, i) {
+    var when = m.created_at ? new Date(m.created_at).toLocaleString([], {
+      day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit'
+    }) : '';
+    return '<li class="why-case-msg' + (m.is_this_turn ? ' is-this' : '') + '">'
+      + '<span class="why-case-n">' + (i + 1) + '</span>'
+      + '<span class="why-case-txt">' + escH(m.text || '') + '</span>'
+      + '<span class="why-case-meta">' + escH((m.channel || '') + (when ? ' · ' + when : '')) + '</span>'
+      + (m.is_this_turn ? '<span class="why-case-here">this reply</span>' : '')
+      + '</li>';
+  }).join('');
+  return '<div class="why-banner why-banner--case">'
+    + '<b>Part of an ongoing case</b>'
+    + '<ul class="why-pts">'
+    + '<li>Ticket <code>' + escH(c.ticket_id || '') + '</code>'
+    + (c.scope ? ' · ' + escH(c.scope) : '') + ' · ' + escH(statusLabel(c.status || ''))
+    + escH(chan) + '</li>'
+    + '<li>' + c.messages.length + ' messages on this case — the reply below was written with them in view.</li>'
+    + '</ul>'
+    + '<ol class="why-case-list">' + rows + '</ol>'
+    + '</div>';
+}
+
 // Graph-backed: reuse the customer's own graph, dimming everything the answer didn't read.
 async function renderWhyGraph(p) {
   var head = '<div class="why-banner why-banner--graph"><b>Read from this customer\'s records</b>'
@@ -2696,6 +2735,16 @@ async function renderWhyGraph(p) {
   if (!custId) return head;
   var gv = await api('/admin/customers/' + encodeURIComponent(custId) + '/graph-view');
   if (!gv || !gv.resolved) return head;
+  // This picture answers ONE question: which of the customer's records did retrieval read
+  // for this reply? Tickets take no part in that step — neo4j_answer has branches for
+  // accounts, cards, loans, policies, claims and transactions, and none for tickets. Drawn
+  // here they can only mislead: dimmed they imply "considered and not used", highlighted
+  // they would be false. The case a reply belongs to IS shown — by the continuity banner
+  // above (renderWhyCase), which is the surface that claim actually belongs to.
+  gv.nodes = gv.nodes.filter(function(n) { return n.type !== 'Ticket'; });
+  var kept = {};
+  gv.nodes.forEach(function(n) { kept[n.id] = true; });
+  gv.edges = gv.edges.filter(function(e) { return kept[e.target]; });
   var keep = {};
   (p.graph_types || []).forEach(function(t) { keep[t] = true; });
   gv.nodes.forEach(function(n) { n.dim = !(n.health === 'hub' || keep[n.type]); });
