@@ -102,6 +102,7 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 62 — Client-demo solution overview doc:** New `docs/client-demo-solution-overview.md` — capabilities plus deep dives on LLM, RAG, agent architecture, WhatsApp, email, and the knowledge layer (graph DB + KB); architecture, 13-step flow, demo path, per-area production scope, prepared answers to 4 anticipated client questions (guardrails / local-LLM / human-review cost / TAM), and verified live-state/risk list; plus a Word export (`.docx`) via a new reusable `infra/scripts/md2docx.py`.
 - **Fix 63 — Tickets never reached Neo4j (id-namespace mismatch):** `_neo4j_customer_id` returned the SQLite `cust_…` id for whatsapp/email, so the graph's `MATCH (c:Customer {customer_id:'CRN…'})` matched nothing and every ticket/interaction write silently produced no node; now resolves the sender's phone/email to the real `CRN…` (backfill script added for the 8 pre-existing tickets).
 - **Fix 64 — Knowledge-graph view in the admin UI:** New read-only `/admin/customers/{id}/graph-view` endpoint returns the customer neighbourhood as `{nodes, edges}`; a "View knowledge graph" button at the top of the right panel opens a modal rendering it as a deterministic radial SVG, coloured by derived health.
+- **Fix 65 — "Why this answer" provenance panel:** New `/admin/conversations/turns/{id}/provenance` endpoint plus a per-reply button that shows whether an answer came from the customer's graph records or from retrieved KB passages; fixed a false "no account records were read" claim, a crash on the graph branch, and the button appearing on holding messages.
 
 ---
 
@@ -2144,8 +2145,102 @@ horizontal space and crosses edges through the hub.
 user was actually asking about. Verifying the easy-to-measure property and treating it as proof of the
 requested one is the failure mode; the renderer should have been eyeballed locally before deploying.
 
+### Graph-view sizing — eight rounds, reverted (recorded because the lesson is the point)
+After Fix 64 shipped, the user asked for a bigger modal with the graph filling it and small text.
+Eight deploy-and-check rounds followed and **none of them landed**; the work was reverted to
+`9169149`, which is the restore point. Worth recording *why*, since the failure was methodological:
+- Each round tuned coupled variables — font size, box size, gap size, modal width, viewBox units —
+  by reasoning about numbers, then asked the user to look. **The user was acting as the rendering
+  engine.** A designer with the page open would have solved it in minutes.
+- The verification was the deeper problem: a checker reported `overlaps=0, off-canvas=0` every time
+  and I reported "CLEAN". True and irrelevant — the user was asking *"does this look right?"*, which
+  no geometry script answers. Measuring the convenient property and treating it as proof of the
+  requested one is the same failure that recurs in Fix 65 below.
+- Two real findings did come out of it: the radius formula sized a **circular** layout with a
+  **linear** budget (`62 * n`), inflating the canvas to 1326x912; and `width:max-content` makes the
+  modal hug the graph, so "bigger window" requires growing the *graph*, not the container. A later
+  attempt to compensate font sizes by the scale factor is a **no-op** — dividing by the same factor
+  the browser multiplies by cancels exactly.
+Left as-is deliberately: the feature works, the sizing is polish, and demo readiness mattered more.
+
+### Fix 65 — "Why this answer" provenance panel (Phases 3+4 of the graph plan, as one feature)
+**Why both phases together:** Phase 3 (highlight the graph nodes an answer used) fires only on the
+6 `TRANSACTIONAL_INTENTS`; measured on live data that was **2 of 24 inbound turns (8%)**. Phase 4
+(show the KB passages instead) covers the other 96%. Built alone, Phase 3 would be a button that
+mostly reports the graph *wasn't* used — so they ship as one surface answering "where did this
+answer come from?" on every reply.
+
+**Built:** `GET /admin/conversations/turns/{turn_id}/provenance`
+([conversations.py](../apps/api/routes/conversations.py)) returns
+`{source, intent, retrieval_backend, graph_types, account_context, citations}`; a
+**"Why this answer?"** button on each reply in the Detailed view opens a modal rendering either the
+customer's graph with the read node types highlighted (reusing `renderGraphSvg` with a dim flag) or
+the retrieved passages with their retrieval confidence.
+
+**Three defects found by verifying against live data, all fixed:**
+1. **The panel asserted something false.** It said *"no account records were read"* on replies that
+   demonstrably used account data (e.g. *"when is my FD maturity date?"* returning a real date). Root
+   cause: there are **two** paths to the model and the panel knew only one. `graph.py` loads
+   `graph_context` for **every** message and the generator renders it into a trusted account slot
+   **independent of retrieval** — so a misclassified question can answer from real records while
+   retrieval fetched something unrelated. Now reports `account_context` separately rather than
+   asserting absence.
+2. **The graph branch crashed** — `state.conversations` / `state.selected` do not exist (the real
+   names are `state.convs` / `state.selectedConvId`). That path had never been executed.
+3. **The button appeared on holding messages**, where the real reply is still a pending draft, so any
+   retrieval shown belonged to text the customer never received. Now excluded in UI *and* endpoint
+   (`source: "holding"`).
+
+**A fix prototyped and DROPPED:** suppressing citations below a confidence threshold. The measured
+distribution kills it — incorrect citations scored **0.62-0.63**, correct ones **0.63-0.67**, and
+nothing scored below 0.3 except holding messages. No cutoff separates them, so the threshold would
+have suppressed nothing while implying a high score means "this is the source". The panel states the
+caveat in plain words instead.
+
+**Label:** `score` -> **`retrieval confidence`**, the term the codebase already uses
+(`retrieval_confidence` on `reply_drafts`, `low_retrieval_confidence` in Rule 8). An earlier pass
+invented "match" — a new word for an existing concept.
+
+**Verification (0 Groq).** An audit script (session scratchpad) calls the endpoint for **every** reply
+in the DB and flags disagreements between a reply's content and the panel's claim. First run: 13
+flagged. **9 were the script's own fault** — it compared citations against *"Support Agent will help
+you shortly"*, which is not an answer; excluding holding messages gave the true count of 4. Then
+hand-checked 10 unflagged replies: **9 of 10** cite a passage that genuinely relates to the answer.
+The user had found 2 defects by hand and the script found more in one run — the lesson being that an
+automated sweep should have existed **before** the feature was shown, not after.
+
+### Two root causes diagnosed this session, NOT yet fixed
+Both block a clean fresh-start demo and are the agreed next work:
+
+- **KB ingestion is broken at two levels.** The source PDF stores each word as a separate text object,
+  so `pypdf` emits `\n \n` between words (333 occurrences; **20.7% of page-1 text is whitespace**) and
+  [documents.py](../services/rag_service/documents.py) uses that output verbatim. The mangled
+  whitespace then destroys the separators `RecursiveCharacterTextSplitter(800,120)` relies on, so it
+  cuts on raw character count: **7 of 9 chunks contain 2 `Q:` markers** (the tail of one FAQ plus the
+  head of an unrelated one) and 7 of 8 start mid-word. That is why one chunk can score 0.62 against
+  almost any question — it genuinely *is* partly relevant. **The PDF content itself is fine: it holds
+  14 well-formed Q&A pairs.** Prototyped fix (normalise whitespace, split on `Q:`) yields **14
+  single-topic chunks, 281-367 chars, 0 spanning multiple topics**. Needs a KB re-index.
+
+- **The intent guardrail's allow-list is incomplete.** `CXAgent._apply_guardrails`
+  ([cx_agent.py](../services/agent_service/cx_agent.py)) lets the rule classifier correct the LLM for
+  only five `boundary_intents`; **`CARD_MANAGEMENT`, `POLICY_STATUS` and `ACCOUNT_BALANCE_INQUIRY` are
+  missing** — all three transactional, i.e. exactly the intents that unlock graph reads. Verified
+  directly (0 Groq): the rule classifier returns `card_management` at **0.79** for *"What is my credit
+  card limit?"* and `policy_status` at **0.79** for the premium-due question, and both are discarded
+  because those intents are not on the list. Separately, **no keyword set contains `fixed
+  deposit`/`FD`/`maturity`**, so FD questions cannot be rule-classified at all. Net effect: **exactly
+  one reply in the entire database renders the graph view**, making the Fix 64 feature look unused.
+  Fixing this also changes ticketing/escalation routing, so it needs the full suite.
+
 ### State at end of session
 Fix 63 live in the rebuilt api image; graph now holds 8 Ticket nodes linked to their real customers.
-Fix 64 (graph endpoint + renderer + modal) live in the rebuilt image and **committed as the
-pre-resize restore point** — the user explicitly wanted a recoverable version before further visual
-changes. Phase 3 (answer-path highlight) not started.
+Fix 64 (graph endpoint + renderer + modal) live and committed as the **pre-resize restore point**
+(`9169149`) after the sizing work was reverted. Fix 65 live and committed (`98a8906`). Fixes 63+64
+were also **cherry-picked onto `origin/fathimaphase2`** (`eda3c37..9ca0555`, fast-forward) at the
+user's instruction — note that branch carries **20 unresolved conflict markers in `classifier.py`**
+from her own earlier merge, so it will not import until she fixes them; that breakage predates the
+push. WhatsApp verified end-to-end live (inbound -> Groq reply -> delivered `read` in ~10s; ngrok
+domain correct, SYSTEM_USER token valid to 2026-09-23). Stack stopped cleanly at session end.
+**Next:** the two root causes above, then a curated question set per customer grounded in real
+holdings, then re-verify.
