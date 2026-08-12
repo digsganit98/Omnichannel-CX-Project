@@ -22,6 +22,7 @@ Regenerate with the scratchpad script `verify_questions.py` if the seed data eve
 | Claim | `claim_status` | `retrieval · neo4j_graph`, Claim highlighted |
 | Policy / premium | `policy_status` | `retrieval · neo4j_graph`, Policy highlighted |
 | Loan | `loan_status` | `retrieval · neo4j_graph`, Loan highlighted |
+| Transaction dispute | `transaction_dispute` | `retrieval · neo4j_graph`, Transaction highlighted |
 | FAQ (below) | `general_inquiry` etc. | `retrieval · opensearch_vector` / `keyword_fallback` + the cited FAQ |
 
 ---
@@ -38,6 +39,7 @@ Holds: CSA salary account, Mastercard Classic, FD, Health policy, 3 claims.
 | 4 | What is my account balance? | `40900000100001` | account_balance_inquiry |
 | 5 | What is the status of my insurance claim? | `CLM001003` | claim_status |
 | 6 | When is my next insurance premium due? | `2026-10-23` | policy_status |
+| 7 | I want to dispute a transaction on my account | `TXN0001000003` | transaction_dispute |
 
 **Demo notes.** Richest customer — best for the knowledge-graph view. Her card is **45 days
 past due** with `Rs.91,821.95` outstanding, which drives an **Attrition risk: High** band, and
@@ -105,6 +107,7 @@ Holds: 2 savings accounts, Personal loan (EMI overdue), Term + Auto policies, 3 
 | 2 | What is the status of my claim? | `CLM001015` | claim_status |
 | 3 | When is my term insurance premium due? | `2026-07-02` | policy_status |
 | 4 | What is my savings account balance? | `5,446` | account_balance_inquiry |
+| 5 | There is an incorrect charge on my account | `TXN0001000067` | transaction_dispute |
 
 **Demo note.** Her personal loan is **EMI overdue** and she has a **disputed** charge
 (`CHG00100002`, `MinBalanceNonMaintenance`, `Rs.264.83`) — good material for the dispute and
@@ -145,9 +148,64 @@ want to show human-in-the-loop**, lead with a loan or claim question and approve
 
 ---
 
+## Ticket continuity scenarios (the omnichannel story)
+
+Everything above is a **single-turn question**, which proves answers are correct but shows nothing
+about continuity — the thing that makes this an omnichannel system rather than a chatbot.
+
+**Continuity does not require three channels to demonstrate.** Ticket matching keys on
+`conversation_id` + `ticket_scope` (`ticket_manager.py`); the **channel is never part of the
+matching logic**, only a label stored on the turn. So running a scenario entirely on web chat
+exercises the identical code path a WhatsApp→email follow-up takes. Sending on a second channel
+changes the dot colour in Lineage, not the behaviour being proven.
+
+Run each scenario as consecutive messages from the SAME customer.
+
+### Scenario A — vague opener, then specifics (scope refinement)
+| Step | Message | Expected |
+|---|---|---|
+| 1 | I want to dispute a transaction on my account | Ticket created, scope `transaction_dispute:other` |
+| 2 | It was the Rs.5,776 IMPS transfer to Samarth Thaker | **Same ticket**, scope refined — NOT a second ticket |
+| 3 | Any update on my dispute? | **Same ticket** again (matched by the LLM referee) |
+
+**Point at:** one ticket ID across all three exchanges in Lineage; the Detailed view showing three
+exchanges under one request node.
+
+### Scenario B — genuinely different matters must NOT merge
+| Step | Message | Expected |
+|---|---|---|
+| 1 | I want to dispute a card transaction | Ticket A |
+| 2 | I also have a problem with a UPI payment | **Ticket B** — a separate incident |
+
+**Point at:** two distinct ticket IDs. This is the counter-example that proves the system is
+matching rather than merging everything — worth showing right after Scenario A.
+
+### Scenario C — topic switch inside one conversation
+| Step | Message | Expected |
+|---|---|---|
+| 1 | What is my credit card limit? | Card theme, no ticket |
+| 2 | When is my FD maturity date? | **Separate theme group**, no ticket |
+| 3 | I want to dispute a transaction | Third theme, ticket created |
+
+**Point at:** three theme headers in the Detailed view; the conversation stays one thread while the
+topics are visibly separated.
+
+**Not yet verified end-to-end.** Unlike the single-turn questions above, these scenarios have not
+been run since the fixes — the expected behaviour is read from the ticket-matching code, not
+observed. Rehearse them once before demoing.
+
+---
+
 ## Known gaps
 
 - **Unverified senders** get "Dear Customer" and no graph data — by design (Fix 59/60).
-- **`transaction_dispute` is deliberately excluded** from graph reads (no transaction records
-  wired), so dispute questions answer from the KB.
+- **In the graph but never read when answering:** `ChargePenalty` (7 nodes), `KYC` (5), `Product`
+  (20, used by the offers engine only), `Interaction` (21, seeded history). No intent routes to
+  them, so questions about a penalty charge or KYC status answer from the KB.
+- **Dates in the seed are fixed and will age.** Sayantini's card payment due date (`2026-07-08`) is
+  already past, and 3 of the 4 FDs are `Matured` with 2021-2023 dates. Answers are still correct
+  about the record; they just describe the past.
+- **Multi-account customers** (Sireesha, Digvijay have 2 savings accounts) get both accounts in a
+  balance answer, with no way to disambiguate "my savings account" in a follow-up.
 - The **Escalate** button is a UI stub — do not click it during a demo.
+- `"scam"` does not match `"scammed"` (doubled-consonant inflections are not stemmed).

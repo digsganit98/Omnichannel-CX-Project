@@ -17,6 +17,7 @@ from services.neo4j_service.queries import (
     get_fixed_deposits,
     get_loan_status,
     get_policy_status,
+    get_transactions,
 )
 
 logger = logging.getLogger(__name__)
@@ -180,6 +181,22 @@ def customer_graph_view(customer_id: str) -> dict:
             f"{_fmt_inr(l.get('amount_inr'))} · {l.get('status')}",
             "ok" if str(l.get("status")).lower() == "active" else "neutral",
             "HAS_LOAN", props=l)
+
+    # Transactions are the one product a customer has DOZENS of (72 across the 5 demo
+    # customers), so they cannot all join a radial layout sized for ~12 nodes. Only the
+    # ones a dispute is actually about are shown: any transaction not in a settled state,
+    # plus the most recent few. A fully-settled history contributes no nodes at all.
+    transactions = get_transactions(client, cid, limit=8)
+    unsettled = [t for t in transactions
+                 if str(t.get("status") or "").lower() not in ("success", "settled", "completed")]
+    for t in (unsettled or transactions[:3]):
+        status = str(t.get("status") or "")
+        settled = status.lower() in ("success", "settled", "completed")
+        add(f"txn:{t.get('txn_id')}", "Transaction",
+            f"{t.get('txn_type') or 'Txn'} {_fmt_inr(t.get('amount'))}",
+            f"{t.get('channel') or ''} · {status}".strip(" ·"),
+            "ok" if settled else "warn",
+            "HAS_TRANSACTION", props=t)
 
     # Policies hold their claims — the two-hop shape a flat list cannot show.
     policies = get_policy_status(client, cid)

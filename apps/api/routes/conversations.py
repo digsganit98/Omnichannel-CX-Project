@@ -23,6 +23,7 @@ INTENT_GRAPH_TYPES = {
     "policy_status": ["Policy", "Claim"],
     "card_management": ["CreditCard"],
     "account_balance_inquiry": ["Account", "FixedDeposit"],
+    "transaction_dispute": ["Transaction"],
 }
 
 

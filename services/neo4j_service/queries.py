@@ -2,10 +2,13 @@
 
 # Intents where Neo4j has real customer data to return.
 # fund_transfer excluded: no live payments integration.
-# transaction_dispute excluded: no transactions table — neo4j_answer() always returned None
-# for it, wasting a Neo4j round-trip before falling to RAG + MANUAL_REVIEW escalation.
 # account_balance_inquiry answers from the graph's account/FD records (demo data, not a
 # live banking feed) so card/account/FD questions return real figures instead of escalating.
+# transaction_dispute WAS excluded on the stated grounds of "no transactions table". That
+# was wrong: the seed loads a Transaction node per row of the Transactions sheet (72 for the
+# 5 demo customers), including real failure states such as 'Debited-Pending-Credit' with a
+# reason. The exclusion meant the single most common inbound intent answered from the generic
+# KB while the customer's own disputed transaction sat unread in the graph.
 TRANSACTIONAL_INTENTS = {
     "loan_status",
     "loan_default_notice",
@@ -13,6 +16,7 @@ TRANSACTIONAL_INTENTS = {
     "policy_status",
     "card_management",
     "account_balance_inquiry",
+    "transaction_dispute",
 }
 
 
@@ -343,5 +347,27 @@ def neo4j_answer(client, intent: str, customer_id: str) -> str | None:
                 )
         return "\n".join(lines)
 
-    # transaction_dispute → no transaction table; returns None → RAG → Rule 2 still fires (MANUAL_REVIEW)
+    if intent == "transaction_dispute":
+        # Most recent transactions, newest first (get_transactions orders by date DESC).
+        # Capped at 8: a dispute is nearly always about a recent debit, and the whole block
+        # is pasted into the prompt — 20 rows would crowd out the customer's actual question.
+        # Failed/pending rows are surfaced explicitly because they are what a dispute is
+        # usually about, and the seed carries real ones ('Debited-Pending-Credit' with a
+        # reason), which a generic KB answer cannot mention.
+        transactions = get_transactions(client, customer_id, limit=8)
+        if not transactions:
+            return None  # Fall through to RAG
+        lines = ["Recent transaction records (newest first):"]
+        for txn in transactions:
+            failure = f", Issue: {txn['failure_reason']}" if txn.get("failure_reason") else ""
+            beneficiary = f", To: {txn['beneficiary_name']}" if txn.get("beneficiary_name") else ""
+            lines.append(
+                f"  - {txn.get('txn_date', '')} {txn.get('txn_type', '')} "
+                f"{_fmt_amount(txn.get('amount'))} via {txn.get('channel', 'N/A')} "
+                f"(ID: {txn.get('txn_id', '')}): "
+                f"Status: {txn.get('status', 'Unknown')}"
+                f"{beneficiary}{failure}"
+            )
+        return "\n".join(lines)
+
     return None

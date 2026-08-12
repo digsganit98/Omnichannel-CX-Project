@@ -103,6 +103,7 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 63 — Tickets never reached Neo4j (id-namespace mismatch):** `_neo4j_customer_id` returned the SQLite `cust_…` id for whatsapp/email, so the graph's `MATCH (c:Customer {customer_id:'CRN…'})` matched nothing and every ticket/interaction write silently produced no node; now resolves the sender's phone/email to the real `CRN…` (backfill script added for the 8 pre-existing tickets).
 - **Fix 64 — Knowledge-graph view in the admin UI:** New read-only `/admin/customers/{id}/graph-view` endpoint returns the customer neighbourhood as `{nodes, edges}`; a "View knowledge graph" button at the top of the right panel opens a modal rendering it as a deterministic radial SVG, coloured by derived health.
 - **Fix 65 — "Why this answer" provenance panel:** New `/admin/conversations/turns/{id}/provenance` endpoint plus a per-reply button that shows whether an answer came from the customer's graph records or from retrieved KB passages; fixed a false "no account records were read" claim, a crash on the graph branch, and the button appearing on holding messages.
+- **Fix 71 — `transaction_dispute` answered from the KB while 72 real transactions sat unread in the graph:** the intent was excluded from `TRANSACTIONAL_INTENTS` on the stated grounds of "no transactions table". **That comment was wrong** — the seed loads a `Transaction` node per row of the Excel Transactions sheet (72 across the 5 customers), and `get_transactions()` already existed but was never called by `neo4j_answer`. Since `transaction_dispute` was the **most common inbound intent** (7 of 24 turns in the pre-wipe data), the single most frequent question type answered from a generic FAQ while the customer's own `Debited-Pending-Credit` transaction — with a real failure reason — was one query away. Wired the branch (8 most recent, newest first), added `Transaction` to the provenance highlight map, and added problem-transaction nodes to the knowledge-graph view (unsettled only, else the 3 most recent — 72 nodes cannot join a radial layout sized for ~12).
 - **Fix 70 — Keyword matching was substring-based, so "pr-emi-um" scored as a loan (broke EVERY insurance question):** `classify_intent` tested `keyword in lowered`, so the `loan_status` keyword **`"emi"` matched inside "premium"** — every premium question scored 1 for `loan_status` *and* 1 for `policy_status`, and `max()` broke the tie by declaration order, routing all insurance premium questions to Loans. Found by verifying 22 grounded demo questions offline: **5 of 22 failed, all of them premium questions, across all 5 customers.** Now matches on word boundaries while still allowing plural/verb inflections (`claims`, `hacked`, `hacking`). **22/22 clean after the fix.** Corrects my own earlier call that this was "latent and harmless".
 - **Fix 69 — KB ingestion produced multi-topic chunks (the last Session-12 root cause):** the KB PDF stores each word as a separate text object, so `pypdf` emitted `\n \n` between words (32% of page-1 text was whitespace), which destroyed the separators `RecursiveCharacterTextSplitter(800,120)` needs — it fell back to cutting on raw character count, so **6 of 9 chunks held two unrelated FAQs** and one chunk could score ~0.62 against almost any question. Fixed by normalising whitespace and splitting on the `Q:` marker (one chunk per Q&A), with the character splitter kept as the fallback for prose documents. **9 → 14 chunks, 6 → 0 multi-topic, 243-796 → 281-367 chars.** Re-indexed live (60 indexed docs → 14, 0 errors) and **measured**: all 5 known-bad queries now return the exactly-correct FAQ at rank 1 with a 1.9×-8.3× score gap over the runner-up — upgrading Session 12's stated inference to a verified result.
 - **Fix 68 — Approved replies keep their provenance (evidence stayed on the holding message):** retrieval evidence is written once, against the outbound turn that exists at reply time — which for a held reply is the **holding message**, not the real answer the agent later approves. So every human-reviewed reply had **zero** evidence and the provenance panel fell back to inferring the source from the intent label (which over-claims: a transactional intent whose customer has no such record answers from the KB, yet the panel would still say "graph"). The draft-send route now copies the holding turn's evidence onto the sent turn. Verified live on the exact broken path: same FD question → held → approved → sent reply now reports `retrieval_backend: neo4j_graph` with the real FD record as a citation (was `null` + a guess).
@@ -2545,6 +2546,58 @@ evidence rows were deleted by explicit id (never a date sweep), plus **2 orphane
 Neo4j** that the SQLite delete would have left behind — caught by re-running the graph check rather
 than assuming one delete covered both stores. The user's own `Sayantini` portal signup was preserved
 and verified surviving.
+
+### Fix 71 — `transaction_dispute` answered from the KB while 72 real transactions sat unread
+**Found by the user challenging a claim I had made.** I stated that `transaction_dispute` was
+excluded from graph reads because "there's no Transaction data wired in" — repeating a code comment
+([queries.py](../services/neo4j_service/queries.py) line 5: *"no transactions table"*) instead of
+checking. The user pushed back, citing the Excel sheets. **The comment was wrong:** the seed loads a
+`Transaction` node per row of the Transactions sheet — **72 nodes across the 5 demo customers** —
+and `get_transactions()` had already been written, just never called by `neo4j_answer`.
+
+**Why this mattered more than it looks:** `transaction_dispute` was the **most common inbound
+intent** in the pre-wipe data (7 of 24 turns). So the single most frequent question type answered
+from a generic FAQ passage while the customer's own transaction — including real failure states like
+`TXN0001000003`, Rs.5,776.55 IMPS, `Debited-Pending-Credit`, *"Beneficiary bank delayed crediting -
+auto-reversal in progress"* — sat one query away.
+
+**Built:** (1) `transaction_dispute` added to `TRANSACTIONAL_INTENTS` with the false comment replaced
+by what is actually true; (2) a `neo4j_answer` branch formatting the 8 most recent transactions
+newest-first, surfacing `failure_reason` and beneficiary explicitly (capped at 8 because the whole
+block is pasted into the prompt — 20 rows would crowd out the question); (3) `"transaction_dispute":
+["Transaction"]` added to `INTENT_GRAPH_TYPES` so the provenance panel highlights the right node
+type; (4) Transaction nodes added to the knowledge-graph view — **unsettled transactions only, else
+the 3 most recent**, because 72 nodes cannot join a radial layout sized for ~12.
+
+**Verified (0 Groq):** 3 of 4 dispute phrasings classify `transaction_dispute` (the 4th, *"My IMPS
+transfer failed"*, goes to `fund_transfer` — arguably correct, and `fund_transfer` remains
+deliberately excluded as there is no payments integration); `neo4j_answer` returns real records for
+both tested customers; graph-view node slice confirmed (Sayantini 3 problem transactions of 8
+fetched, Fathima 1). Full suite **145 pass / 5 fail**, baseline exact.
+
+### Demo question set extended — dispute questions + continuity scenarios
+**The user identified the real gap:** the question set was 22 *single-turn* questions, which prove
+answers are correct but demonstrate **nothing about omnichannel continuity** — the project's actual
+differentiator. I had built a data-correctness checklist and called it a demo script.
+
+**The user also made the key observation that unblocked it:** continuity does not need three
+channels to test. Confirmed in code — `ticket_manager.py` matches on `conversation_id` +
+`ticket_scope`, and the **channel is never part of the matching logic**, only a label on the turn. So
+a scenario run entirely on web chat exercises the identical path a WhatsApp→email follow-up takes;
+a second channel changes the Lineage dot colour, not the behaviour being proven. That removes the
+real-outbound obstacle entirely.
+
+Added to [demo-question-set.md](demo-question-set.md): 2 dispute questions, and 3 continuity
+scenarios — **A** vague opener → specifics → vague follow-up (one ticket, refined then referee-
+matched), **B** two genuinely different matters (must produce TWO tickets — the counter-example
+proving the system matches rather than merges), **C** topic switching inside one conversation (three
+theme groups, one thread). Each lists what to point at in the UI. **Flagged in the doc as not yet
+run end-to-end** — expected behaviour is read from the matching code, not observed.
+
+Also corrected in that doc: the known-gaps section had repeated my false "no transaction records
+wired" claim, and now additionally records the data genuinely never read when answering
+(`ChargePenalty`, `KYC`, `Product`, `Interaction`), the ageing seed dates (Sayantini's card due date
+is already past; 3 of 4 FDs are `Matured`), and multi-account ambiguity.
 
 ### Curated demo question set shipped
 [docs/demo-question-set.md](demo-question-set.md) — 22 questions across all 5 customers, each with
