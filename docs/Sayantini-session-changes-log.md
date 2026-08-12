@@ -103,6 +103,8 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 63 — Tickets never reached Neo4j (id-namespace mismatch):** `_neo4j_customer_id` returned the SQLite `cust_…` id for whatsapp/email, so the graph's `MATCH (c:Customer {customer_id:'CRN…'})` matched nothing and every ticket/interaction write silently produced no node; now resolves the sender's phone/email to the real `CRN…` (backfill script added for the 8 pre-existing tickets).
 - **Fix 64 — Knowledge-graph view in the admin UI:** New read-only `/admin/customers/{id}/graph-view` endpoint returns the customer neighbourhood as `{nodes, edges}`; a "View knowledge graph" button at the top of the right panel opens a modal rendering it as a deterministic radial SVG, coloured by derived health.
 - **Fix 65 — "Why this answer" provenance panel:** New `/admin/conversations/turns/{id}/provenance` endpoint plus a per-reply button that shows whether an answer came from the customer's graph records or from retrieved KB passages; fixed a false "no account records were read" claim, a crash on the graph branch, and the button appearing on holding messages.
+- **Fix 74 — Conversation-view rows split when a customer interleaves topics:** a ticket's steps were grouped only while **consecutive**, at BOTH layers (theme grouping via `prevTicket`, and `buildUnits` via last-unit comparison). An unrelated question in the middle — dispute → loan → dispute — reset the run, so ONE ticket rendered as TWO rows under two separate theme headers, hiding the continuity the backend had just established. Now a returning ticket rejoins its original group (`ticketGroup` map) and `buildUnits` merges by key (`byKey` lookup). Verified by a simulation that first **reproduced the user's screenshots exactly** (3 groups / 3 rows) then showed the fix (2 groups / 2 rows). Frontend-only.
+- **Fix 73 — The knowledge graph knew what a customer HOLDS but not what they are DEALING WITH (write side):** `write_incoming_interaction` MERGEd on `conversation_id`, so every new message **overwrote the previous one** — a 12-turn conversation left a single Interaction node holding only the last sentence. Tickets and messages sat in the graph as disconnected islands, so continuity existed **only in SQLite** and the graph could never show a case history. Interactions are now keyed per **message** (`turn_id`), linked to their ticket by a new `HAS_MESSAGE` edge, and the Ticket node carries its `scope` and `title`. The graph can now answer "the whole case" in one query. Seeded per-conversation rows are untouched (the key falls back when no `turn_id` is passed).
 - **Fix 72 — Ticket continuity: a status follow-up opened a junk ticket, and a second complaint was silently swallowed:** running the continuity scenarios end-to-end (first time they had ever been run) exposed two real defects. *"Any update on my dispute?"* classifies as `ticket_status`, and the referee's candidate list was filtered by the **incoming** intent — so a `transaction_dispute` ticket was never a candidate, the referee never ran, and the question opened a **new ticket about asking after a ticket**. Separately, the ":other refinement" rule merged **any** specific message into an open vague ticket without checking, so *"I **also** have a problem with a UPI payment"* — a second complaint — was absorbed into the first ticket's description as `[Details added: …]` and ceased to exist as its own item. Fixed by (A) gathering referee candidates by conversation, any intent, capped at 5, and (B) giving the refinement rule a **veto** — its own LLM prompt asking *"is this filling in the details, or raising a separate issue?"* — plus (C) the payment rails the seed actually uses. **Verified live: A1+A2+A3 = ONE ticket (including a cross-intent match), B1 = a separate ticket.**
 - **Fix 71 — `transaction_dispute` answered from the KB while 72 real transactions sat unread in the graph:** the intent was excluded from `TRANSACTIONAL_INTENTS` on the stated grounds of "no transactions table". **That comment was wrong** — the seed loads a `Transaction` node per row of the Excel Transactions sheet (72 across the 5 customers), and `get_transactions()` already existed but was never called by `neo4j_answer`. Since `transaction_dispute` was the **most common inbound intent** (7 of 24 turns in the pre-wipe data), the single most frequent question type answered from a generic FAQ while the customer's own `Debited-Pending-Credit` transaction — with a real failure reason — was one query away. Wired the branch (8 most recent, newest first), added `Transaction` to the provenance highlight map, and added problem-transaction nodes to the knowledge-graph view (unsettled only, else the 3 most recent — 72 nodes cannot join a radial layout sized for ~12).
 - **Fix 70 — Keyword matching was substring-based, so "pr-emi-um" scored as a loan (broke EVERY insurance question):** `classify_intent` tested `keyword in lowered`, so the `loan_status` keyword **`"emi"` matched inside "premium"** — every premium question scored 1 for `loan_status` *and* 1 for `policy_status`, and `max()` broke the tie by declaration order, routing all insurance premium questions to Loans. Found by verifying 22 grounded demo questions offline: **5 of 22 failed, all of them premium questions, across all 5 customers.** Now matches on word boundaries while still allowing plural/verb inflections (`claims`, `hacked`, `hacking`). **22/22 clean after the fix.** Corrects my own earlier call that this was "latent and harmless".
@@ -2575,6 +2577,79 @@ transfer failed"*, goes to `fund_transfer` — arguably correct, and `fund_trans
 deliberately excluded as there is no payments integration); `neo4j_answer` returns real records for
 both tested customers; graph-view node slice confirmed (Sayantini 3 problem transactions of 8
 fetched, Fathima 1). Full suite **145 pass / 5 fail**, baseline exact.
+
+### Fix 74 — One ticket rendered as two rows when the customer interleaved topics
+**Found by the user testing out of order** — running the demo steps as a real customer would, with an
+unrelated question in the middle.
+
+Sequence: dispute → dispute details → **loan question** → "any update on my dispute?". The backend
+correctly kept all three dispute messages on ONE ticket. The UI drew **three rows under three theme
+headers**, so the continuity that had just been fixed was invisible.
+
+**Two layers both assumed consecutive steps:**
+1. Theme grouping tracked only `prevTicket`, so the intervening loan step reset it and the returning
+   dispute step opened a *third* group.
+2. `buildUnits` compared against the **last** unit only, so even within one group a ticket split.
+
+Either alone leaves the row split; both had to change. Now a ticket remembers its group
+(`ticketGroup`) and `buildUnits` merges by key (`byKey`).
+
+**Verified by simulation before touching the code** — and the first two attempts at that simulation
+were *wrong*, which is the point of recording this:
+- Attempt 1 grouped raw turns, but inbound turns carry no `ticket_id`, so every customer message came
+  out keyless. Discarded.
+- Attempt 2 paired turns **newest-first** while `app.js` pairs oldest-first and reverses afterwards
+  (the Fix 24g bug), producing mismatched ticket/message pairs and reporting "1 theme group" when the
+  user's screenshot plainly showed 3. **Stopped rather than edit code on a simulation that did not
+  match reality.**
+- Attempt 3 mirrored the real pairing and reproduced the screenshots exactly (3 groups, 3 rows) —
+  only then was it trustworthy. With the fix: **2 groups, 2 rows**, the dispute merged to 6 steps.
+
+Frontend-only; cache-bust bumped. Confirmed in the browser by the user.
+
+### Fix 73 — The graph knew what a customer HOLDS, not what they are DEALING WITH (write side)
+**This came out of the user asking why the knowledge graph exists at all** — and pointing out that I
+kept treating the graph, continuity and the UI as three separate features when they are one story:
+*the graph should prove both that the answer used the customer's real records and that the system
+remembers their case.*
+
+**What was actually true (measured, after I had claimed otherwise):**
+- `write_incoming_interaction` MERGEd on `conversation_id`. Every new message **overwrote** the last,
+  so the live 12-turn dispute conversation was **one** Interaction node holding only *"Any update on
+  my dispute?"*. I had earlier told the user the graph held per-message history — it did not.
+- Ticket nodes carried only `intent`, `priority`, `status` — no scope, and **no edge to any message**.
+- So continuity ran **entirely in SQLite**. Neo4j held the tickets and never linked them to anything,
+  and nothing read them at answer time. The graph was a product catalogue, not a knowledge graph.
+
+**Built:** Interactions keyed per **message** (`turn_id`, falling back to `conversation_id` when none
+is passed, so the seed loader's genuinely-per-conversation rows are unchanged); a new
+`link_interaction_to_ticket` writing `(:Ticket)-[:HAS_MESSAGE]->(:Interaction)`; `ticket_scope` and
+`title` stored on the Ticket node so the graph shows *which* matter a ticket is about and that a
+vague opener was refined.
+
+**A bug caught before it shipped:** `update_interaction_resolution` also MERGEd on `conversation_id`.
+Left alone it would have created a **second, competing node** — the per-message node stuck at `open`
+forever while a conversation-keyed duplicate held the resolution. It now takes the same `turn_id`.
+Separately, making that Cypher an f-string would have crashed on the existing
+`{product_id: …}` / `{agent_id: …}` braces; caught by rendering all five queries against a fake
+client rather than assuming.
+
+**Verified live** (Hirithi, 3-message dispute). One query now returns the whole case:
+
+| | |
+|---|---|
+| ticket | `tkt_45d208275164` |
+| scope | **`transaction_dispute:pos`** (refinement visible in the graph) |
+| messages | all 3, via `HAS_MESSAGE` |
+
+Checks: **0 nodes left `open`** (proving no duplicates), only the **3 new** nodes carry `turn_id`
+(the 25 seeded ones keep their old shape), full suite **145 pass / 5 fail** baseline.
+
+**Still open — this is Layer 1 of 3.** The data now exists but **nothing reads it at answer time**:
+`get_customer_context_for_customer` still loads products only, so the LLM learns about an open case
+only if it happens to fall inside the 8-turn window. Layer 2 (add bounded open-ticket context —
+**measured at 36 tokens**, ~1% of a message) and Layer 3 (render the case in the graph modal, scoped
+to the current conversation, ~4 extra nodes) are designed and **not built**.
 
 ### Fix 72 — Ticket continuity: two defects found by actually running the scenarios
 The continuity scenarios had been **written but never run**. Running them exposed two real defects

@@ -782,19 +782,39 @@ function renderCentre(conv) {
 
   var groups = [];
   var prevTicket = null;
+  // Which group each ticket already lives in. A customer interleaves topics —
+  // opens a dispute, asks an unrelated loan question, then returns to the dispute —
+  // and `prevTicket` alone only keeps a ticket together while its steps are
+  // CONSECUTIVE. The intervening loan step reset it, so the returning dispute step
+  // opened a THIRD group and the same ticket rendered as two separate rows in both
+  // Detailed and Lineage, hiding the very continuity the backend had established.
+  // Remembering the group per ticket sends a returning ticket back to its own group.
+  var ticketGroup = {};
   steps.forEach(function(step, idx) {
     var th = stepThemes[idx];
     var tkt = stepTicket[idx];
     var prev = groups[groups.length - 1];
     var offer = isOfferStep(step);
+    var item = { step: step, idx: idx, ticket: tkt, offer: offer };
+    // A ticket seen before rejoins its original group, however many other topics
+    // came in between.
+    if (tkt && ticketGroup[tkt]) {
+      ticketGroup[tkt].items.push(item);
+      prevTicket = tkt;
+      return;
+    }
     // Same ticket as the previous step → always stay in the same group. An offer
     // is unticketed (tkt is null), so it can only join a group by matching theme.
     var sameTicket = tkt && prevTicket && tkt === prevTicket;
+    var target;
     if (!prev || (prev.theme !== th.theme && !sameTicket)) {
-      groups.push({ theme: th.theme, themeLabel: th.themeLabel, color: th.color, items: [{ step: step, idx: idx, ticket: tkt, offer: offer }] });
+      target = { theme: th.theme, themeLabel: th.themeLabel, color: th.color, items: [item] };
+      groups.push(target);
     } else {
-      prev.items.push({ step: step, idx: idx, ticket: tkt, offer: offer });
+      prev.items.push(item);
+      target = prev;
     }
+    if (tkt && !ticketGroup[tkt]) ticketGroup[tkt] = target;
     prevTicket = tkt;
   });
 
@@ -825,8 +845,8 @@ function renderCentre(conv) {
   // "auto-ack" was sent, plus channel/emotion/status/time for the header.
   function buildUnits(items) {
     var units = [];
+    var byKey = {};
     items.forEach(function(it) {
-      var last = units[units.length - 1];
       // A unit's grouping key: ticket_id for a query/ticket, or — for a
       // bank-initiated offer (unticketed) — its draft_id. The same offer is
       // delivered to every push channel (WhatsApp + email) as separate turns
@@ -834,11 +854,17 @@ function renderCentre(conv) {
       // ONE unit (each channel = one exchange/dot), exactly the omnichannel
       // grouping a multi-channel ticket already gets.
       var key = it.offer ? offerDraftId(it.step) : it.ticket;
-      var lastKey = last ? last.key : null;
-      if (last && key && lastKey === key) {
-        last.items.push(it);
+      // Matching on the PREVIOUS unit only kept a ticket together while its steps
+      // were consecutive; a step from another ticket in between split one ticket
+      // into two units. Keyed lookup merges every step of a ticket into one unit
+      // no matter what interleaved — the unit still renders its exchanges in
+      // chronological order below.
+      if (key && byKey[key]) {
+        byKey[key].items.push(it);
       } else {
-        units.push({ key: key, ticket: it.offer ? null : it.ticket, items: [it] });
+        var unit = { key: key, ticket: it.offer ? null : it.ticket, items: [it] };
+        units.push(unit);
+        if (key) byKey[key] = unit;
       }
     });
     return units.map(function(u) {

@@ -361,6 +361,11 @@ class OrchestrationGraph:
                 channel=message.channel.value,
                 message_text=message.text,
                 timestamp=datetime.now(timezone.utc).isoformat(),
+                # One node per MESSAGE. Without this the node is keyed on the
+                # conversation and each turn overwrites the last, so the graph keeps
+                # only the customer's most recent sentence and can never show the
+                # history of a case.
+                turn_id=state.inbound_turn_id,
             )
         self._complete(state, WorkflowStep.RESOLVE_IDENTITY, "identity_resolution",
                        crm_profile_status=crm_profile.status)
@@ -705,6 +710,9 @@ class OrchestrationGraph:
                 product_id=_extract_product_ref(state),
                 embedding_str=_extract_embedding(state.resolution),
                 urgency=state.analysis.urgency.value,
+                # Same key write_incoming_interaction used, or this MERGEs a second node
+                # and the per-message one never leaves 'open'.
+                turn_id=state.inbound_turn_id,
             )
             if state.ticket:
                 neo4j_writer.upsert_ticket_node(
@@ -714,7 +722,18 @@ class OrchestrationGraph:
                     intent=state.analysis.intent.value,
                     priority=state.ticket.priority.value if hasattr(state.ticket.priority, "value") else str(state.ticket.priority),
                     status=state.ticket.status.value if hasattr(state.ticket.status, "value") else str(state.ticket.status),
+                    ticket_scope=(state.ticket.metadata or {}).get("ticket_scope"),
+                    title=state.ticket.title,
                 )
+                # Attach this message to its ticket, so the graph can answer "what has
+                # been said about this case?" and not only "what does this customer
+                # hold?". Runs after upsert_ticket_node so both nodes exist.
+                if state.inbound_turn_id:
+                    neo4j_writer.link_interaction_to_ticket(
+                        self.neo4j_client,
+                        turn_id=state.inbound_turn_id,
+                        ticket_id=state.ticket.ticket_id,
+                    )
         self._complete(state, WorkflowStep.PERSIST_AUDIT_EVENTS, "workflow_automation_agent",
                        outbound_turn_id=outbound_turn["turn_id"])
         self._audit("workflow_completed", state, intent=self._intent(state),

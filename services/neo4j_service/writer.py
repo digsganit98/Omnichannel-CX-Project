@@ -338,24 +338,42 @@ def write_incoming_interaction(
     channel: str,
     message_text: str,
     timestamp: str,
+    turn_id: str | None = None,
 ) -> None:
     """Write an :Interaction node in 'open' status the moment a message arrives.
 
     Called BEFORE the AI pipeline runs so the graph always has a record of every
     inbound message even if the pipeline fails partway through.
+
+    Keyed on turn_id when one is supplied, so each customer MESSAGE is its own node.
+    It used to MERGE on conversation_id alone, which meant every new message
+    OVERWROTE the previous one: a 12-turn conversation left a single node holding
+    only the last sentence. The graph could therefore show what a customer holds
+    but never what they had been dealing with — the conversation history existed
+    only in SQLite. The conversation_id stays on the node so a whole thread can
+    still be fetched with one match.
+
+    turn_id is optional so existing callers (and the seed loader, whose rows are
+    genuinely one-per-conversation) keep the previous behaviour unchanged.
     """
     if client is None or not conversation_id or not customer_id:
         return
     try:
+        key_clause = (
+            "MERGE (i:Interaction {turn_id: $turn_id})"
+            if turn_id else
+            "MERGE (i:Interaction {conversation_id: $conversation_id})"
+        )
         client.write(
-            """
-            MERGE (i:Interaction {conversation_id: $conversation_id})
-            SET i.channel    = $channel,
-                i.message    = $message,
-                i.status     = 'open',
-                i.created_at = $timestamp
+            f"""
+            {key_clause}
+            SET i.conversation_id = $conversation_id,
+                i.channel         = $channel,
+                i.message         = $message,
+                i.status          = 'open',
+                i.created_at      = $timestamp
             WITH i
-            MATCH (c:Customer {customer_id: $customer_id})
+            MATCH (c:Customer {{customer_id: $customer_id}})
             MERGE (c)-[:HAS_INTERACTION]->(i)
             """,
             {
@@ -364,12 +382,41 @@ def write_incoming_interaction(
                 "channel": channel or "",
                 "message": message_text or "",
                 "timestamp": timestamp or "",
+                "turn_id": turn_id or "",
             },
         )
     except Exception:
         logger.warning(
             "neo4j_write_incoming_interaction_failed",
             extra={"conversation_id": conversation_id},
+            exc_info=True,
+        )
+
+
+def link_interaction_to_ticket(client, turn_id: str, ticket_id: str) -> None:
+    """Attach a message to the ticket it belongs to: (:Ticket)-[:HAS_MESSAGE]->(:Interaction).
+
+    Without this edge the graph holds tickets and messages as disconnected islands —
+    it can answer "what does this customer hold?" but not "what has been said about
+    this case?", which is the half of the story the knowledge graph exists to show.
+    Both nodes must already exist; MATCH (not MERGE) so a missing node writes nothing
+    rather than creating an empty placeholder.
+    """
+    if client is None or not turn_id or not ticket_id:
+        return
+    try:
+        client.write(
+            """
+            MATCH (t:Ticket {ticket_id: $ticket_id})
+            MATCH (i:Interaction {turn_id: $turn_id})
+            MERGE (t)-[:HAS_MESSAGE]->(i)
+            """,
+            {"ticket_id": ticket_id, "turn_id": turn_id},
+        )
+    except Exception:
+        logger.warning(
+            "neo4j_link_interaction_to_ticket_failed",
+            extra={"turn_id": turn_id, "ticket_id": ticket_id},
             exc_info=True,
         )
 
@@ -384,11 +431,16 @@ def update_interaction_resolution(
     product_id: str,
     embedding_str: str,
     urgency: str,
+    turn_id: str | None = None,
 ) -> None:
     """Update the :Interaction node with the AI resolution and create/update ResolutionMemory.
 
     Called AFTER the AI pipeline completes. Closes the open interaction and stores
     the answer as a reusable ResolutionMemory node keyed by (product_id, intent_type).
+
+    Must key on the SAME field write_incoming_interaction used, or it MERGEs a second,
+    competing node: the per-message node stays 'open' forever while a conversation-keyed
+    duplicate holds the resolution.
     """
     if client is None or not conversation_id:
         return
@@ -397,10 +449,16 @@ def update_interaction_resolution(
         import uuid
         now = datetime.now(timezone.utc).isoformat()
         mem_id = "RESMEM-" + str(uuid.uuid4())[:8].upper()
+        key_clause = (
+            "MERGE (i:Interaction {turn_id: $turn_id})"
+            if turn_id else
+            "MERGE (i:Interaction {conversation_id: $conversation_id})"
+        )
         client.write(
-            """
-            MERGE (i:Interaction {conversation_id: $conversation_id})
-            SET i.resolution           = $resolution,
+            f"""
+            {key_clause}
+            SET i.conversation_id      = $conversation_id,
+                i.resolution           = $resolution,
                 i.intent               = $intent,
                 i.sentiment            = $sentiment,
                 i.urgency              = $urgency,
@@ -411,7 +469,7 @@ def update_interaction_resolution(
                 i.updated_at           = $now
 
             WITH i
-            MERGE (rm:ResolutionMemory {product_id: $product_id, intent_type: $intent})
+            MERGE (rm:ResolutionMemory {{product_id: $product_id, intent_type: $intent}})
             ON CREATE SET
                 rm.id                   = $mem_id,
                 rm.query_pattern        = i.message,
@@ -429,7 +487,7 @@ def update_interaction_resolution(
             MERGE (i)-[:CREATED_MEMORY]->(rm)
 
             WITH i
-            MATCH (a:Agent {agent_id: 'AI_GROQ'})
+            MATCH (a:Agent {{agent_id: 'AI_GROQ'}})
             MERGE (i)-[:HANDLED_BY]->(a)
             """,
             {
@@ -442,6 +500,7 @@ def update_interaction_resolution(
                 "embedding": embedding_str or "",
                 "mem_id": mem_id,
                 "now": now,
+                "turn_id": turn_id or "",
             },
         )
     except Exception:
@@ -459,8 +518,16 @@ def upsert_ticket_node(
     intent: str,
     priority: str,
     status: str,
+    ticket_scope: str | None = None,
+    title: str | None = None,
 ) -> None:
-    """Create or update a :Ticket node and link it to the customer."""
+    """Create or update a :Ticket node and link it to the customer.
+
+    ticket_scope is the sub-matter label ("transaction_dispute:imps") that SQLite uses
+    to decide whether a later message continues this ticket. Storing it on the node
+    means the graph can show WHICH specific matter a ticket is about, and that a vague
+    opener was later refined — otherwise every dispute node looks identical.
+    """
     if client is None or not ticket_id or not customer_id:
         return
     try:
@@ -469,7 +536,9 @@ def upsert_ticket_node(
             MERGE (t:Ticket {ticket_id: $ticket_id})
             SET t.intent   = $intent,
                 t.priority = $priority,
-                t.status   = $status
+                t.status   = $status,
+                t.scope    = $ticket_scope,
+                t.title    = $title
             WITH t
             MATCH (c:Customer {customer_id: $customer_id})
             MERGE (c)-[:HAS_TICKET]->(t)
@@ -480,6 +549,8 @@ def upsert_ticket_node(
                 "intent": intent or "",
                 "priority": priority or "",
                 "status": status or "",
+                "ticket_scope": ticket_scope or "",
+                "title": title or "",
             },
         )
     except Exception:
