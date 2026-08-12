@@ -103,6 +103,7 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 63 — Tickets never reached Neo4j (id-namespace mismatch):** `_neo4j_customer_id` returned the SQLite `cust_…` id for whatsapp/email, so the graph's `MATCH (c:Customer {customer_id:'CRN…'})` matched nothing and every ticket/interaction write silently produced no node; now resolves the sender's phone/email to the real `CRN…` (backfill script added for the 8 pre-existing tickets).
 - **Fix 64 — Knowledge-graph view in the admin UI:** New read-only `/admin/customers/{id}/graph-view` endpoint returns the customer neighbourhood as `{nodes, edges}`; a "View knowledge graph" button at the top of the right panel opens a modal rendering it as a deterministic radial SVG, coloured by derived health.
 - **Fix 65 — "Why this answer" provenance panel:** New `/admin/conversations/turns/{id}/provenance` endpoint plus a per-reply button that shows whether an answer came from the customer's graph records or from retrieved KB passages; fixed a false "no account records were read" claim, a crash on the graph branch, and the button appearing on holding messages.
+- **Fix 70 — Keyword matching was substring-based, so "pr-emi-um" scored as a loan (broke EVERY insurance question):** `classify_intent` tested `keyword in lowered`, so the `loan_status` keyword **`"emi"` matched inside "premium"** — every premium question scored 1 for `loan_status` *and* 1 for `policy_status`, and `max()` broke the tie by declaration order, routing all insurance premium questions to Loans. Found by verifying 22 grounded demo questions offline: **5 of 22 failed, all of them premium questions, across all 5 customers.** Now matches on word boundaries while still allowing plural/verb inflections (`claims`, `hacked`, `hacking`). **22/22 clean after the fix.** Corrects my own earlier call that this was "latent and harmless".
 - **Fix 69 — KB ingestion produced multi-topic chunks (the last Session-12 root cause):** the KB PDF stores each word as a separate text object, so `pypdf` emitted `\n \n` between words (32% of page-1 text was whitespace), which destroyed the separators `RecursiveCharacterTextSplitter(800,120)` needs — it fell back to cutting on raw character count, so **6 of 9 chunks held two unrelated FAQs** and one chunk could score ~0.62 against almost any question. Fixed by normalising whitespace and splitting on the `Q:` marker (one chunk per Q&A), with the character splitter kept as the fallback for prose documents. **9 → 14 chunks, 6 → 0 multi-topic, 243-796 → 281-367 chars.** Re-indexed live (60 indexed docs → 14, 0 errors) and **measured**: all 5 known-bad queries now return the exactly-correct FAQ at rank 1 with a 1.9×-8.3× score gap over the runner-up — upgrading Session 12's stated inference to a verified result.
 - **Fix 68 — Approved replies keep their provenance (evidence stayed on the holding message):** retrieval evidence is written once, against the outbound turn that exists at reply time — which for a held reply is the **holding message**, not the real answer the agent later approves. So every human-reviewed reply had **zero** evidence and the provenance panel fell back to inferring the source from the intent label (which over-claims: a transactional intent whose customer has no such record answers from the KB, yet the panel would still say "graph"). The draft-send route now copies the holding turn's evidence onto the sent turn. Verified live on the exact broken path: same FD question → held → approved → sent reply now reports `retrieval_backend: neo4j_graph` with the real FD record as a citation (was `null` + a guess).
 - **Fix 67 — FD questions now reach the graph (both classifiers were blind to fixed deposits):** "When is my FD maturity date?" was classified `general_inquiry` by the LLM at **confidence 1.0** (confidently wrong — no confidence-gated guardrail could ever correct it) and by the rule classifier at 0.45, because no keyword set contained `fixed deposit`/`FD`/`maturity` and the LLM's intent definitions never mentioned FDs. Fixed both: 7 FD keywords on `account_balance_inquiry` + an FD clause in that intent's LLM definition. **No new intent** — `neo4j_answer`'s `account_balance_inquiry` branch already fetches fixed deposits (principal, rate, tenure, maturity date/amount); only classification was broken. Measured after (1 Groq call, 1,377 tokens): LLM `account_balance_inquiry` 1.0, rule 0.91 — both agree. Compounds with Fix 66: FD reaches the graph, and the read is now recorded as `neo4j_graph`.
@@ -2452,6 +2453,57 @@ errors. 0 Groq.
 **Deliberate trade-off:** chunk `source` changed from `InboxIQ_BFSI_KB.pdf:p1` to
 `InboxIQ_BFSI_KB.pdf`. Pages are merged before splitting, so a page number would no longer bound the
 chunk it labels — citing the document is accurate where citing a page would not be.
+
+### Fix 70 — Substring keyword matching routed every insurance question to Loans
+**Found by the step-2 offline verification, not by reading code.** 22 demo questions grounded in the
+5 customers' real holdings were checked for (a) does the rule classifier pick the intent that unlocks
+the right graph read, and (b) does `neo4j_answer` return that customer's record. Result: **5 of 22
+failed — every premium question, for every customer.** Data existed for all 22; only classification
+failed.
+
+**Root cause:** `classify_intent` scored with `keyword in lowered`, a raw substring test. The
+`loan_status` keyword **`"emi"` is inside "pr*emi*um"**, so *"When is my next insurance premium
+due?"* scored 1 for `loan_status` (false hit) and 1 for `policy_status` (real hit); `max()` breaks
+ties by dict order and `LOAN_STATUS` is declared first, so Loans won. `"sip"` inside "gossip" is the
+same class of bug.
+
+**Fix:** `_matches()` — match on word boundaries instead of raw substrings, applied to both the
+keyword scorer and `_process_or_status_intent` (whose `"default"`, `"claim"`, `"loan"` checks had the
+same exposure).
+
+**Two regressions I introduced and then fixed — recorded because the process is the point:**
+1. A bare boundary **lost** plurals the substring test used to catch: *"what are my claims?"* and
+   *"check my balances"* fell to `general_inquiry`. Caught by comparing against a stashed baseline.
+2. Adding only plural suffixes then broke **verb inflections** — `test_distinct_l3_fraud_incidents_
+   create_distinct_tickets` failed because `"hack"` no longer matched *"hacked"*. This was a **new
+   suite failure (6 failed / 144 passed)**, i.e. the suite caught what my own spot-checks missed.
+   Final rule allows `-s/-es/-ies/-ed/-d/-ing` after a keyword while still rejecting a hit inside a
+   longer word.
+
+**Verified:** 22/22 questions clean (was 17/22); false hits gone (`premium`→`policy_status`,
+`gossip`→`general_inquiry`); real short keywords still fire (`emi`, `kyc`, `scam`, `neft`);
+inflections restored (`hacked`, `hacking`, `claims`, `balances`). Full suite back to **145 pass /
+5 fail**, baseline exact. 0 Groq.
+
+**Known limit:** doubled-consonant inflections are still missed (`"scam"` does not match "scammed").
+That is **unchanged from the baseline** — the substring test missed it too — so it is a pre-existing
+gap, not a regression. Not fixed; would need stemming rather than a suffix list.
+
+### Curated demo question set — 22 questions grounded in real holdings
+Built from a full dump of all 5 customers' actual Neo4j records (read via `properties(n)` rather than
+guessed property names — an earlier guess used `account_id`/`amount_claimed`, which do not exist; the
+real keys are `account_number`/`amount_claimed_inr`). Each question carries the exact value the answer
+must contain, so it can be verified on screen during the demo:
+
+| Customer | Verified questions | Grounding examples |
+|---|---|---|
+| Sayantini (HNI) | 6 | FD001001 → 2028-01-12; Mastercard limit 10,65,000; card due 2026-07-08; premium due 2026-10-23 |
+| Sireesha (Mass Affluent) | 4 | Visa limit 75,000; claim CLM001005; premium due 2026-11-28 |
+| Digvijay (Affluent) | 4 | claim CLM001010; premium due 2026-09-01; FD maturity amount 10,94,768 |
+| Hirithi (HNI) | 4 | loan LN001001; RuPay limit 8,30,000; theft claim CLM001011 |
+| Fathima (Affluent) | 4 | loan LN001002 (EMI overdue); claim CLM001015; term premium due 2026-07-02 |
+
+All 22 verified **offline, 0 Groq, 0 turns created** — no demo data was touched to prove them.
 
 ### Groq spend this session
 **5,388 tokens total** (5,158 prompt / 230 completion) across 4 calls — ~1.1% of the 500K/day free

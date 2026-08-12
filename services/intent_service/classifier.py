@@ -1,3 +1,5 @@
+import re
+
 from shared.schemas.intents import Intent, IntentResult, Urgency
 
 from .sentiment import detect_sentiment
@@ -38,11 +40,32 @@ KEYWORDS = {
 }
 
 
+def _matches(keyword: str, lowered: str) -> bool:
+    """Whole-word keyword match.
+
+    A plain `keyword in text` test matches inside longer words: "emi" hides in
+    "pr-emi-um", so every insurance premium question scored for BOTH loan_status
+    (via "emi") and policy_status (via "premium") — and the tie broke toward the
+    intent declared first, routing insurance questions to Loans. "sip" hides in
+    "gossip" the same way. Multi-word keywords ("loan due") keep substring
+    behaviour; the boundary only guards the ends of the phrase.
+
+    A trailing inflection is still a match, because a bare word boundary would
+    otherwise LOSE matches the substring test used to get — customers write
+    "what are my claims?", "my account was hacked", "someone is hacking my card".
+    So plural (-s/-es/-ies) and verb (-ed/-ing/-d) endings are allowed after the
+    keyword, while a hit *inside* a longer word is still rejected.
+    """
+    return re.search(
+        rf"(?<!\w){re.escape(keyword)}(?:e?s|ies|e?d|ing)?(?!\w)", lowered
+    ) is not None
+
+
 def classify_intent(text: str) -> IntentResult:
     lowered = text.lower()
     intent_override = _process_or_status_intent(lowered)
     scores = {
-        intent: sum(1 for keyword in keywords if keyword in lowered)
+        intent: sum(1 for keyword in keywords if _matches(keyword, lowered))
         for intent, keywords in KEYWORDS.items()
     }
     intent, score = max(scores.items(), key=lambda item: item[1])
@@ -65,26 +88,34 @@ def classify_intent(text: str) -> IntentResult:
 
 
 def _process_or_status_intent(lowered: str) -> Intent | None:
-    """Resolve process-vs-account-status phrases before broad keyword scoring."""
-    if any(term in lowered for term in ("human", "agent", "representative", "speak to someone", "connect me")):
+    """Resolve process-vs-account-status phrases before broad keyword scoring.
+
+    Uses the same whole-word matching as the keyword scorer above, so a term like
+    "default" fires on "default"/"default notice" but not inside "defaulted", and
+    "claim" does not fire inside "claimant".
+    """
+    def has(*terms: str) -> bool:
+        return any(_matches(term, lowered) for term in terms)
+
+    if has("human", "agent", "representative", "speak to someone", "connect me"):
         return Intent.HUMAN_ESCALATION
 
-    if any(term in lowered for term in ("default", "overdue", "missed emi", "npa", "loan overdue", "default notice")):
+    if has("default", "overdue", "missed emi", "npa", "loan overdue", "default notice"):
         return Intent.LOAN_DEFAULT_NOTICE
 
     status_terms = ("status", "track", "progress", "update on", "what happened")
     process_terms = ("how do i", "how can i", "steps", "process", "apply", "file", "submit")
 
-    if "claim" in lowered:
-        if any(term in lowered for term in status_terms):
+    if has("claim"):
+        if has(*status_terms):
             return Intent.CLAIM_STATUS
-        if any(term in lowered for term in process_terms):
+        if has(*process_terms):
             return Intent.INSURANCE_CLAIM
 
-    if "loan" in lowered:
-        if any(term in lowered for term in status_terms) or "already applied" in lowered:
+    if has("loan"):
+        if has(*status_terms) or has("already applied"):
             return Intent.LOAN_STATUS
-        if any(term in lowered for term in process_terms):
+        if has(*process_terms):
             return Intent.LOAN_APPLICATION
 
     return None
