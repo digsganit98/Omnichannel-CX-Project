@@ -103,6 +103,7 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 63 — Tickets never reached Neo4j (id-namespace mismatch):** `_neo4j_customer_id` returned the SQLite `cust_…` id for whatsapp/email, so the graph's `MATCH (c:Customer {customer_id:'CRN…'})` matched nothing and every ticket/interaction write silently produced no node; now resolves the sender's phone/email to the real `CRN…` (backfill script added for the 8 pre-existing tickets).
 - **Fix 64 — Knowledge-graph view in the admin UI:** New read-only `/admin/customers/{id}/graph-view` endpoint returns the customer neighbourhood as `{nodes, edges}`; a "View knowledge graph" button at the top of the right panel opens a modal rendering it as a deterministic radial SVG, coloured by derived health.
 - **Fix 65 — "Why this answer" provenance panel:** New `/admin/conversations/turns/{id}/provenance` endpoint plus a per-reply button that shows whether an answer came from the customer's graph records or from retrieved KB passages; fixed a false "no account records were read" claim, a crash on the graph branch, and the button appearing on holding messages.
+- **Fix 69 — KB ingestion produced multi-topic chunks (the last Session-12 root cause):** the KB PDF stores each word as a separate text object, so `pypdf` emitted `\n \n` between words (32% of page-1 text was whitespace), which destroyed the separators `RecursiveCharacterTextSplitter(800,120)` needs — it fell back to cutting on raw character count, so **6 of 9 chunks held two unrelated FAQs** and one chunk could score ~0.62 against almost any question. Fixed by normalising whitespace and splitting on the `Q:` marker (one chunk per Q&A), with the character splitter kept as the fallback for prose documents. **9 → 14 chunks, 6 → 0 multi-topic, 243-796 → 281-367 chars.** Re-indexed live (60 indexed docs → 14, 0 errors) and **measured**: all 5 known-bad queries now return the exactly-correct FAQ at rank 1 with a 1.9×-8.3× score gap over the runner-up — upgrading Session 12's stated inference to a verified result.
 - **Fix 68 — Approved replies keep their provenance (evidence stayed on the holding message):** retrieval evidence is written once, against the outbound turn that exists at reply time — which for a held reply is the **holding message**, not the real answer the agent later approves. So every human-reviewed reply had **zero** evidence and the provenance panel fell back to inferring the source from the intent label (which over-claims: a transactional intent whose customer has no such record answers from the KB, yet the panel would still say "graph"). The draft-send route now copies the holding turn's evidence onto the sent turn. Verified live on the exact broken path: same FD question → held → approved → sent reply now reports `retrieval_backend: neo4j_graph` with the real FD record as a citation (was `null` + a guess).
 - **Fix 67 — FD questions now reach the graph (both classifiers were blind to fixed deposits):** "When is my FD maturity date?" was classified `general_inquiry` by the LLM at **confidence 1.0** (confidently wrong — no confidence-gated guardrail could ever correct it) and by the rule classifier at 0.45, because no keyword set contained `fixed deposit`/`FD`/`maturity` and the LLM's intent definitions never mentioned FDs. Fixed both: 7 FD keywords on `account_balance_inquiry` + an FD clause in that intent's LLM definition. **No new intent** — `neo4j_answer`'s `account_balance_inquiry` branch already fetches fixed deposits (principal, rate, tenure, maturity date/amount); only classification was broken. Measured after (1 Groq call, 1,377 tokens): LLM `account_balance_inquiry` 1.0, rule 0.91 — both agree. Compounds with Fix 66: FD reaches the graph, and the read is now recorded as `neo4j_graph`.
 - **Fix 66 — Provenance could never report "graph" (missing `retrieval` key):** the Neo4j branch built its context metadata without the `retrieval` key the provenance endpoint reads, so `neo4j_graph` was **never** persisted as evidence (live DB: 27 rows, 0 graph) and the panel permanently fell back to *guessing* from the intent label. Added `"retrieval": "neo4j_graph"`, matching what the two RAG paths already do. **Also disproves Session 12's "intent guardrail" root cause** — measured (3 Groq calls, 4,011 tokens) the LLM already classifies card 0.8 / policy 0.9, well above the 0.65 override threshold, so the allow-list fix would have been dead code.
@@ -2399,6 +2400,59 @@ established `neo4j_answer` fetches every record for an intent without selecting)
 `retrieval · neo4j_graph` subtitle already surfaces the recorded fact, and Session 12 lost eight
 rounds to UI polish. Left alone as a cosmetic item, not a correctness bug.
 
+### Fix 69 — KB ingestion produced multi-topic chunks (Session 12's second root cause, now closed)
+**Problem (re-measured this session, not taken from the old notes):** the KB PDF stores every word as
+a separate text object, so `pypdf` emits `\n \n` between words — **179 occurrences on page 1, 32% of
+the extracted text is whitespace**. [documents.py](../services/rag_service/documents.py) used that
+output verbatim. The mangled whitespace destroys the paragraph/sentence separators
+`RecursiveCharacterTextSplitter(800,120)` looks for, so it fell back to cutting on **raw character
+count**: **6 of 9 chunks contained two `Q:` markers** (the tail of one FAQ plus the head of an
+unrelated one) and chunks started mid-word (`required are identity proof…`).
+
+**Why it mattered:** a chunk holding two topics is *genuinely* partly-relevant to both, so it scores
+~0.62 against almost any question. That is the mechanism behind the mismatched citations Fix 65
+found — retrieval was not malfunctioning, it was faithfully ranking mixed chunks. Observed live this
+session: the first FD reply cited a **KYC** passage.
+
+**Fix:** normalise whitespace runs, then split on the `Q:` marker — one complete question+answer per
+chunk. Pages of the same file are joined *before* splitting because FAQ pairs straddle the page
+break. Documents with no `Q:` marker (plain prose) keep the original character splitting, so the
+change is specific to FAQ-shaped content rather than assuming every KB document is an FAQ.
+
+| | Before | After |
+|---|---|---|
+| Chunks | 9 | **14** |
+| Multi-topic | **6** | **0** |
+| Size range | 243-796 (cut mid-word) | 281-367 (complete Q&A) |
+| Indexed docs (live) | **60** | **14** |
+
+The 60 → 14 drop in indexed documents is the fix working: the old count was inflated by the 120-char
+overlap duplicating text across chunks.
+
+**Measured retrieval improvement — this closes Session 12's open caveat.** That session explicitly
+recorded "NOT yet proven that better chunks improve retrieval results — that is an inference".
+Re-running the known-bad queries against the re-indexed store, every one returns the exactly-correct
+FAQ at rank 1 with a decisive gap over the runner-up:
+
+| Query | Top | 2nd | Gap |
+|---|---|---|---|
+| How do I file a health insurance claim? | 9.78 | 5.26 | 1.9× |
+| What is a Demat account? | 7.05 | 3.22 | 2.2× |
+| How can I update my KYC details? | 12.72 | 4.18 | 3.0× |
+| What is the maximum daily ATM withdrawal limit? | 18.64 | 2.25 | **8.3×** |
+| Can I port my insurance policy? | 9.94 | 3.75 | 2.7× |
+
+**Verified:** full suite **145 pass / 5 fail** (baseline exact); prose fallback tested (a no-`Q:`
+document still character-splits into 4 chunks); empty input safe; the title text before the first
+`Q:` is dropped rather than becoming a chunk; metadata (`doc_type`, `.pdf` source,
+`document_version`) preserved — `test_customer_answer_kb_documents_are_knowledge_base_type` asserts
+these and passes. api rebuilt, `POST /admin/rag/index?recreate=true` → 14 loaded / 14 indexed / 0
+errors. 0 Groq.
+
+**Deliberate trade-off:** chunk `source` changed from `InboxIQ_BFSI_KB.pdf:p1` to
+`InboxIQ_BFSI_KB.pdf`. Pages are merged before splitting, so a page number would no longer bound the
+chunk it labels — citing the document is accurate where citing a page would not be.
+
 ### Groq spend this session
 **5,388 tokens total** (5,158 prompt / 230 completion) across 4 calls — ~1.1% of the 500K/day free
 tier. Every call was a single classification with real `usage` read off the response object, never an
@@ -2406,7 +2460,6 @@ estimate: 3 for the guardrail measurement that disproved Session 12's diagnosis,
 All other verification used fakes, offline calls, or read-only DB inspection.
 
 ### Still open
-- **KB ingestion still produces multi-topic chunks** (7 of 9), unchanged from Session 12.
 - **Pre-existing mis-trigger:** the rule classifier returns `loan_status` (0.67) for *"When is my next
   insurance premium due?"* — "premium **due**" hits the `loan_status` keyword `due`. Harmless today
   (the LLM is right at 0.9 and the guardrail can't fire below its threshold), but it is a latent trap
