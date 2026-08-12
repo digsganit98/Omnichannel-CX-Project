@@ -103,6 +103,7 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 63 — Tickets never reached Neo4j (id-namespace mismatch):** `_neo4j_customer_id` returned the SQLite `cust_…` id for whatsapp/email, so the graph's `MATCH (c:Customer {customer_id:'CRN…'})` matched nothing and every ticket/interaction write silently produced no node; now resolves the sender's phone/email to the real `CRN…` (backfill script added for the 8 pre-existing tickets).
 - **Fix 64 — Knowledge-graph view in the admin UI:** New read-only `/admin/customers/{id}/graph-view` endpoint returns the customer neighbourhood as `{nodes, edges}`; a "View knowledge graph" button at the top of the right panel opens a modal rendering it as a deterministic radial SVG, coloured by derived health.
 - **Fix 65 — "Why this answer" provenance panel:** New `/admin/conversations/turns/{id}/provenance` endpoint plus a per-reply button that shows whether an answer came from the customer's graph records or from retrieved KB passages; fixed a false "no account records were read" claim, a crash on the graph branch, and the button appearing on holding messages.
+- **Fix 68 — Approved replies keep their provenance (evidence stayed on the holding message):** retrieval evidence is written once, against the outbound turn that exists at reply time — which for a held reply is the **holding message**, not the real answer the agent later approves. So every human-reviewed reply had **zero** evidence and the provenance panel fell back to inferring the source from the intent label (which over-claims: a transactional intent whose customer has no such record answers from the KB, yet the panel would still say "graph"). The draft-send route now copies the holding turn's evidence onto the sent turn. Verified live on the exact broken path: same FD question → held → approved → sent reply now reports `retrieval_backend: neo4j_graph` with the real FD record as a citation (was `null` + a guess).
 - **Fix 67 — FD questions now reach the graph (both classifiers were blind to fixed deposits):** "When is my FD maturity date?" was classified `general_inquiry` by the LLM at **confidence 1.0** (confidently wrong — no confidence-gated guardrail could ever correct it) and by the rule classifier at 0.45, because no keyword set contained `fixed deposit`/`FD`/`maturity` and the LLM's intent definitions never mentioned FDs. Fixed both: 7 FD keywords on `account_balance_inquiry` + an FD clause in that intent's LLM definition. **No new intent** — `neo4j_answer`'s `account_balance_inquiry` branch already fetches fixed deposits (principal, rate, tenure, maturity date/amount); only classification was broken. Measured after (1 Groq call, 1,377 tokens): LLM `account_balance_inquiry` 1.0, rule 0.91 — both agree. Compounds with Fix 66: FD reaches the graph, and the read is now recorded as `neo4j_graph`.
 - **Fix 66 — Provenance could never report "graph" (missing `retrieval` key):** the Neo4j branch built its context metadata without the `retrieval` key the provenance endpoint reads, so `neo4j_graph` was **never** persisted as evidence (live DB: 27 rows, 0 graph) and the panel permanently fell back to *guessing* from the intent label. Added `"retrieval": "neo4j_graph"`, matching what the two RAG paths already do. **Also disproves Session 12's "intent guardrail" root cause** — measured (3 Groq calls, 4,011 tokens) the LLM already classifies card 0.8 / policy 0.9, well above the 0.65 override threshold, so the allow-list fix would have been dead code.
 
@@ -2352,6 +2353,52 @@ only classification was. So:
 **Compounds with Fix 66:** FD now reaches a transactional intent → the Neo4j branch fires → and the
 read is recorded as `neo4j_graph`, so the provenance panel can prove it.
 
+### Fix 68 — Approved replies keep their provenance (evidence stayed on the holding message)
+**Found by verifying Fix 66 in the running app**, not by reading code — the live check is what
+exposed it.
+
+**Problem:** `add_retrieval_evidence` is called once, against the outbound turn that exists at reply
+time ([graph.py:681](../services/orchestration_service/graph.py)). When the review gate holds a
+reply, that turn is the **holding message** ("Support Agent will help you shortly…"). The real
+answer is created later, by the draft-send route on approval — and nothing carried the evidence
+across. Net effect: **every human-reviewed reply had zero evidence**, so the provenance panel fell
+back to `graph_backed = intent in TRANSACTIONAL_INTENTS` — a guess.
+
+**Why the guess is not harmless:** it assumes any transactional intent means the graph was read. But
+`neo4j_answer` returns `None` when the customer has no such record and RAG answers instead. The panel
+would then highlight FixedDeposit/Account nodes for an answer that never touched the graph — exactly
+the over-claiming Fix 65 was built to eliminate. It happened to be *right* on the demo path, which is
+how it stayed invisible.
+
+**Fix:** `_carry_retrieval_evidence` in [reply_drafts.py](../apps/api/routes/reply_drafts.py) copies
+the holding turn's evidence onto the sent turn. The held answer and the holding message come from the
+same resolution, so that evidence genuinely describes the sent text. Best-effort (wrapped in
+try/except — a failure must never block a delivered reply) and idempotent (skips turns that already
+have evidence).
+
+**Verified live on the exact broken path** — fresh FD question → held for review → approved → sent:
+
+| | Before fix | After fix |
+|---|---|---|
+| `retrieval_backend` | `null` | **`neo4j_graph`** |
+| `source` | `graph` (inferred) | `graph` (**recorded**) |
+| citations | none | the real FD record (principal Rs.160,000, maturity 2028-01-12, maturity amount Rs.183,712) |
+
+Full suite **145 pass / 5 fail**, baseline exact. api rebuilt.
+
+**Known limit (stated, not hidden):** the holding turn is located *positionally* — the first outbound
+turn after the draft's `inbound_turn_id` (turns are chronological). Verified against real data, but a
+stored `holding_turn_id` on the draft would be sturdier. That needs a migration; the positional
+lookup reuses the existing structure instead.
+
+**UI note — deliberately NOT changed.** The graph modal's caption ("Highlighted nodes = what a
+`<intent>` question looks up") is a **static string** with no branch on `retrieval_backend`, so it
+reads the same whether the panel knows or is inferring, and the graph branch never renders
+`p.citations`. Both were true before this fix too. The caption is nonetheless *accurate* (Session 12
+established `neo4j_answer` fetches every record for an intent without selecting), the new
+`retrieval · neo4j_graph` subtitle already surfaces the recorded fact, and Session 12 lost eight
+rounds to UI polish. Left alone as a cosmetic item, not a correctness bug.
+
 ### Groq spend this session
 **5,388 tokens total** (5,158 prompt / 230 completion) across 4 calls — ~1.1% of the 500K/day free
 tier. Every call was a single classification with real `usage` read off the response object, never an
@@ -2366,10 +2413,25 @@ All other verification used fakes, offline calls, or read-only DB inspection.
   if the guardrail's allow-list is ever widened. Not fixed; not caused by this session's work.
 - **Dropped:** the intent guardrail allow-list, disproved above.
 
-### Not yet confirmed in the running app
-Fixes 66 and 67 are verified at the code, classifier and database levels, and the suite matches
-baseline — but **neither has been seen working in the live app**. The api container runs a baked-in
-copy of the source, so both require a rebuild before they are live. Pending: rebuild, send an FD and
-a card message (via the **web portal** — it triggers no outbound delivery to a real customer's
-contacts), then confirm the provenance panel reads "graph" from recorded evidence rather than its
-intent-label fallback.
+### Confirmed in the running app
+api rebuilt and all three fixes verified live via the **web portal** (chosen because it triggers no
+outbound delivery to a real customer's contacts — see [[no-real-outbound-in-tests]]). Portal user
+`prov_test_s13` signed up against Sayantini's seeded email → resolved `matched_existing` →
+`CRN00010001`.
+
+- **Fix 67:** *"When is my FD maturity date?"* → intent `account_balance_inquiry` (was
+  `general_inquiry`), graph read returned FD001001, reply quoted the correct maturity **2028-01-12**,
+  and the conversation view grouped it under an **ACCOUNT BALANCE INQUIRY** theme header.
+- **Fix 66:** the turn's evidence carries `"retrieval": "neo4j_graph"` — the **first such row in the
+  database** (whole-DB distribution went from `keyword_fallback` 16 / `opensearch_vector` 9 /
+  `None` 2 / **`neo4j_graph` 0** to the same plus `neo4j_graph`).
+- **Fix 68:** found *because* of this live check — see above.
+
+**Process note (worth recording):** the live run also caught a mistake in my own reporting — I first
+compared provenance on two turn ids picked from the wrong end of a chronological list and drew a
+conclusion from them. `list_conversation_turns` is **oldest-first**; the newest turn is at the end.
+Re-checked against the correct turn before reporting anything.
+
+**Test artifacts left in the live DB** (portal user `prov_test_s13`, two FD exchanges in
+`conv_3a7da7519e44`, ticket `tkt_a89bbe475b69`, two sent drafts) — retained deliberately so the
+fixes can be inspected in the UI; delete before a clean demo run.

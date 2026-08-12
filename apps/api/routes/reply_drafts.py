@@ -94,6 +94,8 @@ def send_draft(draft_id: str, payload: SendDraftRequest) -> dict:
         metadata={"source": "manual_agent_reply", "draft_id": draft_id, "actor": payload.actor},
     )
 
+    _carry_retrieval_evidence(repository, draft, turn["turn_id"])
+
     updated = repository.update_reply_draft(
         draft_id, status="sent", actor=payload.actor, sent_text=text,
     )
@@ -107,6 +109,61 @@ def send_draft(draft_id: str, payload: SendDraftRequest) -> dict:
                  "edited": text != (draft.get("draft_text") or "")},
     )
     return {"draft": updated, "turn_id": turn["turn_id"], "delivery": delivery}
+
+
+def _carry_retrieval_evidence(repository, draft: dict, sent_turn_id: str) -> None:
+    """Copy the held reply's retrieval evidence onto the turn the agent actually sent.
+
+    Evidence is written once, against the outbound turn that exists at reply time
+    (graph.py). When the review gate holds, that turn is the HOLDING message
+    ("Support Agent will help you shortly…") — so the real reply, created here on
+    approval, carries no evidence at all. The provenance endpoint then falls back to
+    inferring the source from the intent label, which over-claims: a transactional
+    intent whose customer has no such record answers from the KB, yet the panel would
+    still report "graph".
+
+    The held answer and the holding message come from the same resolution, so the
+    holding turn's evidence describes the sent text. Locate it as the first outbound
+    turn after the draft's inbound turn (turns are chronological).
+
+    Best-effort: a failure here must never block a delivered reply, and duplicate
+    evidence is avoided by skipping turns that already have some.
+    """
+    inbound_turn_id = draft.get("inbound_turn_id")
+    if not inbound_turn_id:
+        return
+    try:
+        if repository.list_retrieval_evidence(sent_turn_id):
+            return
+        turns = repository.list_conversation_turns(draft["conversation_id"])
+        holding_turn_id = None
+        seen_inbound = False
+        for turn in turns:
+            if turn["turn_id"] == inbound_turn_id:
+                seen_inbound = True
+                continue
+            if not seen_inbound:
+                continue
+            if turn["turn_id"] == sent_turn_id:
+                break
+            if turn.get("direction") == "outbound":
+                holding_turn_id = turn["turn_id"]
+                break
+        if not holding_turn_id:
+            return
+        evidence = repository.list_retrieval_evidence(holding_turn_id) or []
+        contexts = [
+            {
+                "text": item.get("chunk_text") or "",
+                "score": item.get("score") or 0.0,
+                "metadata": item.get("metadata") or {},
+            }
+            for item in evidence
+        ]
+        if contexts:
+            repository.add_retrieval_evidence(sent_turn_id, contexts)
+    except Exception:
+        pass
 
 
 _OFFER_EMAIL_SUBJECT = "An offer curated for you"
