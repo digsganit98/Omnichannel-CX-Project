@@ -1422,8 +1422,7 @@ function renderRight(conv, tickets) {
     + '<circle cx="3" cy="12.4" r="2.1" stroke="currentColor" stroke-width="1.3"/>'
     + '<circle cx="13" cy="12.4" r="2.1" stroke="currentColor" stroke-width="1.3"/>'
     + '<path d="M6.7 4.9 4.2 10.6M9.3 4.9l2.5 5.7M5.1 12.4h5.8" stroke="currentColor" stroke-width="1.3"/>'
-    + '</svg>View knowledge graph</span>'
-    + '<span class="kg-btn-cnt" id="snap-kg-count"></span></button>'
+    + '</svg>View customer 360 knowledge graph</span></button>'
     + '<div class="rpcard"><div class="ssent-head"><span class="rplbl">Sentiment</span>'
     + '<span class="ssc" style="color:' + sentClr + '">' + escH(sentLbl) + '</span>'
     + '<span class="ssent-count">(last ' + sentCount + ' message' + (sentCount === 1 ? '' : 's') + ')</span></div>'
@@ -1457,7 +1456,6 @@ function renderRight(conv, tickets) {
     api('/admin/customers/' + encodeURIComponent(_snapCustId) + '/graph-view').then(function(gv) {
       var btn = document.getElementById('snap-kg-btn');
       if (!btn || !gv || !gv.resolved || !(gv.nodes || []).length) return;
-      document.getElementById('snap-kg-count').textContent = gv.nodes.length + ' nodes';
       btn.style.display = 'flex';
       btn.onclick = function() { openGraphModal(gv); };
     }).catch(function() { /* button stays hidden */ });
