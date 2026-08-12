@@ -193,6 +193,33 @@ def get_customer_context_by_id(client, customer_id: str) -> dict:
     return get_customer_context_for_customer(client, customer)
 
 
+def get_open_cases(client, customer_id: str, limit: int = 5) -> list[dict]:
+    """The customer's unresolved support cases, newest first.
+
+    Deliberately bounded and summary-only. The conversation history the LLM receives is
+    a fixed window of recent turns, so a case raised earlier simply scrolls out of view
+    and the model stops knowing it exists — even though the ticket is still open. A case
+    is a durable FACT about the customer, like a card limit, so it belongs in the trusted
+    account context rather than depending on luck of the window.
+    """
+    if client is None or not customer_id:
+        return []
+    try:
+        return client.query(
+            """
+            MATCH (c:Customer {customer_id: $cid})-[:HAS_TICKET]->(t:Ticket)
+            WHERE t.status IS NULL OR t.status <> 'resolved'
+            RETURN t.ticket_id AS ticket_id, t.intent AS intent, t.status AS status,
+                   t.priority AS priority, t.scope AS scope, t.title AS title
+            ORDER BY t.ticket_id DESC
+            LIMIT $limit
+            """,
+            {"cid": customer_id, "limit": limit},
+        )
+    except Exception:
+        return []
+
+
 def get_customer_context_for_customer(client, customer: dict | None) -> dict:
     """Return a rich context dict for an already resolved Neo4j customer."""
     if not customer:
@@ -204,6 +231,7 @@ def get_customer_context_for_customer(client, customer: dict | None) -> dict:
     credit_cards = get_credit_cards(client, cid)
     accounts = get_accounts(client, cid)
     fixed_deposits = get_fixed_deposits(client, cid)
+    open_cases = get_open_cases(client, cid)
     return {
         "customer_id": cid,
         "name": customer.get("name"),
@@ -217,6 +245,7 @@ def get_customer_context_for_customer(client, customer: dict | None) -> dict:
         "credit_cards": credit_cards,
         "accounts": accounts,
         "fixed_deposits": fixed_deposits,
+        "open_cases": open_cases,
     }
 
 

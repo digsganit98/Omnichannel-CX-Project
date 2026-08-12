@@ -103,6 +103,7 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 63 — Tickets never reached Neo4j (id-namespace mismatch):** `_neo4j_customer_id` returned the SQLite `cust_…` id for whatsapp/email, so the graph's `MATCH (c:Customer {customer_id:'CRN…'})` matched nothing and every ticket/interaction write silently produced no node; now resolves the sender's phone/email to the real `CRN…` (backfill script added for the 8 pre-existing tickets).
 - **Fix 64 — Knowledge-graph view in the admin UI:** New read-only `/admin/customers/{id}/graph-view` endpoint returns the customer neighbourhood as `{nodes, edges}`; a "View knowledge graph" button at the top of the right panel opens a modal rendering it as a deterministic radial SVG, coloured by derived health.
 - **Fix 65 — "Why this answer" provenance panel:** New `/admin/conversations/turns/{id}/provenance` endpoint plus a per-reply button that shows whether an answer came from the customer's graph records or from retrieved KB passages; fixed a false "no account records were read" claim, a crash on the graph branch, and the button appearing on holding messages.
+- **Fix 75 — The graph now tells the LLM what the customer is DEALING WITH, not just what they hold (Layer 2):** `get_customer_context_for_customer` loaded products only, so an open case reached the model **only if it happened to fall inside the 8-turn history window** — past that, a still-open ticket was invisible. Added `get_open_cases` (unresolved tickets, newest first, capped at 5) to the trusted account context. **Measured: 33 tokens when a case exists, 0 when none** (the block is omitted entirely). Verified live: *"Do I have anything pending with you?"* — a question naming nothing — returned *"you have an open support request regarding a transaction dispute… the Rs.20,766 POS purchase"*. Regression checked: an unrelated card question answered only the card question, with no drift into the dispute.
 - **Fix 74 — Conversation-view rows split when a customer interleaves topics:** a ticket's steps were grouped only while **consecutive**, at BOTH layers (theme grouping via `prevTicket`, and `buildUnits` via last-unit comparison). An unrelated question in the middle — dispute → loan → dispute — reset the run, so ONE ticket rendered as TWO rows under two separate theme headers, hiding the continuity the backend had just established. Now a returning ticket rejoins its original group (`ticketGroup` map) and `buildUnits` merges by key (`byKey` lookup). Verified by a simulation that first **reproduced the user's screenshots exactly** (3 groups / 3 rows) then showed the fix (2 groups / 2 rows). Frontend-only.
 - **Fix 73 — The knowledge graph knew what a customer HOLDS but not what they are DEALING WITH (write side):** `write_incoming_interaction` MERGEd on `conversation_id`, so every new message **overwrote the previous one** — a 12-turn conversation left a single Interaction node holding only the last sentence. Tickets and messages sat in the graph as disconnected islands, so continuity existed **only in SQLite** and the graph could never show a case history. Interactions are now keyed per **message** (`turn_id`), linked to their ticket by a new `HAS_MESSAGE` edge, and the Ticket node carries its `scope` and `title`. The graph can now answer "the whole case" in one query. Seeded per-conversation rows are untouched (the key falls back when no `turn_id` is passed).
 - **Fix 72 — Ticket continuity: a status follow-up opened a junk ticket, and a second complaint was silently swallowed:** running the continuity scenarios end-to-end (first time they had ever been run) exposed two real defects. *"Any update on my dispute?"* classifies as `ticket_status`, and the referee's candidate list was filtered by the **incoming** intent — so a `transaction_dispute` ticket was never a candidate, the referee never ran, and the question opened a **new ticket about asking after a ticket**. Separately, the ":other refinement" rule merged **any** specific message into an open vague ticket without checking, so *"I **also** have a problem with a UPI payment"* — a second complaint — was absorbed into the first ticket's description as `[Details added: …]` and ceased to exist as its own item. Fixed by (A) gathering referee candidates by conversation, any intent, capped at 5, and (B) giving the refinement rule a **veto** — its own LLM prompt asking *"is this filling in the details, or raising a separate issue?"* — plus (C) the payment rails the seed actually uses. **Verified live: A1+A2+A3 = ONE ticket (including a cross-intent match), B1 = a separate ticket.**
@@ -2577,6 +2578,42 @@ transfer failed"*, goes to `fund_transfer` — arguably correct, and `fund_trans
 deliberately excluded as there is no payments integration); `neo4j_answer` returns real records for
 both tested customers; graph-view node slice confirmed (Sayantini 3 problem transactions of 8
 fetched, Fathima 1). Full suite **145 pass / 5 fail**, baseline exact.
+
+### Fix 75 — Open cases added to the trusted account context (Layer 2 of 3)
+Layer 1 made the history exist in the graph; nothing read it. `get_customer_context_for_customer`
+still loaded **products only** — loans, claims, policies, cards, accounts, FDs — so the model learned
+about an open case only if it happened to sit inside the fixed 8-turn history window. Once it
+scrolled past, a still-open ticket was invisible to the LLM even though the graph held it.
+
+**Built:** `get_open_cases(client, customer_id, limit=5)` — unresolved tickets, newest first — folded
+into the same context dict, and rendered by `_format_graph_context` as a summary block. Summary only:
+ids, subject, scope and status. The case's *messages* are deliberately not replayed, which is what
+keeps it a handful of tokens and respects the user's "3-5 turns, not more context" constraint — a
+case is a durable FACT about the customer, like a card limit, not more conversation.
+
+**Measured cost, not estimated:**
+
+| | chars | added tokens |
+|---|---|---|
+| Hirithi (1 open case) | 854 → 989 | **33** |
+| Sayantini (no open cases) | 836 → 836 | **0** — block omitted |
+
+**Verified live.** *"Do I have anything pending with you?"* — a question naming no product, no ticket
+and no amount — produced: *"Based on your earlier contact, I can see that you have an open support
+request regarding a transaction dispute on your RuPay Platinum credit card. The disputed charge is
+the Rs.20,766 POS purchase."* The case **and** its specific transaction were recalled from context
+alone.
+
+**The regression I flagged as the real risk was tested and did not occur:** the worry was the model
+dragging an open case into unrelated answers. *"What is my credit card limit?"* answered *"Your RuPay
+Platinum credit card has a credit limit of Rs.830,000"* — no mention of the dispute. Full suite
+**145 pass / 5 fail**, baseline exact.
+
+**Surfaced (not caused) by this change:** the context listed `tkt_c2316d5f6129 | Ticket Status
+request about manual_review` — a junk ticket created by asking *"anything pending?"*. That is the
+Fix 72 rough edge (Rule 0 escalates on L2 before the "ticket_status never creates a ticket" rule is
+reached). Harmless once, but these now accumulate visibly in the case list, which strengthens the
+argument for fixing it.
 
 ### Fix 74 — One ticket rendered as two rows when the customer interleaved topics
 **Found by the user testing out of order** — running the demo steps as a real customer would, with an

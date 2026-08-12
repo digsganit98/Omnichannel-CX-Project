@@ -511,4 +511,21 @@ def _format_graph_context(graph_ctx: dict | None) -> str:
                 f"Status: {fd.get('status', '')}"
                 f"{maturity}"
             )
+    # Open support cases. Conversation history is a fixed recent-turns window, so a case
+    # raised earlier scrolls out of view and the model stops knowing it exists even while
+    # the ticket is still open. Listing it here makes it a durable fact about the customer,
+    # like a card limit. Summary only (id/subject/status) — the case's messages are not
+    # replayed, so this stays a handful of tokens.
+    open_cases = graph_ctx.get("open_cases") or []
+    if open_cases:
+        lines.append("Open support cases (already raised — do NOT treat as new):")
+        for case in open_cases:
+            subject = case.get("title") or (case.get("intent") or "").replace("_", " ").title()
+            scope = case.get("scope") or ""
+            # "transaction_dispute:imps" → "imps": the specific matter, without repeating the intent.
+            detail = f" about {scope.split(':', 1)[1]}" if ":" in scope and scope.split(":", 1)[1] else ""
+            lines.append(
+                f"  - {case.get('ticket_id', '')} | {subject}{detail} | "
+                f"Status: {case.get('status', 'open')}"
+            )
     return "\n".join(lines)
