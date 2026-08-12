@@ -2264,6 +2264,57 @@ holdings, then re-verify.
 Branch: `Sayantini-phase2-ui-changes`. Picked up Session 12's two open root causes; measurement
 **invalidated one of them** and uncovered a different, real defect underneath.
 
+---
+
+### ▶ HANDOVER — state at end of Session 13 (read this first)
+
+**Everything is committed.** Working tree clean apart from 4 files untracked since Fix 62
+(`docs/client-demo-solution-overview.md`/`.docx`, `docs/whatsapp-architecture-slide.pptx`,
+`infra/scripts/md2docx.py`).
+
+**System state**
+| | |
+|---|---|
+| Stack | **running** (api rebuilt with all 12 fixes; `http://localhost:8888/admin-ui`) |
+| Neo4j | 5 customers, full holdings, **0 tickets, 0 phantoms** |
+| SQLite | **empty** — 0 turns / tickets / drafts / evidence |
+| KB index | 14 single-topic chunks |
+| Portal users | `Sayantini`, `Fathima` (**both the user's own — preserved**) |
+| Admin login | `Admin_SS` (recreated — the fresh start wiped `admin_users`) |
+| Test suite | **145 pass / 5 fail** — the 5 are pre-existing `test_phase1` failures, unchanged all session |
+| Groq | ~155K of 500K used in the rolling 24h |
+
+**What shipped:** 12 fixes (66-77). The through-line is that the knowledge graph went from a
+**product catalogue** to something that carries the customer's **case** — written per message
+(Fix 73), linked to its ticket, read into every reply as trusted context (Fix 75), surfaced as
+continuity in the provenance panel (Fix 76), and kept in step when a ticket resolves (Fix 77).
+
+**Next up (nothing is blocked):**
+1. **Build the demo history** — the user drives this, using [demo-question-set.md](demo-question-set.md).
+   Three sequenced runs; every question verified against real records. Use the wordings as written.
+2. **`client-demo-solution-overview.md` is stale** — written the morning of Session 13, before all 12
+   fixes. Its graph and provenance sections no longer describe the system.
+
+**Known open items — none blocking:**
+- **`ticket_status` junk ticket.** A *vague* status question ("anything pending?") opens a ticket
+  about asking after a ticket, and holds the reply. Cause: Rule 0 escalates on an L2 classification
+  before Rule 3 ("ticket_status never creates a ticket") is reached, making Rule 3 unreachable.
+  **User decided to leave it.** Note it does NOT fire on the demo phrasing *"Any update on my
+  dispute?"*, which classifies as `transaction_dispute` and matches correctly.
+- **Doubled-consonant keywords** — `"scam"` does not match `"scammed"`. Pre-existing, not a regression.
+- **No continuity for unticketed topics.** Replies stay coherent (the LLM still sees the last 8
+  turns) but nothing groups them in the record. Designed and deferred — see [[thread-feature-plan]].
+- **Seed dates age.** Sayantini's card due date (2026-07-08) is already past; 3 of 4 FDs are `Matured`.
+- The **Escalate** button is still a UI stub.
+
+**Two live behaviours worth knowing before testing:**
+- Dispute / loan / claim questions usually classify L2 and are **held for review** — the customer gets
+  the holding message and the real answer waits under **Needs Review**. Card / balance / premium / FAQ
+  usually auto-send.
+- Continuity decisions are **LLM judgement calls** and not bit-for-bit repeatable.
+
+---
+
 ### Measurement first — the guardrail root cause is DISPROVED
 Session 12 logged the intent-guardrail allow-list as a root cause of the graph view looking unused.
 Before changing code, the untested assumption in that diagnosis was measured: `_apply_guardrails`
