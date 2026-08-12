@@ -103,6 +103,7 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 63 — Tickets never reached Neo4j (id-namespace mismatch):** `_neo4j_customer_id` returned the SQLite `cust_…` id for whatsapp/email, so the graph's `MATCH (c:Customer {customer_id:'CRN…'})` matched nothing and every ticket/interaction write silently produced no node; now resolves the sender's phone/email to the real `CRN…` (backfill script added for the 8 pre-existing tickets).
 - **Fix 64 — Knowledge-graph view in the admin UI:** New read-only `/admin/customers/{id}/graph-view` endpoint returns the customer neighbourhood as `{nodes, edges}`; a "View knowledge graph" button at the top of the right panel opens a modal rendering it as a deterministic radial SVG, coloured by derived health.
 - **Fix 65 — "Why this answer" provenance panel:** New `/admin/conversations/turns/{id}/provenance` endpoint plus a per-reply button that shows whether an answer came from the customer's graph records or from retrieved KB passages; fixed a false "no account records were read" claim, a crash on the graph branch, and the button appearing on holding messages.
+- **Fix 66 — Provenance could never report "graph" (missing `retrieval` key):** the Neo4j branch built its context metadata without the `retrieval` key the provenance endpoint reads, so `neo4j_graph` was **never** persisted as evidence (live DB: 27 rows, 0 graph) and the panel permanently fell back to *guessing* from the intent label. Added `"retrieval": "neo4j_graph"`, matching what the two RAG paths already do. **Also disproves Session 12's "intent guardrail" root cause** — measured (3 Groq calls, 4,011 tokens) the LLM already classifies card 0.8 / policy 0.9, well above the 0.65 override threshold, so the allow-list fix would have been dead code.
 
 ---
 
@@ -2244,3 +2245,84 @@ push. WhatsApp verified end-to-end live (inbound -> Groq reply -> delivered `rea
 domain correct, SYSTEM_USER token valid to 2026-09-23). Stack stopped cleanly at session end.
 **Next:** the two root causes above, then a curated question set per customer grounded in real
 holdings, then re-verify.
+
+---
+
+## Session 13 — 2026-08-12
+
+Branch: `Sayantini-phase2-ui-changes`. Picked up Session 12's two open root causes; measurement
+**invalidated one of them** and uncovered a different, real defect underneath.
+
+### Measurement first — the guardrail root cause is DISPROVED
+Session 12 logged the intent-guardrail allow-list as a root cause of the graph view looking unused.
+Before changing code, the untested assumption in that diagnosis was measured: `_apply_guardrails`
+only overrides the LLM when **LLM confidence < 0.65**, and nobody had ever checked what confidence
+the LLM actually returns on these questions.
+
+**3 real Groq calls (`llama-3.1-8b-instant`), 4,011 tokens total** (1,334 / 1,340 / 1,337):
+
+| Question | LLM intent | LLM conf | Rule intent | Rule conf |
+|---|---|---|---|---|
+| "What is my credit card limit?" | `card_management` ✅ | **0.80** | `card_management` | 0.79 |
+| "When is my next insurance premium due?" | `policy_status` ✅ | **0.90** | `loan_status` | 0.67 |
+| "When is my FD maturity date?" | `general_inquiry` ❌ | **1.00** | `general_inquiry` | 0.45 |
+
+**Conclusion: adding those intents to `boundary_intents` would have been dead code.** Every
+confidence is far above the 0.65 gate, so the override could never fire. The LLM is *already correct*
+on card and policy. Session 12 called the fix "necessary but not sufficient"; it is in fact **not
+necessary**.
+
+**Also corrects a logged fact:** Session 12 recorded the rule classifier returning `policy_status`
+0.79 for the premium question. Measured, it returns **`loan_status` 0.67** — "premium **due**" hits
+the `loan_status` keyword `due`. A latent mis-trigger, harmless only because the guardrail can't fire.
+
+### Fix 66 — Provenance could never report "graph" (missing `retrieval` metadata key)
+**Real root cause of the "graph view looks unused" symptom**, found by tracing the persistence path
+rather than the intent path.
+
+The provenance endpoint decides graph-vs-KB by reading **one key** from stored evidence metadata
+([conversations.py:76](../apps/api/routes/conversations.py)): `meta.get("retrieval")`.
+`add_retrieval_evidence` ([repository.py:640](../services/persistence_service/repository.py)) stores
+the branch's metadata dict **verbatim** — it adds nothing. Only the two RAG paths ever set that key
+(`opensearch_vector` in [opensearch_store.py:141](../services/rag_service/opensearch_store.py),
+`keyword_fallback` in [rag_pipeline.py:89](../services/rag_service/rag_pipeline.py)). The Neo4j branch
+set `source` and `doc_type` but **not `retrieval`**.
+
+**Near-miss worth recording:** that same branch *does* set `retrieval_backend="neo4j_graph"` — but on
+the `QueryResolution` object, which is a different thing from the `metadata` dict that gets persisted.
+The correct value existed in memory and was dropped at the DB boundary.
+
+**Consequence:** `backend` always resolved to `None`, so the endpoint fell to its fallback,
+`graph_backed = intent in TRANSACTIONAL_INTENTS` — a *guess from the intent label*. The comment above
+that line says the recorded backend "is the ground truth when we have it"; we never had it.
+
+**Live-data proof (read-only copy of the `cx-data` volume, stack down):** 27 evidence rows —
+`keyword_fallback` 16, `opensearch_vector` 9, `None` 2, **`neo4j_graph` 0**. Inbound intents: 11
+`general_inquiry`, 7 `transaction_dispute`, 3 `loan_application`, 1 `ticket_status`, 1 `loan_status`,
+1 `account_balance_inquiry` — exactly **2 transactional**, matching the "2 of 24 (8%)" in Fix 65.
+The symptom was real; the attributed cause was not.
+
+**Fix:** added `"retrieval": "neo4j_graph"` to the graph branch's context metadata
+([orchestration_agents.py:303-311](../services/agent_service/orchestration_agents.py)) — reusing the
+mechanism the RAG paths already use, not a new one.
+
+**Verified (0 Groq, 0 Neo4j, no stack):** drove the real `QueryResolutionAgent` and the real
+`add_retrieval_evidence` writer with fakes for LLM/Neo4j/OpenSearch — metadata carries the key →
+persists → reads back as `neo4j_graph` → `graph_backed: True`; RAG path still reports
+`opensearch_vector` (no regression). Full suite **145 pass / 5 fail**, byte-identical to the
+documented baseline (the same 5 pre-existing `test_phase1` failures).
+
+**Scope limits (stated, not glossed):**
+- **Reporting only.** The panel can now read the truth instead of guessing; whether the graph read
+  *fires* is untouched.
+- **New turns only.** The 27 existing evidence rows were never recorded with a backend and stay
+  unlabeled, still using the intent fallback.
+- **Not confirmed live** — needs an api rebuild plus a real transactional message.
+
+### Still open
+- **FD is unclassifiable by either classifier.** LLM says `general_inquiry` at **confidence 1.0**
+  (confidently wrong, so no confidence-gated guardrail can ever correct it) and no keyword set
+  contains `fixed deposit`/`FD`/`maturity`. Note there is **no FD intent in the enum** — FD reads ride
+  on `account_balance_inquiry`, so the fix is keywords on that intent, not a new intent.
+- **KB ingestion still produces multi-topic chunks** (7 of 9), unchanged from Session 12.
+- **Dropped:** the intent guardrail allow-list, disproved above.

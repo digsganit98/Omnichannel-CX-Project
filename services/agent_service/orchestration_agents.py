@@ -303,6 +303,12 @@ class QueryResolutionAgent:
                                 "metadata": {
                                     "source": "neo4j_customer_graph",
                                     "doc_type": "customer_graph",
+                                    # Persisted verbatim by add_retrieval_evidence and read back
+                                    # by the provenance endpoint, which keys on "retrieval". The
+                                    # RAG paths set it (opensearch_vector / keyword_fallback);
+                                    # without it here the graph branch stored no backend at all,
+                                    # so the panel fell back to guessing from the intent label.
+                                    "retrieval": "neo4j_graph",
                                 },
                             }]
                             # Pass through Groq so the LLM produces a natural CS response
