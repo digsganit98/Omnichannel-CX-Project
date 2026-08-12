@@ -50,21 +50,41 @@ class TicketManager:
             # Mastercard"), the specific scope must REFINE that open ticket, not fork a
             # duplicate. Only ":other" is upgraded — two specific scopes (card vs upi)
             # are genuinely distinct incidents and still get separate tickets.
+            #
+            # But "vague ticket open + specific message arrived" is NOT proof the two are
+            # the same matter. Live example: a dispute ticket sat at ":other" (the customer's
+            # IMPS details did not match any scope keyword), then "I ALSO have a problem with
+            # a UPI payment" arrived — a second, separate complaint — and this rule absorbed
+            # it into the first ticket's description as "[Details added: ...]". The complaint
+            # stopped existing as its own item, with no error and nothing visibly wrong: the
+            # silent-merge failure the referee below was built to prevent.
+            #
+            # So the referee gets a VETO here — not a vote. It can block a merge it judges to
+            # be a different matter, but it is never a precondition: when no generator is
+            # configured, or the call fails, refinement proceeds exactly as before. Making
+            # the referee a precondition would silently disable refinement whenever the LLM
+            # is unavailable, turning a deterministic behaviour into an LLM-dependent one.
             fallback = self.repository.find_active_ticket_for_scope(
                 conversation_id, intent.value, f"{intent.value}:other"
             )
-            if fallback:
+            if fallback and not self._referee_rejects(fallback, message):
                 existing = self._refine_ticket_scope(fallback, ticket_scope, message)
         if not existing and ticket_scope:
             # Tier-4 omnichannel referee: the scope label didn't string-match any
             # active ticket (e.g. a vague "any update on my dispute?" follow-up
             # arriving on another channel after the ticket was refined to :card).
             # Labels can't answer "same matter or new matter?" — ask the LLM to
-            # pick among the CODE-VETTED candidates (active, same intent, same
-            # conversation) or say NEW. Any doubt/error/absent-LLM ⇒ new ticket:
-            # a spurious fork is visible and fixable; a spurious merge corrupts
-            # the record silently.
-            candidates = self.repository.list_active_tickets_for_intent(conversation_id, intent.value)
+            # pick among the CODE-VETTED candidates or say NEW. Any doubt/error/
+            # absent-LLM ⇒ new ticket: a spurious fork is visible and fixable; a
+            # spurious merge corrupts the record silently.
+            #
+            # Candidates are NOT filtered by the incoming intent. Filtering by it excluded
+            # the commonest follow-up there is: "any update on my dispute?" classifies as
+            # ticket_status, so a transaction_dispute ticket was never a candidate, the
+            # referee never ran, and the question opened a brand-new ticket about asking
+            # after a ticket. Relatedness is a judgement about the text — which is exactly
+            # what the referee reads — not about two intent labels being equal.
+            candidates = self.repository.list_active_tickets_for_conversation(conversation_id)
             if candidates:
                 existing = self._referee_match(candidates, message)
         if existing:
@@ -123,6 +143,67 @@ class TicketManager:
         self.repository.add_ticket_event(ticket.ticket_id, "ticket_scope_refined", "orchestration", details)
         self._audit(ticket, "ticket_scope_refined", details)
         return Ticket(**updated)
+
+    def _referee_rejects(self, ticket: Ticket, message: InboundMessage) -> bool:
+        """True only when the LLM RAN and judged this a SEPARATE matter from a vague ticket.
+
+        This asks a different question from _referee_match, and needs its own prompt.
+        _referee_match compares two *specific* matters ("is this the same transaction as
+        the one in that ticket?"). Here the ticket is by definition vague — it is the
+        ":other" scope precisely because it names no transaction, merchant or amount — so
+        that question cannot be answered sensibly: "does this message describe something
+        different from a ticket that describes nothing?" is trivially yes, which vetoed
+        every legitimate refinement. (Observed live: a vague dispute opener followed by
+        "It was the Rs.28,991 IMPS transfer to Kimaya Seth" — plainly the missing details —
+        was rejected as NEW.)
+
+        The right question is about the customer's INTENT in sending it: are they filling
+        in the details of the matter they just raised, or raising an additional one?
+
+        Deliberately asymmetric with _referee_match: that one treats "could not decide" as
+        "no match" (safe, because the fallback is a new ticket). Here the fallback is an
+        existing, working refinement, so "could not decide" must mean "do not block" —
+        otherwise an absent or failing LLM would quietly switch refinement off.
+        """
+        if not self.generator:
+            return False
+        try:
+            masked_text, _ = mask_text(message.text)
+            masked_desc, _ = mask_text((ticket.description or "")[:300])
+            result = self.generator._generate(
+                system_prompt=(
+                    "A customer raised a support issue but described it only vaguely. A newer "
+                    "message from the same customer contains specific details.\n"
+                    "Decide which of these it is:\n"
+                    "SAME — the message supplies the missing specifics of the issue they already "
+                    "raised (the transaction, merchant, amount, card or account they meant).\n"
+                    "SEPARATE — the message raises an ADDITIONAL, different issue. Wording such as "
+                    "\"I also\", \"another\", \"a second\", \"besides that\", or a second distinct "
+                    "problem alongside the first, indicates SEPARATE.\n"
+                    "When in doubt answer SAME: the vague issue has no details yet, so specifics "
+                    "usually belong to it.\n"
+                    "Reply with exactly one word: SAME or SEPARATE."
+                ),
+                user_prompt=(
+                    f'The vaguely-described open issue: "{masked_desc}"\n\n'
+                    f'The newer message: "{masked_text}"\n\n'
+                    "Answer SAME or SEPARATE."
+                ),
+                operation="ticket_refine_referee",
+            )
+            if not result.get("llm_used"):
+                return False
+            verdict = (result.get("text") or "").strip().upper()
+            rejected = verdict.startswith("SEPARATE")
+            if rejected:
+                self._audit(ticket, "ticket_refine_rejected", {
+                    "ticket_id": ticket.ticket_id,
+                    "verdict": verdict[:40],
+                    "detail_text": message.text[:200],
+                })
+            return rejected
+        except Exception:
+            return False
 
     def _referee_match(self, candidates: list[Ticket], message: InboundMessage) -> Ticket | None:
         """Ask the LLM whether an unmatched message refers to an open ticket or a new matter.
@@ -307,10 +388,26 @@ def _ticket_scope(intent: str, text: str, escalation_reason: str | None) -> str 
         return "fraud_report:other"
 
     if intent == Intent.TRANSACTION_DISPUTE.value:
+        # Every payment rail the seeded Transaction records actually use. Previously only
+        # upi/card were recognised, so an IMPS or NEFT dispute fell to ":other" — leaving
+        # the ticket permanently "vague" and therefore eligible to absorb the next
+        # unrelated specific message via the refinement rule above.
         if has("upi"):
             return "transaction_dispute:upi"
         if has("card", "credit card", "debit card"):
             return "transaction_dispute:card"
+        if has("imps"):
+            return "transaction_dispute:imps"
+        if has("neft"):
+            return "transaction_dispute:neft"
+        if has("rtgs"):
+            return "transaction_dispute:rtgs"
+        if has("atm"):
+            return "transaction_dispute:atm"
+        if has("netbanking", "net banking", "internet banking"):
+            return "transaction_dispute:netbanking"
+        if has("pos ", "pos purchase", "point of sale", "swipe"):
+            return "transaction_dispute:pos"
         return "transaction_dispute:other"
 
     if intent == Intent.LOAN_DEFAULT_NOTICE.value:

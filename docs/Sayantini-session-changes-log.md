@@ -103,6 +103,7 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 63 — Tickets never reached Neo4j (id-namespace mismatch):** `_neo4j_customer_id` returned the SQLite `cust_…` id for whatsapp/email, so the graph's `MATCH (c:Customer {customer_id:'CRN…'})` matched nothing and every ticket/interaction write silently produced no node; now resolves the sender's phone/email to the real `CRN…` (backfill script added for the 8 pre-existing tickets).
 - **Fix 64 — Knowledge-graph view in the admin UI:** New read-only `/admin/customers/{id}/graph-view` endpoint returns the customer neighbourhood as `{nodes, edges}`; a "View knowledge graph" button at the top of the right panel opens a modal rendering it as a deterministic radial SVG, coloured by derived health.
 - **Fix 65 — "Why this answer" provenance panel:** New `/admin/conversations/turns/{id}/provenance` endpoint plus a per-reply button that shows whether an answer came from the customer's graph records or from retrieved KB passages; fixed a false "no account records were read" claim, a crash on the graph branch, and the button appearing on holding messages.
+- **Fix 72 — Ticket continuity: a status follow-up opened a junk ticket, and a second complaint was silently swallowed:** running the continuity scenarios end-to-end (first time they had ever been run) exposed two real defects. *"Any update on my dispute?"* classifies as `ticket_status`, and the referee's candidate list was filtered by the **incoming** intent — so a `transaction_dispute` ticket was never a candidate, the referee never ran, and the question opened a **new ticket about asking after a ticket**. Separately, the ":other refinement" rule merged **any** specific message into an open vague ticket without checking, so *"I **also** have a problem with a UPI payment"* — a second complaint — was absorbed into the first ticket's description as `[Details added: …]` and ceased to exist as its own item. Fixed by (A) gathering referee candidates by conversation, any intent, capped at 5, and (B) giving the refinement rule a **veto** — its own LLM prompt asking *"is this filling in the details, or raising a separate issue?"* — plus (C) the payment rails the seed actually uses. **Verified live: A1+A2+A3 = ONE ticket (including a cross-intent match), B1 = a separate ticket.**
 - **Fix 71 — `transaction_dispute` answered from the KB while 72 real transactions sat unread in the graph:** the intent was excluded from `TRANSACTIONAL_INTENTS` on the stated grounds of "no transactions table". **That comment was wrong** — the seed loads a `Transaction` node per row of the Excel Transactions sheet (72 across the 5 customers), and `get_transactions()` already existed but was never called by `neo4j_answer`. Since `transaction_dispute` was the **most common inbound intent** (7 of 24 turns in the pre-wipe data), the single most frequent question type answered from a generic FAQ while the customer's own `Debited-Pending-Credit` transaction — with a real failure reason — was one query away. Wired the branch (8 most recent, newest first), added `Transaction` to the provenance highlight map, and added problem-transaction nodes to the knowledge-graph view (unsettled only, else the 3 most recent — 72 nodes cannot join a radial layout sized for ~12).
 - **Fix 70 — Keyword matching was substring-based, so "pr-emi-um" scored as a loan (broke EVERY insurance question):** `classify_intent` tested `keyword in lowered`, so the `loan_status` keyword **`"emi"` matched inside "premium"** — every premium question scored 1 for `loan_status` *and* 1 for `policy_status`, and `max()` broke the tie by declaration order, routing all insurance premium questions to Loans. Found by verifying 22 grounded demo questions offline: **5 of 22 failed, all of them premium questions, across all 5 customers.** Now matches on word boundaries while still allowing plural/verb inflections (`claims`, `hacked`, `hacking`). **22/22 clean after the fix.** Corrects my own earlier call that this was "latent and harmless".
 - **Fix 69 — KB ingestion produced multi-topic chunks (the last Session-12 root cause):** the KB PDF stores each word as a separate text object, so `pypdf` emitted `\n \n` between words (32% of page-1 text was whitespace), which destroyed the separators `RecursiveCharacterTextSplitter(800,120)` needs — it fell back to cutting on raw character count, so **6 of 9 chunks held two unrelated FAQs** and one chunk could score ~0.62 against almost any question. Fixed by normalising whitespace and splitting on the `Q:` marker (one chunk per Q&A), with the character splitter kept as the fallback for prose documents. **9 → 14 chunks, 6 → 0 multi-topic, 243-796 → 281-367 chars.** Re-indexed live (60 indexed docs → 14, 0 errors) and **measured**: all 5 known-bad queries now return the exactly-correct FAQ at rank 1 with a 1.9×-8.3× score gap over the runner-up — upgrading Session 12's stated inference to a verified result.
@@ -2574,6 +2575,78 @@ transfer failed"*, goes to `fund_transfer` — arguably correct, and `fund_trans
 deliberately excluded as there is no payments integration); `neo4j_answer` returns real records for
 both tested customers; graph-view node slice confirmed (Sayantini 3 problem transactions of 8
 fetched, Fathima 1). Full suite **145 pass / 5 fail**, baseline exact.
+
+### Fix 72 — Ticket continuity: two defects found by actually running the scenarios
+The continuity scenarios had been **written but never run**. Running them exposed two real defects
+that no amount of code reading had surfaced.
+
+**Defect 1 — a status follow-up opened a junk ticket.** *"Any update on my dispute?"* classifies as
+`ticket_status`. The referee's candidates came from `list_active_tickets_for_intent(conversation_id,
+intent)` — filtered by the **incoming** message's intent — so the customer's open
+`transaction_dispute` ticket was **not a candidate**, the referee was never called, and the question
+created a brand-new ticket *about asking after a ticket*. The referee's own prompt uses that exact
+sentence as its worked example of a match: it was not incapable, it was **starved of candidates**.
+
+**Defect 2 — a second complaint silently swallowed.** The ":other refinement" rule (Fix 51) merges a
+specific message into an open vague ticket. It checked only *"is the ticket vague and the message
+specific?"* — never *"are these the same matter?"* So *"I **also** have a problem with a UPI payment
+to Jivin Vora"* was absorbed into the dispute ticket as `[Details added: …]`. No error, nothing
+visibly wrong, and the UPI complaint stopped existing as its own item — precisely the silent-merge
+failure [ticket_manager.py](../services/ticket_service/ticket_manager.py) warns about in its own
+comment ("a spurious fork is visible and fixable; a spurious merge corrupts the record silently").
+
+**Fixes:**
+- **(A)** `list_active_tickets_for_conversation(conversation_id, limit=5)` — candidates gathered by
+  conversation, **any intent**, newest first. Relatedness is a judgement about the text, which is
+  what the referee reads; it is not two intent labels being equal. Bounded at 5 because each
+  candidate costs prompt tokens and adds another chance to mis-match.
+- **(B)** the refinement rule now consults a **veto** before merging.
+- **(C)** the payment rails the seeded Transactions actually use (`imps`, `neft`, `rtgs`, `atm`,
+  `pos`, `netbanking`) added to `_ticket_scope`, which previously knew only `upi`/`card`.
+
+**Two design mistakes I made and corrected — both worth recording:**
+
+1. **I first made the referee a *precondition* for refinement.** That broke 7 tests instantly: with
+   no generator configured, `_referee_match` returns `None`, so refinement stopped happening at all.
+   A deterministic behaviour would have become silently LLM-dependent — off whenever Groq was down or
+   out of quota. Corrected to a **veto**: it can block a merge, but absence/error/timeout means
+   "do not block", so the old behaviour is preserved exactly.
+2. **I reused `_referee_match`'s prompt for the veto, and it vetoed everything legitimate.** That
+   prompt compares two *specific* matters ("is this the same transaction?"). Here the ticket is
+   **vague by definition** — `:other` means it names no transaction, merchant or amount — so
+   "does this message describe something different from a ticket that describes nothing?" is
+   trivially yes. Observed live: *"It was the Rs.28,991 IMPS transfer to Kimaya Seth"*, plainly the
+   missing details, was rejected as NEW and forked. The veto now has **its own prompt** asking the
+   right question — *is the customer filling in the details of the issue they just raised, or raising
+   an additional one?* — with "when in doubt answer SAME" as the bias, since a vague ticket has no
+   details yet.
+
+**Verified with fakes first (0 Groq), 6 cases:** SAME→merge, SEPARATE→fork, SEPARATE on the details
+message→fork, SAME on the "also" message→merge, **no generator→merge (0 LLM calls)**, **LLM
+error→merge**. The last two are the safety cases: the veto can never disable refinement.
+
+**Then verified live (Fathima, real LLM):**
+
+| Step | Message | Ticket |
+|---|---|---|
+| A1 | I want to dispute a transaction on my account | `tkt_16bc…` |
+| A2 | It was the Rs.28,991 IMPS transfer to Kimaya Seth | **same** |
+| A3 | Any update on my dispute? | **same** — matched despite classifying as `ticket_status` |
+| B1 | I **also** have a problem with a UPI payment to Jivin Vora | **separate ticket** |
+
+A3 is the proof for fix (A): it matched **across an intent boundary**, which the old filter made
+impossible. Full suite **145 pass / 5 fail**, baseline exact.
+
+**Caveats, stated plainly:**
+- **Non-deterministic.** Both decisions are LLM judgement calls, run once. A rerun can differ — that
+  is inherent to the design, not a hidden failure.
+- **(C) is a fixed vocabulary** — the brittleness the user explicitly warned about. An unlisted rail
+  falls to `:other`, where the refinement rule and referee still handle it, so it degrades to
+  judgement rather than breaking. The keyword tiers are a fast path, not the mechanism.
+- **A3 still holds for review.** It attaches to the right ticket but the customer still receives the
+  holding message, because Rule 0 escalates on an L2 classification *before* Rule 3
+  ("ticket_status never creates a ticket") is reached — making Rule 3 unreachable for any status
+  question the LLM rates L2. Diagnosed, **not fixed.**
 
 ### Demo question set extended — dispute questions + continuity scenarios
 **The user identified the real gap:** the question set was 22 *single-turn* questions, which prove

@@ -190,9 +190,21 @@ matching rather than merging everything — worth showing right after Scenario A
 **Point at:** three theme headers in the Detailed view; the conversation stays one thread while the
 topics are visibly separated.
 
-**Not yet verified end-to-end.** Unlike the single-turn questions above, these scenarios have not
-been run since the fixes — the expected behaviour is read from the ticket-matching code, not
-observed. Rehearse them once before demoing.
+**Verified end-to-end (2026-08-12, Fathima, real LLM).** A1+A2+A3 produced **one** ticket — including
+A3 matching back to it despite classifying as a *different intent* (`ticket_status`) — and B1
+correctly produced a **separate** ticket. Running these is what exposed Fix 72's two defects; they
+did not pass before it.
+
+**Both decisions are LLM judgement calls, so they are not bit-for-bit repeatable.** The bias is set
+to merge when unsure on a vague ticket, and to fork when unsure elsewhere (a visible fork is fixable;
+a silent merge hides a complaint). Rehearse once before demoing rather than assuming a given run
+repeats.
+
+**Known rough edge in Scenario A step 3:** the reply attaches to the right ticket but is still **held
+for review**, so the customer sees the holding message rather than the status. Cause is in the
+escalation rules, not continuity (Rule 0 escalates on an L2 classification before the
+"ticket_status never escalates" rule is reached). If you demo A3, approve the draft on screen — or
+lead with steps 1-2 only.
 
 ---
 

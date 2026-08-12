@@ -44,6 +44,7 @@ class CXRepository(Protocol):
     def find_active_ticket_for_intent(self, conversation_id: str, intent: str) -> Ticket | None: ...
     def find_active_ticket_for_scope(self, conversation_id: str, intent: str, ticket_scope: str) -> Ticket | None: ...
     def list_active_tickets_for_intent(self, conversation_id: str, intent: str) -> list[Ticket]: ...
+    def list_active_tickets_for_conversation(self, conversation_id: str, limit: int = 5) -> list[Ticket]: ...
     def find_open_tickets_for_customer(self, customer_id: str, limit: int = 5) -> list[dict]: ...
     def list_tickets(self) -> list[dict]: ...
     def get_ticket(self, ticket_id: str) -> dict | None: ...
@@ -450,6 +451,27 @@ class SQLiteCXRepository:
                 "SELECT * FROM tickets WHERE conversation_id = ? AND intent = ? AND status != 'resolved' "
                 "ORDER BY created_at DESC",
                 (conversation_id, intent),
+            ).fetchall()
+        return [self._ticket(row) for row in rows]
+
+    def list_active_tickets_for_conversation(self, conversation_id: str, limit: int = 5) -> list[Ticket]:
+        """Open tickets for a conversation regardless of intent, newest first.
+
+        The referee's candidate list used to be filtered by the INCOMING message's intent,
+        which silently excluded the most common follow-up of all: "any update on my
+        dispute?" classifies as ticket_status, so a transaction_dispute ticket was never a
+        candidate and the referee was never even called. Relatedness is a judgement about
+        the text, not about matching intent labels — so candidates are gathered by
+        conversation and the referee decides.
+
+        Bounded deliberately: each candidate costs prompt tokens and adds another chance to
+        mis-match, so only the most recent few are offered.
+        """
+        with self.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM tickets WHERE conversation_id = ? AND status != 'resolved' "
+                "ORDER BY created_at DESC LIMIT ?",
+                (conversation_id, limit),
             ).fetchall()
         return [self._ticket(row) for row in rows]
 
