@@ -103,6 +103,7 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 63 — Tickets never reached Neo4j (id-namespace mismatch):** `_neo4j_customer_id` returned the SQLite `cust_…` id for whatsapp/email, so the graph's `MATCH (c:Customer {customer_id:'CRN…'})` matched nothing and every ticket/interaction write silently produced no node; now resolves the sender's phone/email to the real `CRN…` (backfill script added for the 8 pre-existing tickets).
 - **Fix 64 — Knowledge-graph view in the admin UI:** New read-only `/admin/customers/{id}/graph-view` endpoint returns the customer neighbourhood as `{nodes, edges}`; a "View knowledge graph" button at the top of the right panel opens a modal rendering it as a deterministic radial SVG, coloured by derived health.
 - **Fix 65 — "Why this answer" provenance panel:** New `/admin/conversations/turns/{id}/provenance` endpoint plus a per-reply button that shows whether an answer came from the customer's graph records or from retrieved KB passages; fixed a false "no account records were read" claim, a crash on the graph branch, and the button appearing on holding messages.
+- **Fix 67 — FD questions now reach the graph (both classifiers were blind to fixed deposits):** "When is my FD maturity date?" was classified `general_inquiry` by the LLM at **confidence 1.0** (confidently wrong — no confidence-gated guardrail could ever correct it) and by the rule classifier at 0.45, because no keyword set contained `fixed deposit`/`FD`/`maturity` and the LLM's intent definitions never mentioned FDs. Fixed both: 7 FD keywords on `account_balance_inquiry` + an FD clause in that intent's LLM definition. **No new intent** — `neo4j_answer`'s `account_balance_inquiry` branch already fetches fixed deposits (principal, rate, tenure, maturity date/amount); only classification was broken. Measured after (1 Groq call, 1,377 tokens): LLM `account_balance_inquiry` 1.0, rule 0.91 — both agree. Compounds with Fix 66: FD reaches the graph, and the read is now recorded as `neo4j_graph`.
 - **Fix 66 — Provenance could never report "graph" (missing `retrieval` key):** the Neo4j branch built its context metadata without the `retrieval` key the provenance endpoint reads, so `neo4j_graph` was **never** persisted as evidence (live DB: 27 rows, 0 graph) and the panel permanently fell back to *guessing* from the intent label. Added `"retrieval": "neo4j_graph"`, matching what the two RAG paths already do. **Also disproves Session 12's "intent guardrail" root cause** — measured (3 Groq calls, 4,011 tokens) the LLM already classifies card 0.8 / policy 0.9, well above the 0.65 override threshold, so the allow-list fix would have been dead code.
 
 ---
@@ -2319,10 +2320,56 @@ documented baseline (the same 5 pre-existing `test_phase1` failures).
   unlabeled, still using the intent fallback.
 - **Not confirmed live** — needs an api rebuild plus a real transactional message.
 
+### Fix 67 — FD questions now reach the graph (both classifiers were blind to fixed deposits)
+**Problem (measured, not assumed):** *"When is my FD maturity date?"* was classified
+`general_inquiry` by **both** paths — LLM at **confidence 1.0**, rule classifier at 0.45. The 1.0 is
+the important part: `_apply_guardrails` only overrides the LLM below 0.65, so **no guardrail change
+could ever have corrected this**. Two independent blind spots:
+1. No keyword set in [classifier.py](../services/intent_service/classifier.py) contained
+   `fixed deposit` / `FD` / `maturity`.
+2. The LLM's `_INTENT_DEFINITIONS` never mentioned fixed deposits, so `general_inquiry` was a
+   *reasonable* read of the definitions it was given.
+
+**Fix — reuse the existing intent, do not add one.** `neo4j_answer`'s `account_balance_inquiry`
+branch **already** fetches fixed deposits — principal, rate, tenure, maturity date and maturity
+amount ([queries.py:313-343](../services/neo4j_service/queries.py)). The data path was never broken;
+only classification was. So:
+- 7 FD keywords added to `Intent.ACCOUNT_BALANCE_INQUIRY` (with a comment recording *why* FD belongs
+  on this intent rather than a new one).
+- An FD clause added to that intent's line in `_INTENT_DEFINITIONS`
+  ([groq_generator.py](../services/rag_service/groq_generator.py)).
+
+**Verified:**
+- Rule side (0 tokens): all 5 FD phrasings → `account_balance_inquiry` (0.67-0.91).
+- LLM side (**1 Groq call, 1,377 tokens**): `account_balance_inquiry` at **1.0** — flipped from
+  confidently wrong to confidently right. Both classifiers now agree, so the rule path backs up the
+  LLM if it ever drifts.
+- Regression: 9 of 10 control intents unchanged. The 10th (*"insurance premium due"* →
+  `loan_status`) was proven **pre-existing** by stashing the change — identical `loan_status 0.67`
+  before and after. Still open, logged below.
+- Full suite **145 pass / 5 fail**, baseline exact.
+
+**Compounds with Fix 66:** FD now reaches a transactional intent → the Neo4j branch fires → and the
+read is recorded as `neo4j_graph`, so the provenance panel can prove it.
+
+### Groq spend this session
+**5,388 tokens total** (5,158 prompt / 230 completion) across 4 calls — ~1.1% of the 500K/day free
+tier. Every call was a single classification with real `usage` read off the response object, never an
+estimate: 3 for the guardrail measurement that disproved Session 12's diagnosis, 1 to confirm Fix 67.
+All other verification used fakes, offline calls, or read-only DB inspection.
+
 ### Still open
-- **FD is unclassifiable by either classifier.** LLM says `general_inquiry` at **confidence 1.0**
-  (confidently wrong, so no confidence-gated guardrail can ever correct it) and no keyword set
-  contains `fixed deposit`/`FD`/`maturity`. Note there is **no FD intent in the enum** — FD reads ride
-  on `account_balance_inquiry`, so the fix is keywords on that intent, not a new intent.
 - **KB ingestion still produces multi-topic chunks** (7 of 9), unchanged from Session 12.
+- **Pre-existing mis-trigger:** the rule classifier returns `loan_status` (0.67) for *"When is my next
+  insurance premium due?"* — "premium **due**" hits the `loan_status` keyword `due`. Harmless today
+  (the LLM is right at 0.9 and the guardrail can't fire below its threshold), but it is a latent trap
+  if the guardrail's allow-list is ever widened. Not fixed; not caused by this session's work.
 - **Dropped:** the intent guardrail allow-list, disproved above.
+
+### Not yet confirmed in the running app
+Fixes 66 and 67 are verified at the code, classifier and database levels, and the suite matches
+baseline — but **neither has been seen working in the live app**. The api container runs a baked-in
+copy of the source, so both require a rebuild before they are live. Pending: rebuild, send an FD and
+a card message (via the **web portal** — it triggers no outbound delivery to a real customer's
+contacts), then confirm the provenance panel reads "graph" from recorded evidence rather than its
+intent-label fallback.

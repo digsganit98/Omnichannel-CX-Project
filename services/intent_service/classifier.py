@@ -10,7 +10,13 @@ KEYWORDS = {
     Intent.FRAUD_REPORT:            {"fraud", "hack", "phishing", "scam", "money stolen", "account hacked", "unauthorized transaction"},
     Intent.TRANSACTION_DISPUTE:     {"dispute", "wrong debit", "incorrect charge", "charge error", "not authorized", "unknown transaction"},
     Intent.FUND_TRANSFER:           {"transfer", "neft", "rtgs", "imps", "send money", "wire transfer", "beneficiary"},
-    Intent.ACCOUNT_BALANCE_INQUIRY: {"balance", "account balance", "available funds", "how much in my account", "check balance"},
+    # Fixed deposits live here, not on a separate intent: neo4j_answer's
+    # account_balance_inquiry branch already fetches BOTH accounts and fixed deposits
+    # (principal, rate, tenure, maturity date/amount), so FD questions only need to reach
+    # this intent to be answered from the graph.
+    Intent.ACCOUNT_BALANCE_INQUIRY: {"balance", "account balance", "available funds", "how much in my account", "check balance",
+                                     "fixed deposit", "fd maturity", "my fd", "fd account", "deposit maturity", "maturity date",
+                                     "maturity amount"},
     Intent.GENERAL_INQUIRY:         {"sip", "systematic investment plan", "elss", "equity linked savings scheme",
                                      "mutual fund", "tax saving", "tax benefits", "investment plan"},
     Intent.LOAN_STATUS:             {"loan balance", "emi", "repayment", "outstanding loan", "loan status", "loan due", "emi due"},

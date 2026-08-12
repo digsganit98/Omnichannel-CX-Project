@@ -24,7 +24,7 @@ def _system_prompt() -> str:
 # ── Intent definitions used in classification prompt ────────────────────────
 
 _INTENT_DEFINITIONS = """
-account_balance_inquiry  – Customer wants to know their account balance or recent transactions.
+account_balance_inquiry  – Customer wants to know their account balance or recent transactions. ALSO use this for FIXED DEPOSIT (FD) questions — maturity date, maturity amount, principal, interest rate or tenure — since fixed deposits are held on the customer's account records.
 transaction_dispute      – Customer reports an incorrect, unauthorized, or failed transaction.
 fund_transfer            – Customer wants to initiate or track a fund transfer.
 loan_status              – Customer asking about the status of an existing loan. ALSO use this when the customer says they "applied" weeks/days ago and are asking for an update, decision, or why there is a delay — that is status-checking, NOT a new application.
