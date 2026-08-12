@@ -2505,6 +2505,56 @@ must contain, so it can be verified on screen during the demo:
 
 All 22 verified **offline, 0 Groq, 0 turns created** — no demo data was touched to prove them.
 
+### Fresh start executed (2026-08-12) + end-to-end verification on clean data
+**Why a wipe was necessary, not optional.** The provenance audit found **4 of 29 replies flagged**
+(3 MISMATCH + 1 UNGROUNDED). All 3 MISMATCHes were the *same* already-fixed bug showing its
+historical damage — replies containing real account data (FD maturity, card limit, premium date)
+stored with `intent: general_inquiry`, so the panel claimed "KB" for a graph answer. **Those cannot
+be repaired in place:** the wrong intent is stored on the turn, the graph read never happened, and
+the evidence was never recorded — no backfill can invent it. (The 4th flag was a Hindi reply the
+audit's English-only keyword check cannot evaluate — a *script* limitation, not a product bug.)
+
+**Executed** per [fresh-start-runbook.md](fresh-start-runbook.md): SQLite backed up first, stack
+down, `cx-data` + `neo4j-data` + `opensearch-data` removed, model volumes preserved. Verified after:
+Neo4j auto-reseeded to **5 customers / 0 phantoms** with full holdings (8 accounts, 3 cards, 4 FDs,
+2 loans, 7 policies, 15 claims); SQLite empty; KB re-indexed to **14 chunks / 0 multi-topic**.
+
+**End-to-end verification (Hirithi — the only customer holding every product type, so all five
+graph paths are exercised). 4 of 4 correct:**
+
+| Question | Intent | Backend | Answer |
+|---|---|---|---|
+| What is my loan status? | `loan_status` | `neo4j_graph` | LN001001, Rs.877,442, EMI auto-debit |
+| What is my credit card limit? | `card_management` | `neo4j_graph` | RuPay Platinum, Rs.830,000 |
+| Status of my theft claim? | `claim_status` | `neo4j_graph` | CLM001011, Auto/Theft |
+| Car insurance premium due? | `policy_status` | `neo4j_graph` | 2027-04-15 |
+
+Every question: correct intent → graph read fired → `neo4j_graph` recorded → real record returned.
+Post-rebuild audit: **3 replies, 0 flagged** (down from 4 flagged). Honest caveat: only 3 replies were
+auditable at that point (held drafts are not yet replies), so the audit confirms *no regression*
+rather than proving correctness at scale — the 4/4 run is the substantive proof.
+
+**A test-harness bug, recorded because it nearly became a false report.** My run script fetched *the
+last pending draft* rather than the draft for the turn it had just sent, so with three drafts queued
+it compared the claim question against the loan draft and reported a failure. The claim answer was
+correct all along. Same shape as the audit script's own early false positives — the harness is as
+capable of lying as the product.
+
+**Cleanup:** the `hirithi_verify` user, its conversation, 12 turns, 3 drafts, 2 tickets and 6
+evidence rows were deleted by explicit id (never a date sweep), plus **2 orphaned Ticket nodes in
+Neo4j** that the SQLite delete would have left behind — caught by re-running the graph check rather
+than assuming one delete covered both stores. The user's own `Sayantini` portal signup was preserved
+and verified surviving.
+
+### Curated demo question set shipped
+[docs/demo-question-set.md](demo-question-set.md) — 22 questions across all 5 customers, each with
+the **exact value the answer must contain**, so a reply can be checked on screen rather than eyeballed.
+Includes the 5 measured KB questions for the other provenance branch, per-customer demo notes
+(Sayantini's 45-dpd card and 3 differently-stated claims; Digvijay's below-minimum balance;
+Fathima's overdue EMI and disputed charge), which question types hold for review vs auto-send, and
+the known gaps (unverified senders, `transaction_dispute` excluded from graph reads, the Escalate
+stub).
+
 ### Groq spend this session
 **5,388 tokens total** (5,158 prompt / 230 completion) across 4 calls — ~1.1% of the 500K/day free
 tier. Every call was a single classification with real `usage` read off the response object, never an
