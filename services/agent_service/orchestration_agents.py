@@ -270,7 +270,16 @@ class QueryResolutionAgent:
                 ticket_ctx = [{
                     "text": raw_text,
                     "score": 0.98,
-                    "metadata": {"source": "customer_ticket_lookup", "doc_type": "customer_data"},
+                    "metadata": {
+                        "source": "customer_ticket_lookup",
+                        "doc_type": "customer_data",
+                        # Same trap Fix 66 found in the Neo4j branch: retrieval_backend below
+                        # is set on the QueryResolution OBJECT, but the provenance endpoint
+                        # reads this metadata dict (persisted verbatim by
+                        # add_retrieval_evidence). Without this key the backend was dropped at
+                        # the DB boundary and the panel labelled a ticket read as a KB answer.
+                        "retrieval": "customer_ticket_lookup",
+                    },
                 }]
                 # Route through Groq so the LLM produces a natural sentence
                 # ("Your home loan query is with our Loans team…") instead of a raw bullet list.

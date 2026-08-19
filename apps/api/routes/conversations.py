@@ -114,9 +114,20 @@ def turn_provenance(turn_id: str) -> dict:
         # The ticket this reply belongs to, plus every message on it (oldest first) when
         # there is more than one — i.e. only when there is real continuity to show.
         "case": case,
-        # "graph" → retrieval read this customer's records; "kb" → passages were retrieved;
-        # "none" → no retrieval ran (a holding message, an offer, a canned reply).
-        "source": "graph" if graph_backed else ("kb" if evidence else "none"),
+        # "graph" → retrieval read this customer's records from Neo4j; "ticket" → their own
+        # support record was read from SQLite; "kb" → passages were retrieved; "none" → no
+        # retrieval ran (a holding message, an offer, a canned reply).
+        # "ticket" is its own state rather than folded into either neighbour: it is not a
+        # graph read (the data is SQLite, so claiming "graph" would over-claim exactly the way
+        # Fix 65 set out to stop), and it is not a similarity search, so the KB block's
+        # "closest matches / always returns a nearest match" caveats describe a mechanism that
+        # never ran. An exact record read at 0.98 is a third thing.
+        "source": (
+            "graph" if graph_backed
+            else "ticket" if backend == "customer_ticket_lookup"
+            else "kb" if evidence
+            else "none"
+        ),
         "graph_types": graph_types,
         # True when this customer has BFSI records, which are placed in the model's trusted
         # account-context slot on every message regardless of retrieval. The UI must not

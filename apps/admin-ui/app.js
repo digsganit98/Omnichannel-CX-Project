@@ -2674,6 +2674,8 @@ async function openWhyModal(turnId) {
     var caseHtml = renderWhyCase(p.case);
     if (p.source === 'graph') {
       body.innerHTML = caseHtml + await renderWhyGraph(p);
+    } else if (p.source === 'ticket') {
+      body.innerHTML = caseHtml + renderWhyTicket(p);
     } else if (p.source === 'kb') {
       body.innerHTML = caseHtml + renderWhyKb(p);
     } else if (p.source === 'holding') {
@@ -2751,6 +2753,27 @@ async function renderWhyGraph(p) {
     e.dim = !t || t.dim;
   });
   return head + renderGraphSvg(gv);
+}
+
+// Ticket-backed: the customer's own support record, read directly from SQLite.
+// Deliberately NOT the KB block: nothing was retrieved by similarity here, so that block's
+// "closest matches / always returns a nearest match" caveats would describe a mechanism that
+// never ran. And deliberately not the graph block either — this data is not in Neo4j, and
+// drawing graph nodes for it would over-claim.
+function renderWhyTicket(p) {
+  var cites = p.citations || [];
+  var acct = p.account_context
+    ? '<li>Account records were also in the model\'s context.</li>' : '';
+  var head = '<div class="why-banner"><b>Read from your support record</b>'
+    + '<ul class="why-pts">'
+    + '<li>The customer\'s own ticket was read directly — an exact record, not a search result.</li>'
+    + acct
+    + '</ul></div>';
+  return head + cites.map(function(c, i) {
+    return '<div class="why-chunk">'
+      + '<div class="why-chunk-h"><span>' + escH(c.source || 'source ' + (i + 1)) + '</span></div>'
+      + '<div class="why-chunk-t">' + escH(c.text || '') + '</div></div>';
+  }).join('');
 }
 
 // KB-backed: the passages retrieved, with their retrieval confidence.
