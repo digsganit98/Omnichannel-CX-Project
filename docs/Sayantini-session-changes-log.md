@@ -115,6 +115,7 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 68 — Approved replies keep their provenance (evidence stayed on the holding message):** retrieval evidence is written once, against the outbound turn that exists at reply time — which for a held reply is the **holding message**, not the real answer the agent later approves. So every human-reviewed reply had **zero** evidence and the provenance panel fell back to inferring the source from the intent label (which over-claims: a transactional intent whose customer has no such record answers from the KB, yet the panel would still say "graph"). The draft-send route now copies the holding turn's evidence onto the sent turn. Verified live on the exact broken path: same FD question → held → approved → sent reply now reports `retrieval_backend: neo4j_graph` with the real FD record as a citation (was `null` + a guess).
 - **Fix 67 — FD questions now reach the graph (both classifiers were blind to fixed deposits):** "When is my FD maturity date?" was classified `general_inquiry` by the LLM at **confidence 1.0** (confidently wrong — no confidence-gated guardrail could ever correct it) and by the rule classifier at 0.45, because no keyword set contained `fixed deposit`/`FD`/`maturity` and the LLM's intent definitions never mentioned FDs. Fixed both: 7 FD keywords on `account_balance_inquiry` + an FD clause in that intent's LLM definition. **No new intent** — `neo4j_answer`'s `account_balance_inquiry` branch already fetches fixed deposits (principal, rate, tenure, maturity date/amount); only classification was broken. Measured after (1 Groq call, 1,377 tokens): LLM `account_balance_inquiry` 1.0, rule 0.91 — both agree. Compounds with Fix 66: FD reaches the graph, and the read is now recorded as `neo4j_graph`.
 - **Fix 66 — Provenance could never report "graph" (missing `retrieval` key):** the Neo4j branch built its context metadata without the `retrieval` key the provenance endpoint reads, so `neo4j_graph` was **never** persisted as evidence (live DB: 27 rows, 0 graph) and the panel permanently fell back to *guessing* from the intent label. Added `"retrieval": "neo4j_graph"`, matching what the two RAG paths already do. **Also disproves Session 12's "intent guardrail" root cause** — measured (3 Groq calls, 4,011 tokens) the LLM already classifies card 0.8 / policy 0.9, well above the 0.65 override threshold, so the allow-list fix would have been dead code.
+- **Fix 78 — The app was 100% down: Groq removed every Llama model:** `llama-3.1-8b-instant` returns **HTTP 404 `model_not_found`**, and so does the `llama-3.3-70b-versatile` the config recommended as its alternative — all Llama *text* models are gone from the provider (only the two 512-token Prompt Guard classifiers remain, which cannot generate). That took down answer generation, intent + resolution-level classification, the ticket referee/veto and opportunity generation — the whole pipeline, not one feature. Switched to **`openai/gpt-oss-20b`** (cheapest working tier, 131K context, JSON mode), verifying *first* that `message.content` is unpolluted: `gpt-oss` is a reasoning model but emits reasoning in a **separate field**, so `groq_generator`'s `.choices[0].message.content` parsing needs no change. Cost rates read from the live `/v1/models` endpoint and converted to the ledger's per-million units (not carried over as estimates); the retired llama entry is kept so existing `llm_usage_events` rows still cost out. **Measured: ~7,500 tokens/message (~$0.0007)** — reasoning tokens are billed, so completion counts run far above Llama's (199 tokens for one intent classification). Verified live through the real portal code path: FD question → `account_balance_inquiry` (**Fix 67 survives the swap**) → graph read fired → `neo4j_graph` recorded → real record FD001003 returned → joined its existing ticket rather than forking.
 
 ---
 
@@ -2941,3 +2942,100 @@ Re-checked against the correct turn before reporting anything.
 **Test artifacts left in the live DB** (portal user `prov_test_s13`, two FD exchanges in
 `conv_3a7da7519e44`, ticket `tkt_a89bbe475b69`, two sent drafts) — retained deliberately so the
 fixes can be inspected in the UI; delete before a clean demo run.
+
+---
+
+## Session 14 — 2026-08-19
+
+Branch: `Sayantini-phase2-ui-changes`. Started as a UI question about the provenance panel;
+found the app was completely non-functional underneath.
+
+### Investigated — why "Any update on my dispute?" shows no graph (no code changed)
+The user asked why Digvijay's dispute follow-up renders without the graph image while the
+message before it renders with one. **Not a graph bug — that reply never read the graph.**
+`ticket_status` is intercepted by an earlier branch
+([orchestration_agents.py:266](../services/agent_service/orchestration_agents.py)) that answers
+from the SQLite ticket record and `return`s; the Neo4j branch below is never reached. The panel
+was reporting the truth.
+
+Two things in the panel *are* wrong, and both trace to **one line**. The `ticket_status` branch
+builds its metadata without the `retrieval` key:
+
+```python
+"metadata": {"source": "customer_ticket_lookup", "doc_type": "customer_data"},
+```
+
+**This is the Fix 66 bug in a second branch** — Fix 66 found exactly this in the Neo4j branch and
+added the key there only. Same near-miss too: `retrieval_backend="customer_ticket_lookup"` *is*
+set on the `QueryResolution` object, but that is a different thing from the `metadata` dict that
+gets persisted, so the correct value is dropped at the DB boundary.
+
+Measured on the live DB — the graph reply stored `retrieval='neo4j_graph'`, the ticket reply
+stored `None`. From that single `None`: (1) the header drops `retrieval ·` (the frontend renders
+it conditionally — correct behaviour on absent data), and (2) `graph_backed` falls to the intent
+guess, `ticket_status` is not transactional, so evidence-exists → labelled **`kb`**. The
+"Retrieved from the knowledge base" caption is a fallback firing on a non-KB source.
+
+**Not fixed — deliberately deferred.** Adding the key fixes the header, but the mislabel needs a
+product decision: `source` has only three states (`graph`/`kb`/`none`) and a ticket lookup is
+honestly **neither** (it reads SQLite, so calling it `graph` would be its own over-claim). A
+fourth state is the accurate framing. Also, Fix 78 below changed which branch this phrasing even
+takes — see the open item.
+
+### Fix 78 — Groq removed every Llama model; the app was 100% down
+See the summary line above for the full record. Sequence worth keeping:
+
+1. **Asked the provider, did not answer from memory.** `GET /v1/models` returned 13 models;
+   `llama-3.1-8b-instant` was **not among them**, nor was the `llama-3.3-70b-versatile` the
+   config recommended as the fallback.
+2. **Confirmed both directions before changing anything** — old model `HTTP 404`, candidates
+   `HTTP 200`.
+3. **Checked the swap was safe before making it.** `gpt-oss` is a *reasoning* model; the risk was
+   reasoning text polluting `message.content` and breaking every JSON parse. Tested against the
+   real classification prompt: `content` came back as clean JSON with reasoning in a separate
+   field. No code change needed.
+4. **Re-verified Session 13's classification work on the new model** — FD, card, premium and
+   dispute all classify correctly at 0.95, so **Fixes 67 and 70 survive the swap**.
+
+**A regression I introduced and traced honestly.** The change produced a **6th** test failure.
+Rather than assume it was pre-existing, I stashed the change and re-ran the suite to establish
+the true baseline (145/5). The 6th was mine: `test_groq_generator_records_local_llm_usage` pins a
+llama-keyed rate table but built its generator from the **ambient** `GROQ_MODEL`, so the new
+model cost out at 0 and failed `estimated_cost_usd > 0`. A real coupling the change exposed, not
+a brittle test. Fixed by pinning the model in the test → back to **145 pass / 5 fail, baseline
+exact**.
+
+**Live verification via the real portal code path** (`_web_chat_identity` → `WebChatAdapter` →
+router — not a hand-built message; the first two attempts failed on a wrong import and missing
+required fields, and were corrected rather than worked around):
+
+| | |
+|---|---|
+| intent | `account_balance_inquiry` ✅ |
+| retrieval | `neo4j_graph` recorded ✅ |
+| answer | "Your fixed deposit (FD001003) matured on 19 November 2023" — real record |
+| continuity | joined the existing ticket instead of forking ✅ |
+
+**Cleanup — a near-miss worth recording.** `tkt_671780286981` looked like my test artifact, but
+it is the **user's own ticket from 13 Aug**; my smoke-test message joined it via ticket
+continuity. Deleting "my ticket's turns" would have destroyed two real turns. Checked timestamps
+first and deleted only the two 19-Aug rows I created (42 → 40 turns; ticket, the user's turns and
+all 12 pre-existing drafts verified intact).
+
+### Groq spend this session
+**~6,400 tokens** across the investigation (`/models` listing and the 404 both cost 0), plus
+~7,500 for the one live pipeline message. The 5-question classification sweep (~6,070) is an
+**estimate** — the loop did not capture `usage` per call, flagged rather than presented as
+measured.
+
+### Still open
+- **The `customer_ticket_lookup` provenance gap** (above) — real, unfixed, and now lower priority:
+  on `openai/gpt-oss-20b`, *"Any update on my dispute?"* classifies as **`transaction_dispute`**,
+  not `ticket_status`, so the demo phrasing may route around the bug entirely. **Build the demo
+  history first and see what actually happens** rather than fixing a path the demo may not hit.
+  The bug still fires on other `ticket_status` phrasings.
+- **Session 13's measurements were all taken on Llama.** The 22-question sweep has not been re-run
+  on the new model; 5 spot-checks held. A misrouted demo question would be why.
+- **Cost model changed.** ~65 messages per 500K tokens at the measured rate, and these models bill
+  per token — worth checking the Groq billing page before the demo.
+- `client-demo-solution-overview.md` still stale (predates all of Session 13).
