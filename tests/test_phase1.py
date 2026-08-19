@@ -746,6 +746,10 @@ def test_groq_generator_records_local_llm_usage(monkeypatch, tmp_path):
     monkeypatch.setenv("DATABASE_PATH", str(db_path))
     monkeypatch.setenv("LLM_OBSERVABILITY_ENABLED", "true")
     monkeypatch.setenv("LANGFUSE_ENABLED", "false")
+    # Pin the model rather than inheriting GROQ_MODEL from the ambient .env: the rate
+    # table below is keyed by model name, so a generator built on a different model
+    # costs out at 0 and the estimated_cost_usd assertion fails for the wrong reason.
+    monkeypatch.setenv("GROQ_MODEL", "llama-3.1-8b-instant")
     monkeypatch.setenv("LLM_COST_RATES_JSON", '{"llama-3.1-8b-instant":{"input":0.05,"output":0.08}}')
 
     generator = GroqGenerator()
