@@ -1,259 +1,155 @@
-# Demo Script — grounded, sequenced, per customer
+# Demo Script
 
-Three self-contained demo runs. Each is an **ordered sequence**, not a list to pick from: it opens
-with instant graph-backed answers, adds a knowledge-base answer, then builds a multi-message dispute
-that shows ticket continuity — and ends by proving the system also *refuses* to merge two genuinely
-different matters.
+Three ordered runs. **Type the question exactly as written** — wordings were chosen so the LLM and
+the rule classifier agree; a reworded question can misroute mid-demo.
 
-**Expect** is the exact value the reply must contain. If it is missing, something is wrong — do not
-assume it is a wording difference.
-
-**Verified 2026-08-12**, after Fixes 66-72, against the post-fresh-start seed:
-- **All 29 questions below** checked offline (`classify_intent` + `_ticket_scope` + `neo4j_answer`) —
-  correct intent, correct ticket scope, and the expected value present in the customer's records.
-  0 Groq, 0 turns created.
-- **The continuity pattern** (steps 7-10) was additionally run **live end-to-end on Fathima** and
-  passed: one ticket across three messages, a separate ticket for the separate matter.
-
-> **Phrasing is deliberate.** Earlier drafts used "It was the Rs.5,776 IMPS **transfer**…", which the
-> rule classifier reads as `fund_transfer`, and "I also **have a problem with** a UPI payment", which
-> it reads as `general_inquiry`. Both were corrected to wordings the LLM *and* the rule classifier
-> agree on, so a fallback can never land on the wrong intent mid-demo. **Use these wordings as
-> written.**
+**Expect** = the value the reply must contain. **Panel** = open *"Why this answer"* on that step.
 
 ---
 
-## What each step is meant to show
+# Run 1 — Sayantini Sarkar
+HNI · Hyderabad · Mastercard **45 days past due** · FD · Health policy · 3 claims
+*Richest graph, Attrition risk **High**. The default run.*
 
-| Steps | Shows | Panel should read |
-|---|---|---|
-| 1-4 | Instant answers from the customer's own records | `retrieval · neo4j_graph` |
-| 5 | An answer from the knowledge base | `retrieval · opensearch_vector` / `keyword_fallback` |
-| 6 | A held reply — human-in-the-loop review | draft under **Needs Review** |
-| 7-9 | **Ticket continuity** — one matter, three messages, one ticket | one ticket id throughout |
-| 10 | **Correct separation** — a different matter forks | a *second* ticket id |
-
----
-
-# Run 1 — Sayantini Sarkar (CRN00010001)
-**HNI · Hyderabad · 61 months · sayantini.s.55@gmail.com · 917890864700**
-CSA salary account · Mastercard Classic (**45 days past due**) · FD · Health policy · 3 claims
-
-The strongest single customer: the richest knowledge graph, a distressed card driving
-**Attrition risk: High**, and three claims in three different states.
-
-| # | Say this | Expect | Intent |
+| # | Say this | Expect | Panel |
 |---|---|---|---|
-| 1 | What is my credit card limit? | `Rs.1,065,000` | card_management |
-| 2 | When is my credit card payment due? | `2026-07-08` | card_management |
-| 3 | When is my FD maturity date? | `2028-01-12` | account_balance_inquiry |
-| 4 | When is my next insurance premium due? | `2026-10-23` | policy_status |
-| 5 | How do I file a health insurance claim? | cashless: inform insurer/TPA within `24-48 hours` | insurance_claim |
-| 6 | What is the status of my insurance claim? | `CLM001003` · Under Review | claim_status |
-| 7 | I want to dispute a transaction on my account | ticket opens, scope `:other` | transaction_dispute |
-| 8 | The disputed charge is the Rs.5,776 IMPS payment to Samarth Thaker | **same ticket**, scope → `:imps` | transaction_dispute |
-| 9 | Any update on my dispute? | **same ticket** | ticket_status |
-| 10 | I also want to dispute a UPI payment to Kartik Kulkarni | **NEW ticket** | transaction_dispute |
+| 1 | What is my credit card limit? | `Rs.1,065,000` | **graph** · CreditCard |
+| 2 | When is my credit card payment due? | `2026-07-08` | |
+| 3 | When is my FD maturity date? | `2028-01-12` | **graph** · Account + FD |
+| 4 | When is my next insurance premium due? | `2026-10-23` | |
+| 5 | How do I file a health insurance claim? | inform insurer/TPA within `24-48 hours` | **KB** ← the contrast |
+| 6 | What is the status of my insurance claim? | `CLM001003` · Under Review | |
+| 7 | I want to dispute a transaction on my account | ticket opens, scope `:other` | |
+| 8 | The disputed charge is the Rs.5,776 IMPS payment to Samarth Thaker | **same ticket** → `:imps` | |
+| 9 | Any update on my dispute? | **same ticket** | **case banner** · 3 messages |
+| 10 | I also want to dispute a UPI payment to Kartik Kulkarni | **NEW ticket** | |
+| 11 | Do I have anything pending with you? *(optional close)* | names **both** tickets | |
 
-**Why steps 8 and 10 are real.** `TXN0001000003` (Rs.5,776.55, IMPS, Samarth Thaker) and
-`TXN0001000014` (Rs.5,220.47, UPI, Kartik Kulkarni) are both genuinely
-**`Debited-Pending-Credit`** in her records, with the reason *"Beneficiary bank delayed crediting —
-auto-reversal in progress."* Two real stuck payments, so the dispute and the second dispute are both
-legitimate.
+**Step 5 is the one that matters.** A panel saying "graph" on every reply proves nothing. Same
+customer, same chat, KB answer — and the panel says so.
 
-**Point at:** after step 9, one request node in **Detailed** containing three exchanges. After step
-10, **two** rows in **Lineage** — because there are two problems.
+**Step 9** classifies as a *different intent* (`ticket_status`) and still lands on the right ticket.
 
 ---
 
-## Run 1 — the provenance layer (what to open, and what to say)
+# Run 2 — Digvijay Yadav
+Affluent · 2 savings accounts (one **below minimum**) · matured FD · Home policy · 3 claims
+*Service-recovery story.*
 
-Verified **2026-08-19** (post model swap to `openai/gpt-oss-20b`, and after the ticket-provenance
-fix). Intent + scope re-measured for every step below; 0 Groq, 0 turns created.
-
-The steps above prove the *answers* are right. This layer proves **where each answer came from** —
-open **"Why this answer"** on the marked steps. Nothing new to type; it is the same 10 steps.
-
-| On step | Open the panel | It should read | Say |
+| # | Say this | Expect | Panel |
 |---|---|---|---|
-| 1 | ✅ | `retrieval · neo4j_graph` · **CreditCard** lit | "Her own record — not a guess from the wording." |
-| 3 | ✅ | **Account + FixedDeposit** lit | "Different question, different nodes." |
-| 5 | ✅ | **"Retrieved from the knowledge base"**, no graph | "This one *isn't* in her records. The system says so." |
-| 9 | ✅ | Blue **"Part of an ongoing case"** — all 3 messages | "She never repeated the amount." |
+| 1 | What is my account balance? | `14,624` (+ second account) | **graph** · Account |
+| 2 | What is my fixed deposit maturity amount? | `1,094,768` | |
+| 3 | When is my home insurance premium due? | `2026-09-01` | |
+| 4 | What is the status of my claim? | `CLM001010` · Processing | |
+| 5 | What is a Demat account? | electronic holding of securities | **KB** ← the contrast |
+| 6 | I want to dispute a transaction | ticket opens, scope `:other` | |
+| 7 | The disputed charge is the Rs.46,092 ATM withdrawal on 25 May | **same ticket** → `:atm` | |
+| 8 | Any update on my dispute? | **same ticket** | **case banner** |
+| 9 | I also want to dispute a UPI payment to Tiya Varma | **NEW ticket** | |
 
-**Step 5 is the one that makes the rest credible.** Without a negative case, "it reads the graph" is
-unfalsifiable — a panel that says *graph* on every reply is proving nothing. Step 5 is the same
-customer in the same chat getting a KB answer, and the panel reporting it honestly.
+**Step 1 bridge:** account `40900000100004` holds `Rs.2,507` against a `Rs.3,000` minimum, with a
+`Rs.658.56` non-maintenance charge — a natural lead into the attrition panel and offers card.
 
-**Step 9 is the differentiator.** It classifies `ticket_status` — a *different intent* from the
-dispute — and still lands on the right ticket. The banner lists all three messages as one case.
+**Note:** all of Digvijay's transactions are `Success`, so his dispute reply names no failure reason.
+Use Run 1 or 3 for the stuck-payment story.
 
-**A third panel state exists** (added 2026-08-19): a reply built from the customer's own **ticket
-record** now reads **"Read from your support record"** rather than being mislabelled as a
-knowledge-base answer. It is a SQLite record read, not a similarity search, so the KB block's
-"closest matches" caveats never applied to it. Which state step 9 shows depends on how that message
-classifies on the day — either is correct and both are honest.
+---
 
-> **Only new replies carry this.** Retrieval evidence is written once, when the reply is sent, so
-> turns created before 2026-08-19 keep the old label. If you are demoing provenance, use a **fresh**
-> run rather than scrolling back to old history.
+# Run 3 — Fathima Devasahayam
+Affluent · Personal loan (**EMI overdue**) · Term + Auto policies · 3 claims
+*Collections/hardship story. This is the run proven live end-to-end.*
 
-### Optional swap — a stuck payment with a visible failure reason
-
-Steps 8 and 10 can use a different pair of her real transactions if you prefer a NEFT/UPI contrast
-over IMPS/UPI. Both verified 2026-08-19:
-
-| Instead of | Say this | Scope | Grounded in |
+| # | Say this | Expect | Panel |
 |---|---|---|---|
-| step 8 | The disputed transaction is the Rs.29,419 NEFT debit to Neelofar Kumar | `:neft` | `TXN0001000012`, ₹29,419.08, **Pending** — *"Processing at beneficiary bank"* |
-| step 10 | I also want to dispute the Rs.5,220 UPI debit to Kartik Kulkarni | `:upi` | `TXN0001000014`, ₹5,220.47, **Debited-Pending-Credit** |
-
-Same continuity behaviour (one ticket refined, then a fork) — this pair just names two different
-payment rails, which reads more clearly on screen than two similar-sounding transfers.
-
-### Closing question — memory without a reference
-
-Add as **step 11** if you want to end on continuity rather than on a fork:
-
-| # | Say this | Expect |
-|---|---|---|
-| 11 | Do I have anything pending with you? | Names **both** open tickets — the transfer dispute *and* the UPI dispute |
-
-No amount, no reference, no product named. Her open cases are carried into every reply as trusted
-context (measured at **33 tokens** when cases exist, **0** when none). This step classifies
-`ticket_status`, so expect it to hold for review — approve the draft on screen, or treat it as the
-human-in-the-loop moment.
+| 1 | What is my loan status? | `LN001002` · EMI overdue | **graph** · Loan |
+| 2 | What is my savings account balance? | `5,446` (+ second account) | |
+| 3 | When is my term insurance premium due? | `2026-07-02` | |
+| 4 | What is the status of my theft claim? | `CLM001013` · Processing | |
+| 5 | What is the maximum daily ATM withdrawal limit? | `Rs.10,000`-`Rs.50,000` | **KB** ← the contrast |
+| 6 | I want to dispute a transaction on my account | ticket opens, scope `:other` | |
+| 7 | The disputed charge is the Rs.28,991 IMPS payment to Kimaya Seth | **same ticket** → `:imps` | |
+| 8 | Any update on my dispute? | **same ticket** | **case banner** |
+| 9 | I also want to dispute a UPI payment to Jivin Vora | **NEW ticket** | |
 
 ---
 
-# Run 2 — Digvijay Yadav (CRN00010003)
-**Affluent · 16 months · digvijayyadav48@gmail.com**
-2 savings accounts (one **below minimum balance**) · matured FD · Home policy · 3 claims
+# Before you present — read once
 
-Best for the *service-recovery* story: an account under its minimum with a penalty charge already
-applied, and three home-insurance claims that resolved three different ways.
+**Dispute/loan/claim steps hold for review.** The customer gets *"Support Agent will help you
+shortly…"* and the real answer waits under **Needs Review**. Either approve the draft on screen (a
+good human-in-the-loop moment) or skip. Card/balance/premium/FAQ steps auto-send.
+→ *Fast demo with no interruptions: steps 1-5 of any run.*
 
-| # | Say this | Expect | Intent |
-|---|---|---|---|
-| 1 | What is my account balance? | `14,624` (and the second account) | account_balance_inquiry |
-| 2 | What is my fixed deposit maturity amount? | `1,094,768` | account_balance_inquiry |
-| 3 | When is my home insurance premium due? | `2026-09-01` | policy_status |
-| 4 | What is the status of my claim? | `CLM001010` · Processing | claim_status |
-| 5 | What is a Demat account? | electronic holding of securities | general_inquiry |
-| 6 | I want to dispute a transaction | ticket opens, scope `:other` | transaction_dispute |
-| 7 | The disputed charge is the Rs.46,092 ATM withdrawal on 25 May | **same ticket**, scope → `:atm` | transaction_dispute |
-| 8 | Any update on my dispute? | **same ticket** | ticket_status |
-| 9 | I also want to dispute a UPI payment to Tiya Varma | **NEW ticket** | transaction_dispute |
+**Continuity is an LLM judgement call**, not bit-for-bit repeatable. Bias: merge when unsure on a
+vague ticket, fork when unsure elsewhere. **Rehearse each run once.**
 
-**Talking point on step 1:** account `40900000100004` holds `Rs.2,507` against a `Rs.3,000` minimum
-and already carries a `MinBalanceNonMaintenance` charge of `Rs.658.56`. A natural bridge into the
-attrition-risk panel and the offers card.
+**"Any update on my dispute?" holds for review** even though it attaches correctly — an L2
+classification escalates before the "ticket_status never creates a ticket" rule is reached.
 
-**Honest note:** unlike Sayantini and Fathima, **all of Digvijay's transactions are `Success`** — the
-ATM withdrawal and the UPI payment are real records, but neither is a *failed* payment. The dispute
-is plausible (a customer can dispute a successful debit) but the reply will not mention a failure
-reason. Use Run 1 or Run 3 if you want the stuck-payment story.
+**Provenance shows only on fresh replies.** Evidence is written once when a reply is sent, so turns
+created before 2026-08-19 keep the old label. Don't scroll back to old history to demo the panel.
 
 ---
 
-# Run 3 — Fathima Devasahayam (CRN00010005)
-**Affluent · 20 months · fathimawork511@gmail.com**
-2 savings accounts · Personal loan (**EMI overdue**) · Term + Auto policies · 3 claims
+# Verification status
 
-The collections/hardship story: an overdue EMI, a disputed penalty charge already on file, and the
-customer this continuity flow was **proven live on**.
+**Intent + ticket scope: all 29 questions re-checked 2026-08-19** (`classify_intent` +
+`_ticket_scope`), 0 Groq, 0 turns created. Values read from the live Neo4j records.
 
-| # | Say this | Expect | Intent |
-|---|---|---|---|
-| 1 | What is my loan status? | `LN001002` · EMI overdue | loan_status |
-| 2 | What is my savings account balance? | `5,446` (and the second account) | account_balance_inquiry |
-| 3 | When is my term insurance premium due? | `2026-07-02` | policy_status |
-| 4 | What is the status of my theft claim? | `CLM001013` · Processing | claim_status |
-| 5 | What is the maximum daily ATM withdrawal limit? | `Rs.10,000`-`Rs.50,000` for savings | general_inquiry |
-| 6 | I want to dispute a transaction on my account | ticket opens, scope `:other` | transaction_dispute |
-| 7 | The disputed charge is the Rs.28,991 IMPS payment to Kimaya Seth | **same ticket**, scope → `:imps` | transaction_dispute |
-| 8 | Any update on my dispute? | **same ticket** | ticket_status |
-| 9 | I also want to dispute a UPI payment to Jivin Vora | **NEW ticket** | transaction_dispute |
+**Live end-to-end:** the continuity pattern was run on **Fathima** and passed — one ticket across
+three messages, a separate ticket for the separate matter, including step 8 matching across an
+intent boundary.
 
-**Why step 7 is real.** `TXN0001000067` (Rs.28,991.63, IMPS, Kimaya Seth) is genuinely **`Pending`**
-with the reason *"Awaiting bank confirmation."*
+**Caveat — the model changed 2026-08-19.** Groq removed every Llama model (they now 404); the app
+runs on `openai/gpt-oss-20b`. Intent and scope were re-verified, but the *live* run above was
+measured on the old model. Non-determinism is more visible now: *"Any update on my dispute?"* was
+observed classifying as `ticket_status` on one run and `transaction_dispute` on another **within the
+same hour**. Both reach the right ticket; the panel may show either the ticket-record state or the
+graph state. Don't promise one in advance.
 
-**This exact sequence was run live and passed** — including step 8 matching back to the dispute
-ticket despite classifying as a *different intent*, which is what Fix 72 repaired.
+**Grounding for the dispute steps.** Sayantini `TXN0001000003` (Rs.5,776.55 IMPS, Samarth Thaker) and
+`TXN0001000014` (Rs.5,220.47 UPI, Kartik Kulkarni) are both **`Debited-Pending-Credit`** —
+*"Beneficiary bank delayed crediting."* Fathima `TXN0001000067` (Rs.28,991.63 IMPS, Kimaya Seth) is
+**`Pending`** — *"Awaiting bank confirmation."*
 
----
-
-## Rough edges to know before you present
-
-**1. Step "Any update on my dispute?" is still held for review.** It attaches to the correct ticket,
-but the customer sees *"Support Agent will help you shortly…"* rather than the status. The cause is
-in the escalation rules, not continuity: an L2 classification escalates before the
-"ticket_status never creates a ticket" rule is reached. **Either approve the draft on screen** (it is
-a good human-in-the-loop moment) **or skip that step.**
-
-**2. The continuity decisions are LLM judgement calls**, so they are not bit-for-bit repeatable. The
-bias is set to merge when unsure on a vague ticket, and to fork when unsure elsewhere — a visible
-fork is fixable, a silent merge hides a complaint. **Rehearse each run once** rather than assuming a
-given run repeats.
-
-**3. The model changed on 2026-08-19.** Groq removed every Llama model (they now 404), so the app
-runs on `openai/gpt-oss-20b`. All 29 questions were re-checked for intent and ticket scope and still
-route correctly, but the **live** end-to-end numbers in this doc were measured on the old model.
-Non-determinism is also more visible: *"Any update on my dispute?"* was observed classifying as
-`ticket_status` on one run and `transaction_dispute` on another **within the same hour**. Both are
-defensible readings and both reach the right ticket — but it means the panel on that step may show
-either the ticket-record state or the graph state. Do not promise a specific one in advance.
+**Alternative pair for Sayantini steps 8/10**, if you prefer NEFT/UPI over IMPS/UPI (both verified):
+`The disputed transaction is the Rs.29,419 NEFT debit to Neelofar Kumar` → `:neft`
+(`TXN0001000012`, Pending), then `I also want to dispute the Rs.5,220 UPI debit to Kartik Kulkarni`
+→ `:upi`.
 
 ---
 
-## Which questions hold for review
-
-Dispute, loan and claim questions usually classify L2/L3 and are **held** — the customer gets the
-holding message and the real answer waits as a draft under **Needs Review**. Card, balance, premium
-and FAQ questions usually **auto-send**.
-
-- **Want a fast, no-interruption demo?** Steps 1-5 of any run.
-- **Want to show human-in-the-loop?** Continue to the dispute steps and approve drafts on screen.
-
----
-
-## Other verified questions (spares)
-
-Grounded and checked, if you need to go off-script:
+# Spares
 
 | Customer | Question | Expect |
 |---|---|---|
 | Sayantini | What is my account balance? | `40900000100001` |
-| Sireesha (CRN00010002) | What is my credit card limit? | `Rs.75,000` |
+| Sireesha | What is my credit card limit? | `Rs.75,000` |
 | Sireesha | What is the status of my home insurance claim? | `CLM001005` |
 | Sireesha | When is my next premium due? | `2026-11-28` |
-| Hirithi (CRN00010004) | What is my loan status? | `LN001001` |
+| Hirithi | What is my loan status? | `LN001001` |
 | Hirithi | What is my credit card limit? | `Rs.830,000` |
 | Hirithi | What is the status of my theft claim? | `CLM001011` |
 | Hirithi | When is my car insurance premium due? | `2027-04-15` |
 
-**Hirithi is the only customer holding every product type** (current account, card, FD, loan, policy,
-claims) — useful if you want one customer who exercises every graph path. Her 4 questions were run
-live and all returned `retrieval_backend: neo4j_graph`.
+**Hirithi holds every product type** — useful if you want one customer exercising every graph path.
+Her 4 questions ran live and all returned `neo4j_graph`.
 
-Remaining indexed FAQs: opening a savings account, personal loan requirements, reporting a lost or
-stolen card, applying for a home loan, SIP, ELSS tax benefits, term insurance, car insurance premium
-factors, ULIP vs traditional plans, KYC update, policy porting.
+Other indexed FAQs: opening a savings account, personal loan requirements, lost/stolen card, home
+loan, SIP, ELSS, term insurance, car insurance premium factors, ULIP, KYC update, policy porting.
 
 ---
 
-## Known gaps
+# Known gaps
 
-- **Unverified senders** get "Dear Customer" and no graph data — by design (Fix 59/60).
-- **In the graph but never read when answering:** `ChargePenalty` (7 nodes), `KYC` (5), `Product`
-  (20, offers engine only), `Interaction` (21, seeded history). A question about a penalty charge or
-  KYC status answers from the KB, not the customer's record.
-- **Seed dates are fixed and ageing.** Sayantini's card due date (`2026-07-08`) is already past, and
-  3 of 4 FDs are `Matured` with 2021-2023 dates. Answers are correct about the record; they simply
-  describe the past.
-- **Multi-account customers** (Sireesha, Digvijay, Fathima) get *both* accounts in a balance answer,
-  with no way to disambiguate "my savings account" in a follow-up.
-- **No continuity for unticketed topics.** Two card questions with no ticket are not linked as one
-  matter — the LLM still sees the last 8 turns, so *replies* stay coherent, but nothing groups them
-  in the record. Persistent threading is designed and deferred.
-- The **Escalate** button is a UI stub — do not click it during a demo.
+- **Unverified senders** get "Dear Customer" and no graph data — by design.
+- **In the graph but never read when answering:** `ChargePenalty` (7), `KYC` (5), `Product` (20,
+  offers only), `Interaction` (21, seeded). A penalty or KYC question answers from the KB.
+- **Seed dates are ageing.** Sayantini's card due date has passed; 3 of 4 FDs are `Matured`. Answers
+  are correct about the record — they just describe the past.
+- **Multi-account customers** get *both* accounts in a balance answer, with no way to disambiguate a
+  follow-up.
+- **No continuity for unticketed topics.** Replies stay coherent (last 8 turns) but nothing groups
+  them in the record. Designed, deferred.
+- The **Escalate** button is a UI stub — don't click it during a demo.
