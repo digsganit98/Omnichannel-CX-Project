@@ -66,6 +66,66 @@ legitimate.
 
 ---
 
+## Run 1 — the provenance layer (what to open, and what to say)
+
+Verified **2026-08-19** (post model swap to `openai/gpt-oss-20b`, and after the ticket-provenance
+fix). Intent + scope re-measured for every step below; 0 Groq, 0 turns created.
+
+The steps above prove the *answers* are right. This layer proves **where each answer came from** —
+open **"Why this answer"** on the marked steps. Nothing new to type; it is the same 10 steps.
+
+| On step | Open the panel | It should read | Say |
+|---|---|---|---|
+| 1 | ✅ | `retrieval · neo4j_graph` · **CreditCard** lit | "Her own record — not a guess from the wording." |
+| 3 | ✅ | **Account + FixedDeposit** lit | "Different question, different nodes." |
+| 5 | ✅ | **"Retrieved from the knowledge base"**, no graph | "This one *isn't* in her records. The system says so." |
+| 9 | ✅ | Blue **"Part of an ongoing case"** — all 3 messages | "She never repeated the amount." |
+
+**Step 5 is the one that makes the rest credible.** Without a negative case, "it reads the graph" is
+unfalsifiable — a panel that says *graph* on every reply is proving nothing. Step 5 is the same
+customer in the same chat getting a KB answer, and the panel reporting it honestly.
+
+**Step 9 is the differentiator.** It classifies `ticket_status` — a *different intent* from the
+dispute — and still lands on the right ticket. The banner lists all three messages as one case.
+
+**A third panel state exists** (added 2026-08-19): a reply built from the customer's own **ticket
+record** now reads **"Read from your support record"** rather than being mislabelled as a
+knowledge-base answer. It is a SQLite record read, not a similarity search, so the KB block's
+"closest matches" caveats never applied to it. Which state step 9 shows depends on how that message
+classifies on the day — either is correct and both are honest.
+
+> **Only new replies carry this.** Retrieval evidence is written once, when the reply is sent, so
+> turns created before 2026-08-19 keep the old label. If you are demoing provenance, use a **fresh**
+> run rather than scrolling back to old history.
+
+### Optional swap — a stuck payment with a visible failure reason
+
+Steps 8 and 10 can use a different pair of her real transactions if you prefer a NEFT/UPI contrast
+over IMPS/UPI. Both verified 2026-08-19:
+
+| Instead of | Say this | Scope | Grounded in |
+|---|---|---|---|
+| step 8 | The disputed transaction is the Rs.29,419 NEFT debit to Neelofar Kumar | `:neft` | `TXN0001000012`, ₹29,419.08, **Pending** — *"Processing at beneficiary bank"* |
+| step 10 | I also want to dispute the Rs.5,220 UPI debit to Kartik Kulkarni | `:upi` | `TXN0001000014`, ₹5,220.47, **Debited-Pending-Credit** |
+
+Same continuity behaviour (one ticket refined, then a fork) — this pair just names two different
+payment rails, which reads more clearly on screen than two similar-sounding transfers.
+
+### Closing question — memory without a reference
+
+Add as **step 11** if you want to end on continuity rather than on a fork:
+
+| # | Say this | Expect |
+|---|---|---|
+| 11 | Do I have anything pending with you? | Names **both** open tickets — the transfer dispute *and* the UPI dispute |
+
+No amount, no reference, no product named. Her open cases are carried into every reply as trusted
+context (measured at **33 tokens** when cases exist, **0** when none). This step classifies
+`ticket_status`, so expect it to hold for review — approve the draft on screen, or treat it as the
+human-in-the-loop moment.
+
+---
+
 # Run 2 — Digvijay Yadav (CRN00010003)
 **Affluent · 16 months · digvijayyadav48@gmail.com**
 2 savings accounts (one **below minimum balance**) · matured FD · Home policy · 3 claims
@@ -123,7 +183,7 @@ ticket despite classifying as a *different intent*, which is what Fix 72 repaire
 
 ---
 
-## Two rough edges to know before you present
+## Rough edges to know before you present
 
 **1. Step "Any update on my dispute?" is still held for review.** It attaches to the correct ticket,
 but the customer sees *"Support Agent will help you shortly…"* rather than the status. The cause is
@@ -135,6 +195,14 @@ a good human-in-the-loop moment) **or skip that step.**
 bias is set to merge when unsure on a vague ticket, and to fork when unsure elsewhere — a visible
 fork is fixable, a silent merge hides a complaint. **Rehearse each run once** rather than assuming a
 given run repeats.
+
+**3. The model changed on 2026-08-19.** Groq removed every Llama model (they now 404), so the app
+runs on `openai/gpt-oss-20b`. All 29 questions were re-checked for intent and ticket scope and still
+route correctly, but the **live** end-to-end numbers in this doc were measured on the old model.
+Non-determinism is also more visible: *"Any update on my dispute?"* was observed classifying as
+`ticket_status` on one run and `transaction_dispute` on another **within the same hour**. Both are
+defensible readings and both reach the right ticket — but it means the panel on that step may show
+either the ticket-record state or the graph state. Do not promise a specific one in advance.
 
 ---
 
