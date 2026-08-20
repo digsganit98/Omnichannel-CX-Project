@@ -5,6 +5,12 @@ the rule classifier agree; a reworded question can misroute mid-demo.
 
 **Expect** = the value the reply must contain. **Panel** = open *"Why this answer"* on that step.
 
+| Pick one | Steps | Time | When |
+|---|---|---|---|
+| **Run 1** | 11 | ~5 min | Feature-by-feature. Tidy blocks, easy to narrate. |
+| **Run 1 Extended** | 15 | ~8 min | The story. She interleaves topics; 3 tickets stay straight. |
+| Run 2 / Run 3 | 9 | ~4 min | Different customer stories (service recovery, hardship). |
+
 ---
 
 # Run 1 — Sayantini Sarkar
@@ -29,6 +35,78 @@ HNI · Hyderabad · Mastercard **45 days past due** · FD · Health policy · 3 
 customer, same chat, KB answer — and the panel says so.
 
 **Step 9** classifies as a *different intent* (`ticket_status`) and still lands on the right ticket.
+
+---
+
+# Run 1 Extended — Sayantini, the mixed story (15 steps)
+
+Use **instead of** Run 1 when you want the full story rather than a feature checklist. Same
+customer, ~8 minutes. She interleaves topics the way a real person does — the point is that the
+system keeps three separate matters straight while she jumps between them.
+
+**The story:** her card is 45 days overdue with a late fee. While sorting that out she notices a
+stuck transfer. Then she asks about unrelated things. Then she comes back to both.
+
+| # | Say this | Expect | Watch |
+|---|---|---|---|
+| 1 | What is my credit card limit? | `Rs.1,065,000` | panel: **graph** · CreditCard |
+| 2 | When is my credit card payment due? | `2026-07-08` (past due) | |
+| 3 | I want to dispute a charge on my credit card | ticket **A** opens, `:card` | |
+| 4 | The disputed charge is the Rs.1,258 late payment fee on my Mastercard | **ticket A** stays | scope refined |
+| 5 | When is my FD maturity date? | `2028-01-12` | **topic switch** — no new ticket |
+| 6 | I want to dispute the Rs.29,419 NEFT debit to Neelofar Kumar | ticket **B** opens, `:neft` | **two** open tickets |
+| 7 | How do I file a health insurance claim? | `24-48 hours` | panel: **KB** ← the contrast |
+| 8 | Any update on my disputed card charge? | **ticket A** | matched back after 4 unrelated steps |
+| 9 | Any update on my disputed transaction? | **ticket B** | correct one of two |
+| 10 | When is my next insurance premium due? | `2026-10-23` | |
+| 11 | What is the status of my insurance claim? | `CLM001003` · Under Review | |
+| 12 | I also want to dispute a UPI payment to Kartik Kulkarni | ticket **C**, `:upi` | **three** open |
+| 13 | Do I have anything pending with you? | names the open tickets | no reference given |
+| 14 | What is my account balance? | `40900000100001` | |
+| 15 | Any update on my disputed transaction? | **ticket B** again | still correct at the end |
+
+## What each part proves
+
+**Steps 3-4 — refinement.** A vague dispute becomes specific without forking. Ticket A goes
+`:other` → `:card`.
+
+**Steps 5, 7, 10-11, 14 — the interleaving.** Five unrelated questions scattered through the run.
+None creates a ticket; none disturbs A, B or C. This is the part a scripted demo never shows,
+because a scripted demo asks its questions in tidy blocks.
+
+**Steps 8-9 — the hard bit.** Two open disputes, two follow-ups, each has to land on the right one.
+Both classify as `ticket_status` — a *different intent* from the disputes they belong to — and step
+8 matches back across **four intervening messages**.
+
+**Step 12 — it still forks.** Same intent as A and B, the word "also", and it opens a third ticket
+rather than merging into either.
+
+**Step 13 — memory.** No amount, no reference, no product named.
+
+**Step 15 — it holds.** The same follow-up as step 9, fifteen messages in, three open tickets. Still
+resolves to B.
+
+## Where to point
+
+**Lineage:** three rows, not fifteen. Each dispute is one row with its exchanges as dots; the
+unrelated questions sit in their own theme groups.
+
+**Detailed:** ticket A appears as ONE request containing steps 3, 4 and 8 — even though step 5 and
+6 happened in between. That is the interleaving fix; without it A would render as two rows under
+two headers.
+
+## Honest notes
+
+- **Steps 3, 4, 6, 8, 9, 12, 13, 15 hold for review.** That is 8 drafts. Approve them on screen as
+  part of the story, or run the short Run 1 instead if you want fewer interruptions.
+- **Two open tickets of the same intent is the known ambiguity limit.** Steps 8/9 ask the referee to
+  pick between A and B. It is given both as candidates and the wordings differ ("card charge" vs
+  "transaction"), but this is the hardest thing in the demo and the one most likely to vary.
+  **Rehearse it.**
+- **Step 15 is optional** — it is a repeat of step 9 purely to show durability. Drop it if time is
+  short.
+- Intent and ticket scope for all 15 steps verified **2026-08-21** offline (0 Groq, 0 turns).
+  Not yet run end-to-end.
 
 ---
 
