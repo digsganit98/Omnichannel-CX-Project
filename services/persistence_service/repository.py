@@ -38,6 +38,8 @@ class CXRepository(Protocol):
     def update_turn_metadata(self, turn_id: str, extra: dict) -> None: ...
     def update_turn_intent_urgency(self, turn_id: str, intent: str, urgency: str) -> None: ...
     def update_conversation_summary(self, conversation_id: str, summary: str) -> None: ...
+    def get_case_summary(self, conversation_id: str) -> dict | None: ...
+    def save_case_summary(self, conversation_id: str, latest_turn_id: str, summary: dict) -> None: ...
     def create_ticket(self, ticket: Ticket) -> Ticket: ...
     def update_ticket(self, ticket_id: str, **values) -> dict | None: ...
     def find_active_ticket(self, conversation_id: str) -> Ticket | None: ...
@@ -376,6 +378,39 @@ class SQLiteCXRepository:
             conn.execute(
                 "UPDATE conversations SET summary = ?, updated_at = ? WHERE conversation_id = ?",
                 (summary, utc_now(), conversation_id),
+            )
+
+    def get_case_summary(self, conversation_id: str) -> dict | None:
+        """The cached agent-facing summary, or None. Callers compare latest_turn_id
+        against the conversation's newest turn to decide whether it is still current."""
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM case_summaries WHERE conversation_id = ?", (conversation_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        record = dict(row)
+        try:
+            record["open_items"] = json.loads(record.pop("open_items_json") or "[]")
+        except (ValueError, TypeError):
+            record["open_items"] = []
+        return record
+
+    def save_case_summary(self, conversation_id: str, latest_turn_id: str, summary: dict) -> None:
+        """Upsert: one summary per conversation, replaced whenever it is regenerated."""
+        with self.connection() as conn:
+            conn.execute(
+                "INSERT INTO case_summaries(conversation_id, latest_turn_id, situation, "
+                "open_items_json, last_contact, model, created_at) VALUES (?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(conversation_id) DO UPDATE SET latest_turn_id = excluded.latest_turn_id, "
+                "situation = excluded.situation, open_items_json = excluded.open_items_json, "
+                "last_contact = excluded.last_contact, model = excluded.model, "
+                "created_at = excluded.created_at",
+                (
+                    conversation_id, latest_turn_id, summary.get("situation", ""),
+                    json_text(summary.get("open_items") or []), summary.get("last_contact", ""),
+                    summary.get("model"), utc_now(),
+                ),
             )
 
     def create_ticket(self, ticket: Ticket) -> Ticket:

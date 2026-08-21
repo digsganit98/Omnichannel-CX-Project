@@ -1,4 +1,5 @@
 import json
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException
 
@@ -6,6 +7,9 @@ from apps.api.dependencies.runtime import get_repository
 from apps.api.dependencies.security import require_admin_key
 from services.neo4j_service.queries import TRANSACTIONAL_INTENTS
 from services.orchestration_service.graph import HOLDING_MESSAGE
+from services.rag_service.groq_generator import GroqGenerator
+
+logger = logging.getLogger(__name__)
 
 # Matches the customer-facing holding text the review gate sends in place of the AI reply.
 HOLDING_PREFIX = HOLDING_MESSAGE.strip().lower()[:40]
@@ -25,6 +29,76 @@ INTENT_GRAPH_TYPES = {
     "account_balance_inquiry": ["Account", "FixedDeposit"],
     "transaction_dispute": ["Transaction"],
 }
+
+
+@router.get("/{conversation_id}/case-summary")
+def case_summary(conversation_id: str, refresh: bool = False) -> dict:
+    """An agent-facing summary of where this conversation stands.
+
+    Generated on demand rather than per message. An agent reads a summary when they
+    open a conversation, not once per inbound turn, so generating on write would spend
+    a Groq call on every message for something usually never read. The cache is keyed
+    to the newest turn: unchanged conversation → cached row, new turn → regenerate.
+    Cost therefore tracks agent attention, not message volume.
+    """
+    repo = get_repository()
+    conversation = repo.get_conversation(conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    turns = repo.list_conversation_turns(conversation_id) or []
+    if not turns:
+        return {"conversation_id": conversation_id, "status": "empty", "summary": None}
+    latest_turn_id = turns[-1]["turn_id"]
+
+    if not refresh:
+        cached = repo.get_case_summary(conversation_id)
+        if cached and cached.get("latest_turn_id") == latest_turn_id:
+            return {
+                "conversation_id": conversation_id,
+                "status": "cached",
+                "generated_at": cached.get("created_at"),
+                "summary": {
+                    "situation": cached.get("situation", ""),
+                    "open_items": cached.get("open_items", []),
+                    "last_contact": cached.get("last_contact", ""),
+                },
+            }
+
+    # Open tickets read from SQLite, the system of record for ticket status — the same
+    # source the right-panel Open Tickets card uses, so the summary can never disagree
+    # with the card sitting beside it.
+    open_cases = []
+    try:
+        open_cases = repo.find_open_tickets_for_customer(conversation["customer_id"], limit=5) or []
+    except Exception:
+        logger.exception("case_summary_open_tickets_failed")
+
+    generator = GroqGenerator()
+    summary = generator.summarize_case(
+        turns,
+        {"open_cases": open_cases, "graph_context": {"name": conversation.get("display_name")}},
+    )
+    if summary is None:
+        # No LLM (quota, outage, no key). Say so rather than showing the agent a
+        # fabricated or stale-but-unlabelled summary.
+        return {"conversation_id": conversation_id, "status": "unavailable", "summary": None}
+
+    try:
+        repo.save_case_summary(conversation_id, latest_turn_id, summary)
+    except Exception:
+        logger.exception("case_summary_save_failed")  # serve it anyway; caching is best-effort
+
+    return {
+        "conversation_id": conversation_id,
+        "status": "generated",
+        "model": summary.get("model"),
+        "summary": {
+            "situation": summary.get("situation", ""),
+            "open_items": summary.get("open_items", []),
+            "last_contact": summary.get("last_contact", ""),
+        },
+    }
 
 
 @router.get("/{conversation_id}")

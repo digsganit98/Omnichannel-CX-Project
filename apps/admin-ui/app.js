@@ -557,6 +557,7 @@ async function refreshSelectedConv() {
       state.convDetail = detail;
       renderCentre(detail);
       renderRight(detail, [].concat(_allTickets.open, _allTickets.closed));
+      loadCaseSummary(detail.conversation_id, false);
     }
   } catch(e) {}
 }
@@ -614,6 +615,7 @@ async function selectConv(convId) {
     state.convDetail = detail;
     renderCentre(detail);
     renderRight(detail, tickets);
+    loadCaseSummary(detail.conversation_id, false);
   } catch(e) {
     msgsEl.className = 'msgs';
     msgsEl.innerHTML = '<div style="padding:20px;text-align:center;color:var(--red-t);font-size:12px">' + escH(e.message) + '</div>';
@@ -1423,6 +1425,14 @@ function renderRight(conv, tickets) {
     + '<circle cx="13" cy="12.4" r="2.1" stroke="currentColor" stroke-width="1.3"/>'
     + '<path d="M6.7 4.9 4.2 10.6M9.3 4.9l2.5 5.7M5.1 12.4h5.8" stroke="currentColor" stroke-width="1.3"/>'
     + '</svg>View customer 360 knowledge graph</span></button>'
+    // Case summary sits above sentiment: it is what an agent wants first when they
+    // open a conversation cold. Rendered as a placeholder and filled asynchronously so
+    // a slow or unavailable LLM never delays the rest of the panel.
+    + '<div class="rpcard csum-card" id="csum-card">'
+    + '<div class="csum-head"><span class="rplbl">Case summary</span>'
+    + '<button class="csum-refresh" id="csum-refresh" type="button" title="Regenerate this summary">Refresh</button></div>'
+    + '<div class="csum-body" id="csum-body"><span class="csum-muted">Summarising…</span></div>'
+    + '</div>'
     + '<div class="rpcard"><div class="ssent-head"><span class="rplbl">Sentiment</span>'
     + '<span class="ssc" style="color:' + sentClr + '">' + escH(sentLbl) + '</span>'
     + '<span class="ssent-count">(last ' + sentCount + ' message' + (sentCount === 1 ? '' : 's') + ')</span></div>'
@@ -2647,6 +2657,57 @@ window.closeGraphModal = function() {
 };
 
 function kgEsc(s) { return escH(String(s == null ? '' : s)); }
+
+// ── Case summary — what an agent needs before reading the thread ────────────
+// Fetched separately from renderRight so a slow or unavailable LLM never delays the
+// rest of the panel. The endpoint caches against the newest turn, so re-opening an
+// unchanged conversation costs nothing; only Refresh forces a regeneration.
+var _csumFor = null;
+
+async function loadCaseSummary(conversationId, force) {
+  if (!conversationId) return;
+  if (!force && _csumFor === conversationId) return;   // already loaded for this conversation
+  _csumFor = conversationId;
+  var bodyEl = document.getElementById('csum-body');
+  if (!bodyEl) return;
+  if (force) bodyEl.innerHTML = '<span class="csum-muted">Summarising…</span>';
+  try {
+    var p = await api('/admin/conversations/' + encodeURIComponent(conversationId)
+      + '/case-summary' + (force ? '?refresh=true' : ''));
+    // The panel may have moved to another conversation while this was in flight.
+    if (_csumFor !== conversationId) return;
+    bodyEl = document.getElementById('csum-body');
+    if (!bodyEl) return;
+    if (!p.summary) {
+      // Say why there is nothing rather than showing an empty card.
+      bodyEl.innerHTML = '<span class="csum-muted">'
+        + (p.status === 'empty' ? 'No messages yet.' : 'Summary unavailable right now.')
+        + '</span>';
+      return;
+    }
+    var items = p.summary.open_items || [];
+    bodyEl.innerHTML =
+      (p.summary.situation ? '<div class="csum-sit">' + escH(p.summary.situation) + '</div>' : '')
+      + (items.length
+          ? '<div class="csum-lbl">Open items</div><ul class="csum-items">'
+            + items.map(function(i) { return '<li>' + escH(i) + '</li>'; }).join('')
+            + '</ul>'
+          : '<div class="csum-lbl">Nothing outstanding</div>')
+      + (p.summary.last_contact
+          ? '<div class="csum-lbl">Last contact</div><div class="csum-last">'
+            + escH(p.summary.last_contact) + '</div>'
+          : '');
+  } catch (e) {
+    if (_csumFor !== conversationId) return;
+    var el = document.getElementById('csum-body');
+    if (el) el.innerHTML = '<span class="csum-muted">Summary unavailable right now.</span>';
+  }
+}
+
+document.addEventListener('click', function(e) {
+  var btn = e.target && e.target.closest && e.target.closest('#csum-refresh');
+  if (btn && state.convDetail) loadCaseSummary(state.convDetail.conversation_id, true);
+});
 
 // ── "Why this answer" — per-reply provenance ────────────────────────────────
 // Every reply comes from ONE of two places: the customer's own records in the graph

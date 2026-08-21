@@ -894,3 +894,20 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .why-case-meta{font-size:9.5px;color:var(--t3);white-space:nowrap;font-variant-numeric:tabular-nums}
 .why-case-here{grid-column:2/-1;font-size:9px;font-weight:700;letter-spacing:.03em;
   text-transform:uppercase;color:var(--blue-t)}
+
+/* ── Case summary card ─────────────────────────────────────────────────────
+   Agent-facing summary of where a conversation stands, above Sentiment because
+   it is the first thing wanted when opening a conversation cold. Blue heading
+   keeps it distinct from the amber Open Tickets and purple Suggested Offers. */
+.csum-card{margin-bottom:9px}
+.csum-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin-bottom:8px}
+.csum-head .rplbl{margin-bottom:0;color:var(--blue-t)}
+.csum-refresh{background:none;border:none;padding:0;cursor:pointer;font-size:10px;color:var(--t3);text-decoration:underline}
+.csum-refresh:hover{color:var(--t1)}
+.csum-body{font-size:11.5px;line-height:1.5}
+.csum-muted{font-size:11px;color:var(--t3)}
+.csum-sit{margin-bottom:8px}
+.csum-lbl{font-size:10px;font-weight:600;color:var(--t3);text-transform:uppercase;letter-spacing:.4px;margin:8px 0 3px}
+.csum-items{margin:0;padding-left:15px}
+.csum-items li{margin-bottom:2px}
+.csum-last{color:var(--t2)}

@@ -267,6 +267,91 @@ class GroqGenerator:
         except (json.JSONDecodeError, ValueError):
             return None
 
+    def summarize_case(self, turns: list[dict], context: dict | None = None) -> dict | None:
+        """An agent-facing summary of where this conversation stands.
+
+        Written for a human picking up a conversation cold, not for the model: the
+        pipeline already feeds recent turns and open cases into every reply. Returns
+        None when the LLM is unavailable so the caller can fall back rather than
+        display a fabricated summary.
+
+        Deliberately NOT called per message. A summary is only worth generating when
+        an agent actually opens the conversation, so the route caches it against the
+        latest turn id — cost tracks agent attention, not message volume.
+        """
+        ctx = context or {}
+        if not turns:
+            return None
+
+        history_text = _format_conversation_history(turns)
+        cases = ctx.get("open_cases") or []
+        cases_text = ""
+        if cases:
+            lines = ["Open support cases on record:"]
+            for case in cases[:5]:
+                lines.append(
+                    f"  - {case.get('ticket_id', '?')} | {case.get('title') or case.get('intent') or 'case'}"
+                    f" | scope {case.get('ticket_scope') or '-'} | {case.get('status') or 'open'}"
+                )
+            cases_text = "\n".join(lines)
+
+        known_values = _known_values(ctx.get("graph_context"))
+        (history_text, cases_text), pii_mapping = _mask_fragments(
+            [history_text, cases_text], known_values
+        )
+
+        user_prompt = (
+            "Summarise this support conversation for the agent taking it over.\n\n"
+            "Return ONLY a JSON object with exactly these keys:\n"
+            '{"situation": "<what the customer is dealing with, 1-2 sentences>", '
+            '"open_items": ["<each unresolved item, one short line>"], '
+            '"last_contact": "<what happened most recently, 1 sentence>"}\n\n'
+            "Rules:\n"
+            "- Use ONLY what appears below. Never infer an outcome, a promise or a date that is not stated.\n"
+            "- If the customer raised several separate matters, give each its own line in open_items.\n"
+            "- Name amounts and reference ids where they appear, so the agent can act without scrolling.\n"
+            "- open_items is [] when nothing is outstanding.\n"
+            # Half the outbound turns in a held conversation are the automatic
+            # "Support Agent will help you shortly" placeholder. Reporting that as the last
+            # contact tells the agent nothing they cannot already see, and hides the real
+            # last exchange.
+            "- For last_contact describe the last SUBSTANTIVE exchange. Ignore automatic "
+            "holding messages such as 'Support Agent will help you with this shortly'.\n"
+            "- Plain ASCII punctuation only: ordinary spaces, hyphens and apostrophes.\n"
+            "- No markdown, no preamble.\n\n"
+            + (f"{cases_text}\n\n" if cases_text else "")
+            + history_text
+        )
+
+        result = self._generate(
+            system_prompt=(
+                "You summarise customer support conversations for the human agent taking over. "
+                "Return ONLY valid JSON. Never explain or add markdown."
+            ),
+            user_prompt=user_prompt,
+            operation="case_summary",
+            metadata={"turns": len(turns), "open_cases": len(cases)},
+        )
+        if not result["llm_used"]:
+            return None
+        try:
+            text = unmask_text(result["text"].strip(), pii_mapping)
+            parsed = json.loads(text[text.find("{") : text.rfind("}") + 1])
+        except (json.JSONDecodeError, ValueError):
+            return None
+        if not isinstance(parsed, dict):
+            return None
+        items = parsed.get("open_items")
+        return {
+            "situation": _clean_summary_text(parsed.get("situation")),
+            # A model can return a bare string here; normalise so the UI never has to guess.
+            "open_items": [_clean_summary_text(i) for i in items if _clean_summary_text(i)]
+            if isinstance(items, list)
+            else ([_clean_summary_text(items)] if items else []),
+            "last_contact": _clean_summary_text(parsed.get("last_contact")),
+            "model": result.get("model"),
+        }
+
     def status(self, check_connection: bool = False) -> dict:
         status: dict = {
             "provider": "groq",
@@ -376,6 +461,24 @@ def _channel_format_rule(channel: str) -> str:
             "no informal contractions."
         )
     return "Format: Be concise and professional."
+
+
+def _clean_summary_text(value) -> str:
+    """Fold the exotic whitespace and quotes the model emits into plain ASCII.
+
+    Observed live: the model returned U+202F (narrow no-break space) inside a customer
+    name, which renders as mojibake once the JSON is re-encoded. The source turns contain
+    none of these characters - the model introduces them - so normalising on the way out
+    is the right place, rather than trusting a prompt rule to prevent it.
+    """
+    text = str(value or "")
+    for exotic, plain in (
+        (" ", " "), (" ", " "), (" ", " "), (" ", " "),
+        ("‘", "'"), ("’", "'"), ("“", '"'), ("”", '"'),
+        ("‑", "-"), ("–", "-"), ("—", "-"),
+    ):
+        text = text.replace(exotic, plain)
+    return " ".join(text.split()).strip()
 
 
 def _format_conversation_history(recent_turns: list[dict]) -> str:
