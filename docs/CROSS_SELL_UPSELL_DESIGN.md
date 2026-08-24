@@ -243,7 +243,7 @@ token/latency tracking on every call (via the project's existing LLM observabili
 | Repository getter | `services/persistence_service/repository.py` (`get_agent_assist_recommendation`) |
 | UI: card, offer draft, labelling, glue grouping | `apps/admin-ui/app.js` + `style.css` |
 | Tests (LLM mocked; gates, every rule, validation, approve→send flow) | `tests/test_opportunities.py` |
-| Manual test scenarios | `docs/hil-test-questions.md` (Sayantini Group 4, Fathima Group 5) |
+| Manual test scenarios | deleted; recover from git at `4f2f85c` — `git show 4f2f85c:docs/hil-test-questions.md` (Sayantini Group 4, Fathima Group 5) |
 | Session-by-session change history | `docs/Sayantini-session-changes-log.md` (Fix 42–42f) |
 
 ## 12. Verified behaviour (live, real data)
