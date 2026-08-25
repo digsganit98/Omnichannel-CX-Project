@@ -126,6 +126,8 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Attrition risk removed entirely** (UI band, `/graph` field, `services/attrition_service/`) at the user's request; verified no other consumer and no teammate branch had built on it.
 - **Right panel reworked:** customer id/email/phone moved into the conversation header (avatar dropped, duplicate panel header deleted); `.det-row` flattened 3->2 columns (**+162px**); panel 300->380px; snapshot tiles removed; Open Tickets collapsible; Sentiment above Case summary.
 
+- **Fix 85 — The analytics page never said what period it was measuring:** every panel now badges its window (the page mixes all-time with a 7-day LLM summary); avg-cost column added (total and average rank operations differently in 8 of 9 rows); two by-model strip panels merged into one six-column table with per-row hover built from the recorded config; the usage-over-time axis now shows dates, so points days apart stop reading as consecutive.
+
 ---
 
 ## Session 1 — 2026-07-14
@@ -3345,5 +3347,86 @@ had built on it. Removing it also dropped five Neo4j queries that existed only t
 - Everything from Session 15 remains open: **no demo run has been executed end-to-end**, the
   claims thread is the least-proven continuity path, `resolution_memory_cache` still has the
   missing `retrieval` key, and Session 13's sweep has not been re-run on `gpt-oss-20b`.
+
+---
+
+### Fix 85 — The analytics page never said what period it was measuring
+Commit `508ae4d`. Started from the user asking why `llm_generation` appeared on the page,
+and ended in a full audit of it.
+
+**Every panel now carries its window as a badge.** The page mixes **all-time** totals with
+a **7-day** LLM summary and said so nowhere, so panels looked like they contradicted each
+other — `answer_generation 55` sat beside a lifetime conversation count. Worse, an
+operation that had not run inside 7 days simply **vanished**: `ticket_refine_referee` (last
+run 12 Aug) was absent with no explanation, and I twice told the user the chart "caps its
+legend at 8 entries." **There is no cap.** `.slice()` with no argument copies an array; it
+does not truncate. One grep would have found the date filter at
+[llm_observability.py:15](../apps/api/routes/llm_observability.py).
+
+**Avg cost added to the operation table.** Measured, the two rank operations *differently*
+in 8 of 9 rows — output tokens cost 4x input, so an operation with a long prompt and a
+short answer costs less than its token count suggests. `opportunity_generation` is the top
+**total** spender but one of the **cheapest per call**; `customer_context` is the most
+expensive per call by **7.6x**. Total alone hid that. (The user asked whether cost and avg
+cost would just repeat each other — a testable claim, and the measurement said no.)
+
+**Two by-model strip panels became one table** with the same six columns as the operation
+table, so a number means the same thing in both. The strips were a bespoke renderer showing
+one metric each and **no call count**, so a row backed by 7 calls looked as authoritative as
+one backed by 156. Configs whose calls produced **no tokens** are filtered out — a rejected
+request is not a configuration. Each row explains itself on hover, built **from** the
+recorded `model_config` plus a new `GROUP_CONCAT(DISTINCT operation)`, because a version tag
+is a hash: hardcoded text would go stale the moment a setting changed.
+
+**The usage-over-time axis was lying.** It showed only the hour, so 13 points spanning four
+days rendered as consecutive: the axis appeared to run backwards (17:00 → 11:00 → 22:00) and
+three separate days' `14:00` looked like one hour. Now the date shows when the day changes,
+with a dashed rule at the boundary. Tokens moved left of cost — tokens are the real
+constraint on this tier.
+
+**Deliberately not done:** filling empty hours (would add ~155 zero points across a 7-day
+gap and read flat), a scrollable chart (solves crowding that 13 points do not have), and
+merging the two charts (cost and tokens carry different information, so it is the user's
+call).
+
+### The `llm_generation` investigation — three wrong diagnoses, recorded
+Worth keeping in full, because the process was the failure:
+
+1. **"Test junk."** Diagnosed from a *pattern* — null correlation ids, timestamps near my own
+   commands — and recommended deleting. **49 rows deleted.** They included real production
+   records. Not recoverable.
+2. **"It's `classifier.py:188`."** Diagnosed by *reading* code that looked plausible. Also
+   wrong. (The label added there is still correct on its own merits, guarded by
+   `inspect.signature` because the stubs it serves have incompatible signatures.)
+3. **Only then**: patched `record_llm_call`, ran the suite in-process, and captured a **stack
+   trace**. It named `TicketActionDetector.detect_action` directly — see Fix 83.
+
+Then a fourth: I told the user the remaining 12 rows were "old history." They were **11
+minutes old**, from my own three test runs that afternoon. Deleted by explicit event_id list
+after showing every row and asserting the count.
+
+**The lesson, stated plainly:** the user asked "what's the difference between the operation
+and model tables" **three times**. I answered twice from assumption — claiming both showed
+averages — and only opened the SQL on the third ask. `by_operation` returns `SUM(cost)`;
+the version panel divides by calls in the *frontend*. They answer different questions, and I
+had proposed merging them on the false premise that they answered the same one. **A repeated
+question is evidence of being wrong, not a request to rephrase.**
+
+### Still open after this session
+- **`operation` is declared, not derived** — the design issue behind Fix 83, agreed for a
+  fresh session. `llm_observation_context` already carries `agent`/`correlation_id` through a
+  contextvar every nested call inherits; only **2 of ~9** LLM call sites are wrapped in it.
+- **A page-wide window selector** (`7d · 30d · 90d · All`). The endpoint already accepts
+  `?days=` up to 90 and `days=0` for all-time, but **six aggregations have no date filter at
+  all**, so making it real means threading a parameter through `aggregator.py`.
+- **`get_ticket_trend` / `/analytics/trend` is a dead endpoint** — computes a 14-day window,
+  nothing in the frontend calls it.
+- **Cost rates are unverified.** The code comment says they came from Groq's `/v1/models`;
+  that endpoint returns **no pricing at all** today. The arithmetic is exact (recomputed 6
+  rows from stored tokens, zero mismatches), but `input 0.075 / output 0.30` cannot be
+  checked against the source it cites. Also: an unknown model silently costs **$0.00**
+  (`rate_not_configured`), which would make a model swap look free.
+- The offers cache is verified in isolation (5 requests → 1 call) but **not observed over a
+  normal working day**.
 
 ---
