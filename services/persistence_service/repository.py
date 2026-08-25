@@ -364,10 +364,21 @@ class SQLiteCXRepository:
                     json_text(values.get("metadata")), values.get("delivery_status"), created_at,
                 ),
             )
+            # A turn marked resolved closes ONE ticket, not the customer's whole case load.
+            # This used to flip the conversation unconditionally, so a customer confirming
+            # one matter closed a conversation that still had other tickets open — the agent
+            # then saw a green "resolved" banner over live work. Same rule the admin UI
+            # already applies when an agent resolves a ticket by hand (app.js doResolve):
+            # resolved only when nothing is left open. Counted in THIS transaction so the
+            # just-resolved ticket is already committed and cannot be double-counted.
             if values.get("resolved"):
+                still_open = conn.execute(
+                    "SELECT COUNT(*) FROM tickets WHERE conversation_id = ? AND status != 'resolved'",
+                    (values["conversation_id"],),
+                ).fetchone()[0]
                 conn.execute(
-                    "UPDATE conversations SET status = 'resolved', updated_at = ? WHERE conversation_id = ?",
-                    (created_at, values["conversation_id"]),
+                    "UPDATE conversations SET status = ?, updated_at = ? WHERE conversation_id = ?",
+                    ("active" if still_open else "resolved", created_at, values["conversation_id"]),
                 )
             else:
                 conn.execute(
