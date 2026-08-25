@@ -278,38 +278,46 @@ class QueryResolutionAgent:
                 pass
 
         # ── Priority 1: Ticket status lookup (cross-channel memory) ──────────
+        # Always answer here for TICKET_STATUS — including when the customer genuinely has
+        # NO open tickets. _format_ticket_status already has a friendly "no open requests"
+        # message for the empty case; the previous `if tickets:` guard skipped straight past
+        # it whenever the list was empty, falling through to Neo4j/RAG instead. RAG has no
+        # concept of "this customer's tickets" at all, so on a KB miss (or a missing/empty
+        # index) it returned a generic "I'm having trouble accessing that" apology AND
+        # triggered a fresh escalation ticket — which is exactly what a customer asking
+        # "what's my ticket status?" should never see: a confusing new ticket number instead
+        # of either their real tickets or a clear "you have none right now".
         if intent == Intent.TICKET_STATUS:
             tickets = context.get("customer_tickets", [])
-            if tickets:
-                raw_text = _format_ticket_status(tickets, channel)
-                ticket_ctx = [{
-                    "text": raw_text,
-                    "score": 0.98,
-                    "metadata": {
-                        "source": "customer_ticket_lookup",
-                        "doc_type": "customer_data",
-                        # Same trap Fix 66 found in the Neo4j branch: retrieval_backend below
-                        # is set on the QueryResolution OBJECT, but the provenance endpoint
-                        # reads this metadata dict (persisted verbatim by
-                        # add_retrieval_evidence). Without this key the backend was dropped at
-                        # the DB boundary and the panel labelled a ticket read as a KB answer.
-                        "retrieval": "customer_ticket_lookup",
-                    },
-                }]
-                # Route through Groq so the LLM produces a natural sentence
-                # ("Your home loan query is with our Loans team…") instead of a raw bullet list.
-                generation = self.rag.generator.generate_answer(message.text, ticket_ctx, context)
-                return QueryResolution(
-                    answer=generation.get("text") or raw_text,
-                    confidence=0.98,
-                    contexts=ticket_ctx,
-                    citations=[{"index": 1, "source": "customer_ticket_lookup", "score": 0.98}],
-                    retrieval_backend="customer_ticket_lookup",
-                    llm={
-                        "model": generation.get("model"),
-                        "llm_used": generation.get("llm_used", False),
-                    },
-                )
+            raw_text = _format_ticket_status(tickets, channel)
+            ticket_ctx = [{
+                "text": raw_text,
+                "score": 0.98,
+                "metadata": {
+                    "source": "customer_ticket_lookup",
+                    "doc_type": "customer_data",
+                    # Same trap Fix 66 found in the Neo4j branch: retrieval_backend below
+                    # is set on the QueryResolution OBJECT, but the provenance endpoint
+                    # reads this metadata dict (persisted verbatim by
+                    # add_retrieval_evidence). Without this key the backend was dropped at
+                    # the DB boundary and the panel labelled a ticket read as a KB answer.
+                    "retrieval": "customer_ticket_lookup",
+                },
+            }]
+            # Route through Groq so the LLM produces a natural sentence
+            # ("Your home loan query is with our Loans team…") instead of a raw bullet list.
+            generation = self.rag.generator.generate_answer(message.text, ticket_ctx, context)
+            return QueryResolution(
+                answer=generation.get("text") or raw_text,
+                confidence=0.98,
+                contexts=ticket_ctx,
+                citations=[{"index": 1, "source": "customer_ticket_lookup", "score": 0.98}],
+                retrieval_backend="customer_ticket_lookup",
+                llm={
+                    "model": generation.get("model"),
+                    "llm_used": generation.get("llm_used", False),
+                },
+            )
 
         # ── Priority 2: Neo4j transactional data (loans, claims, etc.) ───────
         if intent and self.neo4j_client:
