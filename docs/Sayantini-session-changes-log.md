@@ -127,6 +127,9 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Right panel reworked:** customer id/email/phone moved into the conversation header (avatar dropped, duplicate panel header deleted); `.det-row` flattened 3->2 columns (**+162px**); panel 300->380px; snapshot tiles removed; Open Tickets collapsible; Sentiment above Case summary.
 
 - **Fix 85 — The analytics page never said what period it was measuring:** every panel now badges its window (the page mixes all-time with a 7-day LLM summary); avg-cost column added (total and average rank operations differently in 8 of 9 rows); two by-model strip panels merged into one six-column table with per-row hover built from the recorded config; the usage-over-time axis now shows dates, so points days apart stop reading as consecutive.
+- **Fix 86 — Inbound email was processed with the whole quoted thread attached:** an email reply carries the entire previous thread beneath it and every downstream step reads the message as one flat string, so OUR OWN outbound text acted as customer input - "monitoring each case closely" supplied "close" and the signature "Thank you for reaching out" supplied "thank you", which together satisfied the resolution detector and closed a ticket the customer had only asked about. `strip_quoted_reply` now cuts at the first quote marker in `EmailAdapter.normalize`, the single point all three inbound email paths share.
+- **Fix 87 — One resolved ticket closed the entire conversation:** `append_turn` flipped the conversation to `resolved` unconditionally whenever a turn was marked resolved, so a customer confirming one matter closed a conversation with three other tickets still open; it now resolves only when nothing is left open, the same rule the admin UI already applied when an agent resolved a ticket by hand.
+- **Fix 88 — The Neo4j client never reached TicketManager on the message path:** `OrchestrationGraph` built the manager without it while holding a working client two lines later, so a customer-resolved ticket stayed `open` in the graph while SQLite said `resolved` - and `get_open_cases` reads the GRAPH, so the model kept being fed a closed case as trusted context. The admin route always passed the client; only this path did not.
 
 ---
 
@@ -3430,3 +3433,119 @@ question is evidence of being wrong, not a request to rephrase.**
   normal working day**.
 
 ---
+
+---
+
+## Session 17 — 2026-08-25
+
+Branch: `Sayantini-phase2-ui-changes`. Started from the user asking why a conversation showed as
+resolved and why its reply looked wrong. Two questions, three defects, all on the same turn.
+
+### How it was found
+The user sent a screenshot: Digvijay's conversation carried a green **"Conversation resolved"**
+banner, the reply said *"Your support ticket ... has been marked as resolved. Thank you for
+confirming."*, and the customer's actual message was *"Tell me more about the ticket raised
+currently"* - a request for information, answered by closing his case.
+
+### Fix 86 — Inbound email is processed with the entire quoted thread attached
+**Measured, not reasoned.** The stored turn is **1,264 characters**; the customer typed one line.
+Replaying the real text through the real rule showed `detect_action` fires on the *quoted* block:
+
+| Group | Matched | Source |
+|---|---|---|
+| `close_action` | `close` | **"monitoring each case `close`ly"** - our own outbound text |
+| `ticket_context` | `ticket`, `case`, `query`, `request` | customer's line + the quote |
+| `resolution_cue` | `thank you` | **"`Thank you` for reaching out"** - our own signature |
+
+The customer's sentence **alone** returns `False`. Two of the three matches are substring accidents
+inside our own boilerplate - `close` inside *"closely"* is the same class of defect as Fix 70
+(`emi` inside *"premium"*).
+
+Fixed in `EmailAdapter.normalize`, verified as the single point **all three** inbound email paths
+share (webhook, IMAP poller, inbox poller all funnel through `handle_email_message`).
+
+**A defect in the first version of my own fix, found by testing rather than reading:** the initial
+regex left the `On ... wrote:` attribution behind, because Gmail wraps it across two lines and puts
+**U+202F** (narrow no-break space) in the timestamp - the same character Fix 80 had to normalise.
+It only passed because the `>` lines caught the rest. Matching across lines fixed it: **1,239 -> 71
+characters**, exactly the customer's own words.
+
+Empty-after-strip falls back to the original: losing the turn entirely is worse than an over-long
+one. Nine cases pass, including CRLF bodies and the case that **must still fire** - a genuine
+*"My problem is sorted, thanks"* above a quote.
+
+### Fix 87 — One resolved ticket closed the whole conversation
+A **second, independent defect**, exposed by the first but not caused by it. `_resolved()` is a
+**per-ticket** signal - `_resolve_ticket` acts on `active_ticket` only - and it was being used to
+close the entire conversation at `repository.py:367`.
+
+Live DB at the time: `conv_e0481c26f1ac` = `resolved` with **3 of its 4 tickets still open**.
+
+**The frontend was not at fault.** `urgencyToStatus` already has the correct rule - *every* ticket
+resolved - but the line above it short-circuits on the raw conversation status, so the good check
+was unreachable. The UI was faithfully rendering bad data.
+
+**Reused the app's own pattern:** the manual agent path (`app.js` `doResolve`) already does
+`stillOpen ? 'active' : 'resolved'`. The fix applies that same rule server-side, counted inside the
+existing transaction. Verified both directions: 3 open -> stays `active`; 0 open -> `resolved`.
+
+### Fix 88 — The graph client never reached TicketManager on the message path
+**I diagnosed this wrong first and the record matters.** I told the user the Neo4j mirror "threw and
+was swallowed by `except Exception: pass`". Reproducing it showed otherwise: `neo4j_client` is
+**`None`**, so the mirror block never runs at all. Nothing threw. `OrchestrationGraph` built
+`TicketManager(repository, self.crm)` while assigning a working client **two lines later**.
+
+Consequence, and why this was the highest-value of the three: the two stores are read by
+**different consumers**.
+
+| Consumer | Reads | Saw the ticket as |
+|---|---|---|
+| Graph panel, right panel, agent UI | SQLite | resolved - hidden |
+| `get_open_cases` -> **trusted context fed to the LLM** | **Neo4j** | **open - still fed to the model** |
+
+So the agent screen said closed while the model answering the customer was still told it was open -
+the exact scenario the `ticket_manager.py` comment was written to prevent, running backwards.
+
+### Data repair
+`tkt_25009e2fdde5` -> `open`, `conv_e0481c26f1ac` -> `active`. Guarded by asserts on the exact
+known-bad state, DB backed up first. Because Neo4j **already** said `open`, the repair made the two
+stores agree rather than inventing a state - verified after: all 4 tickets `open` in both, and the
+graph panel renders **4** ticket nodes where it rendered 3.
+
+**History deliberately preserved.** `audit_events` and `ticket_events` untouched: every consumer was
+checked (one read-only listing endpoint, one analytics aggregation - nothing branches on them), so
+keeping them costs nothing and they are the only surviving record that this bug fired.
+
+CRM needed no repair - `external_ticket_id` is NULL and its sync had already 400'd at ticket
+creation.
+
+### Test status
+**5 failed / 145 passed** with the changes; **6 failed / 144 passed** with them stashed. The 5 are a
+strict subset of the 6 - no new failures. The extra baseline failure was
+`test_distinct_l3_fraud_incidents_create_distinct_tickets`, the known flaky one from Session 15.
+
+### Process notes worth keeping
+- **A restart is not a deploy here.** I tested Fix 88 after `docker restart` and read `None`,
+  briefly believing the fix had failed. Source is **baked into the image**; only `apps/admin-ui` is
+  bind-mounted. The fix was correct; the test was invalid. Rebuild before verifying a Python change.
+- **`docker exec` paths need `MSYS_NO_PATHCONV=1`** in Git Bash, which otherwise rewrites `/app/...`
+  into a Windows path.
+- **Heredoc escaping ate a backslash level three times**, so byte patterns never matched the file.
+  Every attempt asserted and left the file untouched - then writing the patch to a real file worked
+  first time. Assert on match count before writing; a failed patch must change nothing.
+- **Line endings are not uniform across this repo.** `graph.py` is CRLF; assuming one style breaks
+  the match or rewrites the whole file as a spurious diff.
+- **The user asked "why is the conversation resolved" and "the reply looks wrong" as one message.**
+  They were two different bugs with one shared trigger. Answering only the visible one would have
+  left Fix 87 live.
+
+### Still open
+- Everything from Session 16 remains open: the **`operation` declared-not-derived** design, **no
+  demo run executed end-to-end**, `resolution_memory_cache`'s missing `retrieval` key, unverified
+  cost rates, and Session 13's sweep never re-run on `gpt-oss-20b`.
+- **The offers cache is still unverified over a working day.** An earlier claim this session that it
+  was "working" was withdrawn: it rested on a correlation (call volume dropping after the first
+  cache row appeared), and one number in it was invented rather than measured.
+- **Fix 86 changes the input to intent classification and ticket scope too**, not just the
+  resolution detector. That is the intended direction, but the effect on classification has **not**
+  been measured across stored turns.
