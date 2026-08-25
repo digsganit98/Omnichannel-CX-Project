@@ -324,8 +324,19 @@
           <div class="chdr">
             <div class="cnfo">
               <div class="cnm" id="convName">Select a conversation</div>
+              <div class="cmeta" id="convMeta"></div>
             </div>
-            <div class="hbtns"></div>
+            <div class="hbtns">
+              <button class="kg-btn kg-btn-hdr" id="snap-kg-btn" type="button" style="display:none" title="See this customer's products, claims and tickets as a connected graph.">
+                <span class="kg-btn-l">
+                  <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                    <circle cx="8" cy="3.2" r="2.1" stroke="currentColor" stroke-width="1.3"/>
+                    <circle cx="3" cy="12.4" r="2.1" stroke="currentColor" stroke-width="1.3"/>
+                    <circle cx="13" cy="12.4" r="2.1" stroke="currentColor" stroke-width="1.3"/>
+                    <path d="M6.7 4.9 4.2 10.6M9.3 4.9l2.5 5.7M5.1 12.4h5.8" stroke="currentColor" stroke-width="1.3"/>
+                  </svg>View customer 360 knowledge graph</span>
+              </button>
+            </div>
           </div>
           <div class="viewbar" id="viewbar"></div>
           <div class="chbar" id="chbar">
@@ -355,12 +366,6 @@
 
         <!-- RIGHT PANEL -->
         <div class="rp">
-          <div class="rphdr">
-            <div class="rpav" id="rpav">—</div>
-            <div class="rpnm" id="rpnm">No conversation selected</div>
-            <div class="rpsub" id="rpsub">Select from queue</div>
-            <div class="rpcontact" id="rpcontact"></div>
-          </div>
           <div class="rpbody" id="rpbody">
             <div style="text-align:center;color:var(--t3);font-size:12px;padding:24px 0">Profile appears here</div>
           </div>

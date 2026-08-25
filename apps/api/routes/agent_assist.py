@@ -4,6 +4,8 @@ Recommendations are surfaced to a human agent for approval/dismissal — never s
 a customer automatically. See services/agent_assist_service/next_best_action.py.
 """
 
+import hashlib
+import json
 import logging
 import os
 
@@ -148,6 +150,27 @@ def get_opportunities(conversation_id: str) -> dict:
         for r in all_rows if r.get("action_type") in _OFFER_ACTION_TYPES
     ]
 
+    # Cache guard. This endpoint is called on EVERY right-panel render, including the
+    # inbox poll's, and the engine's LLM call costs ~1000 tokens whether or not it finds
+    # anything - measured at 53 calls in one day with zero customer messages. Re-run only
+    # when something that could change the answer has changed: the customer's graph
+    # records, how many turns they have, or which offers were already suggested.
+    fingerprint = json.dumps(
+        {"graph": graph_context, "turns": len(turns), "tickets": len(tickets),
+         "suggested": sorted(already_suggested)},
+        sort_keys=True, default=str,
+    )
+    input_hash = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()
+    cached = repository.get_opportunity_evaluation(conversation_id)
+    if cached and cached.get("input_hash") == input_hash:
+        # Already evaluated on these exact inputs. Serve what it produced - which is
+        # legitimately nothing when the model found no offer worth making.
+        if cached.get("suppressed"):
+            return {"conversation_id": conversation_id, "customer_id": customer_id,
+                    "suppressed": cached["suppressed"], "opportunities": []}
+        return {"conversation_id": conversation_id, "customer_id": customer_id,
+                "suppressed": None, "opportunities": _pending_offers()}
+
     from services.rag_service.groq_generator import GroqGenerator
     result = opportunity_engine.generate_opportunities(
         generator=GroqGenerator(),
@@ -158,6 +181,14 @@ def get_opportunities(conversation_id: str) -> dict:
         already_suggested=already_suggested,
         charges=charges,
     )
+
+    # Record that this evaluation ran, whatever it produced — including nothing. Without
+    # this the no-offer case leaves no trace and re-runs on every render forever.
+    try:
+        repository.save_opportunity_evaluation(
+            conversation_id, input_hash, result.get("suppressed"))
+    except Exception:
+        logger.exception("opportunity_evaluation_save_failed")  # serve it anyway
 
     if result.get("suppressed"):
         return {"conversation_id": conversation_id, "customer_id": customer_id,

@@ -189,7 +189,10 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .page.active{display:flex}
 
 /* ── INBOX PAGE (3-column) ── */
-.app{display:grid;grid-template-columns:280px 1fr 300px;height:100%;width:100%;overflow:hidden}
+/* Inbox stays 280px: its rows carry a 60-char message preview, so it is the one column
+   with no slack. The extra 40px for the right panel comes from the centre, which the
+   two-column .det-row above more than pays for. */
+.app{display:grid;grid-template-columns:280px 1fr 380px;height:100%;width:100%;overflow:hidden}
 
 /* QUEUE */
 .queue{background:var(--surf);border-right:1px solid var(--bdr);display:flex;flex-direction:column;overflow:hidden}
@@ -255,9 +258,12 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 /* CENTRE */
 .ctr{display:flex;flex-direction:column;overflow:hidden;background:var(--bg);min-height:0}
 .chdr{background:var(--surf);border-bottom:1px solid var(--bdr);padding:8px 18px;display:flex;align-items:center;gap:12px;flex-shrink:0}
-.cnfo{flex:1;min-width:0}
-.cnm{font-size:14px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.cmeta{font-size:11px;color:var(--t3)}
+.cnfo{flex:1;min-width:0;display:flex;align-items:baseline;gap:10px}
+.cnm{font-size:14px;font-weight:600;white-space:nowrap;flex-shrink:0}
+/* Customer id · email · phone beside the name. This is the part that gives way when
+   the header is narrow — the name and the graph button stay intact. */
+.cmeta{font-size:11px;color:var(--t3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.cmeta-sep{padding:0 6px;opacity:.5}
 .hbtns{display:flex;gap:6px;flex-shrink:0}
 .hbtn{font-size:11px;padding:5px 12px;border-radius:var(--rs);border:1px solid var(--bdr2);background:var(--surf);color:var(--t2);cursor:pointer;font-family:inherit;font-weight:500;transition:all .12s}
 .hbtn:hover{background:var(--surf2);color:var(--t1)}
@@ -320,34 +326,18 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 
 /* RIGHT PANEL */
 .rp{background:var(--surf);border-left:1px solid var(--bdr);display:flex;flex-direction:column;overflow:hidden}
-.rphdr{padding:14px;border-bottom:1px solid var(--bdr);display:flex;flex-direction:column;align-items:center;gap:5px;flex-shrink:0}
-.rpav{width:46px;height:46px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:600;font-size:15px;border:2px solid;background:var(--blue-bg);color:var(--blue-t);border-color:var(--blue-bd)}
-.rpnm{font-size:13px;font-weight:600}
-.rpsub{font-size:11px;color:var(--t3);text-align:center}
 .rpchs{display:flex;gap:4px;flex-wrap:wrap;justify-content:center;padding-top:3px}
-.rpbody{flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:12px}
+/* gap alone spaces the cards - each already has its own grey background and 11px of
+   padding, so a wide gap was doing work the background already does. Never add
+   margin-bottom to a card here: in a flex column it ADDS to this gap rather than
+   replacing it, which is what made the spacing uneven. */
+.rpbody{flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:8px}
 .rpbody::-webkit-scrollbar{width:3px}
 .rpbody::-webkit-scrollbar-thumb{background:var(--bdr);border-radius:3px}
 .rpcard{background:var(--surf2);border-radius:var(--r);padding:11px}
 .rplbl{font-size:10px;font-weight:600;color:var(--t3);text-transform:uppercase;letter-spacing:.5px;margin-bottom:9px}
 .rplbl-tickets{color:var(--amb-t)}
 .rplbl-offers{color:var(--pur-t)}
-/* Attrition-risk band — full width, above the snapshot tiles */
-.attrition-band{align-items:center;gap:7px;flex-wrap:wrap;padding:8px 10px;margin-bottom:8px;border-radius:var(--rs);border:1px solid var(--bdr);background:var(--surf)}
-.attrition-band .ab-lbl{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--t3)}
-/* value shown as plain coloured text, consistent with the other snapshot values */
-.attrition-band .ab-band{font-size:12px;font-weight:600}
-.attrition-band .ab-band.ab-high{color:var(--red-t)}
-.attrition-band .ab-band.ab-medium{color:var(--amb-t)}
-.attrition-band .ab-band.ab-low{color:var(--grn-t)}
-.attrition-band .ab-reasons{font-size:11px;color:var(--t2);flex:1 1 100%;line-height:1.4}
-.snap-sec{margin-top:12px;padding-top:12px;border-top:1px solid var(--bdr)}
-.mgrid{display:grid;grid-template-columns:1fr 1fr;gap:7px}
-.mc{background:var(--surf);border:1px solid var(--bdr);border-radius:var(--rs);padding:9px}
-.mc-wide{grid-column:1 / -1}
-/* all tile values share one size/weight/alignment for consistency */
-.mv,.mv-txt{font-size:12px;font-weight:600;color:var(--t1);line-height:1.3;word-break:break-word}
-.ml{font-size:10px;color:var(--t3);margin-top:3px}
 /* Sentiment header: label + value + count on one line */
 .ssent-head{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;margin-bottom:8px}
 .ssent-head .rplbl{margin-bottom:0}
@@ -366,6 +356,14 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .tkt-desc{font-size:11px;color:var(--t2);line-height:1.5}
 .tkt-created{font-size:9px;color:var(--t3);margin-top:4px}
 /* Scroll the ticket list so ~4 cards show; the rest scroll inside the panel. */
+/* Collapsible card. The header (and its count) always shows; the rows fold away. */
+.tkt-toggle{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;
+  padding:0;background:none;border:none;cursor:pointer;font-family:inherit;text-align:left}
+.tkt-toggle .rplbl{margin-bottom:0}
+.tkt-chev{color:var(--t3);flex-shrink:0;transition:transform .15s}
+.tkt-card.on .tkt-chev{transform:rotate(180deg)}
+.tkt-card .tkt-scroll{display:none}
+.tkt-card.on .tkt-scroll{display:block;margin-top:9px}
 .tkt-scroll{max-height:118px;overflow-y:auto;padding-right:3px}
 .tkt-scroll::-webkit-scrollbar{width:4px}
 .tkt-scroll::-webkit-scrollbar-thumb{background:var(--bdr);border-radius:3px}
@@ -517,18 +515,23 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
    stacked oldest→newest. Full reply text (no clamp). */
 .flow-theme-body.detailed{gap:10px;padding:4px 2px 8px}
 .det-unit{display:flex;flex-direction:column;gap:10px}
-.det-row{display:grid;grid-template-columns:1fr 150px 1.2fr;gap:12px;align-items:stretch;
+/* Two columns, metadata as a header spanning both. It was a 150px middle COLUMN, which
+   stacked five pills into a tall empty gutter and squeezed the query and reply either
+   side; as a header the same pills cost one short row and give that width back. */
+.det-row{display:grid;grid-template-columns:1fr 1.2fr;gap:8px 12px;align-items:stretch;
   background:var(--surf);border:1px solid var(--bdr);border-left:3px solid var(--det-clr,var(--t3));
   border-radius:var(--r);padding:12px 13px;box-shadow:var(--shadow)}
 .det-lbl{display:block;font-size:8.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--t3);margin-bottom:5px}
 .det-q .det-lbl{color:var(--blue-t)}
 .det-r-lbl{color:var(--pur-t)}
 .det-q-text{font-size:11.5px;color:var(--t1);line-height:1.5;word-break:break-word;white-space:pre-wrap}
-.det-node{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5px;text-align:center;
-  border-left:1px solid var(--bdr2);border-right:1px solid var(--bdr2);padding:0 8px}
-/* normalize the middle column to 10px (ticket/status/time default smaller) */
-.det-node .lin-tkt,.det-node .flow-node-status,.det-node .lin-time{font-size:10px}
-.det-node .lin-time{color:var(--t1)}
+/* Spans both columns. Wraps rather than scrolls: a hidden ticket id is a lost one. */
+.det-head{grid-column:1/-1;display:flex;flex-wrap:wrap;align-items:center;gap:6px;
+  padding-bottom:8px;border-bottom:1px solid var(--bdr2)}
+/* normalize the header pills to 10px (ticket/status/time default smaller) */
+.det-head .lin-tkt,.det-head .flow-node-status,.det-head .lin-time{font-size:10px}
+/* Time last, pushed to the far end — it is the one item read by position, not colour. */
+.det-head .lin-time{color:var(--t3);margin-left:auto}
 .det-r{background:var(--pur-bg);border:1px solid var(--pur-bd);border-radius:var(--rs);padding:9px 11px}
 .det-r-text{font-size:11px;color:var(--t1);line-height:1.55;word-break:break-word;white-space:pre-wrap}
 .det-r-pending{color:var(--t3)}
@@ -672,7 +675,12 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 /* operation table with token-share meters */
 .llm-num{text-align:right !important;font-variant-numeric:tabular-nums}
 .llm-op-table td{padding-top:9px;padding-bottom:9px}
-.llm-op-cell{font-weight:600;color:var(--t1) !important;white-space:nowrap}
+.llm-op-cell{font-weight:600;color:var(--t1) !important;white-space:nowrap;cursor:help}
+/* Marks the row as explaining itself on hover — the native title carries the text. */
+.llm-op-q{display:inline-flex;align-items:center;justify-content:center;width:12px;height:12px;
+  margin-left:6px;border-radius:50%;border:1px solid var(--bdr2);background:var(--surf2);
+  color:var(--t3);font-size:8px;font-weight:700;vertical-align:middle}
+.llm-op-cell:hover .llm-op-q{border-color:var(--blue);color:var(--blue)}
 .llm-op-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:8px;vertical-align:middle}
 .llm-meter-cell{min-width:150px}
 .llm-meter-wrap{display:flex;align-items:center;gap:10px}
@@ -811,8 +819,9 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .kg-btn:hover{border-color:var(--blue)}
 .kg-btn:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
 .kg-btn-l{display:flex;align-items:center;gap:7px}
-/* Standing alone at the top of the panel it needs card presence, not an inline button. */
-.kg-btn-top{margin-top:0;margin-bottom:10px;padding:11px 12px;font-size:12px}
+/* In the conversation header it sits inline beside the customer, so it must hug its
+   label rather than fill the width the way the panel version did. */
+.kg-btn-hdr{width:auto;margin-top:0;padding:6px 11px;font-size:11px;white-space:nowrap}
 
 .kg-modal-card{width:max-content;max-width:95vw;min-width:520px;max-height:94vh;display:flex;flex-direction:column;padding:0;overflow:hidden}
 .kg-modal-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;
@@ -899,15 +908,71 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
    Agent-facing summary of where a conversation stands, above Sentiment because
    it is the first thing wanted when opening a conversation cold. Blue heading
    keeps it distinct from the amber Open Tickets and purple Suggested Offers. */
-.csum-card{margin-bottom:9px}
+/* Customer Context — LLM-grouped record, tabbed. Class names are cctx-* because the
+   conversation view already owns .viewtab; a shared tab class would make either set's
+   click handler clear the other. */
+.cctx-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin-bottom:8px}
+.cctx-head .rplbl{margin-bottom:0}
+.cctx-refresh{background:none;border:none;padding:0;cursor:pointer;font-size:10px;color:var(--t3);text-decoration:underline}
+.cctx-refresh:hover{color:var(--t1)}
+.cctx-muted{font-size:11px;color:var(--t3)}
+
+/* Tabs wrap rather than scroll: in a ~260px panel a hidden tab is a lost tab. Empty
+   categories are dropped upstream, so five is the practical maximum here. */
+.cctx-tabs{display:flex;flex-wrap:wrap;gap:3px;margin-bottom:9px}
+.cctx-tab{display:inline-flex;align-items:center;gap:4px;font-size:10px;font-weight:600;
+  padding:4px 8px;border-radius:20px;border:1px solid var(--bdr);background:transparent;
+  color:var(--t3);cursor:pointer;font-family:inherit;transition:all .12s;white-space:nowrap}
+.cctx-tab:hover{color:var(--t1)}
+.cctx-tab.on{background:var(--blue-bg);border-color:var(--blue-bd);color:var(--blue-t)}
+/* Risk count: the agent should see there is a problem before clicking the tab. */
+.cctx-count{display:inline-flex;align-items:center;justify-content:center;min-width:14px;
+  height:14px;padding:0 3px;border-radius:20px;background:var(--red-bg);color:var(--red-t);
+  font-size:9px;font-weight:700}
+.cctx-tab.on .cctx-count{background:var(--red-t);color:#fff}
+
+/* Every panel is in the DOM; .on decides which one shows. Switching is a class
+   toggle — no re-render, no request. */
+.cctx-panel{display:none}
+/* Capped at roughly 5 rows and scrolled. Profile alone runs to 11 rows, which pushed
+   Case summary and Sentiment off the panel entirely - the tab is a filter, not a reason
+   to own the whole column. */
+.cctx-panel.on{display:block;max-height:150px;overflow-y:auto}
+.cctx-panel::-webkit-scrollbar{width:3px}
+.cctx-panel::-webkit-scrollbar-thumb{background:var(--bdr);border-radius:3px}
+
+/* No per-row separators. Rows vary in height (a value that wraps, an optional sub), so
+   evenly-drawn borders land at uneven spacing and the close-together ones read as
+   heavier rules. Spacing alone separates them and stays even whatever the row holds. */
+/* Zebra rows. Spacing alone was not enough once the type shrank - the values ran
+   together into an unreadable column - and per-row borders landed unevenly because rows
+   vary in height. A background band separates every row by the same amount whatever it
+   holds. */
+.cctx-item{padding:5px 7px;border-radius:4px}
+.cctx-item:nth-child(odd){background:var(--surf)}
+.cctx-row{display:flex;align-items:baseline;justify-content:space-between;gap:12px}
+/* The label holds its line and truncates; the value wraps under itself, staying
+   right-aligned. No stacked special case - a full-width bold line at the left margin
+   was itself reading as a horizontal rule. */
+.cctx-lbl{font-size:10px;color:var(--t3);min-width:0;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+/* Weight 500, not 600: at 600 these were the heaviest text in the panel - heavier than
+   the section headings - so a column of amounts read as shouting. */
+.cctx-val{font-size:10.5px;font-weight:600;color:var(--t1);text-align:right;word-break:break-word}
+.cctx-sub{font-size:9.5px;color:var(--t3);line-height:1.35;margin-top:1px}
+
+/* Parse-failure fallback: show what the model said rather than losing it. */
+.cctx-raw{font-size:10px;line-height:1.4;white-space:pre-wrap;word-break:break-word;
+  max-height:180px;overflow-y:auto;margin:6px 0 0;padding:6px;border-radius:var(--rs);
+  background:var(--surf);color:var(--t2);font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+
 .csum-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin-bottom:8px}
-.csum-head .rplbl{margin-bottom:0;color:var(--blue-t)}
+.csum-head .rplbl{margin-bottom:0}
 .csum-refresh{background:none;border:none;padding:0;cursor:pointer;font-size:10px;color:var(--t3);text-decoration:underline}
 .csum-refresh:hover{color:var(--t1)}
-.csum-body{font-size:11.5px;line-height:1.5}
+.csum-body{font-size:10.5px;line-height:1.4}
 .csum-muted{font-size:11px;color:var(--t3)}
 .csum-sit{margin-bottom:8px}
 .csum-lbl{font-size:10px;font-weight:600;color:var(--t3);text-transform:uppercase;letter-spacing:.4px;margin:8px 0 3px}
 .csum-items{margin:0;padding-left:15px}
 .csum-items li{margin-bottom:2px}
-.csum-last{color:var(--t2)}

@@ -471,6 +471,11 @@ class TicketCreationAgent:
                     "Does this message indicate that the customer's issue has been resolved "
                     "and they no longer need support? Answer YES or NO only."
                 ),
+                # Without this the call recorded under the unlabelled 'llm_generation'
+                # default, so a real production step was invisible in the analytics
+                # breakdown — it looked like stray test traffic rather than the
+                # resolution detector running on ambiguous messages.
+                operation="ticket_action_detection",
             )
             if result.get("llm_used") and result.get("text", "").strip().upper().startswith("YES"):
                 return TicketActionDecision(action=TicketAction.RESOLVE, reason="llm_confirmed_resolution")

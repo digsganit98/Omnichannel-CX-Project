@@ -40,6 +40,10 @@ class CXRepository(Protocol):
     def update_conversation_summary(self, conversation_id: str, summary: str) -> None: ...
     def get_case_summary(self, conversation_id: str) -> dict | None: ...
     def save_case_summary(self, conversation_id: str, latest_turn_id: str, summary: dict) -> None: ...
+    def get_customer_context(self, customer_id: str) -> dict | None: ...
+    def save_customer_context(self, customer_id: str, record_hash: str, categories: dict, model: str | None) -> None: ...
+    def get_opportunity_evaluation(self, conversation_id: str) -> dict | None: ...
+    def save_opportunity_evaluation(self, conversation_id: str, input_hash: str, suppressed: str | None) -> None: ...
     def create_ticket(self, ticket: Ticket) -> Ticket: ...
     def update_ticket(self, ticket_id: str, **values) -> dict | None: ...
     def find_active_ticket(self, conversation_id: str) -> Ticket | None: ...
@@ -284,7 +288,7 @@ class SQLiteCXRepository:
 
     def count_recent_inbound(self, customer_id: str, since_iso: str) -> int:
         """Number of inbound (customer-sent) turns for a customer since since_iso
-        (ISO-8601). Used for the 'contacts in last N days' attrition signal."""
+        (ISO-8601). Reported as 'contacts_30d' on the customer graph endpoint."""
         with self.connection() as conn:
             row = conn.execute(
                 "SELECT COUNT(*) AS n FROM conversation_turns "
@@ -295,7 +299,7 @@ class SQLiteCXRepository:
 
     def list_customer_turns(self, customer_id: str, limit: int = 40) -> list[dict]:
         """Most recent turns for a customer (any conversation), newest first —
-        used by the attrition scorer for sentiment/urgency and exit-language."""
+        used by agent-assist for sentiment/urgency signals."""
         with self.connection() as conn:
             rows = conn.execute(
                 "SELECT * FROM conversation_turns WHERE customer_id = ? "
@@ -411,6 +415,59 @@ class SQLiteCXRepository:
                     json_text(summary.get("open_items") or []), summary.get("last_contact", ""),
                     summary.get("model"), utc_now(),
                 ),
+            )
+
+    def get_customer_context(self, customer_id: str) -> dict | None:
+        """The cached LLM-grouped customer record, or None. Callers compare record_hash
+        against a fingerprint of the current record to decide whether it is still current."""
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM customer_context WHERE customer_id = ?", (customer_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        record = dict(row)
+        try:
+            record["categories"] = json.loads(record.pop("categories_json") or "{}")
+        except (ValueError, TypeError):
+            record["categories"] = {}
+        return record
+
+    def save_customer_context(
+        self, customer_id: str, record_hash: str, categories: dict, model: str | None
+    ) -> None:
+        """Upsert: one grouped record per customer, replaced whenever it is regenerated."""
+        with self.connection() as conn:
+            conn.execute(
+                "INSERT INTO customer_context(customer_id, record_hash, categories_json, "
+                "model, created_at) VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(customer_id) DO UPDATE SET record_hash = excluded.record_hash, "
+                "categories_json = excluded.categories_json, model = excluded.model, "
+                "created_at = excluded.created_at",
+                (customer_id, record_hash, json_text(categories or {}), model, utc_now()),
+            )
+
+    def get_opportunity_evaluation(self, conversation_id: str) -> dict | None:
+        """The last opportunity evaluation for a conversation, or None. Callers compare
+        input_hash against a fingerprint of the current inputs to decide whether to re-run."""
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM opportunity_evaluations WHERE conversation_id = ?",
+                (conversation_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def save_opportunity_evaluation(
+        self, conversation_id: str, input_hash: str, suppressed: str | None
+    ) -> None:
+        """Upsert: one evaluation record per conversation, replaced whenever it re-runs."""
+        with self.connection() as conn:
+            conn.execute(
+                "INSERT INTO opportunity_evaluations(conversation_id, input_hash, suppressed, "
+                "created_at) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(conversation_id) DO UPDATE SET input_hash = excluded.input_hash, "
+                "suppressed = excluded.suppressed, created_at = excluded.created_at",
+                (conversation_id, input_hash, suppressed, utc_now()),
             )
 
     def create_ticket(self, ticket: Ticket) -> Ticket:
