@@ -393,34 +393,35 @@
 
         <!-- ═══ SECTION 1: FINOPS ═══ -->
         <div class="analytics-section">
-          <div class="section-lbl sec-finops"><span class="section-ico">&#128176;</span>FinOps — LLM Cost &amp; Usage</div>
+          <div class="section-lbl sec-finops"><span class="section-ico">&#128176;</span>FinOps — LLM Cost &amp; Usage<span class="win-badge" title="Counts LLM calls from the last 7 days only. Older calls are not shown - an operation that has not run recently disappears from these panels.">Last 7 days</span></div>
 
           <div class="chart-card">
-            <div class="chart-title">LLM usage and cost</div>
+            <div class="chart-title"><span>LLM usage and cost</span><span class="win-badge" title="This panel counts LLM calls from the last 7 days only. Older calls are not shown.">Last 7 days</span></div>
             <div class="metric-note">1 LLM call = 1 model invocation — intent classification, an answer-generation
               step, a tool call, or a subagent step each count separately. A single customer conversation
               typically spans several LLM calls across these steps, so "calls" here will exceed the conversation count.</div>
             <div id="llmUsagePanel"><div class="empty-state">Loading...</div></div>
           </div>
 
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
-            <div class="chart-card"><div class="chart-title">Avg cost per call — by model / version</div><div id="costByModelPanel"><div class="empty-state">Loading…</div></div></div>
-            <div class="chart-card"><div class="chart-title">Avg latency per call — by model / version</div><div id="latencyByModelPanel"><div class="empty-state">Loading…</div></div></div>
+          <div class="chart-card">
+            <div class="chart-title"><span>By model / config</span><span class="win-badge" title="This panel counts LLM calls from the last 7 days only. Older calls are not shown.">Last 7 days</span></div>
+            <div class="metric-note">Same calls as the table above, grouped by the settings they ran with rather than by pipeline step. A config with no successful call is not listed.</div>
+            <div id="modelVersionPanel"><div class="empty-state">Loading…</div></div>
           </div>
 
           <div class="chart-card">
-            <div class="chart-title">Usage over time — by model / version</div>
+            <div class="chart-title"><span>Usage over time — by model / version</span><span class="win-badge" title="This panel counts LLM calls from the last 7 days only. Older calls are not shown.">Last 7 days</span></div>
             <div id="llmTimeLegend" class="llm-tl-legend"></div>
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:18px">
-              <div><div class="llm-tl-sub">Cost ($) per hour</div><div id="llmCostTrend"><div class="empty-state">Loading…</div></div></div>
               <div><div class="llm-tl-sub">Tokens per hour</div><div id="llmTokenTrend"><div class="empty-state">Loading…</div></div></div>
+              <div><div class="llm-tl-sub">Cost ($) per hour</div><div id="llmCostTrend"><div class="empty-state">Loading…</div></div></div>
             </div>
           </div>
         </div>
 
         <!-- ═══ SECTION 2: CUSTOMER CARE ANALYTICS ═══ -->
         <div class="analytics-section">
-          <div class="section-lbl sec-care"><span class="section-ico">&#127911;</span>Customer Care Analytics</div>
+          <div class="section-lbl sec-care"><span class="section-ico">&#127911;</span>Customer Care Analytics<span class="win-badge" title="Counts everything on record, with no date filter. Trend arrows inside the tiles compare shorter periods and say so.">All time</span></div>
 
           <div class="kpi-grid" id="overviewGrid">
             <div class="kpi-tile kpi-blue"><div class="kpi-val">—</div><div class="kpi-lbl">Loading…</div></div>
@@ -430,15 +431,15 @@
           </div>
 
           <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px">
-            <div class="chart-card"><div class="chart-title">Tickets by channel</div><div id="channelBars"><div class="empty-state">Loading…</div></div></div>
-            <div class="chart-card"><div class="chart-title">Top intent trends (BFSI)</div><div id="intentBars"><div class="empty-state">Loading…</div></div></div>
-            <div class="chart-card"><div class="chart-title">Agent / team performance</div><div id="agentPanel"><div class="empty-state">Loading…</div></div></div>
+            <div class="chart-card"><div class="chart-title"><span>Tickets by channel</span><span class="win-badge" title="Counts everything on record, with no date filter.">All time</span></div><div id="channelBars"><div class="empty-state">Loading…</div></div></div>
+            <div class="chart-card"><div class="chart-title"><span>Top intent trends (BFSI)</span><span class="win-badge" title="Counts everything on record, with no date filter.">All time</span></div><div id="intentBars"><div class="empty-state">Loading…</div></div></div>
+            <div class="chart-card"><div class="chart-title"><span>Agent / team performance</span><span class="win-badge" title="Counts everything on record, with no date filter.">All time</span></div><div id="agentPanel"><div class="empty-state">Loading…</div></div></div>
           </div>
         </div>
 
         <!-- ═══ SECTION 3: SOLUTION PERFORMANCE ANALYTICS ═══ -->
         <div class="analytics-section">
-          <div class="section-lbl sec-solution"><span class="section-ico">&#9889;</span>Solution Performance Analytics</div>
+          <div class="section-lbl sec-solution"><span class="section-ico">&#9889;</span>Solution Performance Analytics<span class="win-badge" title="Counts everything on record, with no date filter. Trend arrows inside the tiles compare shorter periods and say so.">All time</span></div>
 
           <div class="kpi-grid" id="solutionStatsGrid">
             <div class="kpi-tile kpi-red"><div class="kpi-val">—</div><div class="kpi-lbl">Loading…</div></div>
@@ -448,8 +449,8 @@
           </div>
 
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
-            <div class="chart-card"><div class="chart-title">Open tickets by risk band</div><div id="riskBandPanel"><div class="empty-state">Loading…</div></div></div>
-            <div class="chart-card"><div class="chart-title">Why tickets escalate</div><div id="escReasonPanel"><div class="empty-state">Loading…</div></div></div>
+            <div class="chart-card"><div class="chart-title"><span>Open tickets by risk band</span><span class="win-badge" title="Counts everything on record, with no date filter.">All time</span></div><div id="riskBandPanel"><div class="empty-state">Loading…</div></div></div>
+            <div class="chart-card"><div class="chart-title"><span>Why tickets escalate</span><span class="win-badge" title="Counts everything on record, with no date filter.">All time</span></div><div id="escReasonPanel"><div class="empty-state">Loading…</div></div></div>
           </div>
         </div>
 

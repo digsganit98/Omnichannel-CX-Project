@@ -1703,8 +1703,7 @@ window.loadAnalytics = async function() {
     renderAgentPanel(results[3]);
     renderFeedList(results[4], false);
     renderLlmUsagePanel(results[5]);
-    renderCostByModelPanel(results[5]);
-    renderLatencyByModelPanel(results[5]);
+    renderModelVersionTable(results[5]);
     renderLlmTimeTrends(results[5]);
     renderSolutionStats(results[7]);
     renderSolutionCharts(results[7]);
@@ -1867,9 +1866,18 @@ function renderLlmUsagePanel(data) {
   ops.sort(function(a, b) {
     return (LLM_OP_ORDER[a.operation] || 99) - (LLM_OP_ORDER[b.operation] || 99);
   });
+  // Cost per call, alongside the total. The two rank the operations differently and both
+  // matter: measured here, opportunity generation is the top TOTAL spender but one of the
+  // cheapest per call (it just runs often), while customer context is the most expensive
+  // per call by 7.6x. Total alone hides which operation is inherently costly.
+  var avgCostOf = function(r) {
+    var n = Number(r.calls || 0);
+    return n ? Number(r.estimated_cost_usd || 0) / n : 0;
+  };
   var maxTok   = ops.reduce(function(m, r){ return Math.max(m, Number(r.total_tokens || 0)); }, 0) || 1;
   var maxCalls = ops.reduce(function(m, r){ return Math.max(m, Number(r.calls || 0)); }, 0) || 1;
   var maxCost  = ops.reduce(function(m, r){ return Math.max(m, Number(r.estimated_cost_usd || 0)); }, 0) || 1;
+  var maxAvgC  = ops.reduce(function(m, r){ return Math.max(m, avgCostOf(r)); }, 0) || 1;
   var maxLat   = ops.reduce(function(m, r){ return Math.max(m, Number(r.avg_latency_ms || 0)); }, 0) || 1;
   var opRows = ops.map(function(row, i) {
     var clr = llmOpColor(row.operation, i);
@@ -1886,6 +1894,7 @@ function renderLlmUsagePanel(data) {
       + llmMeterCell(cl / maxCalls, clr, cl.toLocaleString())
       + llmMeterCell(tok / maxTok, clr, tok.toLocaleString())
       + llmMeterCell(co / maxCost, clr, '$' + co.toFixed(6))
+      + llmMeterCell(avgCostOf(row) / maxAvgC, clr, '$' + avgCostOf(row).toFixed(6))
       + llmMeterCell(lat / maxLat, clr, lat.toFixed(0) + ' ms')
       + '</tr>';
   }).join('');
@@ -1901,9 +1910,10 @@ function renderLlmUsagePanel(data) {
     }).join('')
     + '</div>'
     + '<table class="mini-table llm-op-table"><thead><tr>'
-      + '<th>Operation</th><th>Calls</th><th>Token share</th><th>Cost</th><th>Avg latency</th>'
+      + '<th>Operation</th><th>Calls</th><th>Token share</th><th>Cost</th>'
+      + '<th>Avg cost</th><th>Avg latency</th>'
       + '</tr></thead><tbody>'
-    + (opRows || '<tr><td colspan="5">No operation breakdown yet</td></tr>')
+    + (opRows || '<tr><td colspan="6">No operation breakdown yet</td></tr>')
     + '</tbody></table>';
 }
 
@@ -1930,7 +1940,92 @@ function llmVersionCell(row) {
 // A version label for a by_model row: MODEL name as the heading with the version tag as an
 // inline chip beside it, and the human-readable config on the line below. The tag is an id
 // FOR the config shown — never a duplicate of it stacked above.
-function llmVerStripLabel(row) {
+// One row per model + config, same six columns as the Operation table above so a number
+// means the same thing in both. Was two separate strip panels (cost, latency) that each
+// showed one metric and no call count, so a row backed by 7 calls looked as authoritative
+// as one backed by 156.
+function renderModelVersionTable(data) {
+  var el = document.getElementById('modelVersionPanel');
+  if (!el) return;
+  // Configs with no successful call are not configs - they are settings that errored
+  // (a rejected request records zero tokens and zero cost). Showing them as rows invites
+  // comparing a real config against a mistake.
+  var rows = ((data && data.by_model) || []).filter(function(r) {
+    return Number(r.calls || 0) > 0 && Number(r.total_tokens || 0) > 0;
+  });
+  if (!rows.length) {
+    el.innerHTML = '<div class="empty-state">No model usage recorded yet</div>';
+    return;
+  }
+
+  var avgCostOf = function(r) {
+    var n = Number(r.calls || 0);
+    return n ? Number(r.estimated_cost_usd || 0) / n : 0;
+  };
+  var maxCalls = rows.reduce(function(m, r){ return Math.max(m, Number(r.calls || 0)); }, 0) || 1;
+  var maxTok   = rows.reduce(function(m, r){ return Math.max(m, Number(r.total_tokens || 0)); }, 0) || 1;
+  var maxCost  = rows.reduce(function(m, r){ return Math.max(m, Number(r.estimated_cost_usd || 0)); }, 0) || 1;
+  var maxAvgC  = rows.reduce(function(m, r){ return Math.max(m, avgCostOf(r)); }, 0) || 1;
+  var maxLat   = rows.reduce(function(m, r){ return Math.max(m, Number(r.avg_latency_ms || 0)); }, 0) || 1;
+
+  var body = rows.map(function(row, i) {
+    var clr = llmOpColor(row.model_version || row.model || 'unknown', i);
+    var cl  = Number(row.calls || 0);
+    var tok = Number(row.total_tokens || 0);
+    var co  = Number(row.estimated_cost_usd || 0);
+    var lat = Number(row.avg_latency_ms || 0);
+    return '<tr>'
+      + '<td class="llm-op-cell llm-op-cell--ver" title="' + escH(llmVerPurpose(row)) + '">'
+        + '<span class="llm-op-dot" style="background:' + clr + '"></span>'
+        + llmVerCellLabel(row) + '</td>'
+      + llmMeterCell(cl / maxCalls, clr, cl.toLocaleString())
+      + llmMeterCell(tok / maxTok, clr, tok.toLocaleString())
+      + llmMeterCell(co / maxCost, clr, '$' + co.toFixed(6))
+      + llmMeterCell(avgCostOf(row) / maxAvgC, clr, '$' + avgCostOf(row).toFixed(6))
+      + llmMeterCell(lat / maxLat, clr, lat.toFixed(0) + ' ms')
+      + '</tr>';
+  }).join('');
+
+  el.innerHTML = '<table class="mini-table llm-op-table"><thead><tr>'
+    + '<th>Model / config</th><th>Calls</th><th>Token share</th><th>Cost</th>'
+    + '<th>Avg cost</th><th>Avg latency</th>'
+    + '</tr></thead><tbody>' + body + '</tbody></table>';
+}
+
+// What a config row means, built FROM the recorded config rather than from a hardcoded
+// table — a version tag is a hash, so anything written by hand would go stale the moment
+// a setting changes. Explains what the tag is and what each setting does.
+function llmVerPurpose(row) {
+  var out = '';
+  // What this config is FOR: the pipeline steps that ran under it. A version tag is a
+  // hash, so the operation list is the only thing that gives it meaning.
+  var ops = (row.operations || '').split(',').filter(Boolean).sort();
+  if (ops.length) {
+    out += ops.length === 1
+      ? 'Used by: ' + ops[0].replace(/_/g, ' ') + '\n\n'
+      : 'Used by ' + ops.length + ' operations:\n'
+        + ops.map(function(o){ return '  • ' + o.replace(/_/g, ' '); }).join('\n') + '\n\n';
+  }
+  var cfg = row.model_config || null;
+  if (!cfg || typeof cfg !== 'object') {
+    return (out + 'Settings were not recorded for these calls — they predate per-call '
+      + 'config tracking.').trim();
+  }
+  out += 'Settings\n';
+  if (cfg.temperature != null) {
+    out += '  temperature ' + cfg.temperature + ' — how much the wording varies between '
+      + 'runs; low keeps answers consistent\n';
+  }
+  out += cfg.max_tokens != null
+    ? '  max tokens ' + cfg.max_tokens + ' — ceiling on one reply, set where a long '
+      + 'structured answer would otherwise be cut off mid-document\n'
+    : '  max tokens not set — the provider default applies\n';
+  if (cfg.top_p != null) out += '  top_p ' + cfg.top_p + '\n';
+  return out.trim();
+}
+
+// Model name + version tag + the decoded config, on one line for a table cell.
+function llmVerCellLabel(row) {
   var v = row.model_version || 'unknown';
   var isUnknown = (v === 'unknown' || !v);
   var cfg = row.model_config || null;
@@ -1944,48 +2039,10 @@ function llmVerStripLabel(row) {
   } else {
     sub = 'config not recorded';  // legacy 'unknown' rows predate the version feature
   }
-  return '<div class="llm-strip-head">'
-    + '<span class="llm-strip-model">' + escH(row.model || 'unknown') + '</span>'
+  return escH(row.model || 'unknown')
     + '<span class="llm-ver ' + (isUnknown ? 'llm-ver-unknown' : '') + '">' + escH(v) + '</span>'
-    + '</div>'
-    + '<span class="llm-strip-sub">' + sub + '</span>';
-}
-
-// Comparison strips: one row per model-version, a bar normalized to the metric's max + the value.
-// valueOf(row) -> the number to plot (PER-CALL, so versions used a different number of times
-// compare fairly — comparing raw totals would just reward whichever version ran more).
-function renderVersionStrips(containerId, rows, valueOf, fmt) {
-  var el = document.getElementById(containerId);
-  if (!el) return;
-  if (!rows.length) { el.innerHTML = '<div class="empty-state">No model usage recorded yet</div>'; return; }
-  var max = rows.reduce(function(m, r){ return Math.max(m, Number(valueOf(r) || 0)); }, 0) || 1;
-  el.innerHTML = rows.map(function(row) {
-    var val = Number(valueOf(row) || 0);
-    var pct = Math.max(3, Math.round((val / max) * 100));
-    // Same colour for every row — the bars encode the same metric; different colours would
-    // wrongly imply different meaning. (Version identity is carried by the tag chip, not the bar.)
-    var fill = 'var(--pur)';
-    return '<div class="llm-strip">'
-      + '<div class="llm-strip-label">' + llmVerStripLabel(row) + '</div>'
-      + '<div class="llm-strip-bar"><div class="llm-strip-track"><div class="llm-strip-fill" style="width:' + pct + '%;background:' + fill + '"></div></div>'
-      + '<span class="llm-strip-val">' + fmt(val, row) + '</span></div>'
-      + '</div>';
-  }).join('');
-}
-
-function renderCostByModelPanel(data) {
-  // Avg cost PER CALL (total ÷ calls) — a fair per-config comparison, not a volume race.
-  // ("per call" is stated in the card title, so the value stays clean.)
-  renderVersionStrips('costByModelPanel', (data && data.by_model) || [],
-    function(r){ var c = Number(r.calls || 0); return c ? Number(r.estimated_cost_usd || 0) / c : 0; },
-    function(v){ return '$' + v.toFixed(6); });
-}
-
-function renderLatencyByModelPanel(data) {
-  // avg_latency_ms is already an average per call.
-  renderVersionStrips('latencyByModelPanel', (data && data.by_model) || [],
-    function(r){ return Number(r.avg_latency_ms || 0); },
-    function(v){ return v.toFixed(0) + ' ms'; });
+    + '<span class="llm-op-q">?</span>'
+    + '<span class="llm-ver-cfg">' + sub + '</span>';
 }
 
 // Two side-by-side hourly line charts (Cost | Tokens), one coloured line per model+version.
@@ -1993,7 +2050,12 @@ function renderLatencyByModelPanel(data) {
 // tooltip driven in JS (native <title> was unreliable and only on the tiny dot).
 var LLM_TL_COLORS = ['#2563eb', '#7c3aed', '#16a34a', '#d97706', '#db2777', '#dc2626', '#0ea5e9', '#65a30d'];
 function renderLlmTimeTrends(data) {
-  var series = (data && data.time_series) || [];
+  // Same filter as the model/config table: a config whose calls produced no tokens is a
+  // rejected request, not a configuration. Left in, each one drew a lone dot on the axis
+  // and took a colour in the legend.
+  var series = ((data && data.time_series) || []).filter(function(r) {
+    return Number(r.total_tokens || 0) > 0;
+  });
   var legendEl = document.getElementById('llmTimeLegend');
   var costEl = document.getElementById('llmCostTrend');
   var tokEl = document.getElementById('llmTokenTrend');
@@ -2026,8 +2088,25 @@ function renderLlmTimeTrends(data) {
   _llmLineChart(tokEl, hours, keys, byKey, 'tok', function(v){ return v.toLocaleString() + ' tokens'; });
 }
 
-// hour string is "YYYY-MM-DDTHH:00" already in IST (converted in SQL). Show "HH:00".
-function _llmHourLabel(h){ return h.slice(11, 16); }
+// hour string is "YYYY-MM-DDTHH:00" already in IST (converted in SQL).
+var _LLM_MON = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+// Axis tick. Only hours that HAD calls become points, so consecutive points can be days
+// apart — showing the hour alone made three different days' "14:00" look like one hour
+// and the axis appear to run backwards. The date is shown on the first point of each day.
+function _llmHourTick(h, prev) {
+  var hhmm = h.slice(11, 16);
+  if (prev && prev.slice(0, 10) === h.slice(0, 10)) return hhmm;   // same day, hour only
+  return _llmDayLabel(h) + '|' + hhmm;   // '|' splits it onto a second line
+}
+
+function _llmDayLabel(h) {
+  var mon = _LLM_MON[parseInt(h.slice(5, 7), 10) - 1] || h.slice(5, 7);
+  return parseInt(h.slice(8, 10), 10) + ' ' + mon;
+}
+
+// Tooltip header — always the full date, there is no neighbouring point for context.
+function _llmHourLabel(h){ return _llmDayLabel(h) + ' ' + h.slice(11, 16); }
 
 // Compact axis tick label (cost in $, tokens as k).
 function _llmShort(v, metric) {
@@ -2066,7 +2145,17 @@ function _llmLineChart(host, hours, keys, byKey, metric, fmt) {
   // x tick labels + baseline
   s += '<line x1="' + mL + '" y1="' + (mT+ph) + '" x2="' + (W-mR) + '" y2="' + (mT+ph) + '" class="llm-tl-axis"/>';
   hours.forEach(function(h, i){
-    s += '<text x="' + X(i) + '" y="' + (mT+ph+20) + '" text-anchor="middle" class="llm-tl-tick">' + escH(_llmHourLabel(h)) + '</text>';
+    // Two lines when the day changes: the date sits above the hour so a jump of several
+    // days is visible instead of reading as the next hour along.
+    var parts = _llmHourTick(h, i ? hours[i-1] : null).split('|');
+    if (parts.length === 2) {
+      s += '<text x="' + X(i) + '" y="' + (mT+ph+20) + '" text-anchor="middle" class="llm-tl-tick llm-tl-tick-day">' + escH(parts[0]) + '</text>';
+      s += '<text x="' + X(i) + '" y="' + (mT+ph+32) + '" text-anchor="middle" class="llm-tl-tick">' + escH(parts[1]) + '</text>';
+      // A rule marking where one day ends and the next begins.
+      if (i) s += '<line x1="' + (X(i)-(X(i)-X(i-1))/2) + '" y1="' + mT + '" x2="' + (X(i)-(X(i)-X(i-1))/2) + '" y2="' + (mT+ph) + '" class="llm-tl-daysep"/>';
+    } else {
+      s += '<text x="' + X(i) + '" y="' + (mT+ph+20) + '" text-anchor="middle" class="llm-tl-tick">' + escH(parts[0]) + '</text>';
+    }
   });
   s += '<text x="' + (W-mR) + '" y="' + (H-6) + '" text-anchor="end" class="llm-tl-axislbl">Time (IST)</text>';
   // area + line + dots per series

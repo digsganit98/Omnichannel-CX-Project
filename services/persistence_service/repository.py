@@ -964,6 +964,9 @@ class SQLiteCXRepository:
                 SELECT model, COALESCE(model_version, 'unknown') AS model_version,
                        COUNT(*) AS calls, SUM(total_tokens) AS total_tokens,
                        SUM(estimated_cost_usd) AS estimated_cost_usd, AVG(latency_ms) AS avg_latency_ms,
+                       -- Which pipeline steps run under this config. A version tag is a
+                       -- hash, so this is the only thing that says what it is FOR.
+                       GROUP_CONCAT(DISTINCT operation) AS operations,
                        MAX(metadata_json) AS _meta_sample
                 FROM llm_usage_events
                 {where}
