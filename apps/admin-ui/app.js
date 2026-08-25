@@ -1663,6 +1663,10 @@ window.resolveTicket = function(btn, ticketId) {
       renderCentre(state.convDetail);
       renderRight(state.convDetail, all);
       renderQueue();
+      // Resolving a ticket is not a new TURN, and the case summary is cached against
+      // the newest turn id -- so without forcing it here the summary keeps listing the
+      // ticket just resolved as open, contradicting the Open Tickets card beside it.
+      loadCaseSummary(state.convDetail.conversation_id, true);
     }
   }).catch(function(e) {
     toast('Error: ' + e.message);

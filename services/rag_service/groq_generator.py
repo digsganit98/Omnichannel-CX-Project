@@ -308,6 +308,16 @@ class GroqGenerator:
             "Rules:\n"
             "- Use ONLY what appears below. Never infer an outcome, a promise or a date that is not stated.\n"
             "- If the customer raised several separate matters, give each its own line in open_items.\n"
+            # The history can contain our own earlier status emails, which quote a ticket
+            # list that was true when sent and is stale now. Those are message TEXT, not
+            # records: the open cases block above is the system of record, and a ticket
+            # resolved since that email must not reappear because a message still names it.
+            "- open_items must list ONLY the cases in the 'Open support cases on record' "
+            "block above. A ticket id mentioned in the messages but absent from that block "
+            "is CLOSED - never list it. If that block is absent, open_items is [].\n"
+            "- Do not copy status wording out of the messages (assignments, expected "
+            "resolution times). Describe a case from the record, not from what an earlier "
+            "reply said about it.\n"
             "- Name amounts and reference ids where they appear, so the agent can act without scrolling.\n"
             # Situation and open_items otherwise repeat the same ticket id and amount,
             # which is most of the card's width in a narrow panel.
