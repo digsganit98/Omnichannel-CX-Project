@@ -2784,11 +2784,15 @@ async function loadCaseSummary(conversationId, force) {
     var items = p.summary.open_items || [];
     bodyEl.innerHTML =
       (p.summary.situation ? '<div class="csum-sit">' + escH(p.summary.situation) + '</div>' : '')
+      // Open items now carries only what is NOT a ticket (an unanswered question, a
+      // promise not kept). Empty is the normal case - the tickets themselves are in
+      // the card below - so an empty list renders nothing rather than a heading over
+      // blank space or a "Nothing outstanding" line that contradicts Open Tickets (3).
       + (items.length
-          ? '<div class="csum-lbl">Open items</div><ul class="csum-items">'
+          ? '<div class="csum-lbl">Also outstanding</div><ul class="csum-items">'
             + items.map(function(i) { return '<li>' + escH(i) + '</li>'; }).join('')
             + '</ul>'
-          : '<div class="csum-lbl">Nothing outstanding</div>');
+          : '');
   } catch (e) {
     if (_csumFor !== conversationId) return;
     var el = document.getElementById('csum-body');

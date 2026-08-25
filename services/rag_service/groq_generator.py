@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import time
 from pathlib import Path
 
@@ -285,6 +286,14 @@ class GroqGenerator:
 
         history_text = _format_conversation_history(turns)
         cases = ctx.get("open_cases") or []
+        # Our own earlier status emails quote a ticket list that was true when sent, and a
+        # reply is quoted again by each later reply - so a since-resolved id can outnumber
+        # the authoritative block 4:1 in the prompt. Three prompt rules failed to beat that
+        # repetition (the id kept reappearing, and open_items came back as the stale
+        # "Expected resolution within 9 hours" wording). Redacting is the control that
+        # holds: the model cannot copy an id it never sees. Only ids already known closed
+        # are touched; the surrounding message text is left exactly as it is.
+        history_text = _redact_closed_ticket_ids(history_text, cases)
         cases_text = ""
         if cases:
             lines = ["Open support cases on record:"]
@@ -303,27 +312,34 @@ class GroqGenerator:
         user_prompt = (
             "Summarise this support conversation for the agent taking it over.\n\n"
             "Return ONLY a JSON object with exactly these keys:\n"
-            '{"situation": "<what the customer is dealing with, 1-2 sentences>", '
-            '"open_items": ["<each unresolved item, one short line>"]}\n\n'
+            '{"situation": "<the case in 2-3 sentences>", '
+            '"open_items": ["<outstanding item that is NOT a ticket>"]}\n\n'
             "Rules:\n"
             "- Use ONLY what appears below. Never infer an outcome, a promise or a date that is not stated.\n"
-            "- If the customer raised several separate matters, give each its own line in open_items.\n"
-            # The history can contain our own earlier status emails, which quote a ticket
-            # list that was true when sent and is stale now. Those are message TEXT, not
-            # records: the open cases block above is the system of record, and a ticket
-            # resolved since that email must not reappear because a message still names it.
-            "- open_items must list ONLY the cases in the 'Open support cases on record' "
-            "block above. A ticket id mentioned in the messages but absent from that block "
-            "is CLOSED - never list it. If that block is absent, open_items is [].\n"
-            "- Do not copy status wording out of the messages (assignments, expected "
-            "resolution times). Describe a case from the record, not from what an earlier "
-            "reply said about it.\n"
-            "- Name amounts and reference ids where they appear, so the agent can act without scrolling.\n"
-            # Situation and open_items otherwise repeat the same ticket id and amount,
-            # which is most of the card's width in a narrow panel.
-            "- Name each ticket id ONCE, in open_items. Do not repeat it in situation, and "
-            "do not restate an open item inside situation.\n"
-            "- open_items is [] when nothing is outstanding.\n"
+            "- situation is the summary. Say what the customer is chasing, name the "
+            "specific matter (amount, reference, what went wrong) and say what they have "
+            "already done - how often they have asked, on which channel, and what they "
+            "were last told. Write it for an agent opening this cold.\n"
+            "- Do NOT list the open tickets in open_items. They are shown in full "
+            "beneath this card. open_items is for what is outstanding and is NOT a "
+            "ticket: a promise or callback made and not kept, a date the customer is "
+            "waiting on, a question about something that has no ticket at all.\n"
+            "- A question the customer asked that ALREADY has a ticket is not an open "
+            "item - it IS that ticket. Never quote the customer's question back as an "
+            "open item.\n"
+            "- open_items is [] when there is no such item. That is the normal case - "
+            "never invent one to fill the list, and never restate a ticket to fill it.\n"
+            # Our own earlier status emails sit in the history and quote a ticket list that
+            # was true when sent. That is message TEXT, not a record - a ticket resolved
+            # since must not reappear because an old reply still names it.
+            "- The 'Open support cases on record' block is the only truth about which "
+            "cases are open. Mention a ticket id ONLY if it appears in that block. An id "
+            "that appears in the messages but not in that block is CLOSED: do not name "
+            "it, do not describe it as open or pending, do not count it. Do not copy "
+            "status wording (assignments, expected resolution times) out of an earlier "
+            "reply.\n"
+            "- Name amounts and reference ids where they appear, so the agent can act "
+            "without scrolling.\n"
             # Half the outbound turns in a held conversation are the automatic
             # "Support Agent will help you shortly" placeholder, so describing the latest
             # exchange means describing that placeholder unless it is excluded.
@@ -597,6 +613,20 @@ def _clean_summary_text(value) -> str:
         text = text.replace(exotic, plain)
     return " ".join(text.split()).strip()
 
+
+def _redact_closed_ticket_ids(history_text: str, open_cases: list[dict]) -> str:
+    """Blank out ticket ids in the history that are not in the open-cases block.
+
+    The open-cases block is the system of record for what is open. An id that appears
+    only in message text is closed business quoted from an older reply, and leaving it
+    in the prompt is what let a resolved ticket reappear in a summary.
+    """
+    if not history_text:
+        return history_text
+    open_ids = {str(case.get("ticket_id") or "") for case in (open_cases or [])}
+    def _swap(match: 're.Match') -> str:
+        return match.group(0) if match.group(0) in open_ids else "[closed ticket]"
+    return re.sub(r"tkt_[0-9a-f]{6,}", _swap, history_text)
 
 def _format_conversation_history(recent_turns: list[dict]) -> str:
     if not recent_turns:
