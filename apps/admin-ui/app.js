@@ -636,20 +636,53 @@ function renderCentre(conv) {
   document.getElementById('compwrap').style.display = isDone ? 'none' : 'block';
 
   // Channel filter bar
+  // Counts here must match what the pane below actually renders, not raw DB turns: turns
+  // sharing a ticket_id are merged into ONE visible exchange further down (a customer
+  // question + the "we'll get back to you" holding ack + the eventual real reply all
+  // collapse into one row) — counting raw turns.length previously overpromised ("shows 3"
+  // while only 1 exchange was ever visible). Untracked turns (no ticket_id) each still
+  // count individually since they're never merged.
+  function visibleUnitCount(list) {
+    // Mirrors the inbound+outbound pairing below (steps), then dedupes by ticket_id —
+    // an inbound turn itself carries no ticket_id (only the outbound reply that follows
+    // it does), so it must be paired into a step first before the ticket-based merge
+    // is applied, or a lone inbound turn is miscounted as its own unit.
+    var steps = [];
+    var pendingIn = null;
+    list.forEach(function(t) {
+      if (t.direction === 'inbound') {
+        if (pendingIn) steps.push({ inbound: pendingIn, outbound: null });
+        pendingIn = t;
+      } else {
+        steps.push({ inbound: pendingIn, outbound: t });
+        pendingIn = null;
+      }
+    });
+    if (pendingIn) steps.push({ inbound: pendingIn, outbound: null });
+    var seen = {};
+    var n = 0;
+    steps.forEach(function(step) {
+      var tkt = (step.inbound && step.inbound.ticket_id) || (step.outbound && step.outbound.ticket_id) || null;
+      var refTurn = step.inbound || step.outbound;
+      var key = tkt ? ('tkt:' + tkt) : ('step:' + (refTurn && refTurn.turn_id));
+      if (!seen[key]) { seen[key] = true; n++; }
+    });
+    return n;
+  }
   var seenChs = {};
-  turns.forEach(function(t) { if (t.channel) seenChs[t.channel] = (seenChs[t.channel]||0)+1; });
+  turns.forEach(function(t) { if (t.channel) { (seenChs[t.channel] = seenChs[t.channel] || []).push(t); } });
   var bar = document.getElementById('chbar');
   bar.innerHTML = '<span class="chbar-label">Channel:</span>';
   var allBtn = document.createElement('button');
   allBtn.className = 'chfilt' + (activeChFilter === 'all' ? ' on' : '');
-  allBtn.innerHTML = 'All channels <span class="ch-count">' + turns.length + '</span>';
+  allBtn.innerHTML = 'All messages <span class="ch-count">' + visibleUnitCount(turns) + '</span>';
   allBtn.addEventListener('click', function() { activeChFilter = 'all'; renderCentre(conv); });
   bar.appendChild(allBtn);
   Object.keys(seenChs).forEach(function(ch) {
     var btn = document.createElement('button');
     btn.className = 'chfilt' + (activeChFilter === ch ? ' on' : '');
     var cm = chMeta(ch);
-    btn.innerHTML = cm.svg + cm.label + ' <span class="ch-count">' + seenChs[ch] + '</span>';
+    btn.innerHTML = cm.svg + cm.label + ' <span class="ch-count">' + visibleUnitCount(seenChs[ch]) + '</span>';
     if (activeChFilter === ch) btn.style.cssText = 'background:' + cm.clr + ';border-color:' + cm.clr + ';color:#fff';
     btn.addEventListener('click', function() { activeChFilter = ch; renderCentre(conv); });
     bar.appendChild(btn);
@@ -1619,6 +1652,15 @@ window.decideOpportunity = function(btn, status) {
       toast('Offer approved — review the draft & send');
       loadPendingDrafts().then(function() {
         if (state.convDetail) renderCentre(state.convDetail);
+        // Keep the Needs Review badge + queue dot/filter in sync immediately — otherwise
+        // the newly-created offer draft is invisible there until the next ~10s poll.
+        renderQueue();
+        var nrBadge = document.getElementById('reviewBadge');
+        if (nrBadge) {
+          var nrCount = Object.keys(state.pendingDrafts).length;
+          if (nrCount > 0) { nrBadge.style.display = 'flex'; nrBadge.textContent = nrCount > 9 ? '9+' : nrCount; }
+          else { nrBadge.style.display = 'none'; }
+        }
       });
     } else {
       toast('Opportunity dismissed');

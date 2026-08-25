@@ -11,6 +11,7 @@ from services.agent_service.orchestration_agents import (
     QueryResolutionAgent,
     TicketAction,
     TicketCreationAgent,
+    TicketSelection,
     WorkflowAutomationAgent,
 )
 from services.channel_service.delivery import OutboundDeliveryService
@@ -43,7 +44,9 @@ WORKFLOW_EDGES = [
     ("receive_message", "resolve_identity"),
     ("resolve_identity", "load_conversation_context"),
     ("load_conversation_context", "detect_ticket_action"),
-    ("detect_ticket_action", "resolve_ticket | classify_intent [Agent 1]"),
+    ("detect_ticket_action", "check_has_ticket"),
+    ("check_has_ticket", "select_ticket_to_resolve | classify_intent [Agent 1]"),
+    ("select_ticket_to_resolve", "resolve_ticket | send_outbound_reply (ask which ticket)"),
     ("resolve_ticket", "send_outbound_reply"),
     ("classify_intent [Agent 1]", "validate_customer"),
     ("validate_customer", "resolve_query [Agent 2] | reject_unregistered_customer"),
@@ -173,6 +176,8 @@ class OrchestrationGraph:
         workflow.add_node("resolve_identity", self._resolve_identity)
         workflow.add_node("load_conversation_context", self._load_context)
         workflow.add_node("detect_ticket_action", self._detect_ticket_action)
+        workflow.add_node("check_has_ticket", self._check_has_ticket)
+        workflow.add_node("select_ticket_to_resolve", self._select_ticket_to_resolve)
         workflow.add_node("resolve_ticket", self._resolve_ticket)
 
         # Agent 1
@@ -196,10 +201,16 @@ class OrchestrationGraph:
         workflow.add_edge("receive_message", "resolve_identity")
         workflow.add_edge("resolve_identity", "load_conversation_context")
         workflow.add_edge("load_conversation_context", "detect_ticket_action")
+        workflow.add_edge("detect_ticket_action", "check_has_ticket")
         workflow.add_conditional_edges(
-            "detect_ticket_action",
-            self._route_ticket_action,
-            {"resolve_ticket": "resolve_ticket", "classify_intent": "classify_intent"},
+            "check_has_ticket",
+            self._route_has_ticket,
+            {"select_ticket_to_resolve": "select_ticket_to_resolve", "classify_intent": "classify_intent"},
+        )
+        workflow.add_conditional_edges(
+            "select_ticket_to_resolve",
+            self._route_ticket_selection,
+            {"resolve_ticket": "resolve_ticket", "ask_which_ticket": "send_outbound_reply"},
         )
         workflow.add_edge("resolve_ticket", "send_outbound_reply")
         # Agent chain
@@ -413,14 +424,59 @@ class OrchestrationGraph:
                        action=state.ticket_action.action.value, reason=state.ticket_action.reason)
         return {"runtime": state}
 
+    # ── has_ticket gate + ticket-side selection ────────────────────────────
+
+    def _check_has_ticket(self, graph_state: GraphState) -> dict:
+        """Binary node: 1 when this turn is a confirmed ticket-resolution action.
+
+        Materializes the routing decision as an explicit 0/1 field on state (rather than
+        just a Literal computed inline in a conditional-edge callback) so it's visible in
+        the workflow trace and reusable by anything downstream that needs to know "are we
+        on the ticket branch or the query branch" without re-deriving it.
+        """
+        state = graph_state["runtime"]
+        state.has_ticket = 1 if state.ticket_action.action == TicketAction.RESOLVE else 0
+        self._complete(state, WorkflowStep.CHECK_HAS_TICKET, "workflow_automation_agent",
+                       has_ticket=state.has_ticket)
+        return {"runtime": state}
+
     @staticmethod
-    def _route_ticket_action(graph_state: GraphState) -> Literal["resolve_ticket", "classify_intent"]:
-        return "resolve_ticket" if graph_state["runtime"].ticket_action.action == TicketAction.RESOLVE else "classify_intent"
+    def _route_has_ticket(graph_state: GraphState) -> Literal["select_ticket_to_resolve", "classify_intent"]:
+        return "select_ticket_to_resolve" if graph_state["runtime"].has_ticket == 1 else "classify_intent"
+
+    def _select_ticket_to_resolve(self, graph_state: GraphState) -> dict:
+        """Disambiguation only — decide WHICH ticket, kept separate from resolve_ticket
+        (which just performs the resolution) so the two concerns don't blur together."""
+        state = graph_state["runtime"]
+        selection: TicketSelection = self.ticket_agent.select_ticket(state.message, state.context)
+        state.target_ticket_id = selection.target_ticket_id
+        state.ticket_clarification_needed = selection.needs_clarification
+        state.matching_open_tickets = selection.candidates
+        if selection.needs_clarification:
+            options = ", ".join(
+                f"{t['ticket_id']} ({(t.get('title') or t.get('intent') or 'request')})"
+                for t in selection.candidates
+            )
+            state.answer = (
+                "You have more than one open ticket for this kind of request: "
+                f"{options}. Could you tell me which ticket ID you'd like to resolve?"
+            )
+            self._audit("ticket_resolution_clarification_requested", state,
+                        details={"candidates": [t["ticket_id"] for t in selection.candidates]})
+        self._complete(state, WorkflowStep.SELECT_TICKET_TO_RESOLVE, self.ticket_agent.name,
+                       target_ticket_id=state.target_ticket_id,
+                       needs_clarification=state.ticket_clarification_needed,
+                       reason=selection.reason)
+        return {"runtime": state}
+
+    @staticmethod
+    def _route_ticket_selection(graph_state: GraphState) -> Literal["resolve_ticket", "ask_which_ticket"]:
+        return "ask_which_ticket" if graph_state["runtime"].ticket_clarification_needed else "resolve_ticket"
 
     def _resolve_ticket(self, graph_state: GraphState) -> dict:
+        """Pure resolution: mark the already-selected target ticket resolved."""
         state = graph_state["runtime"]
-        active_ticket = state.context["active_ticket"]
-        state.ticket = self.ticket_agent.resolve_ticket(active_ticket["ticket_id"])
+        state.ticket = self.ticket_agent.resolve_ticket(state.target_ticket_id)
         state.answer = (
             f"Your support ticket {state.ticket.ticket_id} has been marked as resolved. "
             "Thank you for confirming."
@@ -756,6 +812,7 @@ class OrchestrationGraph:
             confidence=state.resolution.confidence if state.resolution else 1.0,
             ticket_id=state.ticket.ticket_id if state.ticket else None,
             workflow_status=(
+                "ticket_resolution_clarification_needed" if state.ticket_clarification_needed else
                 "ticket_closed" if state.ticket_action.action == TicketAction.RESOLVE else
                 "customer_validation_required" if (
                     state.customer_validation.validation_required and not state.customer_validation.is_registered
@@ -823,10 +880,10 @@ class OrchestrationGraph:
 
     @staticmethod
     def _resolved(state: OrchestrationState) -> bool:
-        # Only mark the conversation resolved when the customer explicitly confirms it.
-        # Answering a query without creating a ticket is NOT resolution — the customer
-        # may send follow-up messages and must stay in the same conversation thread.
-        return state.ticket_action.action == TicketAction.RESOLVE
+        # Only mark the conversation resolved when the customer explicitly confirms it AND
+        # a specific ticket was actually resolved. When they have multiple open tickets of
+        # the same kind, we've only asked which one — nothing is resolved yet.
+        return state.ticket_action.action == TicketAction.RESOLVE and not state.ticket_clarification_needed
 
     def _audit(self, event_type: str, state: OrchestrationState, **values) -> None:
         self.repository.add_audit_event(event_type, **self._common(state), **values)

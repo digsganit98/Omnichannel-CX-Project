@@ -18,6 +18,8 @@ class WorkflowStep(StrEnum):
     RESOLVE_IDENTITY = "resolve_identity"
     LOAD_CONVERSATION_CONTEXT = "load_conversation_context"
     DETECT_TICKET_ACTION = "detect_ticket_action"
+    CHECK_HAS_TICKET = "check_has_ticket"
+    SELECT_TICKET_TO_RESOLVE = "select_ticket_to_resolve"
     CLASSIFY_INTENT = "classify_intent"
     VALIDATE_CUSTOMER = "validate_customer"
     REJECT_UNREGISTERED_CUSTOMER = "reject_unregistered_customer"
@@ -43,6 +45,17 @@ class OrchestrationState(BaseModel):
     conversation: dict | None = None
     context: dict = Field(default_factory=dict)
     ticket_action: TicketActionDecision = Field(default_factory=TicketActionDecision)
+    # Binary flag set by the check_has_ticket node: 1 when this turn is a ticket-resolution
+    # action (routes into the ticket branch), 0 otherwise (routes into the Agent 1 chain).
+    has_ticket: int = 0
+    # Set by select_ticket_to_resolve once the target ticket is unambiguous (either the
+    # customer named it explicitly, or it's the only open ticket of that kind).
+    target_ticket_id: str | None = None
+    # True when the customer has 2+ open tickets of the same kind and didn't name one —
+    # resolve_ticket is skipped and the customer is asked to specify which ticket.
+    ticket_clarification_needed: bool = False
+    # Candidate tickets considered during disambiguation, for audit/trace visibility.
+    matching_open_tickets: list[dict] = Field(default_factory=list)
     customer_validation: CustomerValidationResult = Field(default_factory=CustomerValidationResult)
     analysis: IntentResult | None = None
     resolution: QueryResolution | None = None
