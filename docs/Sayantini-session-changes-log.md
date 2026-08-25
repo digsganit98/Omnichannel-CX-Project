@@ -119,6 +119,13 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 79 — Provenance called a ticket read a knowledge-base answer:** the `ticket_status` branch omitted the `"retrieval"` key from its context metadata — **the same defect Fix 66 fixed in the Neo4j branch, untouched in this one** — so the backend was dropped at the DB boundary (`retrieval_backend` is set on the `QueryResolution` *object*, a different thing from the persisted `metadata` dict). The panel then guessed from the intent, `ticket_status` failed the transactional test, and an exact SQLite record read at 0.98 was labelled **"Retrieved from the knowledge base"** with *"closest matches found"* caveats describing a similarity search that never ran. Added the key, gave the endpoint a fourth `source` state (`ticket`), and rendered it as **"Read from your support record"** — deliberately not folded into `graph` (the data is SQLite; claiming graph would over-claim exactly what Fix 65 stopped) or `kb`. Verified no ticketing/escalation change: those rules read the object attribute, not this key.
 - **Fix 80 — Agent-facing case summary (situation / open items / last contact):** the GenAI capability list claims case summaries and nothing met it — `conversations.summary` is a *machine* fallback injected only when `recent_turns` is empty, displayed nowhere, and its truncation is deliberate. Built a real one: `summarize_case` + `GET /admin/conversations/{id}/case-summary` + migration 013 + a card above Sentiment. **On demand, cached against the newest turn id**, so cost tracks *agent attention* rather than message volume — **measured 1,071 tokens / $0.00017 per generation, 0 on a cache hit**. Two defects found by running it: `last_contact` reported the automatic holding message (hiding the real exchange), and the model emitted U+202F inside a customer name (mojibake once re-encoded) — the source data contains no such character, so it is normalised on the way out.
 
+- **Fix 81 — Customer Context (LLM-grouped record, tabbed):** one Groq call sorts the customer's graph records into Risk/Holdings/Activity/Claims/Profile as label/value pairs; JSON mode added to `_generate`, every key rebuilt server-side, raw response shown on a parse failure, cached on a SHA-256 of the record.
+- **Fix 82 — Suggested Offers ran an LLM call on every panel render:** no cache + `renderRight` calling it on every poll = **53 Groq calls in one day with zero customer messages**; migration `015` keys an evaluation on its inputs. Verified 5 requests -> 1 call, stale key still re-runs.
+- **Fix 83 — A real pipeline step recorded as the unlabelled `llm_generation` default:** `TicketActionDetector.detect_action` passed no `operation=`. Found by stack trace after **two wrong diagnoses**, the first of which deleted 49 rows that included real production records.
+- **Fix 84 — Case summary dropped to two sections:** "Last contact" restated Open items (structurally guaranteed in a held conversation); each ticket id now named once.
+- **Attrition risk removed entirely** (UI band, `/graph` field, `services/attrition_service/`) at the user's request; verified no other consumer and no teammate branch had built on it.
+- **Right panel reworked:** customer id/email/phone moved into the conversation header (avatar dropped, duplicate panel header deleted); `.det-row` flattened 3->2 columns (**+162px**); panel 300->380px; snapshot tiles removed; Open Tickets collapsible; Sentiment above Case summary.
+
 ---
 
 ## Session 1 — 2026-07-14
@@ -3205,3 +3212,138 @@ from a coin flip. Baseline remains **5 known failures**; treat a 6th as flake un
   been re-run on `openai/gpt-oss-20b`. Spot-checks held.
 - **Provenance shows only on fresh replies** — evidence is written once at reply time, so turns
   created before 2026-08-19 keep the old label. Nothing to backfill from.
+
+## Session 16 — 2026-08-25
+
+Branch: `Sayantini-phase2-ui-changes`, commit `1616a88`. A right-panel session that turned
+into a measurement session: the panel work is real, but the more useful finding is that the
+analytics page has been reporting a fictional operation for months.
+
+### Fix 81 — Customer Context: the customer's records, grouped into tabs by one LLM call
+New right-panel card, first section. `GET /admin/customers/{id}/context` builds the customer's
+record from the graph, one Groq call sorts it into **Risk / Holdings / Activity / Claims /
+Profile**, and the frontend renders every panel up front and switches tabs by class toggle —
+no request per tab.
+
+**Four requirements the user set, and how each is met:**
+1. **Structured, not text.** `{"label","value","sub?"}` pairs. Asking a model for "a readable
+   list" gets commas one run, dashes the next, and needs a fragile parser to undo.
+2. **JSON mode.** `response_format={"type":"json_object"}` — *added to `_generate`, it did not
+   exist*; every other JSON caller here scrapes braces out of prose with `text.find("{")`.
+3. **Every category key always present.** `_normalise_categories` rebuilds all five keys as
+   lists server-side; a missing or malformed key degrades to `[]`, never to a broken panel.
+4. **Parse failure shows the raw response** (`status:"raw"`), not nothing, and is not cached.
+
+**Cached on a SHA-256 of the record**, deliberately not on a turn id like the case summary
+(migration `014`): a case summary goes stale when a *message* arrives, a customer context when
+a *field* changes. Measured: ~5,000 tokens / $0.0012 per generation, cached reads zero.
+
+**Three failures found by running it, not by reading it:**
+- `json_validate_failed` — JSON mode **rejects a truncated document outright** rather than
+  returning partial text, so the ceiling must clear the whole document.
+- **413.** `max_tokens` is *reserved* against the **8,000 tokens-per-minute** cap on this tier,
+  so an over-generous ceiling fails on its own: 8192 made a ~1.2K-token request total 9,735.
+- The real cause was **output volume** — with no cap the model itemised every field of every
+  record and blew the budget mid-document. Settled at `max_tokens=4000` plus "at most 8 items
+  per category".
+
+**A quality fix after seeing the output:** the first working run put identifiers in `value` and
+descriptions in `label` — `"Debit IMPS 5776.55"/"TXN0001000003"`, backwards and unreadable. Then
+over-correcting to short labels stripped the beneficiary names, leaving a column of `UPI`,
+`IMPS`, `UPI`. Both are now stated in the prompt with the failing case as a counter-example.
+
+### Fix 82 — Suggested Offers ran an LLM call on every panel render
+`/opportunities` had **no cache**, and `renderRight` calls it on every render — including the
+inbox poll's. **Measured: 53 Groq calls in one day with zero customer messages**, ~1,000 tokens
+each, several returning `output_chars: 2` (an empty list — paying 1,000 tokens to be told there
+is nothing to offer). All 111 rows carry `correlation_id = NULL`: not one belonged to a message.
+
+`agent_assist_recommendations` could not serve as the cache — an evaluation that produces **no**
+offers writes no row, so nothing distinguishes "never evaluated" from "evaluated, nothing to
+offer". Migration `015` records that an evaluation *ran*, keyed on a hash of the inputs that can
+change the answer. **Verified both directions: 5 requests → 1 LLM call; a forced-stale key
+re-runs immediately.**
+
+### Fix 83 — A real pipeline step was recording as an unlabelled default
+`TicketActionDetector.detect_action` ([orchestration_agents.py:467](../services/agent_service/orchestration_agents.py))
+passed no `operation=`, so it recorded under `_generate`'s `llm_generation` default. It runs
+**before intent classification** on every message whose keyword rules cannot decide whether
+*"All good now"* means the case is closed — a real production step, invisible in analytics.
+
+**This took three wrong diagnoses to find, and the process is the lesson.** I first called the
+rows "test junk" from a *pattern* (null correlation ids, timestamps near my own commands) and
+had the user approve deleting 49 of them. More appeared. I then blamed
+`classifier.py:188` from *reading* — also wrong. Only when I patched `record_llm_call` and
+captured a **stack trace** did the real caller name itself. The deleted rows included real
+production records; that data is not recoverable.
+
+Also labelled the resolution classifier's duck-typed branch, guarded by `inspect.signature` —
+the stubs it serves have incompatible signatures and passing the kwarg blindly raises TypeError.
+
+### The fundamental problem behind Fix 83 — not fixed, deliberately
+`operation` is **a description of the caller, written by the caller, about itself**. Nothing
+derives or checks it, so the telemetry repeats what the code says about itself and is only as
+correct as whoever typed the string. Two call sites were wrong for months with nothing
+surfacing it — and the analytics page looked authoritative the whole time. *I believed it too,
+and told the user "8 operations" reading it as fact. It is 9.*
+
+Removing the default only forces someone to type *something*. The real fix is to make the label
+**derived**: `llm_observation_context` already carries `agent`/`correlation_id`/`conversation_id`
+through a contextvar every nested call inherits, and the pipeline already names its own step
+there. `operation` should come from the same place, with the parameter as an override and an
+honest `unattributed` when there is no context.
+
+**Not attempted this session.** Only 2 of ~9 call sites are wrapped in that context today, so
+making it authoritative means wrapping the rest first — the LLM plumbing every message depends
+on, at the end of a long session in which my judgement in this exact area had been wrong four
+times. Agreed with the user to take it up fresh.
+
+### Fix 84 — Case summary dropped to two sections
+Situation / Open items / **Last contact** repeated the same ticket id and amount three times.
+Last contact is structurally redundant in a held conversation: the last substantive exchange
+*is* the agent answering about the open ticket. Dropped it, and added a prompt rule naming each
+ticket id once. Situation is now one line and all three open tickets surface, where previously
+only the dispute did.
+
+### Attrition risk removed entirely
+UI band, `/graph` field, and `services/attrition_service/` — at the user's request. Verified
+first that nothing else consumed it: one caller, no tests, and the `opportunity_engine` and
+`test_opportunities` mentions are comments about gates dropped back in Fix 42a. Checked all 15
+remote branches — the scorer's blob hash is **identical** on the three that have it, so nobody
+had built on it. Removing it also dropped five Neo4j queries that existed only to feed it.
+
+### Panel and layout work
+- **Customer details moved into the conversation header** beside the name (id · email · phone),
+  avatar dropped, and the right panel's own header deleted — the name was rendered twice.
+- **`.det-row` flattened** from `1fr 150px 1.2fr` to two columns with the metadata as a header
+  row. The 150px middle column stacked five pills into a tall empty gutter while squeezing the
+  query and reply either side; **+162px** recovered.
+- Right panel **300 → 380px**; net centre column still +82px better off.
+- Snapshot tiles (Tenure / Segment / Deadline) removed — all duplicated by Customer Context.
+- Open Tickets card is now **collapsible**, collapsed by default; the count is the signal.
+- Sentiment moved above Case summary.
+
+### Process notes worth keeping
+- **Three visual changes in a row made things worse.** I cannot see the rendered page, and I
+  kept stacking confident CSS edits without waiting for the user to look. Removing the row
+  borders, then shrinking the type, then cutting the padding left the values unreadable — each
+  change reasonable alone, together they fought. **One visual change, then stop.**
+- **I proposed *increasing* font sizes after the user had told me they looked too large**,
+  pattern-matching "think about font sizes" instead of reading what they had already said.
+- **`margin-bottom` on a flex child ADDS to the container's `gap`** rather than replacing it —
+  two cards carried both, which is why the panel's section spacing was uneven.
+- **"ngrok may fail" was repeated three times without once running the check.** The domain was
+  free the whole time. A remembered failure is not a current diagnosis.
+
+### Still open
+- **The `operation` label design** (above) — agreed as the next piece of real work.
+- **12 `llm_generation` rows remain**, all created by today's own test runs before Fix 83:
+  three runs of four calls, identical prompt sizes. They are real `ticket_action_detection`
+  calls, historically mislabelled. Left alone rather than touched again.
+- `opportunity_generation` is still the most-called operation; the cache should cut it sharply
+  but that has **not** been observed over a normal working day yet.
+- Everything from Session 15 remains open: **no demo run has been executed end-to-end**, the
+  claims thread is the least-proven continuity path, `resolution_memory_cache` still has the
+  missing `retrieval` key, and Session 13's sweep has not been re-run on `gpt-oss-20b`.
+
+---
