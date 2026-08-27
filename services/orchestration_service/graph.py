@@ -85,9 +85,15 @@ class OrchestrationGraph:
     ) -> None:
         self.repository = repository
         self.crm = crm or CRMClient()
-        self.tickets = TicketManager(repository, self.crm)
-
         self.neo4j_client = neo4j_client or _try_neo4j()
+
+        # The graph client MUST reach the manager: update_status mirrors a resolved
+        # ticket onto its Ticket node, and get_open_cases reads the GRAPH, not SQLite.
+        # Without it a customer-resolved ticket stayed 'open' in Neo4j while SQLite said
+        # 'resolved', so the model kept being fed a closed case as trusted context. The
+        # admin route (routes/tickets.py) always passed it; this path did not, so the
+        # same action behaved differently depending on who performed it.
+        self.tickets = TicketManager(repository, self.crm, neo4j_client=self.neo4j_client)
 
         # Named agents
         self.intent_agent = IntentClassificationAgent(agent, neo4j_client=self.neo4j_client)

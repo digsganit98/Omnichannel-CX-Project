@@ -1,3 +1,4 @@
+import hashlib
 import logging
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
@@ -7,10 +8,10 @@ from fastapi import APIRouter, Depends
 from apps.api.dependencies.runtime import get_repository
 from apps.api.dependencies.security import require_admin_key
 from services.neo4j_service.client import Neo4jClient
-from services.attrition_service.scorer import score_attrition
 from services.neo4j_service.queries import (
     get_accounts,
     get_case_messages,
+    get_charges,
     get_claim_status,
     get_credit_cards,
     get_customer_by_id,
@@ -20,6 +21,7 @@ from services.neo4j_service.queries import (
     get_policy_status,
     get_transactions,
 )
+from services.rag_service.groq_generator import GroqGenerator
 
 logger = logging.getLogger(__name__)
 
@@ -285,7 +287,7 @@ def customer_graph(customer_id: str) -> dict:
         "name": None,
         "loan_count": 0, "claim_count": 0, "identifiers": identifiers or [],
         "registration_date": None, "segment": None,
-        "contacts_30d": contacts_30d, "upcoming_event": None, "attrition": None,
+        "contacts_30d": contacts_30d, "upcoming_event": None,
     }
     if not identifiers:
         return base
@@ -314,26 +316,6 @@ def customer_graph(customer_id: str) -> dict:
 
         loans = get_loan_status(client, neo4j_cid)
         claims = get_claim_status(client, neo4j_cid)
-        cards = get_credit_cards(client, neo4j_cid)
-        accounts = get_accounts(client, neo4j_cid)
-        fds = get_fixed_deposits(client, neo4j_cid)
-        policies = get_policy_status(client, neo4j_cid)
-        product_type_count = sum(
-            1 for products in (loans, cards, accounts, fds, policies) if products
-        )
-
-        # Attrition risk (rule-based) over BFSI + conversation signals.
-        cust_tickets = [t for t in repo.list_tickets() if t.get("customer_id") == customer_id]
-        cust_turns = repo.list_customer_turns(customer_id)
-        attrition = score_attrition(
-            credit_cards=cards,
-            accounts=accounts,
-            product_type_count=product_type_count,
-            registration_date=registration_date,
-            tickets=cust_tickets,
-            turns=cust_turns,
-            contacts_30d=contacts_30d,
-        )
 
         return {
             **base,
@@ -343,8 +325,176 @@ def customer_graph(customer_id: str) -> dict:
             "registration_date": registration_date,
             "segment": segment,
             "upcoming_event": _upcoming_event(client, neo4j_cid),
-            "attrition": attrition,
         }
     except Exception as exc:
         logger.warning("neo4j_graph_lookup_failed customer=%s: %s", customer_id, exc)
         return base
+
+
+# ── Customer Context: the record, grouped into tabs by one LLM call ──────────
+# Fixed category set. Every key is ALWAYS present in the response, even when empty:
+# a missing key crashes the renderer on whichever field the model happened to omit,
+# so the shape is enforced here rather than trusted from the model.
+CONTEXT_CATEGORIES = ("risk", "holdings", "activity", "claims", "profile")
+
+# The graph query defaults to 20. Ten covers any dispute conversation an agent is
+# likely to be handling and roughly halves this part of the prompt.
+CONTEXT_TXN_LIMIT = 10
+
+
+def _ctx_lines(title: str, rows: list[dict], fields: tuple[str, ...]) -> list[str]:
+    """Compact labelled lines for one group of records.
+
+    Values are passed through verbatim - the prompt forbids the model from reformatting
+    them, and any currency/date presentation happens in the browser where it is
+    deterministic. Empty and zero values are dropped here as well as in the prompt:
+    an agent reads a blank row as missing data rather than as nothing owed.
+    """
+    lines: list[str] = []
+    for row in rows:
+        parts = []
+        for field in fields:
+            value = row.get(field)
+            if value in (None, "", "N/A", "None", 0, "0"):
+                continue
+            parts.append(f"{field}={value}")
+        if parts:
+            lines.append(f"  - {title}: " + ", ".join(parts))
+    return lines
+
+
+def _build_record_text(client, customer: dict) -> str:
+    """The customer's record as compact text for the categoriser."""
+    cid = customer["customer_id"]
+    lines = [f"Customer: customer_id={cid}"]
+    for field in ("name", "segment", "city", "email", "phone", "registration_date"):
+        if customer.get(field):
+            lines.append(f"  - {field}={customer[field]}")
+
+    lines += _ctx_lines("Account", get_accounts(client, cid), (
+        "account_type", "account_sub_type", "account_number", "status",
+        "avg_monthly_balance", "min_balance_required", "branch"))
+    lines += _ctx_lines("CreditCard", get_credit_cards(client, cid), (
+        "card_network", "card_variant", "card_id", "credit_limit", "balance_due",
+        "min_amount_due", "total_amount_due", "payment_due_date", "dpd",
+        "penalty_details", "reward_points_balance", "fraud_flag", "chargeback_flag"))
+    lines += _ctx_lines("FixedDeposit", get_fixed_deposits(client, cid), (
+        "fd_id", "principal_amount", "interest_rate", "tenure_months",
+        "maturity_date", "maturity_amount", "status"))
+    lines += _ctx_lines("Loan", get_loan_status(client, cid), (
+        "loan_id", "loan_type", "principal_amount", "outstanding_amount",
+        "emi_amount", "next_due_date", "dpd", "status"))
+    lines += _ctx_lines("Policy", get_policy_status(client, cid), (
+        "policy_id", "policy_type", "status", "premium_inr", "coverage_inr",
+        "next_premium_due"))
+    lines += _ctx_lines("Transaction", get_transactions(client, cid, limit=CONTEXT_TXN_LIMIT), (
+        "txn_id", "txn_date", "txn_type", "channel", "amount", "beneficiary_name",
+        "status", "failure_reason"))
+    lines += _ctx_lines("Claim", get_claim_status(client, cid), (
+        "claim_id", "claim_type", "policy_type", "status", "amount_claimed",
+        "amount_approved", "reason", "last_updated"))
+    lines += _ctx_lines("Charge", get_charges(client, cid), (
+        "charge_type", "amount", "charge_date", "reason", "reversal_status"))
+    return "\n".join(lines)
+
+
+def _normalise_categories(parsed: dict) -> dict:
+    """Force the model's output into the shape the renderer requires.
+
+    Every category key present, always a list, every item a {label, value} pair with an
+    optional {sub}. A model that returns a bare string, a nested object or a missing key
+    degrades to a dropped item - never to a broken panel.
+    """
+    out: dict[str, list[dict]] = {}
+    for key in CONTEXT_CATEGORIES:
+        items = parsed.get(key)
+        clean: list[dict] = []
+        if isinstance(items, list):
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                label = str(item.get("label") or "").strip()
+                value = item.get("value")
+                value = "" if value is None else str(value).strip()
+                if not label or not value:
+                    continue
+                entry = {"label": label, "value": value}
+                sub = str(item.get("sub") or "").strip()
+                # Drop a sub that adds nothing: a bare source field name (no spaces, the
+                # snake_case the record was built from) or a restatement of the label or
+                # value. The prompt forbids these; this is the guard for when it is
+                # ignored, since each one costs a whole row in a narrow panel.
+                if sub and sub.lower() not in (label.lower(), value.lower()):
+                    if " " in sub or "-" in sub or not sub.replace("_", "").isalpha():
+                        entry["sub"] = sub
+                clean.append(entry)
+        out[key] = clean
+    return out
+
+
+@router.get("/{customer_id}/context")
+def customer_context(customer_id: str, refresh: bool = False) -> dict:
+    """The customer's record grouped into the right-panel Customer Context tabs.
+
+    ONE LLM call per record, not per tab: the frontend renders every panel from this
+    single response and switching tabs is a class toggle, never a request.
+
+    Cached on a fingerprint of the record rather than on a turn id (see 013 vs 014):
+    a case summary goes stale when a message arrives, a customer context goes stale
+    when a FIELD changes. Same record -> cached row and zero tokens; any field
+    different -> the hash differs and it regenerates.
+    """
+    empty = {"customer_id": customer_id, "status": "empty",
+             "categories": {k: [] for k in CONTEXT_CATEGORIES}, "raw": None}
+    try:
+        client, customer = _resolve_graph_customer(customer_id)
+    except Exception as exc:
+        logger.warning("customer_context_lookup_failed customer=%s: %s", customer_id, exc)
+        return empty
+    if not customer:
+        return empty
+
+    try:
+        record_text = _build_record_text(client, customer)
+    except Exception:
+        logger.exception("customer_context_record_build_failed customer=%s", customer_id)
+        return empty
+    if not record_text.strip():
+        return empty
+
+    record_hash = hashlib.sha256(record_text.encode("utf-8")).hexdigest()
+    repo = get_repository()
+
+    if not refresh:
+        cached = repo.get_customer_context(customer_id)
+        if cached and cached.get("record_hash") == record_hash:
+            return {
+                "customer_id": customer_id,
+                "status": "cached",
+                "generated_at": cached.get("created_at"),
+                "categories": _normalise_categories(cached.get("categories") or {}),
+                "raw": None,
+            }
+
+    result = GroqGenerator().categorize_customer_record(record_text)
+    if result is None:
+        # No LLM (quota, outage, no key). Say so rather than showing the agent an
+        # empty panel that reads as "this customer has no records".
+        return {"customer_id": customer_id, "status": "unavailable",
+                "categories": {k: [] for k in CONTEXT_CATEGORIES}, "raw": None}
+
+    if "raw" in result:
+        # Parsing failed. Show what the model said rather than losing the content to a
+        # failed guess; not cached, since a bad parse should be retried, not pinned.
+        return {"customer_id": customer_id, "status": "raw",
+                "categories": {k: [] for k in CONTEXT_CATEGORIES},
+                "raw": result.get("raw")}
+
+    categories = _normalise_categories(result.get("categories") or {})
+    try:
+        repo.save_customer_context(customer_id, record_hash, categories, result.get("model"))
+    except Exception:
+        logger.exception("customer_context_save_failed")  # serve it anyway; caching is best-effort
+
+    return {"customer_id": customer_id, "status": "generated",
+            "model": result.get("model"), "categories": categories, "raw": None}

@@ -61,7 +61,6 @@ def case_summary(conversation_id: str, refresh: bool = False) -> dict:
                 "summary": {
                     "situation": cached.get("situation", ""),
                     "open_items": cached.get("open_items", []),
-                    "last_contact": cached.get("last_contact", ""),
                 },
             }
 
@@ -96,7 +95,6 @@ def case_summary(conversation_id: str, refresh: bool = False) -> dict:
         "summary": {
             "situation": summary.get("situation", ""),
             "open_items": summary.get("open_items", []),
-            "last_contact": summary.get("last_contact", ""),
         },
     }
 

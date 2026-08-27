@@ -1,3 +1,4 @@
+import inspect
 import json
 import logging
 import re
@@ -185,7 +186,24 @@ class ResolutionDecisionEngine:
                     prompt, operation="resolution_level_classification", metadata={"intent": intent}
                 )
             elif hasattr(self.generator, "_generate"):
-                result = self.generator._generate(prompt)
+                # Unknown generator type. Label the call like the two branches above so
+                # its usage is attributed to this operation rather than falling through
+                # to the unlabelled 'llm_generation' default — but only when the callable
+                # actually accepts the kwarg: signatures here vary (some take a single
+                # positional prompt, some take system/user prompts and no operation), and
+                # passing it blindly raises TypeError instead of classifying.
+                try:
+                    accepts_operation = "operation" in inspect.signature(
+                        self.generator._generate).parameters
+                except (TypeError, ValueError):
+                    accepts_operation = False
+                if accepts_operation:
+                    result = self.generator._generate(
+                        prompt, operation="resolution_level_classification",
+                        metadata={"intent": intent},
+                    )
+                else:
+                    result = self.generator._generate(prompt)
             else:
                 result = {"text": "", "llm_used": False, "error": "Unsupported generator interface."}
             if result.get("llm_used"):

@@ -139,6 +139,10 @@ try {
 } catch(e) {}
 
 var state = { convs: [], selectedConvId: null, convDetail: null, simTimer: null, sseSource: null, pendingDrafts: {},
+  // Open Tickets card expanded? Collapsed by default - the count in the header is the
+  // signal; the rows are for acting on. Held here so the choice survives the poll
+  // re-render, and shared across conversations (it is a display preference, not data).
+  tktOpen: false,
   // Theme-group fold state. Keyed "<conversation_id>:<groupIndex>"; presence in
   // the Set = collapsed. Persists across the inbox poll re-render. `themeSeeded`
   // tracks which conversations have had their default (all-but-latest collapsed)
@@ -485,11 +489,6 @@ function customerLabel(conv) {
   return dn;
 }
 
-function customerInitials(conv) {
-  var nm = customerLabel(conv);
-  return nm.split(/\s+/).map(function(w) { return w[0]; }).join('').toUpperCase().slice(0,2);
-}
-
 // DISPLAY-ONLY: unify every status label to one pair — Open / Resolved.
 // The whole app has two status vocabularies (ticket: open/in_progress/resolved;
 // conversation: active/resolved), which read as confusing near-synonyms on screen.
@@ -630,6 +629,13 @@ function renderCentre(conv) {
   var conv_meta = state.convs.find(function(c) { return c.conversation_id === conv.conversation_id; }) || conv;
   var nm = customerLabel(conv_meta);
   document.getElementById('convName').textContent = nm;
+  // Clear the meta line + graph button on every switch: both are filled asynchronously
+  // by renderRight, so without this the previous customer's details linger until the
+  // graph call returns (or forever, if this customer resolves to no graph node).
+  var _metaEl = document.getElementById('convMeta');
+  if (_metaEl) _metaEl.innerHTML = '';
+  var _kgBtn = document.getElementById('snap-kg-btn');
+  if (_kgBtn) { _kgBtn.style.display = 'none'; _kgBtn.onclick = null; }
 
   var isDone = urgencyToStatus(conv_meta) === 'resolved';
   document.getElementById('resbanner').style.display = isDone ? 'flex' : 'none';
@@ -994,14 +1000,14 @@ function renderCentre(conv) {
         var offTime = fmtTime(ex.ref);
         rowsHtml +=
             '<div class="det-row det-row--offer" style="--det-clr:' + themeClr + '">'
-          +   '<div class="det-q">'
-          +     '<span class="det-lbl">Bank-initiated</span>'
-          +     '<div class="det-q-text det-q-text--offer">Offer approved by admin &amp; sent to the customer</div>'
-          +   '</div>'
-          +   '<div class="det-node">'
+          +   '<div class="det-head">'
           +     '<span class="nba-badge nba-badge-upsell">Offer</span>'
           +     '<span class="cp ' + chn.pill + '" style="font-size:10px">' + chn.svg + chn.label + '</span>'
           +     (offTime ? '<span class="lin-time">' + escH(offTime) + '</span>' : '')
+          +   '</div>'
+          +   '<div class="det-q">'
+          +     '<span class="det-lbl">Bank-initiated</span>'
+          +     '<div class="det-q-text det-q-text--offer">Offer approved by admin &amp; sent to the customer</div>'
           +   '</div>'
           +   '<div class="det-r">'
           +     '<span class="det-lbl det-r-lbl">Offer Message</span>'
@@ -1031,16 +1037,19 @@ function renderCentre(conv) {
       var exEmotionCls = EMOTION_CLS[exUrg] || 'fe-neutral';
       rowsHtml +=
           '<div class="det-row" style="--det-clr:' + themeClr + '">'
-        +   '<div class="det-q">'
-        +     '<span class="det-lbl">Customer Query</span>'
-        +     '<div class="det-q-text">' + escH(query || '—') + '</div>'
-        +   '</div>'
-        +   '<div class="det-node">'
+          // Metadata reads as a header across the top rather than a middle column: as a
+          // column these five pills stacked into a tall empty gutter while the query and
+          // reply were squeezed either side of it.
+        +   '<div class="det-head">'
         +     '<span class="flow-emotion ' + exEmotionCls + '">' + escH(exEmotion) + '</span>'
         +     (u.ticket ? '<span class="lin-tkt">' + escH(u.ticket) + '</span>' : '<span class="lin-tkt lin-tkt--none">no ticket</span>')
         +     '<span class="cp ' + chn.pill + '" style="font-size:10px">' + chn.svg + chn.label + '</span>'
         +     '<span class="flow-node-status ' + statusCls + '">' + escH(statusLabel(nodeStatus)) + '</span>'
         +     (timeStr ? '<span class="lin-time">' + escH(timeStr) + '</span>' : '')
+        +   '</div>'
+        +   '<div class="det-q">'
+        +     '<span class="det-lbl">Customer Query</span>'
+        +     '<div class="det-q-text">' + escH(query || '—') + '</div>'
         +   '</div>'
         +   '<div class="det-r">'
         +     '<span class="det-lbl det-r-lbl">AI Agent Reply</span>'
@@ -1385,12 +1394,6 @@ window.discardDraft = function(btn) {
 
 function renderRight(conv, tickets) {
   var conv_meta = state.convs.find(function(c) { return c.conversation_id === conv.conversation_id; }) || conv;
-  var nm = customerLabel(conv_meta);
-  var ini = customerInitials(conv_meta);
-  document.getElementById('rpav').textContent = ini;
-  document.getElementById('rpnm').textContent = nm;
-  document.getElementById('rpsub').textContent = conv_meta.customer_id || '';
-  document.getElementById('rpcontact').innerHTML = '';
 
   var turns = conv.turns || [];
 
@@ -1433,39 +1436,19 @@ function renderRight(conv, tickets) {
   var _snapTickets = (tickets || [].concat(_allTickets.open, _allTickets.closed))
     .filter(function(t) { return t.conversation_id === conv.conversation_id && (t.status === 'open' || t.status === 'in_progress'); });
 
-  // Tenure — placeholder until graph API responds with registration_date
-  var tenureLbl = '—';
-  function calcTenure(dateStr) {
-    if (!dateStr) return '—';
-    var d = new Date(dateStr);
-    if (isNaN(d)) return '—';
-    var msDiff = Date.now() - d.getTime();
-    var years  = Math.floor(msDiff / (1000 * 60 * 60 * 24 * 365));
-    var months = Math.floor(msDiff / (1000 * 60 * 60 * 24 * 30));
-    if (years  >= 1) return years  + ' yr' + (years  > 1 ? 's' : '');
-    if (months >= 1) return months + ' mo';
-    return '< 1 mo';
-  }
-
   var body = document.getElementById('rpbody');
   body.innerHTML = ''
-    // Knowledge graph first — the agent's fastest read of who this customer is.
-    + '<button class="kg-btn kg-btn-top" id="snap-kg-btn" type="button" style="display:none" title="See this customer\'s products, claims and tickets as a connected graph.">'
-    + '<span class="kg-btn-l">'
-    + '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">'
-    + '<circle cx="8" cy="3.2" r="2.1" stroke="currentColor" stroke-width="1.3"/>'
-    + '<circle cx="3" cy="12.4" r="2.1" stroke="currentColor" stroke-width="1.3"/>'
-    + '<circle cx="13" cy="12.4" r="2.1" stroke="currentColor" stroke-width="1.3"/>'
-    + '<path d="M6.7 4.9 4.2 10.6M9.3 4.9l2.5 5.7M5.1 12.4h5.8" stroke="currentColor" stroke-width="1.3"/>'
-    + '</svg>View customer 360 knowledge graph</span></button>'
-    // Case summary sits above sentiment: it is what an agent wants first when they
-    // open a conversation cold. Rendered as a placeholder and filled asynchronously so
-    // a slow or unavailable LLM never delays the rest of the panel.
-    + '<div class="rpcard csum-card" id="csum-card">'
-    + '<div class="csum-head"><span class="rplbl">Case summary</span>'
-    + '<button class="csum-refresh" id="csum-refresh" type="button" title="Regenerate this summary">Refresh</button></div>'
-    + '<div class="csum-body" id="csum-body"><span class="csum-muted">Summarising…</span></div>'
+    // Customer Context leads the panel: what is WRONG with this customer's records,
+    // grouped into tabs by one LLM call. Rendered as a placeholder and filled
+    // asynchronously so a slow or unavailable LLM never delays the rest of the panel.
+    + '<div class="rpcard cctx-card" id="cctx-card">'
+    + '<div class="cctx-head"><span class="rplbl">Customer context</span>'
+    + '<button class="cctx-refresh" id="cctx-refresh" type="button" title="Regroup this customer\'s records">Refresh</button></div>'
+    + '<div class="cctx-tabs" id="cctx-tabs"></div>'
+    + '<div class="cctx-body" id="cctx-body"><span class="cctx-muted">Grouping records…</span></div>'
     + '</div>'
+    // Sentiment before the case summary: it is a one-line read, so it answers "how is
+    // this customer feeling" before the agent starts reading prose.
     + '<div class="rpcard"><div class="ssent-head"><span class="rplbl">Sentiment</span>'
     + '<span class="ssc" style="color:' + sentClr + '">' + escH(sentLbl) + '</span>'
     + '<span class="ssent-count">(last ' + sentCount + ' message' + (sentCount === 1 ? '' : 's') + ')</span></div>'
@@ -1478,22 +1461,23 @@ function renderRight(conv, tickets) {
     + '<span class="slbl" style="color:var(--grn-t)">' + posPct + '% positive</span>'
     + '<span class="slbl">' + neuPct + '% neutral</span>'
     + '<span class="slbl" style="color:var(--red-t)">' + negPct + '% negative</span>'
-    + '</div>'
-    + '<div class="snap-sec">'
-    + '<div class="attrition-band" id="snap-attrition" style="display:none" title="Rule-based flag for whether this customer may leave. High if they mention leaving, OR 2+ strong signs (30+ days overdue, worsening mood, or a stuck ticket); Medium if 1 strong or 3+ weak signs; else Low. A transparent heuristic, not a prediction.">'
-    + '<span class="ab-lbl">Attrition risk</span>'
-    + '<span class="ab-band" id="snap-attrition-band"></span>'
-    + '<span class="ab-reasons" id="snap-attrition-reasons"></span>'
-    + '</div>'
-    + '<div class="mgrid">'
-    + '<div class="mc" title="How long they have been a customer, from their account registration date."><div class="mv" id="snap-tenure">' + escH(tenureLbl) + '</div><div class="ml">Tenure</div></div>'
-    + '<div class="mc" title="Customer value tier set by the bank: HNI (High Net-worth Individual), Affluent, or Mass Affluent. — means no segment on record."><div class="mv mv-txt" id="snap-segment">—</div><div class="ml">Segment</div></div>'
-    + '<div class="mc mc-wide" title="Their most urgent product deadline within ~90 days: an overdue/upcoming card payment, FD maturity, or policy premium due. Overdue is shown in red."><div class="mv mv-txt" id="snap-event">—</div><div class="ml">Deadline</div></div>'
-    + '</div></div></div>';
+    + '</div></div>'
+    // Rendered as a placeholder and filled asynchronously so a slow or unavailable LLM
+    // never delays the rest of the panel.
+    + '<div class="rpcard csum-card" id="csum-card">'
+    + '<div class="csum-head"><span class="rplbl">Case summary</span>'
+    + '<button class="csum-refresh" id="csum-refresh" type="button" title="Regenerate this summary">Refresh</button></div>'
+    + '<div class="csum-body" id="csum-body"><span class="csum-muted">Summarising…</span></div>'
+    + '</div>';
 
   // Async: fetch loans/claims count from Neo4j via customer graph endpoint
   var _snapCustId = conv_meta.customer_id;
   if (_snapCustId) {
+    // Customer Context. renderRight rebuilds the panel HTML above, so the card needs
+    // repainting on every render — but the payload is held client-side, so a repaint
+    // reuses it and only a genuinely new customer costs a request.
+    loadCustomerContext(_snapCustId, false);
+
     // Knowledge-graph button: only shown once we know the customer resolves to a graph
     // node (an unverified sender has none — same rule that keeps phantoms out).
     api('/admin/customers/' + encodeURIComponent(_snapCustId) + '/graph-view').then(function(gv) {
@@ -1503,40 +1487,9 @@ function renderRight(conv, tickets) {
       btn.onclick = function() { openGraphModal(gv); };
     }).catch(function() { /* button stays hidden */ });
 
+    // Still called after the snapshot tiles were dropped: this is also what fills the
+    // conversation header's name / id / email / phone line.
     api('/admin/customers/' + encodeURIComponent(_snapCustId) + '/graph').then(function(g) {
-      var tenureEl = document.getElementById('snap-tenure');
-      if (tenureEl && g.registration_date) tenureEl.textContent = calcTenure(g.registration_date);
-      var segEl = document.getElementById('snap-segment');
-      if (segEl) segEl.textContent = g.segment || '—';
-      var eventEl = document.getElementById('snap-event');
-      if (eventEl) {
-        var ev = g.upcoming_event;
-        if (ev) {
-          var when;
-          if (ev.overdue) when = Math.abs(ev.days) + 'd overdue';
-          else if (ev.days === 0) when = 'today';
-          else when = 'in ' + ev.days + 'd';
-          eventEl.textContent = ev.label + ' · ' + when;
-          eventEl.style.color = ev.overdue ? 'var(--red-t)' : 'var(--t1)';
-        } else {
-          eventEl.textContent = 'None';
-        }
-      }
-
-      // Attrition risk band (full-width, above the tiles)
-      var atr = g.attrition;
-      var atrWrap = document.getElementById('snap-attrition');
-      if (atrWrap && atr && atr.band) {
-        var bandEl = document.getElementById('snap-attrition-band');
-        var reasonsEl = document.getElementById('snap-attrition-reasons');
-        var band = atr.band;
-        bandEl.textContent = band;
-        bandEl.className = 'ab-band ab-' + band.toLowerCase();
-        var top = (atr.reasons || []).slice(0, 2);
-        reasonsEl.textContent = top.length ? '· ' + top.join(', ') : '';
-        atrWrap.style.display = 'flex';
-      }
-
       // Extract email and phone from channel identifiers
       var ids = g.identifiers || [];
       var emailId = null, phoneId = null;
@@ -1546,26 +1499,21 @@ function renderRight(conv, tickets) {
       });
 
       // Use the REAL name from the Neo4j graph payload ONLY if present. Do NOT
-      // overwrite the name already set by renderRight/customerLabel (which reads
+      // overwrite the name already set by renderCentre/customerLabel (which reads
       // the SQLite display_name) — otherwise a missing g.name would clobber a
       // correct name. Never fabricate a name from the email.
       if (g.name && String(g.name).trim()) {
-        var displayName = String(g.name).trim();
-        document.getElementById('rpnm').textContent = displayName;
-        var ini = displayName.split(' ').slice(0,2).map(function(w){return w[0];}).join('').toUpperCase();
-        document.getElementById('rpav').textContent = ini;
+        var nameEl = document.getElementById('convName');
+        if (nameEl) nameEl.textContent = String(g.name).trim();
       }
-      // Customer ID row (no prefix)
-      document.getElementById('rpsub').textContent = _snapCustId || '';
-      // Email + phone inline under customer ID
-      var contactEl = document.getElementById('rpcontact');
-      if (contactEl) {
+      // Customer id · email · phone, inline beside the name in the centre header.
+      var metaEl = document.getElementById('convMeta');
+      if (metaEl) {
         var parts = [];
+        if (_snapCustId) parts.push(escH(_snapCustId));
         if (emailId) parts.push(escH(emailId));
         if (phoneId) parts.push(escH(phoneId));
-        contactEl.innerHTML = parts.length
-          ? '<div style="font-size:10px;color:var(--t3);margin-top:2px;line-height:1.6">' + parts.join('&nbsp;&nbsp;') + '</div>'
-          : '';
+        metaEl.innerHTML = parts.join('<span class="cmeta-sep">·</span>');
       }
     }).catch(function() {});
   }
@@ -1589,7 +1537,15 @@ function renderRight(conv, tickets) {
         + (isOpen ? '<button class="tkt-resolve-btn" onclick="event.stopPropagation();resolveTicket(this,\'' + escH(t.ticket_id) + '\')">Resolve ticket</button>' : '')
         + '</div>';
     }).join('');
-    body.innerHTML += '<div class="rpcard"><div class="rplbl rplbl-tickets">Open Tickets (' + convTickets.length + ')</div>'
+    // Collapsed by default: the COUNT is the at-a-glance signal an agent needs, and
+    // each ticket row carries an id, a description, a date and a Resolve button, so
+    // three open tickets otherwise own most of the panel.
+    body.innerHTML += '<div class="rpcard tkt-card' + (state.tktOpen ? ' on' : '') + '" id="tkt-card">'
+      + '<button class="tkt-toggle" id="tkt-toggle" type="button">'
+      + '<span class="rplbl rplbl-tickets">Open Tickets (' + convTickets.length + ')</span>'
+      + '<svg class="tkt-chev" width="10" height="10" viewBox="0 0 16 16" aria-hidden="true">'
+      + '<path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="2"/></svg>'
+      + '</button>'
       + '<div class="tkt-scroll">' + tktHtml + '</div></div>';
   }
 
@@ -1749,6 +1705,10 @@ window.resolveTicket = function(btn, ticketId) {
       renderCentre(state.convDetail);
       renderRight(state.convDetail, all);
       renderQueue();
+      // Resolving a ticket is not a new TURN, and the case summary is cached against
+      // the newest turn id -- so without forcing it here the summary keeps listing the
+      // ticket just resolved as open, contradicting the Open Tickets card beside it.
+      loadCaseSummary(state.convDetail.conversation_id, true);
     }
   }).catch(function(e) {
     toast('Error: ' + e.message);
@@ -1789,8 +1749,7 @@ window.loadAnalytics = async function() {
     renderAgentPanel(results[3]);
     renderFeedList(results[4], false);
     renderLlmUsagePanel(results[5]);
-    renderCostByModelPanel(results[5]);
-    renderLatencyByModelPanel(results[5]);
+    renderModelVersionTable(results[5]);
     renderLlmTimeTrends(results[5]);
     renderSolutionStats(results[7]);
     renderSolutionCharts(results[7]);
@@ -1869,6 +1828,43 @@ function renderIntentBars(data) {
   renderBars('intentBars', items, 'intent', 'count', null);
 }
 
+// Pipeline order: 1-3 fire on EVERY inbound message, 4-5 only when ticket matching is
+// ambiguous, 6-8 when an agent opens a conversation. Anything unlisted sorts last.
+var LLM_OP_ORDER = {
+  ticket_action_detection: 1,
+  intent_classification: 2,
+  resolution_level_classification: 3,
+  answer_generation: 4,
+  ticket_referee: 5,
+  ticket_refine_referee: 6,
+  case_summary: 7,
+  customer_context: 8,
+  opportunity_generation: 9
+};
+
+// What each call is for, shown on hover. Names like "resolution level classification"
+// say nothing on their own about when the call fires or what it decides.
+var LLM_OP_PURPOSE = {
+  ticket_action_detection:
+    'Runs before intent, and only when keyword rules cannot decide: does this message mean the customer considers their issue resolved? A YES closes the open ticket.',
+  intent_classification:
+    'EVERY message. Classifies the message into one of ~20 BFSI intents, which decides whether the answer comes from the knowledge graph or the knowledge base.',
+  resolution_level_classification:
+    'EVERY message. Decides L1 / L2 / L3 — whether the query can be answered directly or must escalate into a ticket.',
+  answer_generation:
+    'EVERY message. Writes the customer-facing reply from whatever the retrieval step returned (graph records, ticket record, or KB passages).',
+  ticket_referee:
+    'Only when ticket matching is ambiguous: the message matches no open ticket but same-intent tickets exist. Picks the right one or says NEW. Any doubt forks a new ticket.',
+  ticket_refine_referee:
+    'Only when a vague ticket may need narrowing — e.g. a general dispute becoming a specific card dispute. Refines the existing ticket instead of forking a duplicate.',
+  case_summary:
+    'When an agent opens a conversation. Writes the situation and open items for someone picking the case up cold. Cached against the newest turn, so re-opening costs nothing.',
+  customer_context:
+    'When an agent opens a conversation. Sorts the customer’s records into the Risk / Holdings / Activity / Claims / Profile tabs. Cached against a fingerprint of the record.',
+  opportunity_generation:
+    'Evaluates cross-sell and up-sell offers for the Suggested Offers card. Code picks the candidate products; the LLM writes the pitch.'
+};
+
 // Stable colour per operation so the same op keeps its colour across the table + meters.
 var LLM_OP_COLORS = ['--blue', '--pur', '--grn', '--amb', '--pnk', '--red'];
 function llmOpColor(name, idx) {
@@ -1909,9 +1905,25 @@ function renderLlmUsagePanel(data) {
   // max across operations, coloured by the row's operation colour — so Calls, Token share,
   // Cost and Latency all read as mini bar charts, not bare numbers.
   var ops = (data.by_operation || []).slice();
+  // Ordered by WHERE each call happens in the pipeline, not by cost. Cost order shuffles
+  // as usage changes and tells you nothing about what the system does; this reads top to
+  // bottom as the actual sequence: every message, then the conditional ones, then the
+  // calls an agent triggers by opening a conversation.
+  ops.sort(function(a, b) {
+    return (LLM_OP_ORDER[a.operation] || 99) - (LLM_OP_ORDER[b.operation] || 99);
+  });
+  // Cost per call, alongside the total. The two rank the operations differently and both
+  // matter: measured here, opportunity generation is the top TOTAL spender but one of the
+  // cheapest per call (it just runs often), while customer context is the most expensive
+  // per call by 7.6x. Total alone hides which operation is inherently costly.
+  var avgCostOf = function(r) {
+    var n = Number(r.calls || 0);
+    return n ? Number(r.estimated_cost_usd || 0) / n : 0;
+  };
   var maxTok   = ops.reduce(function(m, r){ return Math.max(m, Number(r.total_tokens || 0)); }, 0) || 1;
   var maxCalls = ops.reduce(function(m, r){ return Math.max(m, Number(r.calls || 0)); }, 0) || 1;
   var maxCost  = ops.reduce(function(m, r){ return Math.max(m, Number(r.estimated_cost_usd || 0)); }, 0) || 1;
+  var maxAvgC  = ops.reduce(function(m, r){ return Math.max(m, avgCostOf(r)); }, 0) || 1;
   var maxLat   = ops.reduce(function(m, r){ return Math.max(m, Number(r.avg_latency_ms || 0)); }, 0) || 1;
   var opRows = ops.map(function(row, i) {
     var clr = llmOpColor(row.operation, i);
@@ -1919,12 +1931,16 @@ function renderLlmUsagePanel(data) {
     var cl  = Number(row.calls || 0);
     var co  = Number(row.estimated_cost_usd || 0);
     var lat = Number(row.avg_latency_ms || 0);
+    var purpose = LLM_OP_PURPOSE[row.operation] || '';
     return '<tr>'
-      + '<td class="llm-op-cell"><span class="llm-op-dot" style="background:' + clr + '"></span>'
-        + escH((row.operation || 'unknown').replace(/_/g, ' ')) + '</td>'
+      + '<td class="llm-op-cell"' + (purpose ? ' title="' + escH(purpose) + '"' : '') + '>'
+        + '<span class="llm-op-dot" style="background:' + clr + '"></span>'
+        + escH((row.operation || 'unknown').replace(/_/g, ' '))
+        + (purpose ? '<span class="llm-op-q">?</span>' : '') + '</td>'
       + llmMeterCell(cl / maxCalls, clr, cl.toLocaleString())
       + llmMeterCell(tok / maxTok, clr, tok.toLocaleString())
       + llmMeterCell(co / maxCost, clr, '$' + co.toFixed(6))
+      + llmMeterCell(avgCostOf(row) / maxAvgC, clr, '$' + avgCostOf(row).toFixed(6))
       + llmMeterCell(lat / maxLat, clr, lat.toFixed(0) + ' ms')
       + '</tr>';
   }).join('');
@@ -1940,9 +1956,10 @@ function renderLlmUsagePanel(data) {
     }).join('')
     + '</div>'
     + '<table class="mini-table llm-op-table"><thead><tr>'
-      + '<th>Operation</th><th>Calls</th><th>Token share</th><th>Cost</th><th>Avg latency</th>'
+      + '<th>Operation</th><th>Calls</th><th>Token share</th><th>Cost</th>'
+      + '<th>Avg cost</th><th>Avg latency</th>'
       + '</tr></thead><tbody>'
-    + (opRows || '<tr><td colspan="5">No operation breakdown yet</td></tr>')
+    + (opRows || '<tr><td colspan="6">No operation breakdown yet</td></tr>')
     + '</tbody></table>';
 }
 
@@ -1969,7 +1986,92 @@ function llmVersionCell(row) {
 // A version label for a by_model row: MODEL name as the heading with the version tag as an
 // inline chip beside it, and the human-readable config on the line below. The tag is an id
 // FOR the config shown — never a duplicate of it stacked above.
-function llmVerStripLabel(row) {
+// One row per model + config, same six columns as the Operation table above so a number
+// means the same thing in both. Was two separate strip panels (cost, latency) that each
+// showed one metric and no call count, so a row backed by 7 calls looked as authoritative
+// as one backed by 156.
+function renderModelVersionTable(data) {
+  var el = document.getElementById('modelVersionPanel');
+  if (!el) return;
+  // Configs with no successful call are not configs - they are settings that errored
+  // (a rejected request records zero tokens and zero cost). Showing them as rows invites
+  // comparing a real config against a mistake.
+  var rows = ((data && data.by_model) || []).filter(function(r) {
+    return Number(r.calls || 0) > 0 && Number(r.total_tokens || 0) > 0;
+  });
+  if (!rows.length) {
+    el.innerHTML = '<div class="empty-state">No model usage recorded yet</div>';
+    return;
+  }
+
+  var avgCostOf = function(r) {
+    var n = Number(r.calls || 0);
+    return n ? Number(r.estimated_cost_usd || 0) / n : 0;
+  };
+  var maxCalls = rows.reduce(function(m, r){ return Math.max(m, Number(r.calls || 0)); }, 0) || 1;
+  var maxTok   = rows.reduce(function(m, r){ return Math.max(m, Number(r.total_tokens || 0)); }, 0) || 1;
+  var maxCost  = rows.reduce(function(m, r){ return Math.max(m, Number(r.estimated_cost_usd || 0)); }, 0) || 1;
+  var maxAvgC  = rows.reduce(function(m, r){ return Math.max(m, avgCostOf(r)); }, 0) || 1;
+  var maxLat   = rows.reduce(function(m, r){ return Math.max(m, Number(r.avg_latency_ms || 0)); }, 0) || 1;
+
+  var body = rows.map(function(row, i) {
+    var clr = llmOpColor(row.model_version || row.model || 'unknown', i);
+    var cl  = Number(row.calls || 0);
+    var tok = Number(row.total_tokens || 0);
+    var co  = Number(row.estimated_cost_usd || 0);
+    var lat = Number(row.avg_latency_ms || 0);
+    return '<tr>'
+      + '<td class="llm-op-cell llm-op-cell--ver" title="' + escH(llmVerPurpose(row)) + '">'
+        + '<span class="llm-op-dot" style="background:' + clr + '"></span>'
+        + llmVerCellLabel(row) + '</td>'
+      + llmMeterCell(cl / maxCalls, clr, cl.toLocaleString())
+      + llmMeterCell(tok / maxTok, clr, tok.toLocaleString())
+      + llmMeterCell(co / maxCost, clr, '$' + co.toFixed(6))
+      + llmMeterCell(avgCostOf(row) / maxAvgC, clr, '$' + avgCostOf(row).toFixed(6))
+      + llmMeterCell(lat / maxLat, clr, lat.toFixed(0) + ' ms')
+      + '</tr>';
+  }).join('');
+
+  el.innerHTML = '<table class="mini-table llm-op-table"><thead><tr>'
+    + '<th>Model / config</th><th>Calls</th><th>Token share</th><th>Cost</th>'
+    + '<th>Avg cost</th><th>Avg latency</th>'
+    + '</tr></thead><tbody>' + body + '</tbody></table>';
+}
+
+// What a config row means, built FROM the recorded config rather than from a hardcoded
+// table — a version tag is a hash, so anything written by hand would go stale the moment
+// a setting changes. Explains what the tag is and what each setting does.
+function llmVerPurpose(row) {
+  var out = '';
+  // What this config is FOR: the pipeline steps that ran under it. A version tag is a
+  // hash, so the operation list is the only thing that gives it meaning.
+  var ops = (row.operations || '').split(',').filter(Boolean).sort();
+  if (ops.length) {
+    out += ops.length === 1
+      ? 'Used by: ' + ops[0].replace(/_/g, ' ') + '\n\n'
+      : 'Used by ' + ops.length + ' operations:\n'
+        + ops.map(function(o){ return '  • ' + o.replace(/_/g, ' '); }).join('\n') + '\n\n';
+  }
+  var cfg = row.model_config || null;
+  if (!cfg || typeof cfg !== 'object') {
+    return (out + 'Settings were not recorded for these calls — they predate per-call '
+      + 'config tracking.').trim();
+  }
+  out += 'Settings\n';
+  if (cfg.temperature != null) {
+    out += '  temperature ' + cfg.temperature + ' — how much the wording varies between '
+      + 'runs; low keeps answers consistent\n';
+  }
+  out += cfg.max_tokens != null
+    ? '  max tokens ' + cfg.max_tokens + ' — ceiling on one reply, set where a long '
+      + 'structured answer would otherwise be cut off mid-document\n'
+    : '  max tokens not set — the provider default applies\n';
+  if (cfg.top_p != null) out += '  top_p ' + cfg.top_p + '\n';
+  return out.trim();
+}
+
+// Model name + version tag + the decoded config, on one line for a table cell.
+function llmVerCellLabel(row) {
   var v = row.model_version || 'unknown';
   var isUnknown = (v === 'unknown' || !v);
   var cfg = row.model_config || null;
@@ -1983,48 +2085,10 @@ function llmVerStripLabel(row) {
   } else {
     sub = 'config not recorded';  // legacy 'unknown' rows predate the version feature
   }
-  return '<div class="llm-strip-head">'
-    + '<span class="llm-strip-model">' + escH(row.model || 'unknown') + '</span>'
+  return escH(row.model || 'unknown')
     + '<span class="llm-ver ' + (isUnknown ? 'llm-ver-unknown' : '') + '">' + escH(v) + '</span>'
-    + '</div>'
-    + '<span class="llm-strip-sub">' + sub + '</span>';
-}
-
-// Comparison strips: one row per model-version, a bar normalized to the metric's max + the value.
-// valueOf(row) -> the number to plot (PER-CALL, so versions used a different number of times
-// compare fairly — comparing raw totals would just reward whichever version ran more).
-function renderVersionStrips(containerId, rows, valueOf, fmt) {
-  var el = document.getElementById(containerId);
-  if (!el) return;
-  if (!rows.length) { el.innerHTML = '<div class="empty-state">No model usage recorded yet</div>'; return; }
-  var max = rows.reduce(function(m, r){ return Math.max(m, Number(valueOf(r) || 0)); }, 0) || 1;
-  el.innerHTML = rows.map(function(row) {
-    var val = Number(valueOf(row) || 0);
-    var pct = Math.max(3, Math.round((val / max) * 100));
-    // Same colour for every row — the bars encode the same metric; different colours would
-    // wrongly imply different meaning. (Version identity is carried by the tag chip, not the bar.)
-    var fill = 'var(--pur)';
-    return '<div class="llm-strip">'
-      + '<div class="llm-strip-label">' + llmVerStripLabel(row) + '</div>'
-      + '<div class="llm-strip-bar"><div class="llm-strip-track"><div class="llm-strip-fill" style="width:' + pct + '%;background:' + fill + '"></div></div>'
-      + '<span class="llm-strip-val">' + fmt(val, row) + '</span></div>'
-      + '</div>';
-  }).join('');
-}
-
-function renderCostByModelPanel(data) {
-  // Avg cost PER CALL (total ÷ calls) — a fair per-config comparison, not a volume race.
-  // ("per call" is stated in the card title, so the value stays clean.)
-  renderVersionStrips('costByModelPanel', (data && data.by_model) || [],
-    function(r){ var c = Number(r.calls || 0); return c ? Number(r.estimated_cost_usd || 0) / c : 0; },
-    function(v){ return '$' + v.toFixed(6); });
-}
-
-function renderLatencyByModelPanel(data) {
-  // avg_latency_ms is already an average per call.
-  renderVersionStrips('latencyByModelPanel', (data && data.by_model) || [],
-    function(r){ return Number(r.avg_latency_ms || 0); },
-    function(v){ return v.toFixed(0) + ' ms'; });
+    + '<span class="llm-op-q">?</span>'
+    + '<span class="llm-ver-cfg">' + sub + '</span>';
 }
 
 // Two side-by-side hourly line charts (Cost | Tokens), one coloured line per model+version.
@@ -2032,7 +2096,12 @@ function renderLatencyByModelPanel(data) {
 // tooltip driven in JS (native <title> was unreliable and only on the tiny dot).
 var LLM_TL_COLORS = ['#2563eb', '#7c3aed', '#16a34a', '#d97706', '#db2777', '#dc2626', '#0ea5e9', '#65a30d'];
 function renderLlmTimeTrends(data) {
-  var series = (data && data.time_series) || [];
+  // Same filter as the model/config table: a config whose calls produced no tokens is a
+  // rejected request, not a configuration. Left in, each one drew a lone dot on the axis
+  // and took a colour in the legend.
+  var series = ((data && data.time_series) || []).filter(function(r) {
+    return Number(r.total_tokens || 0) > 0;
+  });
   var legendEl = document.getElementById('llmTimeLegend');
   var costEl = document.getElementById('llmCostTrend');
   var tokEl = document.getElementById('llmTokenTrend');
@@ -2065,8 +2134,25 @@ function renderLlmTimeTrends(data) {
   _llmLineChart(tokEl, hours, keys, byKey, 'tok', function(v){ return v.toLocaleString() + ' tokens'; });
 }
 
-// hour string is "YYYY-MM-DDTHH:00" already in IST (converted in SQL). Show "HH:00".
-function _llmHourLabel(h){ return h.slice(11, 16); }
+// hour string is "YYYY-MM-DDTHH:00" already in IST (converted in SQL).
+var _LLM_MON = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+// Axis tick. Only hours that HAD calls become points, so consecutive points can be days
+// apart — showing the hour alone made three different days' "14:00" look like one hour
+// and the axis appear to run backwards. The date is shown on the first point of each day.
+function _llmHourTick(h, prev) {
+  var hhmm = h.slice(11, 16);
+  if (prev && prev.slice(0, 10) === h.slice(0, 10)) return hhmm;   // same day, hour only
+  return _llmDayLabel(h) + '|' + hhmm;   // '|' splits it onto a second line
+}
+
+function _llmDayLabel(h) {
+  var mon = _LLM_MON[parseInt(h.slice(5, 7), 10) - 1] || h.slice(5, 7);
+  return parseInt(h.slice(8, 10), 10) + ' ' + mon;
+}
+
+// Tooltip header — always the full date, there is no neighbouring point for context.
+function _llmHourLabel(h){ return _llmDayLabel(h) + ' ' + h.slice(11, 16); }
 
 // Compact axis tick label (cost in $, tokens as k).
 function _llmShort(v, metric) {
@@ -2105,7 +2191,17 @@ function _llmLineChart(host, hours, keys, byKey, metric, fmt) {
   // x tick labels + baseline
   s += '<line x1="' + mL + '" y1="' + (mT+ph) + '" x2="' + (W-mR) + '" y2="' + (mT+ph) + '" class="llm-tl-axis"/>';
   hours.forEach(function(h, i){
-    s += '<text x="' + X(i) + '" y="' + (mT+ph+20) + '" text-anchor="middle" class="llm-tl-tick">' + escH(_llmHourLabel(h)) + '</text>';
+    // Two lines when the day changes: the date sits above the hour so a jump of several
+    // days is visible instead of reading as the next hour along.
+    var parts = _llmHourTick(h, i ? hours[i-1] : null).split('|');
+    if (parts.length === 2) {
+      s += '<text x="' + X(i) + '" y="' + (mT+ph+20) + '" text-anchor="middle" class="llm-tl-tick llm-tl-tick-day">' + escH(parts[0]) + '</text>';
+      s += '<text x="' + X(i) + '" y="' + (mT+ph+32) + '" text-anchor="middle" class="llm-tl-tick">' + escH(parts[1]) + '</text>';
+      // A rule marking where one day ends and the next begins.
+      if (i) s += '<line x1="' + (X(i)-(X(i)-X(i-1))/2) + '" y1="' + mT + '" x2="' + (X(i)-(X(i)-X(i-1))/2) + '" y2="' + (mT+ph) + '" class="llm-tl-daysep"/>';
+    } else {
+      s += '<text x="' + X(i) + '" y="' + (mT+ph+20) + '" text-anchor="middle" class="llm-tl-tick">' + escH(parts[0]) + '</text>';
+    }
   });
   s += '<text x="' + (W-mR) + '" y="' + (H-6) + '" text-anchor="end" class="llm-tl-axislbl">Time (IST)</text>';
   // area + line + dots per series
@@ -2730,14 +2826,14 @@ async function loadCaseSummary(conversationId, force) {
     var items = p.summary.open_items || [];
     bodyEl.innerHTML =
       (p.summary.situation ? '<div class="csum-sit">' + escH(p.summary.situation) + '</div>' : '')
+      // Open items now carries only what is NOT a ticket (an unanswered question, a
+      // promise not kept). Empty is the normal case - the tickets themselves are in
+      // the card below - so an empty list renders nothing rather than a heading over
+      // blank space or a "Nothing outstanding" line that contradicts Open Tickets (3).
       + (items.length
-          ? '<div class="csum-lbl">Open items</div><ul class="csum-items">'
+          ? '<div class="csum-lbl">Also outstanding</div><ul class="csum-items">'
             + items.map(function(i) { return '<li>' + escH(i) + '</li>'; }).join('')
             + '</ul>'
-          : '<div class="csum-lbl">Nothing outstanding</div>')
-      + (p.summary.last_contact
-          ? '<div class="csum-lbl">Last contact</div><div class="csum-last">'
-            + escH(p.summary.last_contact) + '</div>'
           : '');
   } catch (e) {
     if (_csumFor !== conversationId) return;
@@ -2749,6 +2845,150 @@ async function loadCaseSummary(conversationId, force) {
 document.addEventListener('click', function(e) {
   var btn = e.target && e.target.closest && e.target.closest('#csum-refresh');
   if (btn && state.convDetail) loadCaseSummary(state.convDetail.conversation_id, true);
+});
+
+// Open Tickets fold. A class toggle on the card — the rows stay in the DOM, so the
+// Resolve buttons and their handlers survive collapsing.
+document.addEventListener('click', function(e) {
+  var btn = e.target && e.target.closest && e.target.closest('#tkt-toggle');
+  if (!btn) return;
+  var card = btn.closest('.tkt-card');
+  if (!card) return;
+  state.tktOpen = !card.classList.contains('on');
+  card.classList.toggle('on', state.tktOpen);
+});
+
+// ── Customer Context — the record, grouped into tabs by one LLM call ─────────
+// ONE call per customer. Every panel is rendered into the page up front and shown by
+// a class toggle, so switching tabs never touches the API.
+//
+// Class names are deliberately cctx-*: the conversation view already owns .viewtab,
+// and a handler selecting a shared tab class would clear both sets when either is
+// clicked.
+var _cctxFor = null;
+// Last payload, kept client-side. renderRight rebuilds the panel on every poll, so
+// without this the card would either blank out or refetch several times a minute.
+var _cctxCache = null;
+
+// Tab order is the reading order for an agent picking up a conversation: what is
+// WRONG first, reference last. Empty categories are dropped rather than greyed out —
+// fewer tabs means wider tabs and no wrapping in a ~260px panel.
+var CCTX_TABS = [
+  ['risk',     'Risk'],
+  ['holdings', 'Holdings'],
+  ['activity', 'Activity'],
+  ['claims',   'Claims'],
+  ['profile',  'Profile']
+];
+
+function cctxRenderItems(items) {
+  return items.map(function(it) {
+    return '<div class="cctx-item">'
+      + '<div class="cctx-row">'
+      + '<span class="cctx-lbl">' + escH(it.label) + '</span>'
+      + '<span class="cctx-val">' + escH(it.value) + '</span>'
+      + '</div>'
+      + (it.sub ? '<div class="cctx-sub">' + escH(it.sub) + '</div>' : '')
+      + '</div>';
+  }).join('');
+}
+
+function cctxRender(payload) {
+  var tabsEl = document.getElementById('cctx-tabs');
+  var bodyEl = document.getElementById('cctx-body');
+  if (!tabsEl || !bodyEl) return;
+
+  if (payload.status === 'raw' && payload.raw) {
+    // Parsing failed. Show what the model actually said rather than nothing — losing
+    // content to a failed guess is worse than showing it unformatted.
+    tabsEl.innerHTML = '';
+    bodyEl.innerHTML = '<div class="cctx-muted">Could not group these records. Raw response:</div>'
+      + '<pre class="cctx-raw">' + escH(payload.raw) + '</pre>';
+    return;
+  }
+
+  var cats = payload.categories || {};
+  var present = CCTX_TABS.filter(function(t) {
+    return (cats[t[0]] || []).length > 0;
+  });
+
+  if (!present.length) {
+    tabsEl.innerHTML = '';
+    bodyEl.innerHTML = '<span class="cctx-muted">'
+      + (payload.status === 'unavailable' ? 'Grouping unavailable right now.'
+         : 'No records on file for this customer.')
+      + '</span>';
+    return;
+  }
+
+  tabsEl.innerHTML = present.map(function(t, i) {
+    var key = t[0], count = (cats[key] || []).length;
+    // Risk carries its count so the agent sees there is a problem before clicking.
+    var badge = key === 'risk'
+      ? '<span class="cctx-count">' + count + '</span>' : '';
+    return '<button type="button" class="cctx-tab' + (i === 0 ? ' on' : '')
+      + '" data-cctx="' + escH(key) + '">' + escH(t[1]) + badge + '</button>';
+  }).join('');
+
+  bodyEl.innerHTML = present.map(function(t, i) {
+    return '<div class="cctx-panel' + (i === 0 ? ' on' : '') + '" data-cctx-panel="'
+      + escH(t[0]) + '">' + cctxRenderItems(cats[t[0]] || []) + '</div>';
+  }).join('');
+}
+
+async function loadCustomerContext(customerId, force) {
+  if (!customerId) return;
+  var bodyEl = document.getElementById('cctx-body');
+  if (!bodyEl) return;
+  // Same customer and we already have the payload: repaint the rebuilt card from
+  // memory. This is the common case — the queue poll re-renders the panel regularly.
+  if (!force && _cctxFor === customerId && _cctxCache) {
+    cctxRender(_cctxCache);
+    return;
+  }
+  _cctxFor = customerId;
+  if (force) _cctxCache = null;
+  bodyEl.innerHTML = '<span class="cctx-muted">Grouping records…</span>';
+  try {
+    var p = await api('/admin/customers/' + encodeURIComponent(customerId)
+      + '/context' + (force ? '?refresh=true' : ''));
+    // The panel may have moved to another customer while this was in flight.
+    if (_cctxFor !== customerId) return;
+    _cctxCache = p;
+    cctxRender(p);
+  } catch (e) {
+    if (_cctxFor !== customerId) return;
+    var el = document.getElementById('cctx-body');
+    var tabs = document.getElementById('cctx-tabs');
+    if (tabs) tabs.innerHTML = '';
+    if (el) el.innerHTML = '<span class="cctx-muted">Context unavailable right now.</span>';
+  }
+}
+
+// Tab switching is a pure class toggle — scoped to .cctx-* so it can never disturb
+// the conversation view's .viewtab set.
+document.addEventListener('click', function(e) {
+  var tab = e.target && e.target.closest && e.target.closest('.cctx-tab');
+  if (!tab) return;
+  var key = tab.getAttribute('data-cctx');
+  var card = tab.closest('.cctx-card');
+  if (!card) return;
+  card.querySelectorAll('.cctx-tab').forEach(function(t) {
+    t.classList.toggle('on', t === tab);
+  });
+  card.querySelectorAll('.cctx-panel').forEach(function(p) {
+    p.classList.toggle('on', p.getAttribute('data-cctx-panel') === key);
+  });
+});
+
+document.addEventListener('click', function(e) {
+  var btn = e.target && e.target.closest && e.target.closest('#cctx-refresh');
+  if (btn && state.convDetail) {
+    var meta = state.convs.find(function(c) {
+      return c.conversation_id === state.convDetail.conversation_id;
+    }) || state.convDetail;
+    if (meta.customer_id) loadCustomerContext(meta.customer_id, true);
+  }
 });
 
 // ── "Why this answer" — per-reply provenance ────────────────────────────────

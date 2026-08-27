@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import time
 from pathlib import Path
 
@@ -285,6 +286,14 @@ class GroqGenerator:
 
         history_text = _format_conversation_history(turns)
         cases = ctx.get("open_cases") or []
+        # Our own earlier status emails quote a ticket list that was true when sent, and a
+        # reply is quoted again by each later reply - so a since-resolved id can outnumber
+        # the authoritative block 4:1 in the prompt. Three prompt rules failed to beat that
+        # repetition (the id kept reappearing, and open_items came back as the stale
+        # "Expected resolution within 9 hours" wording). Redacting is the control that
+        # holds: the model cannot copy an id it never sees. Only ids already known closed
+        # are touched; the surrounding message text is left exactly as it is.
+        history_text = _redact_closed_ticket_ids(history_text, cases)
         cases_text = ""
         if cases:
             lines = ["Open support cases on record:"]
@@ -303,20 +312,39 @@ class GroqGenerator:
         user_prompt = (
             "Summarise this support conversation for the agent taking it over.\n\n"
             "Return ONLY a JSON object with exactly these keys:\n"
-            '{"situation": "<what the customer is dealing with, 1-2 sentences>", '
-            '"open_items": ["<each unresolved item, one short line>"], '
-            '"last_contact": "<what happened most recently, 1 sentence>"}\n\n'
+            '{"situation": "<the case in 2-3 sentences>", '
+            '"open_items": ["<outstanding item that is NOT a ticket>"]}\n\n'
             "Rules:\n"
             "- Use ONLY what appears below. Never infer an outcome, a promise or a date that is not stated.\n"
-            "- If the customer raised several separate matters, give each its own line in open_items.\n"
-            "- Name amounts and reference ids where they appear, so the agent can act without scrolling.\n"
-            "- open_items is [] when nothing is outstanding.\n"
+            "- situation is the summary. Say what the customer is chasing, name the "
+            "specific matter (amount, reference, what went wrong) and say what they have "
+            "already done - how often they have asked, on which channel, and what they "
+            "were last told. Write it for an agent opening this cold.\n"
+            "- Do NOT list the open tickets in open_items. They are shown in full "
+            "beneath this card. open_items is for what is outstanding and is NOT a "
+            "ticket: a promise or callback made and not kept, a date the customer is "
+            "waiting on, a question about something that has no ticket at all.\n"
+            "- A question the customer asked that ALREADY has a ticket is not an open "
+            "item - it IS that ticket. Never quote the customer's question back as an "
+            "open item.\n"
+            "- open_items is [] when there is no such item. That is the normal case - "
+            "never invent one to fill the list, and never restate a ticket to fill it.\n"
+            # Our own earlier status emails sit in the history and quote a ticket list that
+            # was true when sent. That is message TEXT, not a record - a ticket resolved
+            # since must not reappear because an old reply still names it.
+            "- The 'Open support cases on record' block is the only truth about which "
+            "cases are open. Mention a ticket id ONLY if it appears in that block. An id "
+            "that appears in the messages but not in that block is CLOSED: do not name "
+            "it, do not describe it as open or pending, do not count it. Do not copy "
+            "status wording (assignments, expected resolution times) out of an earlier "
+            "reply.\n"
+            "- Name amounts and reference ids where they appear, so the agent can act "
+            "without scrolling.\n"
             # Half the outbound turns in a held conversation are the automatic
-            # "Support Agent will help you shortly" placeholder. Reporting that as the last
-            # contact tells the agent nothing they cannot already see, and hides the real
-            # last exchange.
-            "- For last_contact describe the last SUBSTANTIVE exchange. Ignore automatic "
-            "holding messages such as 'Support Agent will help you with this shortly'.\n"
+            # "Support Agent will help you shortly" placeholder, so describing the latest
+            # exchange means describing that placeholder unless it is excluded.
+            "- Ignore automatic holding messages such as 'Support Agent will help you "
+            "with this shortly' - they are not part of the case.\n"
             "- Plain ASCII punctuation only: ordinary spaces, hyphens and apostrophes.\n"
             "- No markdown, no preamble.\n\n"
             + (f"{cases_text}\n\n" if cases_text else "")
@@ -348,9 +376,100 @@ class GroqGenerator:
             "open_items": [_clean_summary_text(i) for i in items if _clean_summary_text(i)]
             if isinstance(items, list)
             else ([_clean_summary_text(items)] if items else []),
-            "last_contact": _clean_summary_text(parsed.get("last_contact")),
             "model": result.get("model"),
         }
+
+    def categorize_customer_record(self, record_text: str) -> dict | None:
+        """Sort a customer's record fields into the five Customer Context tabs.
+
+        Returns ``{"categories": {...}, "model": ...}`` on success, or
+        ``{"raw": "<model text>", "model": ...}`` when the response could not be parsed
+        as the agreed shape — the caller shows the raw text rather than losing content
+        to a failed guess. ``None`` only when the LLM itself was unavailable.
+
+        The contract is label/value PAIRS, never formatted strings: asking a model for
+        "a readable list" gets a different format on every run (commas, dashes, newlines,
+        nothing) and needs a fragile parser to undo. Structure removes that at the source,
+        and json_mode makes the provider return a document rather than prose around one.
+        """
+        if not record_text.strip():
+            return None
+
+        user_prompt = (
+            "Sort every field below into exactly these five categories.\n\n"
+            "Return ONLY a JSON object with exactly these five keys:\n"
+            '{"profile": [{"label": "...", "value": "..."}], '
+            '"holdings": [], "activity": [], "claims": [], "risk": []}\n\n'
+            "Rules:\n"
+            "- EVERY key must be present. Use [] for a category with no fields.\n"
+            '- Each item is {"label": "...", "value": "..."} with an optional short '
+            '"sub". Never a bare string, never nested objects.\n'
+            # A field name is not context. Left unsaid, the model uses sub as a
+            # provenance label ("dpd", "penalty_details") and spends a whole row on it.
+            '- "sub" is ONLY for a reference id, a date or a status the agent needs '
+            '(e.g. "TXN0001000003 - pending"). NEVER the source field\'s name, and never '
+            "a restatement of the label or value. Omit it when there is nothing to add.\n"
+            '- "label" NAMES the thing (what an agent scans down the left). "value" is '
+            "what it IS. Never put an identifier in value and its description in label - "
+            '"Debit IMPS 5776.55"/"TXN0001000003" is backwards; write '
+            '"IMPS to Samarth Thaker"/"Rs.5776.55" with sub "TXN0001000003 - pending".\n'
+            '- "value" carries the value EXACTLY as given - never round, reformat or '
+            "invent one.\n"
+            "- Omit any field whose value is empty, zero, 'N/A' or 'None'.\n"
+            '- "risk" holds only fields signalling a problem: days past due, fraud or '
+            "chargeback flags, balance below minimum, penalties, stuck or failed "
+            "payments, rejected claims. Healthy fields stay in their own category.\n"
+            # With one card, "Mastercard Classic - " on every row is ~20 wasted
+            # characters in a narrow panel and tells the agent nothing.
+            "- Keep labels SHORT (2-4 words). Prefix a label with its instrument ONLY "
+            "when the customer holds two or more of that kind and the rows would "
+            'otherwise be ambiguous. With a single card write "Credit limit", not '
+            '"Mastercard Classic - Credit Limit".\n'
+            # Short must not mean anonymous. Stripped to the channel alone, eight
+            # transactions render as an unreadable column of "UPI", "IMPS", "UPI".
+            "- For a transaction the label names WHO it was to, not just the channel: "
+            '"IMPS to Samarth Thaker", never "IMPS" or a status like '
+            '"Debited-Pending". For a claim, name the claim type.\n'
+            # Without a ceiling the model itemises every field of every record and runs
+            # past the token budget mid-document, which json_mode rejects outright.
+            "- At most 8 items per category. Keep only what an agent would act on.\n"
+            "- Plain ASCII only. No markdown, no preamble.\n\n"
+            + record_text
+        )
+
+        result = self._generate(
+            system_prompt=(
+                "You organise a banking customer's records into fixed categories for a "
+                "support agent's screen. Return ONLY valid JSON. Never explain, never "
+                "use markdown."
+            ),
+            user_prompt=user_prompt,
+            operation="customer_context",
+            metadata={"record_chars": len(record_text)},
+            json_mode=True,
+            # Sized against two measured limits, not guessed:
+            #  - json_mode rejects a TRUNCATED document outright (400 json_validate_
+            #    failed, empty failed_generation) instead of returning partial text, so
+            #    the ceiling must clear the whole document. Measured: 1,648 completion
+            #    tokens for a customer with 14 records.
+            #  - max_tokens is RESERVED against the 8000 tokens-per-minute cap on this
+            #    tier, so an over-generous ceiling 413s on its own. 8192 made a ~1.2K
+            #    prompt request total 9735 and failed.
+            # 4000 clears the document with ~2x margin and leaves TPM room for the
+            # pipeline's other calls in the same minute.
+            max_tokens=4000,
+        )
+        if not result["llm_used"]:
+            return None
+
+        text = (result.get("text") or "").strip()
+        try:
+            parsed = json.loads(text[text.find("{") : text.rfind("}") + 1])
+        except (json.JSONDecodeError, ValueError):
+            return {"raw": text, "model": result.get("model")}
+        if not isinstance(parsed, dict):
+            return {"raw": text, "model": result.get("model")}
+        return {"categories": parsed, "model": result.get("model")}
 
     def status(self, check_connection: bool = False) -> dict:
         status: dict = {
@@ -379,6 +498,8 @@ class GroqGenerator:
         user_prompt: str,
         operation: str = "llm_generation",
         metadata: dict | None = None,
+        json_mode: bool = False,
+        max_tokens: int | None = None,
     ) -> dict:
         # The sampling config that defines this call's "version" (see llm_usage._config_version).
         # Kept in one place so every record_llm_call below stamps the same version tag.
@@ -398,6 +519,17 @@ class GroqGenerator:
             )
             return result
         started = time.perf_counter()
+        # JSON mode makes the provider return a JSON document rather than prose that
+        # happens to contain one. Opt-in: the older callers here scrape the braces out
+        # of free text and must keep behaving exactly as they do today.
+        extra: dict = {"response_format": {"type": "json_object"}} if json_mode else {}
+        # A reasoning model spends completion tokens thinking BEFORE it emits output, so
+        # a long structured answer can hit the provider's default ceiling mid-document.
+        # In json_mode that returns a 400 (json_validate_failed) rather than a truncated
+        # string, so callers producing long JSON must raise the ceiling explicitly.
+        if max_tokens:
+            extra["max_tokens"] = max_tokens
+            call_params["max_tokens"] = max_tokens
         try:
             response = self._groq.chat.completions.create(
                 model=self.model,
@@ -407,6 +539,7 @@ class GroqGenerator:
                 ],
                 temperature=call_params["temperature"],
                 timeout=self.timeout,
+                **extra,
             )
             text = response.choices[0].message.content.strip()
             latency_ms = round((time.perf_counter() - started) * 1000, 2)
@@ -480,6 +613,20 @@ def _clean_summary_text(value) -> str:
         text = text.replace(exotic, plain)
     return " ".join(text.split()).strip()
 
+
+def _redact_closed_ticket_ids(history_text: str, open_cases: list[dict]) -> str:
+    """Blank out ticket ids in the history that are not in the open-cases block.
+
+    The open-cases block is the system of record for what is open. An id that appears
+    only in message text is closed business quoted from an older reply, and leaving it
+    in the prompt is what let a resolved ticket reappear in a summary.
+    """
+    if not history_text:
+        return history_text
+    open_ids = {str(case.get("ticket_id") or "") for case in (open_cases or [])}
+    def _swap(match: 're.Match') -> str:
+        return match.group(0) if match.group(0) in open_ids else "[closed ticket]"
+    return re.sub(r"tkt_[0-9a-f]{6,}", _swap, history_text)
 
 def _format_conversation_history(recent_turns: list[dict]) -> str:
     if not recent_turns:
