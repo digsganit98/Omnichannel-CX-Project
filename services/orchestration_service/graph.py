@@ -775,6 +775,12 @@ class OrchestrationGraph:
                 # Same key write_incoming_interaction used, or this MERGEs a second node
                 # and the per-message one never leaves 'open'.
                 turn_id=state.inbound_turn_id,
+                # Cross-customer learning key: the KIND of problem, not this customer's
+                # account. ticket_scope is already "intent:subtype" (e.g.
+                # "transaction_dispute:imps"), the same distinction select_ticket uses to
+                # tell a card dispute from a UPI one. Falls back to the bare intent when a
+                # turn produced no ticket.
+                memory_key=_memory_key(state),
             )
             if state.ticket:
                 neo4j_writer.upsert_ticket_node(
@@ -969,6 +975,22 @@ def _graph_identifiers(state: "OrchestrationState") -> list[str]:  # type: ignor
         seen.add(c)
         out.append(c)
     return out
+
+
+def _memory_key(state) -> str:
+    """The ResolutionMemory key: the kind of problem, shared across customers.
+
+    Prefers the ticket's ticket_scope ("transaction_dispute:imps"), which already
+    encodes intent + subtype. Without a ticket, falls back to "<intent>:general" so
+    unticketed turns still group by intent rather than colliding into one bucket.
+    """
+    scope = None
+    if getattr(state, "ticket", None) is not None:
+        scope = (state.ticket.metadata or {}).get("ticket_scope")
+    if scope:
+        return str(scope)
+    intent = state.analysis.intent.value if state.analysis else "unknown"
+    return f"{intent}:general"
 
 
 def _extract_product_ref(state: "OrchestrationState") -> str:  # type: ignore[name-defined]

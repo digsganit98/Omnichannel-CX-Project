@@ -432,6 +432,7 @@ def update_interaction_resolution(
     embedding_str: str,
     urgency: str,
     turn_id: str | None = None,
+    memory_key: str | None = None,
 ) -> None:
     """Update the :Interaction node with the AI resolution and create/update ResolutionMemory.
 
@@ -469,20 +470,26 @@ def update_interaction_resolution(
                 i.updated_at           = $now
 
             WITH i
-            MERGE (rm:ResolutionMemory {{product_id: $product_id, intent_type: $intent}})
+            MERGE (rm:ResolutionMemory {{memory_key: $memory_key}})
             ON CREATE SET
                 rm.id                   = $mem_id,
+                rm.intent_type          = $intent,
+                rm.product_id           = $product_id,
                 rm.query_pattern        = i.message,
                 rm.resolution_text      = $resolution,
                 rm.resolution_embedding = $embedding,
                 rm.verified             = false,
-                rm.times_reused         = 1,
+                rm.times_reused         = 0,
                 rm.created_at           = $now
             ON MATCH SET
-                rm.resolution_text      = $resolution,
-                rm.resolution_embedding = $embedding,
-                rm.times_reused         = rm.times_reused + 1,
-                rm.updated_at           = $now
+                rm.intent_type          = $intent,
+                rm.updated_at           = $now,
+                // A human-verified answer IS the reward signal: the next unverified
+                // generation must never overwrite it. Only refresh while unverified.
+                rm.resolution_text      = CASE WHEN coalesce(rm.verified, false)
+                                               THEN rm.resolution_text ELSE $resolution END,
+                rm.resolution_embedding = CASE WHEN coalesce(rm.verified, false)
+                                               THEN rm.resolution_embedding ELSE $embedding END
 
             MERGE (i)-[:CREATED_MEMORY]->(rm)
 
@@ -497,6 +504,7 @@ def update_interaction_resolution(
                 "sentiment": sentiment or "",
                 "urgency": urgency or "",
                 "product_id": product_id or "general",
+                "memory_key": memory_key or f"{intent or 'unknown'}:general",
                 "embedding": embedding_str or "",
                 "mem_id": mem_id,
                 "now": now,

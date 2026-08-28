@@ -568,18 +568,20 @@ def _load_interactions(client, wb) -> int:
         client.write(
             """
             MATCH (i:Interaction {conversation_id: $conversation_id})
-            MERGE (rm:ResolutionMemory {product_id: $product_id, intent_type: $intent_type})
+            MERGE (rm:ResolutionMemory {memory_key: $memory_key})
             ON CREATE SET
                 rm.id = $mem_id,
+                rm.intent_type = $intent_type,
+                rm.product_id = $product_id,
                 rm.query_pattern = i.message,
                 rm.resolution_text = i.resolution,
                 rm.verified = $verified,
-                rm.times_reused = 1,
+                rm.times_reused = 0,
                 rm.created_at = i.created_at
             ON MATCH SET
+                rm.intent_type = $intent_type,
                 rm.resolution_text = i.resolution,
                 rm.verified = $verified,
-                rm.times_reused = rm.times_reused + 1,
                 rm.updated_at = i.updated_at
             MERGE (i)-[:CREATED_MEMORY]->(rm)
             """,
@@ -587,6 +589,10 @@ def _load_interactions(client, wb) -> int:
                 "conversation_id": conversation_id,
                 "product_id": product_ref,
                 "intent_type": intent,
+                # Must match the runtime key in writer.update_interaction_resolution, or a
+                # seeded memory can never be found by search_resolution_memory. Seed rows
+                # carry no ticket_scope, so they take the "<intent>:general" fallback.
+                "memory_key": f"{intent or 'unknown'}:general",
                 "mem_id": "RESMEM-" + conversation_id,
                 "verified": verified,
             },

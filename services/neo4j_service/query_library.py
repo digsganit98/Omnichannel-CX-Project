@@ -127,18 +127,25 @@ def get_customer_360(client, phone_or_email: str) -> dict:
 
 # ── Resolution Memory ─────────────────────────────────────────────────────────
 
-def search_resolution_memory(client, product_id: str, intent_type: str) -> dict | None:
-    """Return a cached resolution for a (product_id, intent_type) combination.
+def search_resolution_memory(client, memory_key: str) -> dict | None:
+    """Return a human-verified resolution for a memory_key ("intent:subtype").
 
-    Returns None if not found or if the memory is not yet verified.
-    Only returns verified answers to prevent stale/wrong cached responses.
+    The key is the KIND OF PROBLEM, not one customer's account: keying on a
+    customer's own loan/claim id (the previous behaviour) made every memory
+    unreachable by anyone else, while the "general" fallback collided across
+    unrelated matters. Keying on ticket_scope is what lets a resolution verified
+    for one customer answer another customer's same problem.
+
+    Returns None unless the memory is verified — an unverified memory is a
+    candidate awaiting human approval, never a servable answer.
     """
-    if client is None or not product_id or not intent_type:
+    if client is None or not memory_key:
         return None
     try:
         rows = client.query(
             """
-            MATCH (rm:ResolutionMemory {product_id: $product_id, intent_type: $intent})
+            MATCH (rm:ResolutionMemory {memory_key: $memory_key})
+            WHERE coalesce(rm.verified, false) = true
             RETURN rm.resolution_text AS resolution,
                    rm.times_reused   AS times_reused,
                    rm.verified       AS verified,
@@ -146,7 +153,7 @@ def search_resolution_memory(client, product_id: str, intent_type: str) -> dict 
             ORDER BY rm.times_reused DESC
             LIMIT 1
             """,
-            {"product_id": product_id, "intent": intent_type},
+            {"memory_key": memory_key},
         )
         return rows[0] if rows else None
     except Exception:

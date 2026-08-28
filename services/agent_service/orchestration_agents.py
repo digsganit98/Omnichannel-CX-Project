@@ -224,6 +224,17 @@ class IntentClassificationAgent:
 
 # ── Agent 2: Query / Complaint Resolution ───────────────────────────────────
 
+# Intents whose answers are PROCEDURAL — the steps are the same for every customer, so a
+# verified answer is safely reusable across customers. Deliberately excluded: anything whose
+# answer carries the customer's own figures or case specifics (account_balance_inquiry,
+# transaction_dispute, loan_status, claim_status, ticket_status...), plus fraud_report and
+# human_escalation, where a cached reply must never stand in for a live assessment.
+MEMORY_ELIGIBLE_INTENTS = {
+    Intent.KYC_UPDATE.value,
+    Intent.GENERAL_INQUIRY.value,
+}
+
+
 class QueryResolutionAgent:
     """Routes to ticket lookup, Neo4j (transactional), or RAG/KB based on intent."""
 
@@ -245,16 +256,24 @@ class QueryResolutionAgent:
         channel = context.get("channel", "")
 
         # ── Priority 0: ResolutionMemory cache (agent-verified cross-customer answers) ──
-        # Only for non-sensitive, non-ticket intents. Verified = human agent approved it.
-        # Broad ResolutionMemory keys are unsafe for customer-facing FAQs. Until memory
-        # hits are semantically validated, let KB/graph retrieval answer the live query.
-        memory_excluded_intents = {intent_item.value for intent_item in Intent}
-        if intent and intent not in memory_excluded_intents and self.neo4j_client:
+        # An answer a human agent approved for THIS KIND of problem, reused for another
+        # customer with the same problem. Verified = a human sent it unedited.
+        #
+        # This gate was previously `intent not in {every Intent value}`, which can never be
+        # true — the cache was switched off for every real message. It was disabled on
+        # purpose: keyed on the customer's own product id, a hit could serve one customer's
+        # particulars ("your outstanding is Rs.91,822") to somebody else. Two changes make
+        # it safe to run: memories are now keyed by ticket_scope (the kind of problem), and
+        # only intents whose answers are PROCEDURAL are eligible — anything whose answer
+        # embeds an amount, a balance or a case's specifics stays excluded and is answered
+        # live from the graph/KB below.
+        if intent in MEMORY_ELIGIBLE_INTENTS and self.neo4j_client:
             try:
                 from services.neo4j_service.query_library import search_resolution_memory
-                graph_ctx = context.get("graph_context", {})
-                product_id = _derive_product_id_for_memory(intent, graph_ctx)
-                memory = search_resolution_memory(self.neo4j_client, product_id, intent)
+                active_ticket = context.get("active_ticket") or {}
+                scope = (active_ticket.get("metadata") or {}).get("ticket_scope")
+                memory_key = str(scope) if scope else f"{intent}:general"
+                memory = search_resolution_memory(self.neo4j_client, memory_key)
                 if memory and memory.get("verified") and memory.get("resolution"):
                     cached_answer = memory["resolution"]
                     return QueryResolution(
@@ -784,12 +803,3 @@ def _salutation(customer_name: str) -> str:
     return name
 
 
-def _derive_product_id_for_memory(intent: str, graph_ctx: dict) -> str:
-    """Derive the product_id key for ResolutionMemory lookup from intent + graph context."""
-    if "loan" in intent:
-        loans = graph_ctx.get("loans", [])
-        return loans[0].get("loan_id", "loan_general") if loans else "loan_general"
-    if any(k in intent for k in ("claim", "insurance", "policy")):
-        claims = graph_ctx.get("claims", [])
-        return claims[0].get("claim_id", "insurance_general") if claims else "insurance_general"
-    return "general"
