@@ -574,15 +574,97 @@ def test_customer_message_can_resolve_active_ticket_without_rag():
     assert closed.rag_contexts == []
     assert repo.get_ticket(opened.ticket_id)["status"] == TicketStatus.RESOLVED.value
     assert "marked as resolved" in closed.message
+    # The customer has an open case, so check_has_open_case routes into the ticket
+    # branch; detect_ticket_action then finds a close request and select_ticket_to_resolve
+    # picks which one (only one candidate here, so no clarification is needed).
     assert [entry["step"] for entry in closed.workflow_trace] == [
         "receive_message",
         "resolve_identity",
         "load_conversation_context",
+        "check_has_open_case",
         "detect_ticket_action",
+        "select_ticket_to_resolve",
         "resolve_ticket",
         "send_outbound_reply",
         "persist_audit_events",
     ]
+
+
+def test_has_open_case_gate_routes_on_customer_state_not_message_content():
+    """The gate answers "does this customer have a case", not "is this a close request".
+
+    A customer with an open ticket asking something unrelated must still take the ticket
+    branch (has_open_case=1) — the earlier version of this node keyed on the message being
+    a resolution, so a customer with three open cases asking a fresh question read 0.
+    """
+    repo = SQLiteCXRepository(":memory:")
+    workflow = graph(repo)
+
+    # Distinct message ids: whatsapp_message() defaults to "wamid-1", and a repeat of an
+    # already-seen provider message id is correctly suppressed as a duplicate delivery.
+    first = workflow.run(
+        whatsapp_message(message_id="case-gate-1", text="Someone used my card without my permission.")
+    )
+    steps = [entry["step"] for entry in first.workflow_trace]
+    gate = [e for e in first.workflow_trace if e["step"] == "check_has_open_case"][0]
+    # No case existed when this turn arrived, so the ticket branch is skipped outright.
+    assert gate["details"]["has_open_case"] == 0
+    assert "detect_ticket_action" not in steps
+    assert first.ticket_id
+
+    second = workflow.run(
+        whatsapp_message(message_id="case-gate-2", text="What are the requirements for a personal loan?")
+    )
+    gate2 = [e for e in second.workflow_trace if e["step"] == "check_has_open_case"][0]
+    steps2 = [entry["step"] for entry in second.workflow_trace]
+    # Same customer now HAS an open case, so the gate is 1 even though this message is an
+    # ordinary question — and detect_ticket_action correctly declines to close anything.
+    assert gate2["details"]["has_open_case"] == 1
+    assert "detect_ticket_action" in steps2
+    assert "resolve_ticket" not in steps2
+    assert second.resolved is False
+
+
+def test_select_ticket_asks_which_when_two_open_tickets_share_a_scope():
+    """Two open cases of the same kind must produce a question, not a guess."""
+    from services.agent_service.orchestration_agents import TicketCreationAgent
+    from services.ticket_service.ticket_manager import TicketManager
+
+    repo = SQLiteCXRepository(":memory:")
+    agent = TicketCreationAgent(TicketManager(repo))
+
+    def ticket(tid, intent, scope):
+        return {"ticket_id": tid, "intent": intent, "metadata": {"ticket_scope": scope}}
+
+    card_a = ticket("tkt_aaaaaaaaaaaa", "transaction_dispute", "transaction_dispute:card")
+    card_b = ticket("tkt_bbbbbbbbbbbb", "transaction_dispute", "transaction_dispute:card")
+    upi = ticket("tkt_cccccccccccc", "transaction_dispute", "transaction_dispute:upi")
+
+    def select(text, active, owned):
+        return agent.select_ticket(
+            whatsapp_message(text=text), {"active_ticket": active, "customer_tickets": owned}
+        )
+
+    # One candidate of that kind -> resolve it outright.
+    assert select("yes resolved", card_a, [card_a]).target_ticket_id == "tkt_aaaaaaaaaaaa"
+
+    # Two of the SAME scope and no id named -> ask, and resolve nothing.
+    ambiguous = select("yes resolved", card_a, [card_a, card_b])
+    assert ambiguous.needs_clarification is True
+    assert ambiguous.target_ticket_id is None
+    assert {c["ticket_id"] for c in ambiguous.candidates} == {"tkt_aaaaaaaaaaaa", "tkt_bbbbbbbbbbbb"}
+
+    # A card dispute and a UPI dispute are different matters despite one intent.
+    assert select("yes resolved", card_a, [card_a, upi]).target_ticket_id == "tkt_aaaaaaaaaaaa"
+
+    # An explicitly named id wins over the ambiguity.
+    named = select("please close tkt_bbbbbbbbbbbb", card_a, [card_a, card_b])
+    assert named.target_ticket_id == "tkt_bbbbbbbbbbbb"
+
+    # An id the customer does NOT own is ignored rather than honoured.
+    foreign = select("close tkt_ffffffffffff", card_a, [card_a, card_b])
+    assert foreign.needs_clarification is True
+    assert foreign.target_ticket_id is None
 
 
 def test_restart_persistence(tmp_path):
@@ -1528,11 +1610,14 @@ def test_orchestration_trace_records_explicit_agent_workflow():
     # proceeds through the full agent chain instead of being rejected as unregistered.
     response = graph(repo).run(whatsapp_message(text="What are the requirements for a personal loan?"))
     steps = [entry["step"] for entry in response.workflow_trace]
+    # No open case for this customer, so check_has_open_case routes straight to the
+    # Agent 1 chain — detect_ticket_action is skipped entirely rather than run and
+    # discarded, since there is nothing to close.
     assert steps == [
         "receive_message",
         "resolve_identity",
         "load_conversation_context",
-        "detect_ticket_action",
+        "check_has_open_case",
         "classify_intent",
         "validate_customer",
         "retrieve_knowledge",

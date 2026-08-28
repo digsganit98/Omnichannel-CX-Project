@@ -43,9 +43,9 @@ WORKFLOW_EDGES = [
     ("__start__", "receive_message"),
     ("receive_message", "resolve_identity"),
     ("resolve_identity", "load_conversation_context"),
-    ("load_conversation_context", "detect_ticket_action"),
-    ("detect_ticket_action", "check_has_ticket"),
-    ("check_has_ticket", "select_ticket_to_resolve | classify_intent [Agent 1]"),
+    ("load_conversation_context", "check_has_open_case"),
+    ("check_has_open_case", "detect_ticket_action | classify_intent [Agent 1]"),
+    ("detect_ticket_action", "select_ticket_to_resolve | classify_intent [Agent 1]"),
     ("select_ticket_to_resolve", "resolve_ticket | send_outbound_reply (ask which ticket)"),
     ("resolve_ticket", "send_outbound_reply"),
     ("classify_intent [Agent 1]", "validate_customer"),
@@ -181,8 +181,8 @@ class OrchestrationGraph:
         workflow.add_node("receive_message", self._receive_message)
         workflow.add_node("resolve_identity", self._resolve_identity)
         workflow.add_node("load_conversation_context", self._load_context)
+        workflow.add_node("check_has_open_case", self._check_has_open_case)
         workflow.add_node("detect_ticket_action", self._detect_ticket_action)
-        workflow.add_node("check_has_ticket", self._check_has_ticket)
         workflow.add_node("select_ticket_to_resolve", self._select_ticket_to_resolve)
         workflow.add_node("resolve_ticket", self._resolve_ticket)
 
@@ -206,11 +206,18 @@ class OrchestrationGraph:
         workflow.add_edge(START, "receive_message")
         workflow.add_edge("receive_message", "resolve_identity")
         workflow.add_edge("resolve_identity", "load_conversation_context")
-        workflow.add_edge("load_conversation_context", "detect_ticket_action")
-        workflow.add_edge("detect_ticket_action", "check_has_ticket")
+        workflow.add_edge("load_conversation_context", "check_has_open_case")
+        # The customer's case state decides the branch BEFORE anything inspects the
+        # message: no open case and there is nothing to close or ask about, so the turn
+        # goes straight to the Agent 1 chain.
         workflow.add_conditional_edges(
-            "check_has_ticket",
-            self._route_has_ticket,
+            "check_has_open_case",
+            self._route_has_open_case,
+            {"detect_ticket_action": "detect_ticket_action", "classify_intent": "classify_intent"},
+        )
+        workflow.add_conditional_edges(
+            "detect_ticket_action",
+            self._route_ticket_action,
             {"select_ticket_to_resolve": "select_ticket_to_resolve", "classify_intent": "classify_intent"},
         )
         workflow.add_conditional_edges(
@@ -430,25 +437,47 @@ class OrchestrationGraph:
                        action=state.ticket_action.action.value, reason=state.ticket_action.reason)
         return {"runtime": state}
 
-    # ── has_ticket gate + ticket-side selection ────────────────────────────
+    # ── open-case gate + ticket-side selection ─────────────────────────────
 
-    def _check_has_ticket(self, graph_state: GraphState) -> dict:
-        """Binary node: 1 when this turn is a confirmed ticket-resolution action.
+    def _check_has_open_case(self, graph_state: GraphState) -> dict:
+        """Binary node: 1 when this customer has at least one OPEN ticket, else 0.
 
-        Materializes the routing decision as an explicit 0/1 field on state (rather than
-        just a Literal computed inline in a conditional-edge callback) so it's visible in
-        the workflow trace and reusable by anything downstream that needs to know "are we
-        on the ticket branch or the query branch" without re-deriving it.
+        The question is about the CUSTOMER's state, not about this message — someone with
+        three open cases asking a brand-new question is still 1. That state decides which
+        half of the graph the turn belongs in, and it is settled once, here, immediately
+        after load_conversation_context has fetched the tickets.
+
+        Establishing it as a node rather than an inline lambda matters for two reasons.
+        It is visible: the 0/1 shows up in the workflow trace, so the branch a turn took
+        can be read off the record instead of inferred. And it is single-sourced: every
+        step below reads this one answer rather than re-deriving its own, which is exactly
+        how a customer with no tickets used to slip past a local `if tickets:` into RAG and
+        be handed an escalation ticket they never asked for.
+
+        Counted from customer_tickets — all open tickets on ANY channel, not just this
+        conversation's active one — because a customer who opened a case on WhatsApp and
+        wrote in by email has an open case either way.
         """
         state = graph_state["runtime"]
-        state.has_ticket = 1 if state.ticket_action.action == TicketAction.RESOLVE else 0
-        self._complete(state, WorkflowStep.CHECK_HAS_TICKET, "workflow_automation_agent",
-                       has_ticket=state.has_ticket)
+        open_tickets = state.context.get("customer_tickets") or []
+        state.has_open_case = 1 if open_tickets else 0
+        self._complete(state, WorkflowStep.CHECK_HAS_OPEN_CASE, "workflow_automation_agent",
+                       has_open_case=state.has_open_case, open_ticket_count=len(open_tickets))
         return {"runtime": state}
 
     @staticmethod
-    def _route_has_ticket(graph_state: GraphState) -> Literal["select_ticket_to_resolve", "classify_intent"]:
-        return "select_ticket_to_resolve" if graph_state["runtime"].has_ticket == 1 else "classify_intent"
+    def _route_has_open_case(graph_state: GraphState) -> Literal["detect_ticket_action", "classify_intent"]:
+        """No open case → nothing to close and nothing to ask about; answer the question."""
+        return "detect_ticket_action" if graph_state["runtime"].has_open_case == 1 else "classify_intent"
+
+    @staticmethod
+    def _route_ticket_action(graph_state: GraphState) -> Literal["select_ticket_to_resolve", "classify_intent"]:
+        """Within the ticket branch: is this turn asking to CLOSE a case, or something else?"""
+        return (
+            "select_ticket_to_resolve"
+            if graph_state["runtime"].ticket_action.action == TicketAction.RESOLVE
+            else "classify_intent"
+        )
 
     def _select_ticket_to_resolve(self, graph_state: GraphState) -> dict:
         """Disambiguation only — decide WHICH ticket, kept separate from resolve_ticket

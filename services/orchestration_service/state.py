@@ -17,8 +17,8 @@ class WorkflowStep(StrEnum):
     RECEIVE_MESSAGE = "receive_message"
     RESOLVE_IDENTITY = "resolve_identity"
     LOAD_CONVERSATION_CONTEXT = "load_conversation_context"
+    CHECK_HAS_OPEN_CASE = "check_has_open_case"
     DETECT_TICKET_ACTION = "detect_ticket_action"
-    CHECK_HAS_TICKET = "check_has_ticket"
     SELECT_TICKET_TO_RESOLVE = "select_ticket_to_resolve"
     CLASSIFY_INTENT = "classify_intent"
     VALIDATE_CUSTOMER = "validate_customer"
@@ -45,9 +45,14 @@ class OrchestrationState(BaseModel):
     conversation: dict | None = None
     context: dict = Field(default_factory=dict)
     ticket_action: TicketActionDecision = Field(default_factory=TicketActionDecision)
-    # Binary flag set by the check_has_ticket node: 1 when this turn is a ticket-resolution
-    # action (routes into the ticket branch), 0 otherwise (routes into the Agent 1 chain).
-    has_ticket: int = 0
+    # Binary flag set by the check_has_open_case node: 1 when this customer has at least
+    # one OPEN ticket, 0 when they have none. It answers "what state is this customer in",
+    # not "what is this message" — a customer with three open cases asking a fresh question
+    # is still 1. Established once, immediately after the tickets are loaded, so every step
+    # below reads one answer instead of each re-deriving its own (which is how a zero-ticket
+    # customer used to fall past `if tickets:` into RAG and be handed a ticket they never
+    # asked for).
+    has_open_case: int = 0
     # Set by select_ticket_to_resolve once the target ticket is unambiguous (either the
     # customer named it explicitly, or it's the only open ticket of that kind).
     target_ticket_id: str | None = None
