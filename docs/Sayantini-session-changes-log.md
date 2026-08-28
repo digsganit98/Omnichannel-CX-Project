@@ -133,6 +133,12 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 89 — The case summary listed tickets that were already resolved:** resolving a ticket is not a new turn, so the turn-keyed cache never invalidated and the card kept the ticket; `resolveTicket` now forces a regeneration, the same call the Refresh button makes. That exposed the real defect - the prompt said "Use ONLY what appears below" and the history IS below, so the model reproduced a ticket list quoted from one of our own older status emails.
 - **Fix 90 — The case summary was a second copy of the ticket list:** situation read "Customer wants to know the status of their open tickets" and open_items restated the titles the Open Tickets card already shows with a status pill and a Resolve button; situation now carries the case (matter, amount, what the customer has already done) and open_items is re-scoped to what is outstanding and is NOT a ticket, so it is usually empty and the section hides.
 
+- **Merged Digvijay's branch:** his ticket-disambiguation + `ticket_status` fall-through fixes, built on this branch's Aug 24 tip and already on `main`; zero conflicts, all Session 16/17 fixes verified intact.
+- **Fix 91 — Resolution memory keyed by the problem, not the customer:** `MERGE` used the customer's own loan/claim id, so every such memory sat unreachable at `times_reused=1` while everything else collided into `"general"` (one node at 23); re-keyed on `ticket_scope`, verified text no longer overwritten by the next unverified generation, and the read gate (`intent not in {every Intent}` — never true) re-enabled behind a procedural-intent allow-list.
+- **Fix 92 — An agent's approval now verifies the answer:** nothing at runtime ever set `verified`, so every memory written from a real conversation was permanently unservable; sending a held draft unedited now verifies it, editing keeps it unverified and stores the agent's wording as the next candidate. Reached via the draft's `inbound_turn_id` → `:Interaction` → `[:CREATED_MEMORY]`, no schema change.
+- **Fix 93 — `has_open_case` gate:** replaces the merged `has_ticket` node, which set 1 only for a confirmed close request (so a customer with three open cases asking a question read 0); now answers what its name says, sits where the tickets are already loaded, and a customer with no case skips the ticket branch entirely.
+- **Fix 94 — Channel filter bar back to counts that add up:** the merge changed the chips to request counts, and a cross-channel ticket is one request under "All" but appears under both chips (All=5 vs 2+3+2=7); reverted to turn counts, which sum by construction. Also removes `visibleUnitCount`, which had no `draft_id` branch and counted one offer sent to two channels as two.
+
 ---
 
 ## Session 1 — 2026-07-14
@@ -3633,3 +3639,133 @@ inbound email handling and Python source is baked into the image.
   the stored text of older turns still carries the quote. Also worth knowing: the stored sentiment is
   not purely the LLM's - `_apply_guardrails` lets the same keyword list override it toward negative,
   never away from it.
+
+---
+
+## Session 18 — 2026-08-28
+
+Branch: `Sayantini-phase2-ui-changes`. Started from "what extra work has been done in Digvijay's
+branch", and ended in the learning loop, because that is what his `has_ticket` node was reaching for.
+
+### Merging Digvijay's branch
+His two commits were built on `899683e` — this branch's tip on Aug 24 — and he merged this branch
+into his on Aug 27; `origin/main` now points at that merge. So his work was already on main and this
+branch was the one behind. Merged with `--no-ff`; **zero conflicts**, and `_redact_closed_ticket_ids`,
+`strip_quoted_reply` and the `still_open` fix were each verified present afterwards.
+
+**A regression I reported and then had to withdraw.** The merged tree failed 8 tests against a
+pre-merge 5, and I called the third failure — `test_distinct_l3_fraud_incidents_create_distinct_tickets`
+— a real regression, on the strength of one comparison. It is not. Running `test_phase1.py` **alone**
+on the *pre-merge* tree fails it too: the test is order-dependent, has been since Session 15, and two
+new workflow steps were merely enough to tip it. The merge cost exactly the **2** stale step-sequence
+assertions predicted.
+
+### Fix 91 — Resolution memory was keyed so that nothing could ever be reused
+`ResolutionMemory` is the cross-customer learning store, and three things stopped it working.
+
+**The key was the customer.** `MERGE` ran on `(product_id, intent_type)` where `product_id` came from
+the customer's own records — their loan id, their claim id. Measured in the live graph: every such
+memory sits at `times_reused=1`, unreachable by anyone else, while everything without a product fell
+back to the literal string `"general"` and collided — one node on `("general", "transaction_dispute")`
+at **23**, standing for 23 unrelated disputes. Re-keyed on `ticket_scope`
+(`"transaction_dispute:imps"`), which already encodes intent + subtype and is the same distinction
+`select_ticket` uses to tell a card dispute from a UPI one.
+
+**`ON MATCH` overwrote verified answers** while incrementing the counter, so a human-approved answer
+was replaced by the next unverified generation and `times_reused` measured collisions rather than
+reuse.
+
+**The read gate could never fire.** `intent not in {every Intent value}` is never true — Priority 0
+has been dead code for every real message. The comment says why it was disabled: with a
+customer-specific key, a hit could serve one customer's particulars to somebody else. Re-enabled
+behind an explicit allow-list of intents whose answers are **procedural** (`kyc_update`,
+`general_inquiry`); anything carrying an amount, a balance or a case's specifics stays excluded.
+
+The seed loader had to move to the same key or seeded memories would be written where nothing looks.
+
+### Fix 92 — The reward signal was computed and thrown away
+Memory only serves answers a human verified, and **nothing at runtime ever set `verified`** — it came
+from one column of the seed spreadsheet, so 14 of the 24 live nodes were permanently unservable.
+
+The signal existed the whole time. A held reply is written by the AI and read by a human before it
+goes out, so the agent's decision already **is** a judgement on that answer. The endpoint even
+computed `edited` — and wrote it to an audit row nothing ever read.
+
+Now: **unedited → `verified = true`**, and the answer becomes servable to the next customer with the
+same problem. **Edited → stays unverified**, and the agent's own wording replaces the rejected text
+so the better answer is next time's candidate.
+
+No new identifier had to be threaded through the draft table: `inbound_turn_id` is already the
+`:Interaction` key and the interaction already points at its memory via `[:CREATED_MEMORY]`.
+
+**Deliberately not keyed on ticket closure.** A good answer on a still-open case is exactly what
+should be learned; a case the customer abandoned is not. Closing a ticket is a state change,
+verifying an answer is a quality judgement, and they come apart in both directions.
+
+### Fix 93 — `has_open_case`
+The requirement was a binary node routing a customer **who has a case** into the ticket side. The
+merged version answered a different question — 1 only when the turn was a confirmed close request —
+so a customer with three open cases asking an ordinary question read **0**, and the name promised
+what the value did not deliver.
+
+`check_has_open_case` now answers what it says, and sits immediately after
+`load_conversation_context`, which has already fetched the tickets, so it costs no extra query and is
+settled **before anything inspects the message**. That ordering is the point: the old chain ran
+`detect_ticket_action` on every turn and let each later step re-derive case state for itself, which is
+exactly how a zero-ticket customer slipped past a local `if tickets:` into RAG and was handed an
+escalation ticket they never asked for.
+
+Three questions, three nodes: **whether** this is ticket business (`check_has_open_case`), **what
+kind** (`detect_ticket_action`), **which one** (`select_ticket_to_resolve`).
+
+Verified on a live three-turn conversation: gate 0 with no case and the ticket branch skipped
+entirely; gate 1 once a case exists, with an ordinary question still routed to Agent 1; gate 1 and a
+clean close on confirmation.
+
+### Fix 94 — The channel bar stopped adding up
+The merge changed the chips from turn counts to merged-request counts, answering a real complaint —
+the bar read "All channels 20" while the panel rendered 5 requests. But it put a request count into a
+bar whose job is a per-channel breakdown of a total, and requests do not divide by channel. Measured:
+All=5 against chips of 2+3+2=**7**. A ticket spanning WhatsApp and email is ONE request under "All"
+and is counted under **both** chips, because filtering happens before the omnichannel merge.
+
+Reverted to turn counts, which sum by construction — verified 15=15, 20=3+6+11, 28=8+14+6. This also
+removed `visibleUnitCount`, which had a defect of its own: no `draft_id` branch, so one offer pushed
+to WhatsApp and email counted as two. `buildUnits` was always right and still renders that as one unit.
+
+### Tests
+**5 failed / 147 passed** — back to the pre-merge baseline, with two more passing than before. The two
+stale assertions were updated to the **new** workflow shape rather than worked around, and coverage
+was added for the gate and for `select_ticket`'s disambiguation (card-vs-UPI scope, and an id the
+customer does not own being ignored rather than honoured) — neither had any.
+
+### Process notes
+- **A failing test was mine, not the code's.** My first `has_open_case` test read 0 on the second
+  turn. `whatsapp_message()` defaults to `message_id="wamid-1"`, so the second call was correctly
+  suppressed as a duplicate delivery. Checked the DB before assuming the code was wrong.
+- **`writer.py`, `graph.py` and the log are CRLF.** Every patch asserted its match count and restored
+  the original line endings; the first attempt failed its assertion and changed nothing, which is the
+  behaviour to keep.
+- **An edge case I over-sold.** I ranked "ticket id read from the email subject" alongside real
+  defects and called it imminent. Tracing every outbound path shows we never put a ticket id in a
+  subject — we echo the customer's own back for threading. It needs the customer to type one there
+  *and* have 2+ open cases *and* mean a different one. Real, rare, dropped from the plan.
+
+### Still open
+- **None of this has been seen in the running app.** Everything was verified by tests, direct graph
+  queries and scripted runs; the stack is still on an image built before this session. The learning
+  loop in particular has never been watched happen for real — an agent approving a draft in the UI,
+  the memory flipping to verified, the next customer getting that answer.
+- **The 24 existing memories carry no `memory_key`** and will not be found until rewritten. Nothing
+  breaks (reads return `None`); whether to migrate them is undecided.
+- **The memory allow-list is two intents.** Deliberately narrow to prove the loop without risking a
+  wrong answer crossing customers; widening should follow watching it work.
+- Everything from Session 16/17 remains: the **`operation` declared-not-derived** design, **no demo
+  run executed end-to-end**, `resolution_memory_cache`'s missing `retrieval` key, unverified cost
+  rates, Session 13's sweep never re-run on `gpt-oss-20b`, the offers cache unverified over a working
+  day, and Fix 86's effect on classification unmeasured.
+- **Not scheduled, found this session:** we send Jira the status string `"resolved"` and ask it to
+  find a transition by that name — default Jira calls it **Done**, so the call cannot match. Hidden
+  behind an existing CRM permissions 400. And `find_open_tickets_for_customer` caps at **5**, so a
+  customer with 6+ open tickets can make `select_ticket` see one same-kind match where there are two
+  and close silently instead of asking (live max is 3).
