@@ -19,14 +19,14 @@ class WorkflowStep(StrEnum):
     LOAD_CONVERSATION_CONTEXT = "load_conversation_context"
     CHECK_HAS_OPEN_CASE = "check_has_open_case"
     DETECT_TICKET_ACTION = "detect_ticket_action"
-    SELECT_TICKET_TO_RESOLVE = "select_ticket_to_resolve"
+    SELECT_TICKET_TO_CLOSE = "select_ticket_to_close"
     CLASSIFY_INTENT = "classify_intent"
     VALIDATE_CUSTOMER = "validate_customer"
     REJECT_UNREGISTERED_CUSTOMER = "reject_unregistered_customer"
     RETRIEVE_KNOWLEDGE = "retrieve_knowledge"
     DECIDE_RESOLUTION = "decide_resolution"
     CREATE_OR_UPDATE_TICKET = "create_or_update_ticket"
-    RESOLVE_TICKET = "resolve_ticket"
+    CLOSE_TICKET = "close_ticket"
     SEND_OUTBOUND_REPLY = "send_outbound_reply"
     PERSIST_AUDIT_EVENTS = "persist_audit_events"
 
@@ -53,11 +53,11 @@ class OrchestrationState(BaseModel):
     # customer used to fall past `if tickets:` into RAG and be handed a ticket they never
     # asked for).
     has_open_case: int = 0
-    # Set by select_ticket_to_resolve once the target ticket is unambiguous (either the
+    # Set by select_ticket_to_close once the target ticket is unambiguous (either the
     # customer named it explicitly, or it's the only open ticket of that kind).
     target_ticket_id: str | None = None
     # True when the customer has 2+ open tickets of the same kind and didn't name one —
-    # resolve_ticket is skipped and the customer is asked to specify which ticket.
+    # close_ticket is skipped and the customer is asked to specify which ticket.
     ticket_clarification_needed: bool = False
     # Candidate tickets considered during disambiguation, for audit/trace visibility.
     matching_open_tickets: list[dict] = Field(default_factory=list)

@@ -16,6 +16,17 @@ from shared.schemas.tickets import Ticket
 logger = logging.getLogger(__name__)
 
 
+# Our single status field has to address Jira's separate Status workflow. 'resolved' and
+# 'closed' both mean the ticket is finished; default Jira spells that "Done", and
+# company-managed projects often add a distinct "Closed" step after it.
+_JIRA_STATUS_ALIASES = {
+    "resolved": ["done", "closed", "resolve issue", "complete"],
+    "closed": ["done", "closed", "resolve issue", "complete"],
+    "open": ["to do", "open", "backlog"],
+    "in_progress": ["in progress", "start progress"],
+}
+
+
 @dataclass
 class CRMResult:
     status: str
@@ -135,16 +146,30 @@ class CRMClient:
             transitions = self._request("GET", f"/rest/api/3/issue/{quote(external_ticket_id)}/transitions")
             if transitions.status != "synced":
                 return transitions
+            # Jira keeps STATUS (To Do / In Progress / Done) apart from RESOLUTION
+            # (Fixed / Won't Fix / Duplicate) — an issue can be Closed with resolution
+            # "Won't Fix". We store one field, and its value 'resolved' is a word default
+            # Jira has no transition for, so this lookup could only ever fail with
+            # "No Jira transition found for status 'resolved'". Map our internal value to
+            # the names Jira actually uses, and try each in turn.
+            wanted = [status.lower()] + _JIRA_STATUS_ALIASES.get(status.lower(), [])
             match = next(
                 (
                     item for item in transitions.data.get("transitions", [])
-                    if item.get("name", "").lower() == status.lower()
-                    or item.get("to", {}).get("name", "").lower() == status.lower()
+                    if item.get("name", "").lower() in wanted
+                    or item.get("to", {}).get("name", "").lower() in wanted
                 ),
                 None,
             )
             if not match:
-                return CRMResult("failed", {}, f"No Jira transition found for status '{status}'")
+                available = ", ".join(
+                    sorted({t.get("name", "") for t in transitions.data.get("transitions", [])})
+                ) or "none"
+                return CRMResult(
+                    "failed", {},
+                    f"No Jira transition found for status '{status}' "
+                    f"(tried {wanted}; available: {available})",
+                )
             return self._request(
                 "POST",
                 f"/rest/api/3/issue/{quote(external_ticket_id)}/transitions",

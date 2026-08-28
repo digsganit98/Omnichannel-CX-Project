@@ -90,7 +90,7 @@ class TicketDecision(BaseModel):
 
 class TicketAction(StrEnum):
     NONE = "none"
-    RESOLVE = "resolve"
+    CLOSE = "close"
 
 
 class TicketActionDecision(BaseModel):
@@ -101,7 +101,7 @@ class TicketActionDecision(BaseModel):
 class TicketSelection(BaseModel):
     """Result of disambiguating WHICH open ticket a resolution action applies to.
 
-    Kept separate from the actual resolve step (TicketCreationAgent.resolve_ticket) so the
+    Kept separate from the actual close step (TicketCreationAgent.close_ticket) so the
     resolution node stays a single-purpose "mark this ticket resolved" action, and all the
     branching lives here instead.
     """
@@ -518,7 +518,7 @@ class TicketCreationAgent:
         # Require close_action + ticket_context, OR resolution_cue + ticket_context.
         # The original triple-AND was too strict — "My issue is sorted, thanks" never matched.
         if has_ticket_context and (has_close_action or has_resolution_cue):
-            return TicketActionDecision(action=TicketAction.RESOLVE, reason="customer_confirmed_resolution")
+            return TicketActionDecision(action=TicketAction.CLOSE, reason="customer_confirmed_closure")
 
         # LLM fallback for ambiguous messages (e.g., "All good now", "Issue is sorted").
         try:
@@ -537,7 +537,7 @@ class TicketCreationAgent:
                 operation="ticket_action_detection",
             )
             if result.get("llm_used") and result.get("text", "").strip().upper().startswith("YES"):
-                return TicketActionDecision(action=TicketAction.RESOLVE, reason="llm_confirmed_resolution")
+                return TicketActionDecision(action=TicketAction.CLOSE, reason="llm_confirmed_closure")
         except Exception:
             pass
 
@@ -546,8 +546,8 @@ class TicketCreationAgent:
     def select_ticket(self, message: InboundMessage, context: dict) -> TicketSelection:
         """Work out WHICH open ticket a confirmed resolution action applies to.
 
-        Deliberately separate from resolve_ticket(): this method only decides the target
-        (or that the customer must be asked), so the actual resolve step stays a clean,
+        Deliberately separate from close_ticket(): this method only decides the target
+        (or that the customer must be asked), so the actual close step stays a clean,
         single-purpose "mark this ticket resolved" action.
 
         1. If the customer named a ticket id in their message, honor it directly (as long as
@@ -594,7 +594,7 @@ class TicketCreationAgent:
             needs_clarification=True, candidates=same_kind, reason="multiple_open_tickets_same_kind"
         )
 
-    def resolve_ticket(self, ticket_id: str) -> Ticket:
+    def close_ticket(self, ticket_id: str) -> Ticket:
         updated = self.tickets.update_status(ticket_id, status=TicketStatus.RESOLVED, actor="customer_message")
         return Ticket(**updated)
 

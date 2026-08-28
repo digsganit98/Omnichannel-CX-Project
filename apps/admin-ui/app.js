@@ -67,7 +67,7 @@ var THEME_COLOR = {
 };
 // System-event "intents" that aren't real customer topics — excluded from
 // grouping and from node/row titles so they never surface as a theme.
-var NON_TOPIC_INTENTS = { ticket_resolution: 1 };
+var NON_TOPIC_INTENTS = { ticket_closure: 1 };
 function topicOrEmpty(intent) { return NON_TOPIC_INTENTS[intent] ? '' : (intent || ''); }
 // Prettify a raw intent key into a display label, e.g. "fraud_report" →
 // "Fraud Report". Empty/unknown intent falls back to "General".
@@ -489,14 +489,16 @@ function customerLabel(conv) {
   return dn;
 }
 
-// DISPLAY-ONLY: unify every status label to one pair — Open / Resolved.
+// DISPLAY-ONLY: unify every status label to one pair — Open / Closed.
 // The whole app has two status vocabularies (ticket: open/in_progress/resolved;
 // conversation: active/resolved), which read as confusing near-synonyms on screen.
 // This maps the RAW value to a single user-facing word. It must ONLY wrap display
 // text — never feed a class/branch/comparison; all logic keeps using the raw value.
 function statusLabel(s) {
   var v = (s || '').toLowerCase();
-  return (v === 'resolved' || v === 'closed') ? 'Resolved' : 'Open';
+  // 'resolved' is the STORED value and stays as it is in the DB; CLOSING a ticket is a
+  // state change, so the word on screen is Closed. Resolution means answering a query.
+  return (v === 'resolved' || v === 'closed') ? 'Closed' : 'Open';
 }
 
 function urgencyToStatus(conv) {
@@ -748,7 +750,7 @@ function renderCentre(conv) {
   //     themed step.
   //  3. A new group starts only at a REAL boundary: the theme changed AND the
   //     step does not share a ticket with the previous step.
-  // `ticket_resolution` is a system event (auto-resolve on "thanks"), not a
+  // `ticket_closure` is a system event (auto-close on "thanks"), not a
   // customer topic — treat it as unthemed (via topicOrEmpty) so it never forms
   // its own group and instead inherits the intent of the ticket/turns around it.
   var rawIntent = steps.map(function(step) {
@@ -1514,7 +1516,7 @@ function renderRight(conv, tickets) {
         + '<span class="tkt-st" style="' + stBg + '">' + escH(statusLabel(t.status)) + '</span>'
         + '</div><div class="tkt-desc">' + escH((t.title||t.intent||'').slice(0,60)) + '</div>'
         + '<div class="tkt-created">Created: ' + escH(fmtDateTime(t.created_at)) + '</div>'
-        + (isOpen ? '<button class="tkt-resolve-btn" onclick="event.stopPropagation();resolveTicket(this,\'' + escH(t.ticket_id) + '\')">Resolve ticket</button>' : '')
+        + (isOpen ? '<button class="tkt-resolve-btn" onclick="event.stopPropagation();resolveTicket(this,\'' + escH(t.ticket_id) + '\')">Close ticket</button>' : '')
         + '</div>';
     }).join('');
     // Collapsed by default: the COUNT is the at-a-glance signal an agent needs, and
@@ -1755,7 +1757,7 @@ function renderOverview(d) {
   var cards = [
     { val: d.total_open, lbl: 'Open tickets', sub: d.total_conversations + ' total conversations', tone: 'amb', icon: '&#9873;', clr: d.total_open > 20 ? 'var(--amb-t)' : 'var(--t1)', subClr: '',
       tip: 'Count of tickets whose status is not resolved or closed. The live backlog across all conversations.' },
-    { val: d.total_resolved, lbl: 'Resolved', sub: d.total_customers + ' customers', tone: 'grn', icon: '&#10003;', clr: 'var(--grn-t)', subClr: '',
+    { val: d.total_resolved, lbl: 'Closed', sub: d.total_customers + ' customers', tone: 'grn', icon: '&#10003;', clr: 'var(--grn-t)', subClr: '',
       tip: 'Count of tickets with status resolved or closed.' },
     { val: negPct.toFixed(0) + '%', lbl: 'Negative sentiment today', sub: negDeltaLabel, tone: 'red', icon: '&#9760;', clr: 'var(--red-t)', subClr: negDeltaClr,
       tip: 'Share of today\'s inbound messages classified negative (stored AI sentiment, falling back to keyword detection) ÷ today\'s inbound messages × 100. The delta compares against yesterday\'s same figure.' },
@@ -2749,7 +2751,7 @@ window.loadUserTickets = async function() {
       });
     }
     renderGroup('Open', openTickets);
-    renderGroup('Resolved', closedTickets);
+    renderGroup('Closed', closedTickets);
   } catch(e) {
     list.innerHTML = '<div class="user-empty" style="color:var(--red-t)">' + escH(e.message) + '</div>';
   } finally {

@@ -567,15 +567,15 @@ def test_customer_message_can_resolve_active_ticket_without_rag():
 
     assert opened.ticket_id
     assert closed.ticket_id == opened.ticket_id
-    assert closed.intent == "ticket_resolution"
+    assert closed.intent == "ticket_closure"
     assert closed.resolved is True
     assert closed.workflow_status == "ticket_closed"
     assert closed.retrieval_backend == "not_required"
     assert closed.rag_contexts == []
     assert repo.get_ticket(opened.ticket_id)["status"] == TicketStatus.RESOLVED.value
-    assert "marked as resolved" in closed.message
+    assert "has been closed" in closed.message
     # The customer has an open case, so check_has_open_case routes into the ticket
-    # branch; detect_ticket_action then finds a close request and select_ticket_to_resolve
+    # branch; detect_ticket_action then finds a close request and select_ticket_to_close
     # picks which one (only one candidate here, so no clarification is needed).
     assert [entry["step"] for entry in closed.workflow_trace] == [
         "receive_message",
@@ -583,8 +583,8 @@ def test_customer_message_can_resolve_active_ticket_without_rag():
         "load_conversation_context",
         "check_has_open_case",
         "detect_ticket_action",
-        "select_ticket_to_resolve",
-        "resolve_ticket",
+        "select_ticket_to_close",
+        "close_ticket",
         "send_outbound_reply",
         "persist_audit_events",
     ]
@@ -621,7 +621,7 @@ def test_has_open_case_gate_routes_on_customer_state_not_message_content():
     # ordinary question — and detect_ticket_action correctly declines to close anything.
     assert gate2["details"]["has_open_case"] == 1
     assert "detect_ticket_action" in steps2
-    assert "resolve_ticket" not in steps2
+    assert "close_ticket" not in steps2
     assert second.resolved is False
 
 

@@ -45,9 +45,9 @@ WORKFLOW_EDGES = [
     ("resolve_identity", "load_conversation_context"),
     ("load_conversation_context", "check_has_open_case"),
     ("check_has_open_case", "detect_ticket_action | classify_intent [Agent 1]"),
-    ("detect_ticket_action", "select_ticket_to_resolve | classify_intent [Agent 1]"),
-    ("select_ticket_to_resolve", "resolve_ticket | send_outbound_reply (ask which ticket)"),
-    ("resolve_ticket", "send_outbound_reply"),
+    ("detect_ticket_action", "select_ticket_to_close | classify_intent [Agent 1]"),
+    ("select_ticket_to_close", "close_ticket | send_outbound_reply (ask which ticket)"),
+    ("close_ticket", "send_outbound_reply"),
     ("classify_intent [Agent 1]", "validate_customer"),
     ("validate_customer", "resolve_query [Agent 2] | reject_unregistered_customer"),
     ("reject_unregistered_customer", "send_outbound_reply"),
@@ -183,8 +183,8 @@ class OrchestrationGraph:
         workflow.add_node("load_conversation_context", self._load_context)
         workflow.add_node("check_has_open_case", self._check_has_open_case)
         workflow.add_node("detect_ticket_action", self._detect_ticket_action)
-        workflow.add_node("select_ticket_to_resolve", self._select_ticket_to_resolve)
-        workflow.add_node("resolve_ticket", self._resolve_ticket)
+        workflow.add_node("select_ticket_to_close", self._select_ticket_to_close)
+        workflow.add_node("close_ticket", self._close_ticket)
 
         # Agent 1
         workflow.add_node("classify_intent", self._classify_intent)
@@ -218,14 +218,14 @@ class OrchestrationGraph:
         workflow.add_conditional_edges(
             "detect_ticket_action",
             self._route_ticket_action,
-            {"select_ticket_to_resolve": "select_ticket_to_resolve", "classify_intent": "classify_intent"},
+            {"select_ticket_to_close": "select_ticket_to_close", "classify_intent": "classify_intent"},
         )
         workflow.add_conditional_edges(
-            "select_ticket_to_resolve",
+            "select_ticket_to_close",
             self._route_ticket_selection,
-            {"resolve_ticket": "resolve_ticket", "ask_which_ticket": "send_outbound_reply"},
+            {"close_ticket": "close_ticket", "ask_which_ticket": "send_outbound_reply"},
         )
-        workflow.add_edge("resolve_ticket", "send_outbound_reply")
+        workflow.add_edge("close_ticket", "send_outbound_reply")
         # Agent chain
         workflow.add_edge("classify_intent", "validate_customer")
         workflow.add_conditional_edges(
@@ -471,16 +471,16 @@ class OrchestrationGraph:
         return "detect_ticket_action" if graph_state["runtime"].has_open_case == 1 else "classify_intent"
 
     @staticmethod
-    def _route_ticket_action(graph_state: GraphState) -> Literal["select_ticket_to_resolve", "classify_intent"]:
+    def _route_ticket_action(graph_state: GraphState) -> Literal["select_ticket_to_close", "classify_intent"]:
         """Within the ticket branch: is this turn asking to CLOSE a case, or something else?"""
         return (
-            "select_ticket_to_resolve"
-            if graph_state["runtime"].ticket_action.action == TicketAction.RESOLVE
+            "select_ticket_to_close"
+            if graph_state["runtime"].ticket_action.action == TicketAction.CLOSE
             else "classify_intent"
         )
 
-    def _select_ticket_to_resolve(self, graph_state: GraphState) -> dict:
-        """Disambiguation only — decide WHICH ticket, kept separate from resolve_ticket
+    def _select_ticket_to_close(self, graph_state: GraphState) -> dict:
+        """Disambiguation only — decide WHICH ticket, kept separate from close_ticket
         (which just performs the resolution) so the two concerns don't blur together."""
         state = graph_state["runtime"]
         selection: TicketSelection = self.ticket_agent.select_ticket(state.message, state.context)
@@ -494,31 +494,31 @@ class OrchestrationGraph:
             )
             state.answer = (
                 "You have more than one open ticket for this kind of request: "
-                f"{options}. Could you tell me which ticket ID you'd like to resolve?"
+                f"{options}. Could you tell me which ticket ID you'd like to close?"
             )
-            self._audit("ticket_resolution_clarification_requested", state,
+            self._audit("ticket_closure_clarification_requested", state,
                         details={"candidates": [t["ticket_id"] for t in selection.candidates]})
-        self._complete(state, WorkflowStep.SELECT_TICKET_TO_RESOLVE, self.ticket_agent.name,
+        self._complete(state, WorkflowStep.SELECT_TICKET_TO_CLOSE, self.ticket_agent.name,
                        target_ticket_id=state.target_ticket_id,
                        needs_clarification=state.ticket_clarification_needed,
                        reason=selection.reason)
         return {"runtime": state}
 
     @staticmethod
-    def _route_ticket_selection(graph_state: GraphState) -> Literal["resolve_ticket", "ask_which_ticket"]:
-        return "ask_which_ticket" if graph_state["runtime"].ticket_clarification_needed else "resolve_ticket"
+    def _route_ticket_selection(graph_state: GraphState) -> Literal["close_ticket", "ask_which_ticket"]:
+        return "ask_which_ticket" if graph_state["runtime"].ticket_clarification_needed else "close_ticket"
 
-    def _resolve_ticket(self, graph_state: GraphState) -> dict:
+    def _close_ticket(self, graph_state: GraphState) -> dict:
         """Pure resolution: mark the already-selected target ticket resolved."""
         state = graph_state["runtime"]
-        state.ticket = self.ticket_agent.resolve_ticket(state.target_ticket_id)
+        state.ticket = self.ticket_agent.close_ticket(state.target_ticket_id)
         state.answer = (
-            f"Your support ticket {state.ticket.ticket_id} has been marked as resolved. "
+            f"Your support ticket {state.ticket.ticket_id} has been closed. "
             "Thank you for confirming."
         )
-        self._audit("ticket_resolved_by_customer", state, ticket_id=state.ticket.ticket_id,
+        self._audit("ticket_closed_by_customer", state, ticket_id=state.ticket.ticket_id,
                     details={"reason": state.ticket_action.reason})
-        self._complete(state, WorkflowStep.RESOLVE_TICKET, self.ticket_agent.name,
+        self._complete(state, WorkflowStep.CLOSE_TICKET, self.ticket_agent.name,
                        ticket_id=state.ticket.ticket_id, status=state.ticket.status.value)
         return {"runtime": state}
 
@@ -763,7 +763,7 @@ class OrchestrationGraph:
             text=state.answer,
             intent=self._intent(state),
             urgency=state.analysis.urgency.value if state.analysis else "low",
-            resolved=self._resolved(state),
+            resolved=self._closed(state),
             ticket_id=state.ticket.ticket_id if state.ticket else None,
             external_message_id=provider_message_id,
             delivery_status=state.delivery["status"],
@@ -851,15 +851,15 @@ class OrchestrationGraph:
             conversation_id=state.conversation_id,
             customer_id=state.customer_id,
             message=state.answer,
-            resolved=self._resolved(state),
+            resolved=self._closed(state),
             intent=self._intent(state),
             sentiment=state.analysis.sentiment if state.analysis else "positive",
             urgency=state.analysis.urgency.value if state.analysis else "low",
             confidence=state.resolution.confidence if state.resolution else 1.0,
             ticket_id=state.ticket.ticket_id if state.ticket else None,
             workflow_status=(
-                "ticket_resolution_clarification_needed" if state.ticket_clarification_needed else
-                "ticket_closed" if state.ticket_action.action == TicketAction.RESOLVE else
+                "ticket_closure_clarification_needed" if state.ticket_clarification_needed else
+                "ticket_closed" if state.ticket_action.action == TicketAction.CLOSE else
                 "customer_validation_required" if (
                     state.customer_validation.validation_required and not state.customer_validation.is_registered
                 ) else
@@ -918,18 +918,18 @@ class OrchestrationGraph:
 
     @staticmethod
     def _intent(state: OrchestrationState) -> str:
-        if state.ticket_action.action == TicketAction.RESOLVE:
-            return "ticket_resolution"
+        if state.ticket_action.action == TicketAction.CLOSE:
+            return "ticket_closure"
         if state.customer_validation.validation_required and not state.customer_validation.is_registered:
             return "customer_not_registered"
         return state.analysis.intent.value if state.analysis else "unknown"
 
     @staticmethod
-    def _resolved(state: OrchestrationState) -> bool:
+    def _closed(state: OrchestrationState) -> bool:
         # Only mark the conversation resolved when the customer explicitly confirms it AND
         # a specific ticket was actually resolved. When they have multiple open tickets of
         # the same kind, we've only asked which one — nothing is resolved yet.
-        return state.ticket_action.action == TicketAction.RESOLVE and not state.ticket_clarification_needed
+        return state.ticket_action.action == TicketAction.CLOSE and not state.ticket_clarification_needed
 
     def _audit(self, event_type: str, state: OrchestrationState, **values) -> None:
         self.repository.add_audit_event(event_type, **self._common(state), **values)
