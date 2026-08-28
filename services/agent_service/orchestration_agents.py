@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from enum import StrEnum
+import re
 
 from pydantic import BaseModel, Field
 
@@ -94,6 +95,20 @@ class TicketAction(StrEnum):
 
 class TicketActionDecision(BaseModel):
     action: TicketAction = TicketAction.NONE
+    reason: str | None = None
+
+
+class TicketSelection(BaseModel):
+    """Result of disambiguating WHICH open ticket a resolution action applies to.
+
+    Kept separate from the actual resolve step (TicketCreationAgent.resolve_ticket) so the
+    resolution node stays a single-purpose "mark this ticket resolved" action, and all the
+    branching lives here instead.
+    """
+
+    target_ticket_id: str | None = None
+    needs_clarification: bool = False
+    candidates: list[dict] = Field(default_factory=list)
     reason: str | None = None
 
 
@@ -263,38 +278,46 @@ class QueryResolutionAgent:
                 pass
 
         # ── Priority 1: Ticket status lookup (cross-channel memory) ──────────
+        # Always answer here for TICKET_STATUS — including when the customer genuinely has
+        # NO open tickets. _format_ticket_status already has a friendly "no open requests"
+        # message for the empty case; the previous `if tickets:` guard skipped straight past
+        # it whenever the list was empty, falling through to Neo4j/RAG instead. RAG has no
+        # concept of "this customer's tickets" at all, so on a KB miss (or a missing/empty
+        # index) it returned a generic "I'm having trouble accessing that" apology AND
+        # triggered a fresh escalation ticket — which is exactly what a customer asking
+        # "what's my ticket status?" should never see: a confusing new ticket number instead
+        # of either their real tickets or a clear "you have none right now".
         if intent == Intent.TICKET_STATUS:
             tickets = context.get("customer_tickets", [])
-            if tickets:
-                raw_text = _format_ticket_status(tickets, channel)
-                ticket_ctx = [{
-                    "text": raw_text,
-                    "score": 0.98,
-                    "metadata": {
-                        "source": "customer_ticket_lookup",
-                        "doc_type": "customer_data",
-                        # Same trap Fix 66 found in the Neo4j branch: retrieval_backend below
-                        # is set on the QueryResolution OBJECT, but the provenance endpoint
-                        # reads this metadata dict (persisted verbatim by
-                        # add_retrieval_evidence). Without this key the backend was dropped at
-                        # the DB boundary and the panel labelled a ticket read as a KB answer.
-                        "retrieval": "customer_ticket_lookup",
-                    },
-                }]
-                # Route through Groq so the LLM produces a natural sentence
-                # ("Your home loan query is with our Loans team…") instead of a raw bullet list.
-                generation = self.rag.generator.generate_answer(message.text, ticket_ctx, context)
-                return QueryResolution(
-                    answer=generation.get("text") or raw_text,
-                    confidence=0.98,
-                    contexts=ticket_ctx,
-                    citations=[{"index": 1, "source": "customer_ticket_lookup", "score": 0.98}],
-                    retrieval_backend="customer_ticket_lookup",
-                    llm={
-                        "model": generation.get("model"),
-                        "llm_used": generation.get("llm_used", False),
-                    },
-                )
+            raw_text = _format_ticket_status(tickets, channel)
+            ticket_ctx = [{
+                "text": raw_text,
+                "score": 0.98,
+                "metadata": {
+                    "source": "customer_ticket_lookup",
+                    "doc_type": "customer_data",
+                    # Same trap Fix 66 found in the Neo4j branch: retrieval_backend below
+                    # is set on the QueryResolution OBJECT, but the provenance endpoint
+                    # reads this metadata dict (persisted verbatim by
+                    # add_retrieval_evidence). Without this key the backend was dropped at
+                    # the DB boundary and the panel labelled a ticket read as a KB answer.
+                    "retrieval": "customer_ticket_lookup",
+                },
+            }]
+            # Route through Groq so the LLM produces a natural sentence
+            # ("Your home loan query is with our Loans team…") instead of a raw bullet list.
+            generation = self.rag.generator.generate_answer(message.text, ticket_ctx, context)
+            return QueryResolution(
+                answer=generation.get("text") or raw_text,
+                confidence=0.98,
+                contexts=ticket_ctx,
+                citations=[{"index": 1, "source": "customer_ticket_lookup", "score": 0.98}],
+                retrieval_backend="customer_ticket_lookup",
+                llm={
+                    "model": generation.get("model"),
+                    "llm_used": generation.get("llm_used", False),
+                },
+            )
 
         # ── Priority 2: Neo4j transactional data (loans, claims, etc.) ───────
         if intent and self.neo4j_client:
@@ -434,6 +457,11 @@ def _relative_time(iso_str: str | None) -> str:
 
 # ── Agent 3: Ticket Creation ─────────────────────────────────────────────────
 
+# Matches this codebase's ticket id format (shared.utils.ids.new_id("tkt") -> "tkt_<12 hex>"),
+# tolerant of shorter fragments a customer might paste/retype.
+TICKET_ID_PATTERN = re.compile(r"\btkt_[a-f0-9]{6,}\b", re.IGNORECASE)
+
+
 class TicketCreationAgent:
     """Decides when a JIRA ticket is needed and creates it."""
 
@@ -483,6 +511,57 @@ class TicketCreationAgent:
             pass
 
         return TicketActionDecision()
+
+    def select_ticket(self, message: InboundMessage, context: dict) -> TicketSelection:
+        """Work out WHICH open ticket a confirmed resolution action applies to.
+
+        Deliberately separate from resolve_ticket(): this method only decides the target
+        (or that the customer must be asked), so the actual resolve step stays a clean,
+        single-purpose "mark this ticket resolved" action.
+
+        1. If the customer named a ticket id in their message, honor it directly (as long as
+           it's actually one of their own open tickets).
+        2. Otherwise, look across ALL the customer's open tickets (any channel — an
+           omnichannel customer may have opened one on WhatsApp and another by email) for
+           ones "of the same kind" as this conversation's active ticket: same intent, and
+           same ticket_scope subtype when the active ticket has one (e.g. "card" vs "upi"
+           transaction disputes are different matters even though both are
+           transaction_dispute).
+        3. Exactly one match -> that's the target. Two or more -> ask the customer which one.
+        """
+        active_ticket = context.get("active_ticket")
+        customer_tickets = context.get("customer_tickets") or []
+
+        named_ids = TICKET_ID_PATTERN.findall(message.text or "")
+        if named_ids:
+            wanted = named_ids[0].lower()
+            owned_ids = {t.get("ticket_id", "").lower(): t.get("ticket_id") for t in customer_tickets}
+            if active_ticket:
+                owned_ids.setdefault(active_ticket.get("ticket_id", "").lower(), active_ticket.get("ticket_id"))
+            if wanted in owned_ids:
+                return TicketSelection(target_ticket_id=owned_ids[wanted], reason="customer_named_ticket_id")
+
+        if not active_ticket:
+            return TicketSelection(reason="no_active_ticket")
+
+        active_intent = active_ticket.get("intent")
+        active_scope = (active_ticket.get("metadata") or {}).get("ticket_scope")
+        same_kind = [
+            t for t in customer_tickets
+            if t.get("intent") == active_intent
+            and (active_scope is None or (t.get("metadata") or {}).get("ticket_scope") == active_scope)
+        ]
+        if not same_kind:
+            # active_ticket wasn't present in customer_tickets (e.g. it's the only one, or
+            # the customer_tickets lookup is limited) — it's still a valid single match.
+            same_kind = [active_ticket]
+
+        if len(same_kind) == 1:
+            return TicketSelection(target_ticket_id=same_kind[0]["ticket_id"], reason="single_match")
+
+        return TicketSelection(
+            needs_clarification=True, candidates=same_kind, reason="multiple_open_tickets_same_kind"
+        )
 
     def resolve_ticket(self, ticket_id: str) -> Ticket:
         updated = self.tickets.update_status(ticket_id, status=TicketStatus.RESOLVED, actor="customer_message")
