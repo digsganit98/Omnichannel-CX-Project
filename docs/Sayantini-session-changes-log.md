@@ -130,6 +130,8 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 86 — Inbound email was processed with the whole quoted thread attached:** an email reply carries the entire previous thread beneath it and every downstream step reads the message as one flat string, so OUR OWN outbound text acted as customer input - "monitoring each case closely" supplied "close" and the signature "Thank you for reaching out" supplied "thank you", which together satisfied the resolution detector and closed a ticket the customer had only asked about. `strip_quoted_reply` now cuts at the first quote marker in `EmailAdapter.normalize`, the single point all three inbound email paths share.
 - **Fix 87 — One resolved ticket closed the entire conversation:** `append_turn` flipped the conversation to `resolved` unconditionally whenever a turn was marked resolved, so a customer confirming one matter closed a conversation with three other tickets still open; it now resolves only when nothing is left open, the same rule the admin UI already applied when an agent resolved a ticket by hand.
 - **Fix 88 — The Neo4j client never reached TicketManager on the message path:** `OrchestrationGraph` built the manager without it while holding a working client two lines later, so a customer-resolved ticket stayed `open` in the graph while SQLite said `resolved` - and `get_open_cases` reads the GRAPH, so the model kept being fed a closed case as trusted context. The admin route always passed the client; only this path did not.
+- **Fix 89 — The case summary listed tickets that were already resolved:** resolving a ticket is not a new turn, so the turn-keyed cache never invalidated and the card kept the ticket; `resolveTicket` now forces a regeneration, the same call the Refresh button makes. That exposed the real defect - the prompt said "Use ONLY what appears below" and the history IS below, so the model reproduced a ticket list quoted from one of our own older status emails.
+- **Fix 90 — The case summary was a second copy of the ticket list:** situation read "Customer wants to know the status of their open tickets" and open_items restated the titles the Open Tickets card already shows with a status pill and a Resolve button; situation now carries the case (matter, amount, what the customer has already done) and open_items is re-scoped to what is outstanding and is NOT a ticket, so it is usually empty and the section hides.
 
 ---
 
@@ -3549,3 +3551,85 @@ strict subset of the 6 - no new failures. The extra baseline failure was
 - **Fix 86 changes the input to intent classification and ticket scope too**, not just the
   resolution detector. That is the intended direction, but the effect on classification has **not**
   been measured across stored turns.
+
+### Fix 89 — The case summary listed tickets that were already resolved
+Commit `690d531`. Found by the user resolving a ticket and seeing Open Items say **4** while
+Open Tickets said **3** on the same panel.
+
+**Two causes, and the first hid the second.**
+
+The summary is cached against the newest turn id. Resolving a ticket is **not a new turn**, so
+nothing invalidated the cache. `resolveTicket` already re-renders the panel and already knows a
+ticket changed, so it now also calls `loadCaseSummary(id, true)` - the identical call the Refresh
+button makes. One line; the endpoint's `refresh` parameter and the "Summarising..." state already
+existed.
+
+That fix exposed the real defect. The summary regenerated **1.6 seconds** after the resolve and
+still listed the resolved ticket. The prompt said *"Use ONLY what appears below"* - and the
+conversation history **is** below, including our own earlier status emails, which quote a ticket
+list that was true when sent. The model reproduced one verbatim: *"Assigned to Customer Care"* and
+*"Expected resolution within 9 hours"*, phrases that appear **nowhere** in the ticket data and only
+in that email. Fix 80 passes open cases from SQLite precisely so the summary cannot contradict the
+card beside it; the data path honoured that and the prompt did not.
+
+**Verified against all three live conversations: 3/3/3 open items, matching the database exactly.**
+
+### Fix 90 — The case summary was a second copy of the ticket list
+Commit `7058da8`. The user asked whether the card should show a better summary. It should:
+situation read *"Customer wants to know the status of their open tickets"* - true of almost any
+conversation - and open_items restated the three ticket titles that the Open Tickets card shows
+directly below with a status pill, a created date and a Resolve button. Two panels, the same
+content, and the upper copy the less reliable one because the model rephrases it every run.
+
+**Re-scoped both fields.** `situation` now carries the case: what is being chased, the specific
+matter with its amount and reference, and what the customer has already done - how often they have
+asked, on which channel, what they were last told. `open_items` is only for what is outstanding and
+is **not** a ticket (a promise not kept, a date being waited on), so it is usually empty and the
+frontend renders nothing rather than a heading over blank space.
+
+**Redaction rather than a fourth prompt rule - this is the lesson worth keeping.** Measured on
+Digvijay's conversation: the resolved `tkt_25009e2fdde5` appears **four times** in the history text
+(our own status emails, re-quoted by each later reply) against **once** in the authoritative
+open-cases block. Three successive prompt rules lost to that repetition - the id kept reappearing in
+situation, and open_items came back as *"Expected resolution within 9 hours"*, the exact stale
+wording the rule forbade. `_redact_closed_ticket_ids` now replaces any ticket id in the history that
+is **not** in the open-cases block before the prompt is built. **The model cannot copy an id it
+never sees.** A prompt rule asking a model to ignore the most-repeated text in its own input is a
+weak control; removing the text is a strong one.
+
+**Two rules removed because they contradicted the new contract** - both were written when open_items
+WAS the ticket list, and still said to fill it from the open-cases block and to name each ticket id
+there. Left in place they told the model the opposite of the rules above them.
+
+**Also corrected by measurement:** the first version of the open_items rule produced Fathima's own
+two questions as "open items" - both of which already had tickets. A customer's question is normally
+the very thing a ticket was raised for, so quoting it back is the ticket list again in different
+words. Naming that specific failure fixed it; the general "never restate a ticket" had not.
+
+**Verified across all three conversations, twice each (6 runs):** no resolved ticket in any output,
+no stale status wording, open_items empty for two customers and a genuine non-ticket item
+(*"Waiting for bank confirmation on disputed charge of Rs.28,991"*) for the third. Tests 5 failed /
+145 passed, the same strict subset of the 6-failure baseline.
+
+### Branch pushed — 8 commits
+`899683e..7058da8` to `origin/Sayantini-phase2-ui-changes`. Sessions 16 and 17 had both been sitting
+unpushed. Checked before pushing that `.env` is untracked and no secrets appear in the diff.
+
+**`5e8d2e0` needs an api rebuild, not a restart**, for anyone pulling this branch - it changes
+inbound email handling and Python source is baked into the image.
+
+### Still open after this session
+- Everything from Session 16: the **`operation` declared-not-derived** design, **no demo run
+  executed end-to-end**, `resolution_memory_cache`'s missing `retrieval` key, unverified cost rates,
+  and Session 13's sweep never re-run on `gpt-oss-20b`.
+- **The offers cache is still unverified over a working day.** An earlier claim this session that it
+  was "working" was withdrawn: it rested on a correlation, and one figure in it was invented rather
+  than measured.
+- **Fix 86 changes the input to intent classification and ticket scope too**, not just the resolution
+  detector. The effect on classification across stored turns has **not** been measured.
+- **Sentiment on an unclassified inbound turn falls back to a browser keyword scan**, and that scan
+  reads the quoted thread. Digvijay's panel shows 20% negative because our own signature contains
+  *"resolution overdue"* - not because the customer is unhappy. Fix 86 prevents this for NEW email;
+  the stored text of older turns still carries the quote. Also worth knowing: the stored sentiment is
+  not purely the LLM's - `_apply_guardrails` lets the same keyword list override it toward negative,
+  never away from it.
