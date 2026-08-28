@@ -519,6 +519,68 @@ def update_interaction_resolution(
         )
 
 
+def verify_resolution_memory(
+    client,
+    turn_id: str,
+    approved_text: str,
+    edited: bool,
+) -> dict | None:
+    """Record a human agent's verdict on the answer a held draft proposed.
+
+    This is the reward signal for the ResolutionMemory store. A held reply is written
+    by the AI and then read by a human before it goes out, so the agent's decision is
+    already a judgement on that answer - it was simply never fed back:
+
+      sent unedited -> the agent endorsed this answer. verified = true, and it becomes
+                       servable to the NEXT customer with the same problem.
+      sent edited   -> the AI's text was not good enough. Keep verified = false and
+                       store what the agent actually sent, so the better answer is the
+                       candidate next time rather than the rejected one.
+
+    Reached from the draft's inbound_turn_id: that turn is the :Interaction, and the
+    interaction already points at the memory it created (:CREATED_MEMORY), so no new
+    identifier has to be threaded through the draft table.
+
+    Deliberately NOT keyed on ticket closure - a good answer on a still-open case is
+    exactly what should be learned, and a case abandoned by the customer is not.
+
+    Returns the memory's id + new verified state, or None when there is nothing to
+    verify (no graph, no turn, or the turn produced no memory).
+    """
+    if client is None or not turn_id:
+        return None
+    try:
+        from datetime import datetime, timezone
+        rows = client.query(
+            """
+            MATCH (i:Interaction {turn_id: $turn_id})-[:CREATED_MEMORY]->(rm:ResolutionMemory)
+            SET rm.verified          = $verified,
+                rm.verified_at       = $now,
+                rm.verified_by       = 'human_agent',
+                // The agent's own wording is the better answer when they rewrote it;
+                // when they sent it unedited the stored text already IS what went out.
+                rm.resolution_text   = CASE WHEN $edited THEN $approved_text
+                                            ELSE rm.resolution_text END
+            RETURN rm.id AS memory_id, rm.verified AS verified, rm.memory_key AS memory_key
+            """,
+            {
+                "turn_id": turn_id,
+                "verified": not edited,
+                "edited": edited,
+                "approved_text": approved_text or "",
+                "now": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+        return rows[0] if rows else None
+    except Exception:
+        logger.warning(
+            "neo4j_verify_resolution_memory_failed",
+            extra={"turn_id": turn_id},
+            exc_info=True,
+        )
+        return None
+
+
 def upsert_ticket_node(
     client,
     ticket_id: str,

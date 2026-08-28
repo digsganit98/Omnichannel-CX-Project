@@ -6,6 +6,8 @@ sends it manually — which delivers to the customer (WhatsApp/email push; web-c
 portal's history poll) and persists a normal outbound turn.
 """
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
@@ -13,6 +15,8 @@ from apps.api.dependencies.runtime import get_repository
 from apps.api.dependencies.security import require_admin_key
 from services.channel_service.delivery import OutboundDeliveryService
 from shared.schemas.messages import Channel, InboundMessage
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin/reply-drafts", tags=["admin"], dependencies=[Depends(require_admin_key)])
 
@@ -99,6 +103,15 @@ def send_draft(draft_id: str, payload: SendDraftRequest) -> dict:
     updated = repository.update_reply_draft(
         draft_id, status="sent", actor=payload.actor, sent_text=text,
     )
+    edited = text != (draft.get("draft_text") or "")
+
+    # Feed the agent's verdict back to the graph. Reviewing a held reply IS a human
+    # judgement on that answer — sent unedited endorses it, rewritten rejects it — and
+    # until now that judgement was recorded in the audit row below and read by nothing,
+    # so every ResolutionMemory stayed unverified and therefore unservable forever.
+    # Best-effort: a graph failure must never block a reply the agent has approved.
+    memory = _verify_resolution_memory(draft, text, edited)
+
     repository.add_audit_event(
         "reply_draft_sent",
         draft_id,
@@ -106,9 +119,41 @@ def send_draft(draft_id: str, payload: SendDraftRequest) -> dict:
         conversation_id=draft.get("conversation_id"),
         ticket_id=draft.get("ticket_id"),
         details={"actor": payload.actor, "delivery_status": delivery.get("status"),
-                 "edited": text != (draft.get("draft_text") or "")},
+                 "edited": edited,
+                 "memory_id": (memory or {}).get("memory_id"),
+                 "memory_verified": (memory or {}).get("verified")},
     )
-    return {"draft": updated, "turn_id": turn["turn_id"], "delivery": delivery}
+    return {"draft": updated, "turn_id": turn["turn_id"], "delivery": delivery,
+            "memory": memory}
+
+
+def _neo4j_client():
+    """None when the graph is unreachable/disabled — sending a reply must still work."""
+    try:
+        from services.neo4j_service.client import Neo4jClient
+        return Neo4jClient()
+    except Exception:
+        return None
+
+
+def _verify_resolution_memory(draft: dict, sent_text: str, edited: bool) -> dict | None:
+    """Mark the memory this draft's answer created as human-verified (or not).
+
+    The draft carries no memory id, and none needs to be added: inbound_turn_id is the
+    :Interaction key, and the interaction already points at the memory it created.
+    """
+    turn_id = draft.get("inbound_turn_id")
+    if not turn_id:
+        return None
+    try:
+        from services.neo4j_service import writer as neo4j_writer
+        return neo4j_writer.verify_resolution_memory(
+            _neo4j_client(), turn_id=turn_id, approved_text=sent_text, edited=edited,
+        )
+    except Exception:
+        logger.warning("resolution_memory_verify_failed", extra={"draft_id": draft.get("draft_id")},
+                       exc_info=True)
+        return None
 
 
 def _carry_retrieval_evidence(repository, draft: dict, sent_turn_id: str) -> None:
