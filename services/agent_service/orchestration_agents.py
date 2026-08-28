@@ -229,9 +229,14 @@ class IntentClassificationAgent:
 # answer carries the customer's own figures or case specifics (account_balance_inquiry,
 # transaction_dispute, loan_status, claim_status, ticket_status...), plus fraud_report and
 # human_escalation, where a cached reply must never stand in for a live assessment.
+#
+# general_inquiry is excluded too, and for a different reason: it is a CATCH-ALL. Two
+# questions with nothing in common land on the same key, so a verified answer about account
+# charges would be served to someone asking what an SIP is — which is precisely what
+# test_general_inquiry_resolution_memory_does_not_override_kb_rag exists to prevent. An
+# intent only belongs here when the intent itself pins down the question.
 MEMORY_ELIGIBLE_INTENTS = {
     Intent.KYC_UPDATE.value,
-    Intent.GENERAL_INQUIRY.value,
 }
 
 
@@ -270,10 +275,14 @@ class QueryResolutionAgent:
         if intent in MEMORY_ELIGIBLE_INTENTS and self.neo4j_client:
             try:
                 from services.neo4j_service.query_library import search_resolution_memory
-                active_ticket = context.get("active_ticket") or {}
-                scope = (active_ticket.get("metadata") or {}).get("ticket_scope")
-                memory_key = str(scope) if scope else f"{intent}:general"
-                memory = search_resolution_memory(self.neo4j_client, memory_key)
+                # Keyed on THIS question's intent, never on whatever ticket the customer
+                # happens to have open. An earlier version read the active ticket's
+                # ticket_scope, so a customer with an open transaction_dispute asking about
+                # KYC looked up "transaction_dispute:atm" and could never find the verified
+                # kyc_update answer sitting beside it. The write side still records the
+                # ticket's own scope — a memory formed FOR a case belongs to that case —
+                # but a lookup must follow what is being asked now.
+                memory = search_resolution_memory(self.neo4j_client, f"{intent}:general")
                 if memory and memory.get("verified") and memory.get("resolution"):
                     cached_answer = memory["resolution"]
                     return QueryResolution(
@@ -286,8 +295,11 @@ class QueryResolutionAgent:
                                 "source": "resolution_memory_cache",
                                 "doc_type": "customer_graph",
                                 "times_reused": memory.get("times_reused", 0),
-                                "product_id": product_id,
+                                "memory_key": f"{intent}:general",
                                 "intent_type": intent,
+                                # Fix 66's trap: the provenance panel reads THIS dict, not
+                                # retrieval_backend on the object, so the key must be here too.
+                                "retrieval": "resolution_memory_cache",
                             },
                         }],
                         citations=[{"index": 1, "source": "resolution_memory_cache", "score": 0.92}],

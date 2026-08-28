@@ -795,7 +795,12 @@ class OrchestrationGraph:
                 self.neo4j_client,
                 conversation_id=state.conversation_id,
                 customer_id=_neo4j_customer_id(state, self.neo4j_client),
-                resolution=state.answer or "",
+                # The RESOLUTION BODY, not the delivered reply. state.answer has already
+                # been through compose_answer, which prepends "Hi <customer name>," and,
+                # on email, a sign-off — so storing it would put one customer's name into
+                # an answer meant to be reused for the next customer with the same problem.
+                # This is exactly the particulars-leak the memory cache was disabled over.
+                resolution=(state.resolution.answer if state.resolution else state.answer) or "",
                 intent=state.analysis.intent.value,
                 sentiment=state.analysis.sentiment,
                 product_id=_extract_product_ref(state),
