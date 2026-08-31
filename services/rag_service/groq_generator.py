@@ -95,6 +95,14 @@ _LANGUAGE_NAMES = {
 }
 
 
+def _reasoning_effort() -> str:
+    """How hard a reasoning model should think before answering. "low" by default.
+
+    Empty string disables the parameter entirely (for a model that rejects it).
+    """
+    return os.getenv("GROQ_REASONING_EFFORT", "low").strip().lower()
+
+
 class GroqGenerator:
     def __init__(self) -> None:
         self.api_key = os.getenv("GROQ_API_KEY", "")
@@ -530,6 +538,22 @@ class GroqGenerator:
         if max_tokens:
             extra["max_tokens"] = max_tokens
             call_params["max_tokens"] = max_tokens
+        # gpt-oss models bill the tokens they spend THINKING, and that overhead is
+        # invisible - measured on one categorisation prompt: 270 reasoning tokens at the
+        # default effort against 25 at "low", ~2.7x the billed total for the same answer.
+        # Groq's free tier caps at 8,000 tokens PER MINUTE, so the customer-context call
+        # (5,719 tokens) was blowing that ceiling on its own and returning None, which the
+        # panel honestly rendered as "Grouping unavailable right now". At effort=low the
+        # same call costs ~3,000 and completes.
+        #
+        # These are sorting/classification/extraction tasks over data that is already
+        # retrieved - there is no chain of reasoning to discover, so the thinking budget
+        # buys nothing. Configurable because a future prompt may genuinely need it, and
+        # silently ignored by non-reasoning models.
+        effort = _reasoning_effort()
+        if effort:
+            extra["reasoning_effort"] = effort
+            call_params["reasoning_effort"] = effort
         try:
             response = self._groq.chat.completions.create(
                 model=self.model,
