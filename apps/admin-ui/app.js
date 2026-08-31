@@ -3720,7 +3720,8 @@ function renderSchemaSvg(sc) {
   (sc.edges || []).forEach(function(e) { relCounts[e.rel] = (relCounts[e.rel] || 0) + e.count; });
 
   var W = 1955, H = 525;
-  var svg = '<svg class="kgs" viewBox="0 0 ' + W + ' ' + H + '" xmlns="http://www.w3.org/2000/svg">';
+  var svg = '<svg class="kgs" style="--kgs-w:' + W + 'px;--kgs-h:' + H + 'px;--kgs-s:0.76" width="' + W + '" height="' + H
+          + '" viewBox="0 0 ' + W + ' ' + H + '" xmlns="http://www.w3.org/2000/svg">';
   svg += '<defs><marker id="kgar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" '
        + 'markerHeight="7" orient="auto-start-reverse">'
        + '<path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"/></marker></defs>';
@@ -3819,60 +3820,197 @@ function flowParts(name) {
   return m ? { step: m[1], agent: m[2] } : { step: String(name), agent: '' };
 }
 
-function flowLabel(name) {
-  var s = flowParts(name).step;
-  if (s === '__start__') return 'START';
-  if (s === '__end__') return 'END';
-  return s;
+// The pipeline drawn as it actually branches. Positions are a fixed map, like the schema
+// view: the topology only changes when graph.py changes, and a stable picture is worth
+// more than an auto-layout that shifts every open.
+//
+// Two lanes below check_has_open_case: LEFT is the ticket-close branch, RIGHT is the
+// answer branch. They rejoin at send_outbound_reply, which every path reaches.
+var FL_W = 466;
+
+// Landscape. Node notes carry the SAME text as the written walkthrough - an earlier
+// version silently trimmed them to fit (classify_intent lost "language", resolve_query
+// lost its confidence scores), so the diagram and the explanation disagreed.
+//
+// Row A (y=190) is the spine every message follows.
+// Row B (y=40)  is the ticket-close lane, above the spine.
+// Row C (y=340) is the answer lane, below the spine.
+var FLOW_MAP = {
+  '__start__':                   { x:   8, y: 296, w: 134, h: 58, kind: 'end',  label: 'START' },
+
+  'receive_message':             { x: 150, y: 270, w: FL_W, h: 120, kind: 'step',
+                                   note: 'log the inbound event|+ provider' },
+  'resolve_identity':            { x: 640, y: 270, w: FL_W, h: 120, kind: 'step',
+                                   note: 'phone OR email -> ONE Customer|(this is the omnichannel join)' },
+  'load_conversation_context':   { x: 1130, y: 270, w: FL_W, h: 120, kind: 'step',
+                                   note: 'ONE fetch, shared downstream:|turns / tickets / graph' },
+  'check_has_open_case':         { x: 1620, y: 270, w: FL_W, h: 120, kind: 'gate',
+                                   note: 'does this CUSTOMER have|an open case?' },
+
+  'detect_ticket_action':        { x: 2110, y:  40, w: FL_W, h: 102, kind: 'gate',
+                                   note: 'is this turn about closing?' },
+  'select_ticket_to_close':      { x: 2600, y:  40, w: FL_W, h: 102, kind: 'gate',
+                                   note: 'WHICH ticket?' },
+  'close_ticket':                { x: 3090, y:  40, w: FL_W, h: 102, kind: 'step',
+                                   note: 'mark the selected ticket closed' },
+
+  'classify_intent':             { x: 2110, y: 470, w: FL_W, h: 136, kind: 'agent',
+                                   agent: 'Agent 1',
+                                   note: 'ONE Groq call returns intent +|urgency + sentiment + language' },
+  'validate_customer':           { x: 2600, y: 470, w: FL_W, h: 136, kind: 'gate',
+                                   agent: 'Agent 1b',
+                                   note: 'registered for this intent?' },
+  'reject_unregistered_customer':{ x: 2600, y: 650, w: FL_W, h: 108, kind: 'step',
+                                   note: 'ask them to write from|a registered address' },
+  'resolve_query':               { x: 3090, y: 470, w: FL_W, h: 164, kind: 'agent',
+                                   agent: 'Agent 2',
+                                   note: '0 memory .92   1 ticket .98|2 graph .95    3 KB vary|then grade L1 / L2 / L3' },
+  'decide_ticket':               { x: 3580, y: 470, w: FL_W, h: 136, kind: 'gate',
+                                   agent: 'Agent 3',
+                                   note: 'Rule 0 first: L3 and L2|-> ticket. Then rules 1-8' },
+  'create_ticket':               { x: 4070, y: 446, w: FL_W, h: 120, kind: 'step',
+                                   note: 'attach / refine / fork,|referee - then Jira' },
+  'skip_ticket':                 { x: 4070, y: 600, w: FL_W, h: 92, kind: 'step',
+                                   note: 'answer directly' },
+
+  'send_outbound_reply':         { x: 4030, y: 212, w: 500, h: 178, kind: 'gate',
+                                   note: 'REVIEW GATE|hold <=> ticket required|held: draft saved, customer|gets the holding message' },
+  'persist_audit_events':        { x: 4600, y: 240, w: FL_W, h: 120, kind: 'step',
+                                   note: 'turn + citations + evidence|Interaction -> closed, memory' },
+  '__end__':                     { x: 5090, y: 264, w: 122, h: 58, kind: 'end', label: 'END' }
+};
+
+var FLOW_EDGES = [
+  { f: '__start__', t: 'receive_message', fs: 'r', ts: 'l' },
+  { f: 'receive_message', t: 'resolve_identity', fs: 'r', ts: 'l' },
+  { f: 'resolve_identity', t: 'load_conversation_context', fs: 'r', ts: 'l' },
+  { f: 'load_conversation_context', t: 'check_has_open_case', fs: 'r', ts: 'l' },
+
+  { f: 'check_has_open_case', t: 'detect_ticket_action', fs: 'r', ts: 'l', cond: '1  has a case' },
+  { f: 'check_has_open_case', t: 'classify_intent', fs: 'r', ts: 'l', cond: '0  no case' },
+
+  { f: 'detect_ticket_action', t: 'select_ticket_to_close', fs: 'r', ts: 'l', cond: 'CLOSE' },
+  { f: 'detect_ticket_action', t: 'classify_intent', fs: 'b', ts: 't', cond: 'anything else' },
+  { f: 'select_ticket_to_close', t: 'close_ticket', fs: 'r', ts: 'l', cond: 'clear' },
+  { f: 'select_ticket_to_close', t: 'send_outbound_reply', fs: 'b', ts: 'l', cond: 'ambiguous - ask which' },
+  { f: 'close_ticket', t: 'send_outbound_reply', fs: 'r', ts: 't' },
+
+  { f: 'classify_intent', t: 'validate_customer', fs: 'r', ts: 'l' },
+  { f: 'validate_customer', t: 'resolve_query', fs: 'r', ts: 'l', cond: 'registered' },
+  { f: 'validate_customer', t: 'reject_unregistered_customer', fs: 'b', ts: 't', cond: 'not' },
+  { f: 'reject_unregistered_customer', t: 'send_outbound_reply', band: 800, gx: 4590, ts: 'b' },
+  { f: 'resolve_query', t: 'decide_ticket', fs: 'r', ts: 'l' },
+  { f: 'decide_ticket', t: 'create_ticket', fs: 'r', ts: 'l', cond: 'required' },
+  { f: 'decide_ticket', t: 'skip_ticket', fs: 'b', ts: 'l', cond: 'no' },
+  { f: 'create_ticket', t: 'send_outbound_reply', fs: 't', ts: 'b' },
+  { f: 'skip_ticket', t: 'send_outbound_reply', band: 800, gx: 4630, ts: 'b' },
+
+  { f: 'send_outbound_reply', t: 'persist_audit_events', fs: 'r', ts: 'l' },
+  { f: 'persist_audit_events', t: '__end__', fs: 'r', ts: 'l' }
+];
+
+var FL_FILL = {
+  end:   ['#0f172a', '#0f172a', '#ffffff'],
+  step:  ['#ffffff', '#cbd5e1', '#101828'],
+  gate:  ['#fffbeb', '#fcd34d', '#b45309'],
+  agent: ['#eff6ff', '#93c5fd', '#1d4ed8']
+};
+
+function flAnchor(n, side) {
+  if (side === 't') return [n.x + n.w / 2, n.y];
+  if (side === 'b') return [n.x + n.w / 2, n.y + n.h];
+  if (side === 'l') return [n.x, n.y + n.h / 2];
+  return [n.x + n.w, n.y + n.h / 2];
 }
 
 function renderFlowSvg(wf) {
-  var edges = wf.edges || [];
-  var html = '<div class="flow-wrap">';
+  var W = 5300, H = 850;
+  var svg = '<svg class="kgs" style="--kgs-w:' + W + 'px;--kgs-h:' + H + 'px;--kgs-s:0.44" width="' + W + '" height="' + H
+          + '" viewBox="0 0 ' + W + ' ' + H + '" xmlns="http://www.w3.org/2000/svg">';
+  svg += '<defs><marker id="flar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" '
+       + 'markerHeight="7" orient="auto-start-reverse">'
+       + '<path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"/></marker></defs>';
 
-  edges.forEach(function(e) {
-    var from = flowParts(e.from);
-    var targets = String(e.to).split('|').map(function(t) { return t.trim(); });
-    var isBranch = targets.length > 1;
-
-    html += '<div class="flow-step' + (isBranch ? ' flow-step--branch' : '') + '">';
-    html += '<div class="flow-node' + (flowLabel(e.from) === 'START' ? ' flow-node--end' : '') + '">'
-      + '<span class="flow-node-n">' + kgEscape(flowLabel(e.from)) + '</span>'
-      + (from.agent ? '<span class="flow-agent">' + kgEscape(from.agent) + '</span>' : '')
-      + '</div>';
-    html += '<div class="flow-arrow">' + (isBranch ? '◆' : '↓') + '</div>';
-    html += '<div class="flow-targets">';
-    targets.forEach(function(t) {
-      var p = flowParts(t);
-      // "close_ticket (ask which ticket)" — the parenthetical is the branch condition.
-      var cm = p.step.match(/^(.*?)\s*\((.+)\)\s*$/);
-      var stepName = cm ? cm[1] : p.step;
-      var cond = cm ? cm[2] : '';
-      html += '<div class="flow-node flow-node--t'
-        + (flowLabel(stepName) === 'END' ? ' flow-node--end' : '') + '">'
-        + '<span class="flow-node-n">' + kgEscape(flowLabel(stepName)) + '</span>'
-        + (p.agent ? '<span class="flow-agent">' + kgEscape(p.agent) + '</span>' : '')
-        + (cond ? '<span class="flow-cond">' + kgEscape(cond) + '</span>' : '')
-        + '</div>';
-    });
-    html += '</div></div>';
+  FLOW_EDGES.forEach(function(e) {
+    var a = FLOW_MAP[e.f], b = FLOW_MAP[e.t];
+    if (!a || !b) return;
+    var p1, p2, d, lx, ly;
+    if (e.band) {
+      // Out the top, along a horizontal lane measured to be clear of every box, then
+      // down/up into the target. Used where a direct run would clip the create/skip column.
+      p1 = flAnchor(a, 'b'); p2 = flAnchor(b, e.ts);
+      d = 'M' + p1[0] + ',' + p1[1] + ' V' + e.band + ' H' + e.gx
+        + ' V' + p2[1] + ' H' + p2[0];
+      lx = e.gx - 60; ly = e.band - 5;
+      svg += '<path class="kgs-e" d="' + d + '" marker-end="url(#flar)"/>';
+      if (e.cond) svg += '<text class="fl-cond" x="' + lx + '" y="' + ly + '">'
+                       + kgEscape(e.cond) + '</text>';
+      return;
+    }
+    p1 = flAnchor(a, e.fs); p2 = flAnchor(b, e.ts);
+    if (e.fs === 'l' || e.fs === 'r') {
+      // sideways out, then vertical, then in
+      var mx = e.fs === 'l' ? Math.min(p1[0], p2[0]) - 40 : Math.max(p1[0], p2[0]) + 40;
+      if (e.ts === 't' || e.ts === 'b') {
+        d = 'M' + p1[0] + ',' + p1[1] + ' H' + p2[0] + ' V' + p2[1];
+        lx = (p1[0] + p2[0]) / 2 - 30; ly = p1[1] - 7;
+      } else {
+        d = 'M' + p1[0] + ',' + p1[1] + ' H' + mx + ' V' + p2[1] + ' H' + p2[0];
+        lx = e.fs === 'l' ? mx + 6 : mx - 120; ly = (p1[1] + p2[1]) / 2 - 6;
+      }
+    } else {
+      var my = (p1[1] + p2[1]) / 2;
+      d = 'M' + p1[0] + ',' + p1[1] + ' V' + my + ' H' + p2[0] + ' V' + p2[1];
+      lx = p1[0] === p2[0] ? p1[0] + 8 : (p1[0] + p2[0]) / 2 + 8; ly = my - 5;
+    }
+    svg += '<path class="kgs-e" d="' + d + '" marker-end="url(#flar)"/>';
+    if (e.cond) {
+      svg += '<text class="fl-cond" x="' + lx + '" y="' + ly + '">' + kgEscape(e.cond) + '</text>';
+    }
   });
 
-  var agents = wf.agents || [];
-  if (agents.length) {
-    html += '<div class="sch-tier-h" style="margin-top:16px">Agents</div><div class="flow-agents">';
-    agents.forEach(function(a) {
-      html += '<div class="flow-agent-card"><div class="flow-agent-n">' + kgEscape(a.name) + '</div>'
-        + '<div class="flow-agent-r">' + kgEscape(a.responsibility || '') + '</div></div>';
-    });
-    html += '</div>';
-  }
-  html += '</div>';
-  return html;
+  Object.keys(FLOW_MAP).forEach(function(key) {
+    var n = FLOW_MAP[key];
+    var c = FL_FILL[n.kind] || FL_FILL.step;
+    svg += '<g class="kgs-n">';
+    svg += '<rect x="' + n.x + '" y="' + n.y + '" width="' + n.w + '" height="' + n.h
+         + '" rx="' + (n.kind === 'end' ? 15 : 8) + '" fill="' + c[0] + '" stroke="' + c[1]
+         + '" stroke-width="1.5"/>';
+    if (n.kind === 'end') {
+      svg += '<text class="fl-end" x="' + (n.x + n.w / 2) + '" y="' + (n.y + 26)
+           + '" text-anchor="middle" fill="' + c[2] + '">' + kgEscape(n.label) + '</text>';
+    } else {
+      var ty = n.y + 38;
+      if (n.agent) {
+        svg += '<text class="fl-agent" x="' + (n.x + n.w - 10) + '" y="' + (n.y + 19)
+             + '" text-anchor="end">' + kgEscape(n.agent) + '</text>';
+      }
+      svg += '<text class="fl-name" x="' + (n.x + 11) + '" y="' + ty + '" fill="' + c[2] + '">'
+           + kgEscape(key) + '</text>';
+      (n.note || '').split('|').forEach(function(line, i) {
+        if (!line) return;
+        svg += '<text class="fl-note" x="' + (n.x + 11) + '" y="' + (ty + 32 + i * 25) + '">'
+             + kgEscape(line) + '</text>';
+      });
+    }
+    svg += '</g>';
+  });
+  svg += '</svg>';
+
+  var gates = Object.keys(FLOW_MAP).filter(function(k) { return FLOW_MAP[k].kind === 'gate'; }).length;
+  return '<div class="kgs-wrap">'
+    + '<div class="kgs-note">Every inbound message runs this pipeline \u2014 WhatsApp, email and web '
+    + 'chat alike. The left lane is ticket-closing, the right lane is answering; both rejoin at '
+    + 'send_outbound_reply.</div>'
+    + svg
+    + '<div class="kgs-key">'
+    + '<span><i style="background:#ffffff;border-color:#cbd5e1"></i>Step</span>'
+    + '<span><i style="background:#fffbeb;border-color:#fcd34d"></i>Decision point (' + gates + ')</span>'
+    + '<span><i style="background:#eff6ff;border-color:#93c5fd"></i>LLM agent</span>'
+    + '<span><i style="background:#0f172a;border-color:#0f172a"></i>Start / end</span>'
+    + '</div></div>';
 }
 
-// Wire both header buttons once the DOM is up. They are never hidden: neither diagram
-// depends on which conversation is selected.
 // Prefetch both payloads at load. Buttons are wired inline in index.html (onclick=),
 // matching how every other button in this app is wired.
 if (document.readyState === 'loading') {
