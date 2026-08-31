@@ -636,8 +636,6 @@ function renderCentre(conv) {
   // graph call returns (or forever, if this customer resolves to no graph node).
   var _metaEl = document.getElementById('convMeta');
   if (_metaEl) _metaEl.innerHTML = '';
-  var _kgBtn = document.getElementById('snap-kg-btn');
-  if (_kgBtn) { _kgBtn.style.display = 'none'; _kgBtn.onclick = null; }
 
   var isDone = urgencyToStatus(conv_meta) === 'resolved';
   document.getElementById('resbanner').style.display = isDone ? 'flex' : 'none';
@@ -1497,14 +1495,10 @@ function renderRight(conv, tickets) {
     // reuses it and only a genuinely new customer costs a request.
     loadCustomerContext(_snapCustId, false);
 
-    // Knowledge-graph button: only shown once we know the customer resolves to a graph
-    // node (an unverified sender has none — same rule that keeps phantoms out).
-    api('/admin/customers/' + encodeURIComponent(_snapCustId) + '/graph-view').then(function(gv) {
-      var btn = document.getElementById('snap-kg-btn');
-      if (!btn || !gv || !gv.resolved || !(gv.nodes || []).length) return;
-      btn.style.display = 'flex';
-      btn.onclick = function() { openGraphModal(gv); };
-    }).catch(function() { /* button stays hidden */ });
+    // The customer-360 graph is no longer offered here — the header now opens the two
+    // system diagrams instead (Neo4j knowledge graph / LangGraph workflow), which do not
+    // depend on which customer is selected. /graph-view is still live and still feeds the
+    // "Why this answer" provenance panel.
 
     // Still called after the snapshot tiles were dropped: this is also what fills the
     // conversation header's name / id / email / phone line.
@@ -3499,3 +3493,390 @@ if (userToken && portalUser && !isTokenExpired(userToken)) {
 }
 
 })();
+
+// ═══════════════════════════════════════════════════════════════════════════
+// System diagrams — the two things the header buttons open.
+//
+// Both are about the SYSTEM, not the selected customer, so neither is gated on a
+// customer resolving to a graph node the way the old 360 view was. They reuse
+// #graphModal (shell, CSS, close handler) but NOT renderGraphSvg: that layout is
+// radial hub-and-spoke, which suits "one customer at the centre" and suits neither
+// a schema with chains (Customer→CreditCard→Product) nor a left-to-right pipeline.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Which node types each transactional intent reads at answer time. Mirrors
+// neo4j_answer()'s branches in services/neo4j_service/queries.py — the point of the
+// schema picture is to show the ANSWER PATH, not just the data model, so a node that
+// is never read at answer time honestly shows nothing here.
+var KG_INTENT_READS = {
+  Account:        ['account_balance_inquiry'],
+  FixedDeposit:   ['account_balance_inquiry'],
+  CreditCard:     ['card_management'],
+  Loan:           ['loan_status', 'loan_default_notice'],
+  Policy:         ['policy_status'],
+  Claim:          ['claim_status', 'policy_status'],
+  Transaction:    ['transaction_dispute'],
+  Ticket:         ['(trusted context — get_open_cases, every message)'],
+  ResolutionMemory: ['(Priority 0 — verified memories only)']
+};
+
+// Tiers give the schema its shape. Order matters: identity, then what the customer
+// HOLDS, then what they are DEALING WITH, then the catalog everything hangs off.
+var KG_TIERS = [
+  { key: 'identity', label: 'Identity', types: ['Customer'] },
+  { key: 'holdings', label: 'Holdings — what the customer has',
+    types: ['Account', 'CreditCard', 'FixedDeposit', 'Loan', 'Policy', 'Claim',
+            'Transaction', 'ChargePenalty', 'KYC'] },
+  { key: 'case', label: 'Case layer — what they are dealing with',
+    types: ['Ticket', 'Interaction', 'ResolutionMemory', 'Agent'] },
+  { key: 'catalog', label: 'Catalog', types: ['Product'] }
+];
+
+// Prefetched at load and rendered synchronously on click — the same shape the customer-360
+// button used (fetch first, then `onclick` only renders). A fetch inside the click handler
+// was the one thing here that differed from the app's working pattern.
+var _schemaData = null, _flowData = null;
+
+// Local copy: escH lives inside the main IIFE and is not visible from here. Same scope
+// boundary that hid api() — anything this block needs must be defined in this block.
+function kgEscape(v) {
+  return String(v == null ? '' : v).replace(/[&<>"]/g, function(c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+  });
+}
+
+function kgShowModal(title, sub, counts, body) {
+  document.getElementById('graphModalTitle').textContent = title;
+  document.getElementById('graphModalSub').textContent = sub;
+  document.getElementById('graphModalCounts').textContent = counts;
+  document.getElementById('graphModalBody').innerHTML = body;
+  document.getElementById('graphModal').classList.remove('hidden');
+}
+
+window.openSchemaModal = function() {
+  var sc = _schemaData;
+  if (!sc || !sc.reachable) {
+    kgShowModal('Neo4j knowledge graph', 'Node types and how they connect', '',
+      '<div class="kg-empty">Schema not loaded'
+      + (sc && sc.error ? ': ' + kgEscape(sc.error) : ' — is Neo4j running?') + '</div>');
+    loadSystemDiagrams();
+    return;
+  }
+  var total = (sc.nodes || []).reduce(function(a, n) { return a + (n.count || 0); }, 0);
+  kgShowModal('Neo4j knowledge graph',
+    'Node types and how they connect — live counts from the running database',
+    (sc.nodes || []).length + ' node types · ' + (sc.edges || []).length
+      + ' relationship types · ' + total + ' nodes live',
+    renderSchemaSvg(sc));
+};
+
+window.openFlowModal = function() {
+  var wf = _flowData;
+  if (!wf || !wf.edges) {
+    kgShowModal('LangGraph workflow', 'The pipeline every inbound message runs through', '',
+      '<div class="kg-empty">Workflow not loaded.</div>');
+    loadSystemDiagrams();
+    return;
+  }
+  var branches = (wf.edges || []).filter(function(e) { return String(e.to).indexOf('|') >= 0; }).length;
+  kgShowModal('LangGraph workflow',
+    'The pipeline every inbound message runs through — WhatsApp, email and web chat alike',
+    (wf.steps || []).length + ' steps · ' + (wf.edges || []).length + ' edges · '
+      + branches + ' decision points · ' + (wf.framework || 'LangGraph'),
+    renderFlowSvg(wf));
+};
+
+// Fetch both payloads once, up front. Failures are silent: the click handler above
+// reports "not loaded" and retries, so a slow start never leaves a stuck modal.
+function loadSystemDiagrams() {
+  // Uses fetch directly, NOT the api() helper: api() and adminKey are declared inside the
+  // main IIFE, so this code (appended after it) cannot see them — that scope boundary is
+  // what silently broke the first version. The key is read from sessionStorage, the same
+  // place api() gets it.
+  function kgFetch(path) {
+    var key = '';
+    try { key = sessionStorage.getItem('cx-admin-key') || ''; } catch (e) {}
+    return fetch(path, { headers: { 'x-admin-key': key } }).then(function(r) {
+      if (!r.ok) throw new Error(r.status + ' ' + r.statusText);
+      return r.json();
+    });
+  }
+  kgFetch('/admin/neo4j/schema')
+    .then(function(d) { _schemaData = d; })
+    .catch(function(e) { _schemaData = { reachable: false, error: String(e.message || e) }; });
+  kgFetch('/admin/orchestration/workflow')
+    .then(function(d) { _flowData = d; })
+    .catch(function() { _flowData = null; });
+}
+
+// Real SVG with drawn edges. Layout is a fixed hand-authored map, NOT a physics sim: the
+// schema must look identical on every open, and it only changes when the data model does.
+// Live counts come from the payload; the arrangement is ours.
+//
+// Geometry rules learned the hard way:
+//  - Every box is 200 wide. Property strings are kept under ~26 chars so 10px monospace
+//    (~6px/char) fits inside 200-20 padding. Longer names are shortened, never clipped.
+//  - Columns are 215 apart, rows 150 apart: enough for an edge label to sit on the gap
+//    without touching either box.
+//  - The Customer->Ticket edge leaves the RIGHT side and runs down a dedicated corridor
+//    at x=1105, outside every column, so it never crosses another node.
+var KG_COLW = 196, KG_COLGAP = 210, KG_X0 = 24;
+function kgCol(i) { return KG_X0 + i * KG_COLGAP; }
+
+// EVERY edge below is a relationship that exists in the database - verified against
+// MATCH (a)-[r]->(b). An earlier version drew FixedDeposit under Account and Loan under
+// CreditCard purely because they sat in the same grid column; both are children of
+// Customer, so those arrows described relationships that do not exist. A diagram that
+// invents an edge is worse than no diagram.
+//
+// Row 1 = the seven things a Customer directly owns (all :HAS_* from Customer).
+// Row 2 = second-hop only: Claim (via Policy) and the case chain.
+var KG_MAP = {
+  Customer:        { x: kgCol(2), y:  26, w: 210, h: 84, tier: 'identity', head: 'Anchor',
+                     props: ['customer_id', 'name / email / phone', 'segment / city'] },
+
+  Account:         { x: kgCol(0), y: 210, w: KG_COLW, h: 82, tier: 'holdings', head: 'Money in',
+                     props: ['account_number', 'avg_monthly_balance', 'min_balance_reqd'] },
+  FixedDeposit:    { x: kgCol(1), y: 210, w: KG_COLW, h: 82, tier: 'holdings', head: 'Money in',
+                     props: ['fd_id / principal', 'maturity_date', 'maturity_amount'] },
+  CreditCard:      { x: kgCol(2), y: 210, w: KG_COLW, h: 82, tier: 'holdings', head: 'Money out',
+                     props: ['credit_limit', 'balance_due / dpd', 'payment_due_date'] },
+  Loan:            { x: kgCol(3), y: 210, w: KG_COLW, h: 82, tier: 'holdings', head: 'Money out',
+                     props: ['loan_type / amount', 'emis_pending / dpd', 'next_step'] },
+  Policy:          { x: kgCol(4), y: 210, w: KG_COLW, h: 82, tier: 'holdings', head: 'Insurance',
+                     props: ['policy_id / coverage', 'premium_inr', 'next_premium_due'] },
+  Transaction:     { x: kgCol(5), y: 210, w: KG_COLW, h: 82, tier: 'holdings', head: 'Activity',
+                     props: ['txn_id / amount', 'status', 'failure_reason'] },
+  ChargePenalty:   { x: kgCol(6), y: 210, w: 206, h: 82, tier: 'holdings', head: 'Activity',
+                     props: ['charge_type', 'amount / reason', 'reversal_status'] },
+
+  Claim:           { x: kgCol(4), y: 370, w: KG_COLW, h: 82, tier: 'holdings', head: 'Insurance',
+                     props: ['claim_id / status', 'amount_claimed', 'amount_approved'] },
+  KYC:             { x: kgCol(5), y: 370, w: KG_COLW, h: 78, tier: 'holdings', head: 'Compliance',
+                     props: ['kyc_status', 'registered_at'] },
+  Product:         { x: kgCol(1), y: 370, w: 230, h: 78, tier: 'catalog', head: 'Shared catalogue',
+                     props: ['product_id / name', 'Account, FD, Card, Loan'] },
+
+  Ticket:          { x: kgCol(7), y:  26, w: KG_COLW, h: 82, tier: 'case', head: 'The case',
+                     props: ['ticket_id / status', 'scope = continuity', 'intent / priority'] },
+  Interaction:     { x: kgCol(7), y: 210, w: KG_COLW, h: 82, tier: 'case', head: 'One per message',
+                     props: ['turn_id / channel', 'message / sentiment', 'status open->closed'] },
+  Agent:           { x: kgCol(8), y: 210, w: 186, h: 82, tier: 'case', head: 'Handled by',
+                     props: ['AI_GROQ  (the AI)', 'HUMAN_SR  (a person)', 'one per handler type'] },
+  ResolutionMemory:{ x: kgCol(7) - 30, y: 370, w: 256, h: 82, tier: 'memory', head: 'Learning loop',
+                     props: ['memory_key = problem', 'verified / times_reused', 'resolution_text'] }
+};
+
+// fs/ts = the side each line leaves and enters. Fan-out edges from Customer all leave the
+// bottom; the Ticket edge leaves the right because Ticket sits beside Customer, not below.
+var KG_EDGES = [
+  { from: 'Customer', to: 'Account',          rel: 'HAS_ACCOUNT',     fs: 'b', ts: 't' },
+  { from: 'Customer', to: 'FixedDeposit',     rel: 'HAS_FD',          fs: 'b', ts: 't' },
+  { from: 'Customer', to: 'CreditCard',       rel: 'HAS_CREDIT_CARD', fs: 'b', ts: 't' },
+  { from: 'Customer', to: 'Loan',             rel: 'HAS_LOAN',        fs: 'b', ts: 't' },
+  { from: 'Customer', to: 'Policy',           rel: 'HAS_POLICY',      fs: 'b', ts: 't' },
+  { from: 'Customer', to: 'Transaction',      rel: 'HAS_TRANSACTION', fs: 'b', ts: 't' },
+  { from: 'Customer', to: 'ChargePenalty',    rel: 'HAS_CHARGE',      fs: 'b', ts: 't' },
+  { from: 'Customer', to: 'Ticket',           rel: 'HAS_TICKET',      fs: 'r', ts: 'l' },
+
+  // Second hop: a claim belongs to a policy (it also hangs off Customer directly - the
+  // same node reached two ways, which is the point of a graph).
+  { from: 'Policy',   to: 'Claim',            rel: 'HAS_CLAIM',       fs: 'b', ts: 't' },
+
+  // All four holdings that carry a product point at the catalogue.
+  { from: 'Account',  to: 'Product',          rel: 'PRODUCT_IS',      fs: 'b', ts: 't' },
+  { from: 'FixedDeposit', to: 'Product',      rel: 'PRODUCT_IS',      fs: 'b', ts: 't' },
+  { from: 'CreditCard', to: 'Product',        rel: 'PRODUCT_IS',      fs: 'b', ts: 't' },
+  { from: 'Loan',     to: 'Product',          rel: 'PRODUCT_IS',      fs: 'b', ts: 't' },
+
+  { from: 'Customer', to: 'KYC',              rel: 'KYC_VERIFIED_BY', lane: 464, gutter: 12 },
+  // The SAME Claim node reached two ways - by its policy and directly by the customer.
+  // That is what a graph buys you, so both edges are drawn rather than one.
+  { from: 'Customer', to: 'Claim',            rel: 'HAS_CLAIM',       lane: 478, gutter: 6 },
+  { from: 'Customer', to: 'Interaction',      rel: 'HAS_INTERACTION', top: 14, gutter: 1912, enter: 'b' },
+  { from: 'Ticket',   to: 'Interaction',      rel: 'HAS_MESSAGE',     fs: 'b', ts: 't' },
+  { from: 'Interaction', to: 'Agent',         rel: 'HANDLED_BY',      fs: 'r', ts: 'l' },
+  { from: 'Interaction', to: 'ResolutionMemory', rel: 'CREATED_MEMORY', fs: 'b', ts: 't' }
+];
+
+var KG_TIER_FILL = {
+  identity: ['#eff6ff', '#93c5fd', '#1d4ed8'],
+  holdings: ['#f0fdf4', '#86efac', '#15803d'],
+  catalog:  ['#f5f3ff', '#c4b5fd', '#6d28d9'],
+  case:     ['#fffbeb', '#fcd34d', '#b45309'],
+  memory:   ['#fdf2f8', '#f9a8d4', '#be185d']
+};
+
+function kgAnchor(n, side) {
+  if (side === 't') return [n.x + n.w / 2, n.y];
+  if (side === 'b') return [n.x + n.w / 2, n.y + n.h];
+  if (side === 'l') return [n.x, n.y + n.h / 2];
+  return [n.x + n.w, n.y + n.h / 2];
+}
+
+function renderSchemaSvg(sc) {
+  var counts = {}, relCounts = {};
+  (sc.nodes || []).forEach(function(n) { counts[n.id] = n.count; });
+  (sc.edges || []).forEach(function(e) { relCounts[e.rel] = (relCounts[e.rel] || 0) + e.count; });
+
+  var W = 1955, H = 525;
+  var svg = '<svg class="kgs" viewBox="0 0 ' + W + ' ' + H + '" xmlns="http://www.w3.org/2000/svg">';
+  svg += '<defs><marker id="kgar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" '
+       + 'markerHeight="7" orient="auto-start-reverse">'
+       + '<path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"/></marker></defs>';
+
+  KG_EDGES.forEach(function(e) {
+    var a = KG_MAP[e.from], b = KG_MAP[e.to];
+    if (!a || !b || counts[e.from] == null || counts[e.to] == null) return;
+    var d, labX, labY, p1, p2;
+
+    if (e.top) {
+      // Up over the top of the drawing, right along the margin, down the outer gutter and
+      // in from the right. Nothing sits above y=26 or beyond x=1890, so this is always clear.
+      p1 = kgAnchor(a, 't'); p2 = kgAnchor(b, e.enter || 'r');
+      d = (e.enter === 'b')
+        ? 'M' + p1[0] + ',' + p1[1] + ' V' + e.top + ' H' + e.gutter + ' V' + (p2[1] + 44)
+          + ' H' + p2[0] + ' V' + p2[1]
+        : 'M' + p1[0] + ',' + p1[1] + ' V' + e.top + ' H' + e.gutter + ' V' + p2[1] + ' H' + p2[0];
+      labX = e.gutter - 150; labY = e.top - 4;
+    } else if (e.lane) {
+      // Down the left edge of the source, along a horizontal lane BELOW every box, then
+      // up into the target's underside. A vertical corridor could not clear the tall
+      // case column, so long edges travel underneath the drawing instead.
+      // LEFT out of the source, down the far-left gutter (x=10, no box there), along the
+      // lane below every box, then up into the target's underside. Leaving downward
+      // would immediately cross whatever sits in the column beneath the source.
+      p1 = kgAnchor(a, 'l'); p2 = kgAnchor(b, e.enter || 'b');
+      d = 'M' + p1[0] + ',' + p1[1] + ' H' + e.gutter + ' V' + e.lane
+        + ' H' + p2[0] + ' V' + p2[1];
+      labX = p2[0] - 118; labY = e.lane - 5;
+    } else if (e.corridor) {
+      p1 = kgAnchor(a, 'r'); p2 = kgAnchor(b, 'r');
+      d = 'M' + p1[0] + ',' + p1[1] + ' H' + e.corridor + ' V' + p2[1] + ' H' + p2[0];
+      labX = p1[0] + 12; labY = p1[1] - 7;
+    } else if (e.fs === 'l' || e.fs === 'r') {
+      p1 = kgAnchor(a, e.fs); p2 = kgAnchor(b, e.ts);
+      var midX = (p1[0] + p2[0]) / 2;
+      d = 'M' + p1[0] + ',' + p1[1] + ' H' + midX + ' V' + p2[1] + ' H' + p2[0];
+      labX = midX - 46; labY = p1[1] - 8;
+    } else {
+      p1 = kgAnchor(a, e.fs); p2 = kgAnchor(b, e.ts);
+      var midY = (p1[1] + p2[1]) / 2;
+      d = 'M' + p1[0] + ',' + p1[1] + ' V' + midY + ' H' + p2[0] + ' V' + p2[1];
+      labX = (p1[0] + p2[0]) / 2 + 7; labY = midY - 6;
+    }
+    svg += '<path class="kgs-e" d="' + d + '" marker-end="url(#kgar)"/>';
+    var n = relCounts[e.rel];
+    svg += '<text class="kgs-el" x="' + labX + '" y="' + labY + '">:'
+         + kgEscape(e.rel) + (n ? ' x' + n : '') + '</text>';
+  });
+
+  Object.keys(KG_MAP).forEach(function(label) {
+    var n = KG_MAP[label];
+    if (counts[label] == null) return;
+    var c = KG_TIER_FILL[n.tier] || KG_TIER_FILL.holdings;
+    svg += '<g class="kgs-n">';
+    svg += '<rect x="' + n.x + '" y="' + n.y + '" width="' + n.w + '" height="' + n.h
+         + '" rx="8" fill="' + c[0] + '" stroke="' + c[1] + '" stroke-width="1.5"/>';
+    svg += '<text class="kgs-h" x="' + (n.x + 11) + '" y="' + (n.y + 17) + '" fill="' + c[2] + '">'
+         + kgEscape(n.head) + '</text>';
+    svg += '<text class="kgs-t" x="' + (n.x + 11) + '" y="' + (n.y + 36) + '">(:'
+         + kgEscape(label) + ')</text>';
+    svg += '<text class="kgs-c" x="' + (n.x + n.w - 11) + '" y="' + (n.y + 36)
+         + '" text-anchor="end" fill="' + c[2] + '">' + (counts[label] || 0) + '</text>';
+    (n.props || []).forEach(function(pr, i) {
+      svg += '<text class="kgs-p" x="' + (n.x + 11) + '" y="' + (n.y + 53 + i * 12) + '">'
+           + kgEscape(pr) + '</text>';
+    });
+    svg += '</g>';
+  });
+  svg += '</svg>';
+
+  var extra = (sc.nodes || []).filter(function(n) { return !KG_MAP[n.id]; });
+  var note = extra.length
+    ? '<div class="kgs-extra">Also in the database, not placed above: '
+      + extra.map(function(n) { return kgEscape(n.label) + ' x' + n.count; }).join(' / ') + '</div>'
+    : '';
+
+  // Say what the big number on each box IS. Without this a viewer sees "(:Agent) 2" and
+  // has no way to know whether 2 is a limit, a version, or a row count.
+  return '<div class="kgs-wrap">'
+    + '<div class="kgs-note">The number on each box is how many of that node type exist '
+    + 'in the database right now. Every customer shares one graph — this is the whole '
+    + 'system, not one person’s records.</div>'
+    + svg + note
+    + '<div class="kgs-key">'
+    + '<span><i style="background:#eff6ff;border-color:#93c5fd"></i>Identity</span>'
+    + '<span><i style="background:#f0fdf4;border-color:#86efac"></i>Holdings &amp; activity</span>'
+    + '<span><i style="background:#f5f3ff;border-color:#c4b5fd"></i>Catalogue</span>'
+    + '<span><i style="background:#fffbeb;border-color:#fcd34d"></i>Case layer</span>'
+    + '<span><i style="background:#fdf2f8;border-color:#f9a8d4"></i>Learning loop</span>'
+    + '</div></div>';
+}
+
+function flowParts(name) {
+  var m = String(name).match(/^(.*?)\s*\[(.+)\]\s*$/);
+  return m ? { step: m[1], agent: m[2] } : { step: String(name), agent: '' };
+}
+
+function flowLabel(name) {
+  var s = flowParts(name).step;
+  if (s === '__start__') return 'START';
+  if (s === '__end__') return 'END';
+  return s;
+}
+
+function renderFlowSvg(wf) {
+  var edges = wf.edges || [];
+  var html = '<div class="flow-wrap">';
+
+  edges.forEach(function(e) {
+    var from = flowParts(e.from);
+    var targets = String(e.to).split('|').map(function(t) { return t.trim(); });
+    var isBranch = targets.length > 1;
+
+    html += '<div class="flow-step' + (isBranch ? ' flow-step--branch' : '') + '">';
+    html += '<div class="flow-node' + (flowLabel(e.from) === 'START' ? ' flow-node--end' : '') + '">'
+      + '<span class="flow-node-n">' + kgEscape(flowLabel(e.from)) + '</span>'
+      + (from.agent ? '<span class="flow-agent">' + kgEscape(from.agent) + '</span>' : '')
+      + '</div>';
+    html += '<div class="flow-arrow">' + (isBranch ? '◆' : '↓') + '</div>';
+    html += '<div class="flow-targets">';
+    targets.forEach(function(t) {
+      var p = flowParts(t);
+      // "close_ticket (ask which ticket)" — the parenthetical is the branch condition.
+      var cm = p.step.match(/^(.*?)\s*\((.+)\)\s*$/);
+      var stepName = cm ? cm[1] : p.step;
+      var cond = cm ? cm[2] : '';
+      html += '<div class="flow-node flow-node--t'
+        + (flowLabel(stepName) === 'END' ? ' flow-node--end' : '') + '">'
+        + '<span class="flow-node-n">' + kgEscape(flowLabel(stepName)) + '</span>'
+        + (p.agent ? '<span class="flow-agent">' + kgEscape(p.agent) + '</span>' : '')
+        + (cond ? '<span class="flow-cond">' + kgEscape(cond) + '</span>' : '')
+        + '</div>';
+    });
+    html += '</div></div>';
+  });
+
+  var agents = wf.agents || [];
+  if (agents.length) {
+    html += '<div class="sch-tier-h" style="margin-top:16px">Agents</div><div class="flow-agents">';
+    agents.forEach(function(a) {
+      html += '<div class="flow-agent-card"><div class="flow-agent-n">' + kgEscape(a.name) + '</div>'
+        + '<div class="flow-agent-r">' + kgEscape(a.responsibility || '') + '</div></div>';
+    });
+    html += '</div>';
+  }
+  html += '</div>';
+  return html;
+}
+
+// Wire both header buttons once the DOM is up. They are never hidden: neither diagram
+// depends on which conversation is selected.
+// Prefetch both payloads at load. Buttons are wired inline in index.html (onclick=),
+// matching how every other button in this app is wired.
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', loadSystemDiagrams);
+} else {
+  loadSystemDiagrams();
+}

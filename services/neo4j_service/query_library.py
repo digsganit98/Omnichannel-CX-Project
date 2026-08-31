@@ -289,3 +289,39 @@ def create_vector_indexes(client, dimension: int = 384) -> dict:
             else:
                 results[idx_name] = f"failed: {err[:120]}"
     return {"status": "done", "indexes": results}
+
+
+def get_graph_schema(client) -> dict:
+    """The SHAPE of the knowledge graph — node types and how they connect.
+
+    Deliberately not a customer's records (that is customers.py::customer_graph_view).
+    This answers "what does this system know how to know", so it returns one node per
+    LABEL carrying its live count, not one node per row.
+
+    Counts come from a full scan, which is honest at this size (167 nodes) and would
+    not be at millions. If that ever matters, swap to
+    `CALL apoc.meta.stats()` or the count-store.
+    """
+    if client is None:
+        return {"nodes": [], "edges": [], "reachable": False}
+    try:
+        labels = client.query(
+            "MATCH (n) UNWIND labels(n) AS l "
+            "RETURN l AS label, count(*) AS count ORDER BY count DESC"
+        )
+        rels = client.query(
+            "MATCH (a)-[r]->(b) "
+            "RETURN labels(a)[0] AS source, type(r) AS rel, labels(b)[0] AS target, "
+            "count(*) AS count ORDER BY count DESC"
+        )
+    except Exception as exc:
+        return {"nodes": [], "edges": [], "reachable": False, "error": str(exc)[:200]}
+
+    return {
+        "reachable": True,
+        "nodes": [{"id": r["label"], "label": r["label"], "count": r["count"]} for r in labels],
+        "edges": [
+            {"source": r["source"], "target": r["target"], "rel": r["rel"], "count": r["count"]}
+            for r in rels if r.get("source") and r.get("target")
+        ],
+    }

@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Omnichannel CX Accelerator - Ticket Operations</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/admin-ui/assets/style.css?v=20260821-casesummary">
+<link rel="stylesheet" href="/admin-ui/assets/style.css?v=20260831-kg10">
 </head>
 <body>
 
@@ -327,14 +327,22 @@
               <div class="cmeta" id="convMeta"></div>
             </div>
             <div class="hbtns">
-              <button class="kg-btn kg-btn-hdr" id="snap-kg-btn" type="button" style="display:none" title="See this customer's products, claims and tickets as a connected graph.">
+              <button class="kg-btn kg-btn-hdr" id="snap-schema-btn" type="button" onclick="openSchemaModal()" title="The node types this system stores and how they connect, with live counts.">
                 <span class="kg-btn-l">
                   <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
                     <circle cx="8" cy="3.2" r="2.1" stroke="currentColor" stroke-width="1.3"/>
                     <circle cx="3" cy="12.4" r="2.1" stroke="currentColor" stroke-width="1.3"/>
                     <circle cx="13" cy="12.4" r="2.1" stroke="currentColor" stroke-width="1.3"/>
                     <path d="M6.7 4.9 4.2 10.6M9.3 4.9l2.5 5.7M5.1 12.4h5.8" stroke="currentColor" stroke-width="1.3"/>
-                  </svg>View customer 360 knowledge graph</span>
+                  </svg>Neo4j knowledge graph</span>
+              </button>
+              <button class="kg-btn kg-btn-hdr" id="snap-flow-btn" type="button" onclick="openFlowModal()" title="The LangGraph pipeline every inbound message runs through.">
+                <span class="kg-btn-l">
+                  <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                    <rect x="1.2" y="5.9" width="4" height="4.2" rx="1" stroke="currentColor" stroke-width="1.3"/>
+                    <rect x="10.8" y="5.9" width="4" height="4.2" rx="1" stroke="currentColor" stroke-width="1.3"/>
+                    <path d="M5.2 8h5.6M9.2 6.4 10.8 8l-1.6 1.6" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+                  </svg>LangGraph workflow</span>
               </button>
             </div>
           </div>
@@ -627,6 +635,6 @@
   </div>
 </div>
 
-<script src="/admin-ui/assets/app.js?v=20260821-casesummary"></script>
+<script src="/admin-ui/assets/app.js?v=20260831-kg10"></script>
 </body>
 </html>

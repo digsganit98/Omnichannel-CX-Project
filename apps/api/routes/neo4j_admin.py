@@ -85,6 +85,21 @@ def cross_sell_candidates(limit: int = 50) -> dict:
         client.close()
 
 
+@router.get("/schema")
+def graph_schema() -> dict:
+    """The knowledge graph's SHAPE — node types and how they connect, with live counts.
+
+    Distinct from /admin/customers/{id}/graph-view, which draws one customer's records.
+    This answers "what does this system know how to know".
+    """
+    client = _get_client()
+    try:
+        from services.neo4j_service.query_library import get_graph_schema
+        return get_graph_schema(client)
+    finally:
+        client.close()
+
+
 def _count_nodes(client) -> dict:
     labels = ["Customer", "Account", "CreditCard", "FixedDeposit", "Loan", "Claim",
               "Transaction", "ChargePenalty", "Product", "Policy", "KYC",
