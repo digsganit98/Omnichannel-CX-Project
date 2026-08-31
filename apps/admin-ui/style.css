@@ -1008,13 +1008,14 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .kgs-t{font-size:14.5px;font-weight:700;fill:var(--t1);
   font-family:ui-monospace,Menlo,Consolas,monospace}
 .kgs-c{font-size:16px;font-weight:700}
-.kgs-p{font-size:11.5px;font-weight:400;fill:var(--t1);font-family:ui-monospace,Menlo,Consolas,monospace}
+.kgs-p{font-size:11.5px;font-weight:400;fill:var(--t2);font-family:ui-monospace,Menlo,Consolas,monospace}
 .kgs-n rect{transition:filter .12s}
 .kgs-n:hover rect{filter:brightness(.97)}
-.kgs-note{font-size:11.5px;color:var(--t2);margin:0 0 8px;line-height:1.45}
+.kgs-note{font-size:9.5px;color:var(--t2);margin:0 0 6px;line-height:1.5}  /* The SVG is scaled (--kgs-s), so 21px box text renders at ~9px on the flow view
+     and ~16px on the schema. These notes are plain HTML and are NOT scaled, so a
+     'matching' 11.5px sat larger than the box titles it was annotating. */
 .kgs-extra{margin-top:8px;font-size:11px;color:var(--t3)}
-.kgs-key{display:flex;flex-wrap:wrap;gap:12px;margin-top:10px;padding-top:9px;
-  border-top:1px solid var(--bdr);font-size:11px;color:var(--t2)}
+.kgs-key{display:flex;flex-wrap:wrap;gap:12px;font-size:11px;color:var(--t2)}  /* Lives in the header bar now, not under the diagram - no top border or margin. */
 .kgs-key span{display:flex;align-items:center;gap:5px}
 .kgs-key i{width:11px;height:11px;border-radius:3px;border:1.5px solid;display:inline-block}
 
@@ -1022,7 +1023,7 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .fl-name{font-size:25px;font-weight:700;font-family:ui-monospace,Menlo,Consolas,monospace}
 .fl-note{font-size:21px;fill:var(--t2);font-family:ui-monospace,Menlo,Consolas,monospace}
 .kgs-note-2{margin-top:6px}
-.fl-src{font-size:16px;font-weight:700;fill:#0e7490;letter-spacing:.3px;font-family:ui-monospace,Menlo,Consolas,monospace}
+.fl-store{fill:#0e7490;font-weight:700}
 .fl-cond{font-size:21px;font-weight:700;fill:var(--amb-t);
   font-family:ui-monospace,Menlo,Consolas,monospace}
 .fl-agent{font-size:17px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;

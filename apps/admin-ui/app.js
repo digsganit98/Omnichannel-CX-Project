@@ -3553,7 +3553,17 @@ function kgShowModal(title, sub, counts, body) {
   document.getElementById('graphModalTitle').textContent = title;
   document.getElementById('graphModalSub').textContent = sub;
   document.getElementById('graphModalCounts').textContent = counts;
-  document.getElementById('graphModalBody').innerHTML = body;
+  var bodyEl = document.getElementById('graphModalBody');
+  bodyEl.innerHTML = body;
+  // The colour key is built by each renderer at the foot of its own markup, which put it
+  // below a wide diagram - off screen until you scrolled. The header already has a bar
+  // holding the live counts, right-aligned, with the whole left side empty. Move the key
+  // into it: key on the left, counts on the right, both visible before any scrolling.
+  var bar = document.querySelector('.kg-legend');
+  var old = bar.querySelector('.kgs-key');
+  if (old) bar.removeChild(old);
+  var key = bodyEl.querySelector('.kgs-key');
+  if (key) bar.insertBefore(key, bar.firstChild);
   document.getElementById('graphModal').classList.remove('hidden');
 }
 
@@ -3719,9 +3729,8 @@ function kgAnchor(n, side) {
 }
 
 function renderSchemaSvg(sc) {
-  var counts = {}, relCounts = {};
+  var counts = {};
   (sc.nodes || []).forEach(function(n) { counts[n.id] = n.count; });
-  (sc.edges || []).forEach(function(e) { relCounts[e.rel] = (relCounts[e.rel] || 0) + e.count; });
 
   var W = 1955, H = 525;
   var svg = '<svg class="kgs" style="--kgs-w:' + W + 'px;--kgs-h:' + H + 'px;--kgs-s:0.76" width="' + W + '" height="' + H
@@ -3730,6 +3739,7 @@ function renderSchemaSvg(sc) {
        + 'markerHeight="7" orient="auto-start-reverse">'
        + '<path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"/></marker></defs>';
 
+  var kgLabels = [];
   KG_EDGES.forEach(function(e) {
     var a = KG_MAP[e.from], b = KG_MAP[e.to];
     if (!a || !b || counts[e.from] == null || counts[e.to] == null) return;
@@ -3771,9 +3781,66 @@ function renderSchemaSvg(sc) {
       labX = (p1[0] + p2[0]) / 2 + 7; labY = midY - 6;
     }
     svg += '<path class="kgs-e" d="' + d + '" marker-end="url(#kgar)"/>';
-    var n = relCounts[e.rel];
-    svg += '<text class="kgs-el" x="' + labX + '" y="' + labY + '">:'
-         + kgEscape(e.rel) + (n ? ' x' + n : '') + '</text>';
+    kgLabels.push({ x: labX, y: labY, ax: p2[0], ay: p2[1], rel: e.rel, side: e.ts, fx: p1[0], by: b.y,
+                    routed: !!(e.top || e.lane || e.corridor), text: ':' + e.rel });
+    // The count is deliberately NOT on the label. For 11 of 13 edges it simply repeats
+    // the number already on the target box (8 accounts, :HAS_ACCOUNT x8), and where it
+    // differs it looks like a contradiction rather than a fact: :HAS_CLAIM x30 against
+    // (:Claim) 15, because each claim is reached twice - from its policy and from the
+    // customer. Node counts stay on the boxes, where the note above explains them.
+  });
+
+  // A label belongs to ONE arrow, so it is centred on that arrow's head rather than
+  // offset from the midpoint of the run. Before this, Customer's seven fan-out labels
+  // all sat at the same y and read as a single strip of text -
+  // ":HAS_ACCOUNT x8 :HAS_FD x4 :HAS_CREDIT_CARD x3 ..." - which is what made the
+  // diagram look busy. They never overlapped, so a collision check passed them; the
+  // problem was that nothing separated them.
+  //
+  // Two things fix it: centre each label on its own arrow, and alternate consecutive
+  // labels between two heights so neighbours cannot run together. Both rows sit just
+  // above the boxes, close to the arrowheads they name.
+  var KGL_CH = 11.5 * 0.6, KGL_NEAR = 14, KGL_STEP = 18;
+  var seen = {};
+  kgLabels.sort(function(p, q) { return p.x - q.x; });
+  var band = {};
+  kgLabels.forEach(function(l) {
+    // PRODUCT_IS is drawn from all four holdings that carry a product, and the count is
+    // the TOTAL across them - so four identical ":PRODUCT_IS x17" in a row said the same
+    // thing four times and overstated each edge. Label it once, on the first arrow.
+    if (seen[l.rel] && l.rel === 'PRODUCT_IS') return;
+    seen[l.rel] = true;
+    var w = l.text.length * KGL_CH;
+    var lx, ly;
+    if (l.routed) {
+      // Customer -> KYC, -> Claim and -> Interaction cannot run straight: boxes sit in
+      // the way, so they travel over the top or along a lane under the drawing. Their
+      // arrowhead is nowhere near the run, so centring on it would put the label on the
+      // wrong part of the picture - each branch already computes a point ON its own
+      // path, which is where the label belongs. An earlier pass skipped these edges
+      // entirely and left three unexplained lines on the diagram.
+      lx = l.x; ly = l.y;
+    } else if (l.side === 'l' || l.side === 'r') {
+      // A SIDEWAYS arrow enters the target's left or right edge, so "just above the
+      // arrowhead" is inside the box. Sit it beside the arrow when the approach has
+      // room; where the boxes nearly touch (Interaction -> Agent is a 14-unit gap)
+      // there is no room beside it, so lift it clear above both boxes instead.
+      var gap = l.side === 'l' ? l.ax - (l.fx || 0) : (l.fx || 0) - l.ax;
+      if (Math.abs(gap) > w + 16) {
+        lx = l.side === 'l' ? l.ax - w - 8 : l.ax + 8;
+        ly = l.ay - 6;
+      } else {
+        lx = l.ax - w / 2;
+        ly = l.by - 8;
+      }
+    } else {
+      var key = Math.round(l.ay);
+      band[key] = (band[key] || 0) + 1;
+      lx = l.ax - w / 2;
+      ly = l.ay - KGL_NEAR - (band[key] % 2 ? 0 : KGL_STEP);
+    }
+    svg += '<text class="kgs-el" x="' + lx + '" y="' + ly + '">'
+         + kgEscape(l.text) + '</text>';
   });
 
   Object.keys(KG_MAP).forEach(function(label) {
@@ -3844,10 +3911,10 @@ var FLOW_MAP = {
 
   'receive_message':             { x: 150, y: 270, w: FL_W, h: 120, kind: 'step',
                                    note: 'log the inbound event|+ provider' },
-  'resolve_identity':            { x: 640, y: 270, w: FL_W, h: 120, kind: 'step', src: 'sql+graph',
-                                   note: 'phone OR email -> ONE Customer|(this is the omnichannel join)' },
-  'load_conversation_context':   { x: 1130, y: 270, w: FL_W, h: 120, kind: 'step', src: 'sql+graph',
-                                   note: 'ONE fetch, shared downstream:|turns / tickets / graph' },
+  'resolve_identity':            { x: 640, y: 270, w: FL_W, h: 145, kind: 'step',
+                                   note: 'phone OR email -> ONE Customer|(the omnichannel join)|the customer (graph)' },
+  'load_conversation_context':   { x: 1130, y: 270, w: FL_W, h: 145, kind: 'step',
+                                   note: 'ONE fetch, shared downstream:|turns + tickets (sql)|their records (graph)' },
   'check_has_open_case':         { x: 1620, y: 270, w: FL_W, h: 120, kind: 'gate',
                                    note: 'does this CUSTOMER have|an open case?' },
 
@@ -3858,29 +3925,29 @@ var FLOW_MAP = {
   'close_ticket':                { x: 3090, y:  40, w: FL_W, h: 102, kind: 'step',
                                    note: 'mark the selected ticket closed' },
 
-  'classify_intent':             { x: 2110, y: 470, w: FL_W, h: 136, kind: 'agent', src: 'sql',
+  'classify_intent':             { x: 2110, y: 470, w: FL_W, h: 136, kind: 'agent',
                                    agent: 'Agent 1',
-                                   note: 'ONE Groq call returns intent +|urgency + sentiment + language' },
+                                   note: 'ONE Groq call returns intent +|urgency + sentiment + language|written onto the turn (sql)' },
   'validate_customer':           { x: 2600, y: 470, w: FL_W, h: 136, kind: 'gate',
                                    agent: 'Agent 1b',
                                    note: 'registered for this intent?' },
   'reject_unregistered_customer':{ x: 2600, y: 650, w: FL_W, h: 108, kind: 'step',
                                    note: 'ask them to write from|a registered address' },
-  'resolve_query':               { x: 3090, y: 470, w: FL_W, h: 164, kind: 'agent', src: 'graph+kb',
+  'resolve_query':               { x: 3090, y: 470, w: FL_W, h: 164, kind: 'agent',
                                    agent: 'Agent 2',
-                                   note: 'answers from the RL memory, their|tickets, the graph, or the KB|- then grades it L1 / L2 / L3' },
+                                   note: 'answers from the RL memory, their|tickets or records (graph),|or the KB (kb)|- then grades it L1 / L2 / L3' },
   'decide_ticket':               { x: 3580, y: 470, w: FL_W, h: 136, kind: 'gate',
                                    agent: 'Agent 3',
                                    note: 'does a human need to see this?|L2/L3 always -> ticket' },
-  'create_ticket':               { x: 4070, y: 446, w: FL_W, h: 120, kind: 'step', src: 'sql+graph',
-                                   note: 'same matter or new? decided by|matching the graph, not keywords' },
+  'create_ticket':               { x: 4070, y: 446, w: FL_W, h: 145, kind: 'step',
+                                   note: 'same matter or new? matched on|transactions (graph)|the ticket is written (sql)' },
   'skip_ticket':                 { x: 4070, y: 600, w: FL_W, h: 92, kind: 'step',
                                    note: 'answer directly' },
 
-  'send_outbound_reply':         { x: 4030, y: 212, w: 500, h: 178, kind: 'gate', src: 'sql',
-                                   note: 'REVIEW GATE|hold <=> ticket required|held: draft saved, customer|gets the holding message' },
-  'persist_audit_events':        { x: 4600, y: 240, w: FL_W, h: 120, kind: 'step', src: 'sql+graph',
-                                   note: 'turn + citations + evidence|Interaction -> closed, memory' },
+  'send_outbound_reply':         { x: 4030, y: 212, w: 500, h: 200, kind: 'gate',
+                                   note: 'REVIEW GATE|hold <=> ticket required|customer gets a holding message|an agent edits or approves,|then sends it manually' },
+  'persist_audit_events':        { x: 4600, y: 240, w: FL_W, h: 145, kind: 'step',
+                                   note: 'turn + citations + evidence (sql)|Interaction closed, memory (graph)' },
   '__end__':                     { x: 5090, y: 264, w: 122, h: 58, kind: 'end', label: 'END' }
 };
 
@@ -3989,20 +4056,18 @@ function renderFlowSvg(wf) {
         svg += '<text class="fl-agent" x="' + (n.x + n.w - 10) + '" y="' + (n.y + 19)
              + '" text-anchor="end">' + kgEscape(n.agent) + '</text>';
       }
-      // Which store this step reads or writes. The diagram drew the LangGraph nodes
-      // and nothing about the data layer, so it could not say that identity resolution
-      // writes BOTH stores, or that the answer comes from the graph and the KB rather
-      // than from SQL. Sits under the step name, left-aligned with it.
-      if (n.src) {
-        svg += '<text class="fl-src" x="' + (n.x + 11) + '" y="' + (n.y + 19) + '">'
-             + kgEscape(n.src) + '</text>';
-      }
       svg += '<text class="fl-name" x="' + (n.x + 11) + '" y="' + ty + '" fill="' + c[2] + '">'
            + kgEscape(key) + '</text>';
       (n.note || '').split('|').forEach(function(line, i) {
         if (!line) return;
+        // sql / graph / kb name the STORE a fact came from. They sit inside the sentence
+        // rather than on a line of their own - a separate line just restated the note in
+        // different words - so they are coloured to read as sources, not as prose.
+        var html = kgEscape(line).replace(/(sql|graph|kb)/g, function(w) {
+          return '<tspan class="fl-store">' + w + '</tspan>';
+        });
         svg += '<text class="fl-note" x="' + (n.x + 11) + '" y="' + (ty + 32 + i * 25) + '">'
-             + kgEscape(line) + '</text>';
+             + html + '</text>';
       });
     }
     svg += '</g>';
@@ -4011,14 +4076,15 @@ function renderFlowSvg(wf) {
 
   var gates = Object.keys(FLOW_MAP).filter(function(k) { return FLOW_MAP[k].kind === 'gate'; }).length;
   return '<div class="kgs-wrap">'
-    + '<div class="kgs-note">Every inbound message runs this pipeline \u2014 WhatsApp, email and web '
-    + 'chat alike. The left lane is ticket-closing, the right lane is answering; both rejoin at '
-    + 'send_outbound_reply. <b>sql</b> / <b>graph</b> under a step name is the store it reads or writes.'
-    + '</div>'
-    + '<div class="kgs-note kgs-note-2">Wrapping every step: <b>PII masking</b> \u2014 names, phone '
-    + 'numbers and account numbers are replaced with placeholders before any text reaches the LLM, and '
-    + 'restored in the reply. <b>Idempotency</b> \u2014 a retried webhook returns the first reply instead '
-    + 'of answering twice. <b>Tracing</b> \u2014 every run and every LLM call is recorded.</div>'
+    + '<div class="kgs-note kgs-note-2"><b>PII masking</b> \u2014 around every LLM call: PAN, '
+    + 'Aadhaar, phone numbers, email addresses and card numbers are replaced with placeholders '
+    + 'before the text leaves for the model, and restored in the reply.</div>'
+    + '<div class="kgs-note kgs-note-2"><b>Deterministic safety net</b> \u2014 fraud, phishing, '
+    + 'OTP sharing and regulatory complaints force critical escalation before the LLM is called.</div>'
+    + '<div class="kgs-note kgs-note-2"><b>Learning loop</b> \u2014 answers are keyed by the kind '
+    + 'of problem, not the customer, so one verified answer serves the next person with the same '
+    + 'problem. Only procedural answers qualify; anything carrying a balance or a case\u2019s '
+    + 'specifics is excluded.</div>'
     + svg
     + '<div class="kgs-key">'
     + '<span><i style="background:#ffffff;border-color:#cbd5e1"></i>Step</span>'

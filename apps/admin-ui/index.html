@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Omnichannel CX Accelerator - Ticket Operations</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/admin-ui/assets/style.css?v=20260831-kg16">
+<link rel="stylesheet" href="/admin-ui/assets/style.css?v=20260901-kg26">
 </head>
 <body>
 
@@ -217,11 +217,11 @@
       </div>
       <button class="ticket-modal-close" onclick="closeGraphModal()" aria-label="Close">&times;</button>
     </div>
+    <!-- Healthy / Needs attention / Overdue / Neutral swatches removed: they coloured the
+         customer-360 radial graph by account health, which Fix 97 replaced with the Neo4j
+         schema and LangGraph pipeline views. Neither uses those colours, so the legend
+         described nothing on screen. The live-count line stays. -->
     <div class="kg-legend">
-      <span class="kg-lg"><span class="kg-sw kg-sw-ok"></span>Healthy</span>
-      <span class="kg-lg"><span class="kg-sw kg-sw-warn"></span>Needs attention</span>
-      <span class="kg-lg"><span class="kg-sw kg-sw-crit"></span>Overdue / rejected</span>
-      <span class="kg-lg"><span class="kg-sw kg-sw-neutral"></span>Neutral</span>
       <span class="kg-counts" id="graphModalCounts"></span>
     </div>
     <div class="kg-modal-body" id="graphModalBody"></div>
@@ -635,6 +635,6 @@
   </div>
 </div>
 
-<script src="/admin-ui/assets/app.js?v=20260831-kg16"></script>
+<script src="/admin-ui/assets/app.js?v=20260901-kg26"></script>
 </body>
 </html>
