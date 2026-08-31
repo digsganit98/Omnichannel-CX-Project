@@ -95,6 +95,14 @@ _LANGUAGE_NAMES = {
 }
 
 
+# Operations that ask a reasoning model to think LESS. Deliberately a narrow list, not a
+# global setting: only customer_context was ever large enough to hit the provider's
+# per-minute token ceiling. Sorting an already-retrieved record into five categories has
+# no chain of reasoning to discover; grading L1/L2/L3 or writing a customer's reply might,
+# and neither has been measured, so neither is on this list.
+REASONING_EFFORT_OPERATIONS = {"customer_context"}
+
+
 def _reasoning_effort() -> str:
     """How hard a reasoning model should think before answering. "low" by default.
 
@@ -538,20 +546,21 @@ class GroqGenerator:
         if max_tokens:
             extra["max_tokens"] = max_tokens
             call_params["max_tokens"] = max_tokens
-        # gpt-oss models bill the tokens they spend THINKING, and that overhead is
-        # invisible - measured on one categorisation prompt: 270 reasoning tokens at the
-        # default effort against 25 at "low", ~2.7x the billed total for the same answer.
-        # Groq's free tier caps at 8,000 tokens PER MINUTE, so the customer-context call
-        # (5,719 tokens) was blowing that ceiling on its own and returning None, which the
-        # panel honestly rendered as "Grouping unavailable right now". At effort=low the
-        # same call costs ~3,000 and completes.
+        # gpt-oss bills the tokens it spends THINKING, and that overhead is invisible:
+        # measured on the categorisation prompt, 270 reasoning tokens at the default
+        # effort against 25 at "low" - 2.7x the billed total for the same answer.
         #
-        # These are sorting/classification/extraction tasks over data that is already
-        # retrieved - there is no chain of reasoning to discover, so the thinking budget
-        # buys nothing. Configurable because a future prompt may genuinely need it, and
-        # silently ignored by non-reasoning models.
+        # Applied ONLY to customer_context, because that is the only operation the
+        # overhead actually broke. Measured across every recorded call: customer_context
+        # averages 3,555 tokens and peaks at 5,719, roughly double the next largest, and
+        # it is the ONLY operation that ever returned nothing (4 zero-token failures) -
+        # it exceeds Groq's 8,000-per-minute ceiling by itself, which the panel rendered
+        # as "Grouping unavailable right now". Every other operation sits between 775 and
+        # 2,000 tokens and has never once failed, so there is no evidence to justify
+        # changing how hard the model thinks about grading an L3 fraud report or writing
+        # the reply a customer receives.
         effort = _reasoning_effort()
-        if effort:
+        if effort and operation in REASONING_EFFORT_OPERATIONS:
             extra["reasoning_effort"] = effort
             call_params["reasoning_effort"] = effort
         try:
