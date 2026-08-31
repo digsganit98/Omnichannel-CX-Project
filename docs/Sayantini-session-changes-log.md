@@ -157,6 +157,9 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 108 — The case summary printed an internal placeholder and a claim that was false:** the redaction that hides a resolved ticket's id blanked the ID but left the SENTENCE, so the model read *"your dispute ticket [closed ticket] is still open and is being reviewed by the Fraud and Disputes team"* and reported it as current — and copied the placeholder text onto the screen. A line whose ticket ids are all closed is now dropped whole; a line naming a still-open ticket is untouched.
 - **Fix 109 — One word for a finished case, `closed`:** `TicketStatus.RESOLVED = "resolved"` came from the first commit and every close stored it; Session 18 changed only the NAMES and added `statusLabel()` to translate for display — which cannot reach inside LLM-generated text, so the case-summary model read the raw value and wrote "resolved" onto the agent's screen. The enum is now `CLOSED = "closed"` (migration 016 + a Cypher update), and **every site that accepted BOTH words now accepts one**, so writing the old value reads as an open ticket instead of silently working. Data wipes never fixed this and never could: the word came from an enum, not from data.
 - **Fix 110 — Removed the case summary's "Also outstanding" list:** every value it ever produced was a reworded copy of the situation above it or empty (`{}`); the category — outstanding work that is NOT a ticket — is empty by construction in a system that tickets anything needing follow-up, and three prompt rules written to stop the paraphrasing all failed.
+- **Fix 111 — The agent view identified customers by this app's internal keys:** the header led with `cust_56ac6c67338f`, a SQLite row id an agent cannot look up or quote; the Profile tab carried no customer id at all even though the record handed to the model opens with `customer_id=CRN...`; and Fathima showed no phone because the header read `channel_identities` (channels she has WRITTEN IN ON) rather than the customer record, which holds her number.
+- **Fix 112 — The workflow diagram showed the LangGraph nodes and nothing else:** each step now names the data it reads and from where, and three properties that are not nodes — PII masking, the deterministic safety net, the learning loop — are stated beneath it. Idempotency and tracing were dropped as plumbing.
+- **Fix 113 — The schema diagram's edge labels were one strip of text:** every label sat at the midpoint of its own edge, so Customer's seven-way fan-out landed on a single line; labels are now centred on the arrowhead they name and staggered between two heights. Counts came off the labels (11 of 13 repeated the box), `:PRODUCT_IS` is drawn once instead of four times, and three labels lost on the long-routed edges were restored. The colour key moved into the header bar.
 - **Right panel:** the five card headings (Customer Context, Sentiment, Case Summary, Open Tickets, Suggested Offers) unified to blue; Neo4j box property lines set to normal weight.
 
 
@@ -4388,3 +4391,112 @@ reading the code.
 - The same product queries run twice per message.
 - **The demo script still needs rewriting** against real behaviour — the only demo blocker.
 - Everything inherited from Sessions 19-21.
+
+---
+
+## Session 23 — 2026-09-01
+
+Branch: `Sayantini-phase2-ui-changes`. Continuous with Session 22. The agent's view of a
+customer, then both system diagrams — nearly all of it found by the user looking at the
+screen, not by me checking.
+
+### Fix 111 — The customer's own identifiers were the ones missing
+Three places named the customer by whatever this app happened to store rather than by what
+the bank knows.
+
+**The header led with `cust_56ac6c67338f`** — a SQLite row key generated when a message first
+arrives. Random hex an agent cannot look up, quote, or find in any other system. Removed;
+email and phone stay, because those are what an agent uses to verify who is writing.
+
+**The Profile tab had no customer id at all.** `_build_record_text` opens the record with
+`customer_id=CRN...`, so the model is *told* it — and drops it while sorting fields into tabs.
+Added server-side in `_normalise_categories`, the same reason every other key there is rebuilt
+rather than trusted. Costs no LLM call: the cached path gets it too. Any row the model DID
+emit carrying that id is dropped first, **matched on the value, not the label** — "CRN",
+"Customer Number" and "Customer ID" all collapse to one row, verified against all three.
+
+**Fathima showed no phone number.** The header built contact details from `channel_identities`,
+which records the channels a customer has **written in on** — she has only ever used email and
+the portal, so there was no whatsapp row and no phone, while the graph held `7538870992`.
+*Channels used* is not the same question as *how to reach someone*. `/graph` now returns the
+record's own phone, email and CRN; the frontend prefers those and falls back to the channel
+identifiers, so an unverified sender still shows the address they wrote from.
+
+### Fix 112 — The pipeline diagram drew the nodes and nothing else
+It rendered `WORKFLOW_EDGES`, so anything that is not a LangGraph node was invisible no matter
+how important. Each step now names the data it reads and from where — traced through the
+agents a node delegates to, not just its own calls: `create_ticket` reads transactions from
+the graph and writes the ticket to SQLite, neither visible in the node body.
+
+Three properties are stated beneath the diagram because none of them is a node:
+
+| | Where it runs |
+|---|---|
+| **PII masking** | inside every LLM call — PAN, Aadhaar, phone, email, card numbers |
+| **Deterministic safety net** | before the LLM — 24 regex patterns force L3 |
+| **Learning loop** | keyed by the kind of problem, not the customer |
+
+**Idempotency and tracing were dropped.** They were on the first version of this note; they are
+plumbing every production system has, and they said nothing about handling a customer's money.
+
+**The human-in-the-loop note was dropped too**, on checking: `decide_ticket` ("does a human need
+to see this?") and `send_outbound_reply` ("REVIEW GATE") already draw it. What the boxes could
+not show is what happens *after* the hold — an agent edits or approves and sends manually,
+outside this pipeline — so the review gate box now says that.
+
+**A stale legend was removed** from the modal header: Healthy / Needs attention / Overdue /
+Neutral, left from the customer-360 radial view that Fix 97 replaced. It described colours that
+appear on neither current diagram.
+
+### Fix 113 — The schema diagram's labels were one strip of text
+The Neo4j view looked busy beside the pipeline view, and it was not the box contents.
+
+**Seven labels sat on one line.** Each was placed at the midpoint of its own edge, so Customer's
+whole fan-out landed at the same y and read as a sentence:
+`:HAS_ACCOUNT x8 :HAS_FD x4 :HAS_CREDIT_CARD x3 ...`. They never overlapped — which is why an
+overlap check passed them. Each label is now centred on the arrowhead it names, and consecutive
+labels alternate between two heights.
+
+**Counts came off the labels.** For 11 of 13 edges the number repeated the target box (8
+accounts, `:HAS_ACCOUNT x8`); where it differed it read as a contradiction — `:HAS_CLAIM x30`
+against `(:Claim) 15`, because each claim is reached twice, from its policy and from the
+customer. Node counts stay on the boxes.
+
+**`:PRODUCT_IS` was drawn four times**, the same total repeated on four converging edges.
+
+**Three labels had been lost.** `Customer -> KYC`, `-> Claim` and `-> Interaction` route the long
+way round, and my first version skipped them because the arrowhead logic did not fit — leaving
+unlabelled lines, including a loop around the whole picture. The user asked what the unlabelled
+line was. Each routed branch already computes a point on its own path; the label goes there.
+
+**The colour key moved into the header bar**, beside the live counts, which was empty space. It
+had been under a diagram wider than the screen — off screen until you scrolled.
+
+### Two claims of mine that were wrong
+**"10 label collisions"** — double-counted labels across different routers. The real number was
+**2**. **"The boxes are cramped at 14-unit gaps"** — compared raw values across two different SVG
+scale factors. Applied properly both diagrams have a **10.6px** gap; the schema actually has more
+relative room. Same error as the notes font, which I set to 11.5px to "match" box text that
+renders at 9.2px after scaling.
+
+### Process
+The user found nearly all of this. My original answer to *"is the workflow diagram correct?"*
+checked the **edges** — 22 drawn, 22 real — and reported the diagram correct. That was the wrong
+question: it was an accurate LangGraph topology and an incomplete picture of the system, shown
+as the latter. Everything found afterwards had been there the whole time.
+
+The same shape repeated inside this session: I verified 13 labels placed with 0 overlaps and
+called it done, without checking 13 against the 16 that existed before.
+
+**Groq quota**: ~115 calls and 56K tokens went on running the test suite repeatedly — roughly
+11% of a day's free tier, against the standing rule to verify with mocks and DB reads. Stopped
+once the user asked.
+
+### Still open
+- The `handled_by` fix from Session 22 still has no reader.
+- Outbound replies are still not graph nodes.
+- **Jira** — the credentials are rejected (401 on `/myself`, which touches no project); needs a
+  fresh token from the Atlassian account that owns it.
+- `get_transactions` limits hardcoded per caller; product queries run twice per message.
+- **The demo script still needs rewriting** against real behaviour — the only demo blocker,
+  inherited from Session 19.
