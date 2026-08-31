@@ -1021,6 +1021,8 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 /* LangGraph pipeline: real SVG, fixed layout, drawn branches. */
 .fl-name{font-size:25px;font-weight:700;font-family:ui-monospace,Menlo,Consolas,monospace}
 .fl-note{font-size:21px;fill:var(--t2);font-family:ui-monospace,Menlo,Consolas,monospace}
+.kgs-note-2{margin-top:6px}
+.fl-src{font-size:16px;font-weight:700;fill:#0e7490;letter-spacing:.3px;font-family:ui-monospace,Menlo,Consolas,monospace}
 .fl-cond{font-size:21px;font-weight:700;fill:var(--amb-t);
   font-family:ui-monospace,Menlo,Consolas,monospace}
 .fl-agent{font-size:17px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;

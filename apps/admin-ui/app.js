@@ -3844,9 +3844,9 @@ var FLOW_MAP = {
 
   'receive_message':             { x: 150, y: 270, w: FL_W, h: 120, kind: 'step',
                                    note: 'log the inbound event|+ provider' },
-  'resolve_identity':            { x: 640, y: 270, w: FL_W, h: 120, kind: 'step',
+  'resolve_identity':            { x: 640, y: 270, w: FL_W, h: 120, kind: 'step', src: 'sql+graph',
                                    note: 'phone OR email -> ONE Customer|(this is the omnichannel join)' },
-  'load_conversation_context':   { x: 1130, y: 270, w: FL_W, h: 120, kind: 'step',
+  'load_conversation_context':   { x: 1130, y: 270, w: FL_W, h: 120, kind: 'step', src: 'sql+graph',
                                    note: 'ONE fetch, shared downstream:|turns / tickets / graph' },
   'check_has_open_case':         { x: 1620, y: 270, w: FL_W, h: 120, kind: 'gate',
                                    note: 'does this CUSTOMER have|an open case?' },
@@ -3858,7 +3858,7 @@ var FLOW_MAP = {
   'close_ticket':                { x: 3090, y:  40, w: FL_W, h: 102, kind: 'step',
                                    note: 'mark the selected ticket closed' },
 
-  'classify_intent':             { x: 2110, y: 470, w: FL_W, h: 136, kind: 'agent',
+  'classify_intent':             { x: 2110, y: 470, w: FL_W, h: 136, kind: 'agent', src: 'sql',
                                    agent: 'Agent 1',
                                    note: 'ONE Groq call returns intent +|urgency + sentiment + language' },
   'validate_customer':           { x: 2600, y: 470, w: FL_W, h: 136, kind: 'gate',
@@ -3866,20 +3866,20 @@ var FLOW_MAP = {
                                    note: 'registered for this intent?' },
   'reject_unregistered_customer':{ x: 2600, y: 650, w: FL_W, h: 108, kind: 'step',
                                    note: 'ask them to write from|a registered address' },
-  'resolve_query':               { x: 3090, y: 470, w: FL_W, h: 164, kind: 'agent',
+  'resolve_query':               { x: 3090, y: 470, w: FL_W, h: 164, kind: 'agent', src: 'graph+kb',
                                    agent: 'Agent 2',
                                    note: 'answers from the RL memory, their|tickets, the graph, or the KB|- then grades it L1 / L2 / L3' },
   'decide_ticket':               { x: 3580, y: 470, w: FL_W, h: 136, kind: 'gate',
                                    agent: 'Agent 3',
                                    note: 'does a human need to see this?|L2/L3 always -> ticket' },
-  'create_ticket':               { x: 4070, y: 446, w: FL_W, h: 120, kind: 'step',
+  'create_ticket':               { x: 4070, y: 446, w: FL_W, h: 120, kind: 'step', src: 'sql+graph',
                                    note: 'same matter or new? decided by|matching the graph, not keywords' },
   'skip_ticket':                 { x: 4070, y: 600, w: FL_W, h: 92, kind: 'step',
                                    note: 'answer directly' },
 
-  'send_outbound_reply':         { x: 4030, y: 212, w: 500, h: 178, kind: 'gate',
+  'send_outbound_reply':         { x: 4030, y: 212, w: 500, h: 178, kind: 'gate', src: 'sql',
                                    note: 'REVIEW GATE|hold <=> ticket required|held: draft saved, customer|gets the holding message' },
-  'persist_audit_events':        { x: 4600, y: 240, w: FL_W, h: 120, kind: 'step',
+  'persist_audit_events':        { x: 4600, y: 240, w: FL_W, h: 120, kind: 'step', src: 'sql+graph',
                                    note: 'turn + citations + evidence|Interaction -> closed, memory' },
   '__end__':                     { x: 5090, y: 264, w: 122, h: 58, kind: 'end', label: 'END' }
 };
@@ -3989,6 +3989,14 @@ function renderFlowSvg(wf) {
         svg += '<text class="fl-agent" x="' + (n.x + n.w - 10) + '" y="' + (n.y + 19)
              + '" text-anchor="end">' + kgEscape(n.agent) + '</text>';
       }
+      // Which store this step reads or writes. The diagram drew the LangGraph nodes
+      // and nothing about the data layer, so it could not say that identity resolution
+      // writes BOTH stores, or that the answer comes from the graph and the KB rather
+      // than from SQL. Sits under the step name, left-aligned with it.
+      if (n.src) {
+        svg += '<text class="fl-src" x="' + (n.x + 11) + '" y="' + (n.y + 19) + '">'
+             + kgEscape(n.src) + '</text>';
+      }
       svg += '<text class="fl-name" x="' + (n.x + 11) + '" y="' + ty + '" fill="' + c[2] + '">'
            + kgEscape(key) + '</text>';
       (n.note || '').split('|').forEach(function(line, i) {
@@ -4005,7 +4013,12 @@ function renderFlowSvg(wf) {
   return '<div class="kgs-wrap">'
     + '<div class="kgs-note">Every inbound message runs this pipeline \u2014 WhatsApp, email and web '
     + 'chat alike. The left lane is ticket-closing, the right lane is answering; both rejoin at '
-    + 'send_outbound_reply.</div>'
+    + 'send_outbound_reply. <b>sql</b> / <b>graph</b> under a step name is the store it reads or writes.'
+    + '</div>'
+    + '<div class="kgs-note kgs-note-2">Wrapping every step: <b>PII masking</b> \u2014 names, phone '
+    + 'numbers and account numbers are replaced with placeholders before any text reaches the LLM, and '
+    + 'restored in the reply. <b>Idempotency</b> \u2014 a retried webhook returns the first reply instead '
+    + 'of answering twice. <b>Tracing</b> \u2014 every run and every LLM call is recorded.</div>'
     + svg
     + '<div class="kgs-key">'
     + '<span><i style="background:#ffffff;border-color:#cbd5e1"></i>Step</span>'
