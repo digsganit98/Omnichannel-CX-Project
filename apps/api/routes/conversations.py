@@ -58,10 +58,7 @@ def case_summary(conversation_id: str, refresh: bool = False) -> dict:
                 "conversation_id": conversation_id,
                 "status": "cached",
                 "generated_at": cached.get("created_at"),
-                "summary": {
-                    "situation": cached.get("situation", ""),
-                    "open_items": cached.get("open_items", []),
-                },
+                "summary": {"situation": cached.get("situation", "")},
             }
 
     # Open tickets read from SQLite, the system of record for ticket status — the same
@@ -92,10 +89,7 @@ def case_summary(conversation_id: str, refresh: bool = False) -> dict:
         "conversation_id": conversation_id,
         "status": "generated",
         "model": summary.get("model"),
-        "summary": {
-            "situation": summary.get("situation", ""),
-            "open_items": summary.get("open_items", []),
-        },
+        "summary": {"situation": summary.get("situation", "")},
     }
 
 

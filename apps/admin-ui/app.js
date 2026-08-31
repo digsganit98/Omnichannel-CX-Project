@@ -2837,18 +2837,14 @@ async function loadCaseSummary(conversationId, force) {
         + '</span>';
       return;
     }
-    var items = p.summary.open_items || [];
+    // The card is the situation, nothing else. An "Also outstanding" list used to sit
+    // here for work that was NOT a ticket - but this system tickets anything needing
+    // follow-up, so the category was empty by construction and the model filled it by
+    // rewording the situation instead of returning nothing. Every value it ever
+    // produced was an echo or empty, through three prompt rules written to stop it.
+    // Open work is in the Open Tickets card directly below, with status and Resolve.
     bodyEl.innerHTML =
-      (p.summary.situation ? '<div class="csum-sit">' + escH(p.summary.situation) + '</div>' : '')
-      // Open items now carries only what is NOT a ticket (an unanswered question, a
-      // promise not kept). Empty is the normal case - the tickets themselves are in
-      // the card below - so an empty list renders nothing rather than a heading over
-      // blank space or a "Nothing outstanding" line that contradicts Open Tickets (3).
-      + (items.length
-          ? '<div class="csum-lbl">Also outstanding</div><ul class="csum-items">'
-            + items.map(function(i) { return '<li>' + escH(i) + '</li>'; }).join('')
-            + '</ul>'
-          : '');
+      (p.summary.situation ? '<div class="csum-sit">' + escH(p.summary.situation) + '</div>' : '');
   } catch (e) {
     if (_csumFor !== conversationId) return;
     var el = document.getElementById('csum-body');

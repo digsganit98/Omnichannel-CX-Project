@@ -339,24 +339,14 @@ class GroqGenerator:
 
         user_prompt = (
             "Summarise this support conversation for the agent taking it over.\n\n"
-            "Return ONLY a JSON object with exactly these keys:\n"
-            '{"situation": "<the case in 2-3 sentences>", '
-            '"open_items": ["<outstanding item that is NOT a ticket>"]}\n\n'
+            "Return ONLY a JSON object with exactly this key:\n"
+            '{"situation": "<the case in 2-3 sentences>"}\n\n'
             "Rules:\n"
             "- Use ONLY what appears below. Never infer an outcome, a promise or a date that is not stated.\n"
             "- situation is the summary. Say what the customer is chasing, name the "
             "specific matter (amount, reference, what went wrong) and say what they have "
             "already done - how often they have asked, on which channel, and what they "
             "were last told. Write it for an agent opening this cold.\n"
-            "- Do NOT list the open tickets in open_items. They are shown in full "
-            "beneath this card. open_items is for what is outstanding and is NOT a "
-            "ticket: a promise or callback made and not kept, a date the customer is "
-            "waiting on, a question about something that has no ticket at all.\n"
-            "- A question the customer asked that ALREADY has a ticket is not an open "
-            "item - it IS that ticket. Never quote the customer's question back as an "
-            "open item.\n"
-            "- open_items is [] when there is no such item. That is the normal case - "
-            "never invent one to fill the list, and never restate a ticket to fill it.\n"
             # Our own earlier status emails sit in the history and quote a ticket list that
             # was true when sent. That is message TEXT, not a record - a ticket resolved
             # since must not reappear because an old reply still names it.
@@ -397,13 +387,8 @@ class GroqGenerator:
             return None
         if not isinstance(parsed, dict):
             return None
-        items = parsed.get("open_items")
         return {
             "situation": _clean_summary_text(parsed.get("situation")),
-            # A model can return a bare string here; normalise so the UI never has to guess.
-            "open_items": [_clean_summary_text(i) for i in items if _clean_summary_text(i)]
-            if isinstance(items, list)
-            else ([_clean_summary_text(items)] if items else []),
             "model": result.get("model"),
         }
 

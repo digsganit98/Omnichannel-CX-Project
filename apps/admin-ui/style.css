@@ -988,9 +988,6 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .csum-body{font-size:10.5px;line-height:1.4}
 .csum-muted{font-size:11px;color:var(--t3)}
 .csum-sit{margin-bottom:8px}
-.csum-lbl{font-size:10px;font-weight:600;color:var(--t3);text-transform:uppercase;letter-spacing:.4px;margin:8px 0 3px}
-.csum-items{margin:0;padding-left:15px}
-.csum-items li{margin-bottom:2px}
 
 /* ── System diagrams: Neo4j knowledge graph + LangGraph workflow ──────────────
    Both open in #graphModal. Its body centres a single SVG, so these views set

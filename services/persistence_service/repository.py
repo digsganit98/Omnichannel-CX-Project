@@ -22,11 +22,6 @@ def json_text(value: dict | list | None) -> str:
 
 
 
-def _as_list(value) -> list:
-    """A list, whatever the LLM returned. Non-list shapes become []."""
-    return value if isinstance(value, list) else []
-
-
 class CXRepository(Protocol):
     def migrate(self) -> None: ...
     def reserve_message(self, provider: str, external_message_id: str) -> bool: ...
@@ -411,10 +406,10 @@ class SQLiteCXRepository:
         if row is None:
             return None
         record = dict(row)
-        try:
-            record["open_items"] = json.loads(record.pop("open_items_json") or "[]")
-        except (ValueError, TypeError):
-            record["open_items"] = []
+        # open_items was dropped: every value it ever produced was either a reworded
+        # copy of `situation` or empty. The column stays (NOT NULL, written as [])
+        # so no table rebuild is needed, but nothing reads it.
+        record.pop("open_items_json", None)
         return record
 
     def save_case_summary(self, conversation_id: str, latest_turn_id: str, summary: dict) -> None:
@@ -429,12 +424,9 @@ class SQLiteCXRepository:
                 "created_at = excluded.created_at",
                 (
                     conversation_id, latest_turn_id, summary.get("situation", ""),
-                    # The model decides this shape, so it cannot be trusted to be a list:
-                    # a live row holds "{}" because it returned an empty OBJECT, and
-                    # `or []` passes that straight through ({} is falsy but json_text({})
-                    # still writes {}). The reader does `open_items.length`, which is
-                    # undefined on an object - it renders blank by luck, not by design.
-                    json_text(_as_list(summary.get("open_items"))), summary.get("last_contact", ""),
+                    # Column kept NOT NULL and written empty; open_items is no longer
+                    # produced or read (see get_case_summary).
+                    "[]", summary.get("last_contact", ""),
                     summary.get("model"), utc_now(),
                 ),
             )
