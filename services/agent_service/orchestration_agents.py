@@ -761,7 +761,15 @@ class WorkflowAutomationAgent:
                     f"Your request has been logged under reference {ref}. "
                     f"Our {team} team will follow up with you."
                 )
-            body = f"{body}\n\n{ticket_note}".strip() if body else ticket_note
+            # Skip the appended reference when the reply already gave it. The note exists
+            # so every reply carries its ticket id; a reply naming that id already
+            # satisfies it, and appending anyway printed it twice ("your dispute tkt_X is
+            # being reviewed" / "logged under reference tkt_X"). Started once the generator
+            # was told which case a message belongs to, so the model began citing the right
+            # id rather than none or a wrong one. A DIFFERENT id in the body does not count:
+            # the note is still appended, so a misattributed reply still carries the truth.
+            if ticket.ticket_id not in body:
+                body = f"{body}\n\n{ticket_note}".strip() if body else ticket_note
 
         if channel == "email":
             salutation_name = _salutation(customer_name)
