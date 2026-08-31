@@ -1011,7 +1011,7 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .kgs-t{font-size:14.5px;font-weight:700;fill:var(--t1);
   font-family:ui-monospace,Menlo,Consolas,monospace}
 .kgs-c{font-size:16px;font-weight:700}
-.kgs-p{font-size:11.5px;font-weight:600;fill:var(--t1);font-family:ui-monospace,Menlo,Consolas,monospace}
+.kgs-p{font-size:11.5px;font-weight:400;fill:var(--t1);font-family:ui-monospace,Menlo,Consolas,monospace}
 .kgs-n rect{transition:filter .12s}
 .kgs-n:hover rect{filter:brightness(.97)}
 .kgs-note{font-size:11.5px;color:var(--t2);margin:0 0 8px;line-height:1.45}
