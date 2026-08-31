@@ -111,6 +111,10 @@ def send_draft(draft_id: str, payload: SendDraftRequest) -> dict:
     # so every ResolutionMemory stayed unverified and therefore unservable forever.
     # Best-effort: a graph failure must never block a reply the agent has approved.
     memory = _verify_resolution_memory(draft, text, edited)
+    # A person read this reply and pressed send, so the graph must say so. The message
+    # path records the AI as handler (it drafted the text); without this the human's
+    # review was invisible and HUMAN_SR sat at zero interactions.
+    _record_human_handling(draft, edited)
 
     repository.add_audit_event(
         "reply_draft_sent",
@@ -152,6 +156,20 @@ def _verify_resolution_memory(draft: dict, sent_text: str, edited: bool) -> dict
         )
     except Exception:
         logger.warning("resolution_memory_verify_failed", extra={"draft_id": draft.get("draft_id")},
+                       exc_info=True)
+        return None
+
+
+def _record_human_handling(draft: dict, edited: bool) -> dict | None:
+    """Mark this turn's Interaction as handled by a human (and edited, when reworded)."""
+    turn_id = draft.get("inbound_turn_id")
+    if not turn_id:
+        return None
+    try:
+        from services.neo4j_service import writer as neo4j_writer
+        return neo4j_writer.record_human_handling(_neo4j_client(), turn_id=turn_id, edited=edited)
+    except Exception:
+        logger.warning("human_handling_record_failed", extra={"draft_id": draft.get("draft_id")},
                        exc_info=True)
         return None
 

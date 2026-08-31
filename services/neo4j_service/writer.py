@@ -466,7 +466,7 @@ def update_interaction_resolution(
                 i.product_ref          = $product_id,
                 i.resolution_embedding = $embedding,
                 i.status               = 'closed',
-                i.handled_by           = 'AI_GROQ',
+                i.handled_by           = 'AI_AGENT',
                 i.updated_at           = $now
 
             WITH i
@@ -494,7 +494,7 @@ def update_interaction_resolution(
             MERGE (i)-[:CREATED_MEMORY]->(rm)
 
             WITH i
-            MATCH (a:Agent {{agent_id: 'AI_GROQ'}})
+            MATCH (a:Agent {{agent_id: 'AI_AGENT'}})
             MERGE (i)-[:HANDLED_BY]->(a)
             """,
             {
@@ -575,6 +575,63 @@ def verify_resolution_memory(
     except Exception:
         logger.warning(
             "neo4j_verify_resolution_memory_failed",
+            extra={"turn_id": turn_id},
+            exc_info=True,
+        )
+        return None
+
+
+def record_human_handling(client, turn_id: str, edited: bool) -> dict | None:
+    """Record that a HUMAN agent, not the AI, handled this message.
+
+    Every reply is drafted by the AI, so the message path writes handled_by='AI_AGENT'
+    and links HANDLED_BY to that node. When a reply is HELD for review, a person reads
+    it and presses send - and that was never recorded, so the graph credited the AI for
+    work a human did and (:Agent {agent_id:'HUMAN_SR'}) sat at zero interactions forever.
+
+    Two relationships, because they answer different questions:
+      HANDLED_BY -> who dealt with this message. Reviewing and approving IS handling,
+                    whether or not the wording changed, so this always moves to HUMAN_SR.
+      EDITED_BY  -> who rewrote the AI's answer. Only when the agent changed the text.
+
+    The AI's authorship is not erased: i.drafted_by keeps AI_AGENT, so "the AI wrote it,
+    a human approved it" stays answerable.
+
+    Best-effort by design: a graph failure must never block a reply the agent has already
+    approved and sent. Returns None when there is nothing to record.
+    """
+    if client is None or not turn_id:
+        return None
+    try:
+        from datetime import datetime, timezone
+        rows = client.query(
+            """
+            MATCH (i:Interaction {turn_id: $turn_id})
+            MATCH (h:Agent {agent_id: 'HUMAN_SR'})
+            OPTIONAL MATCH (i)-[old:HANDLED_BY]->(:Agent)
+            DELETE old
+            SET i.drafted_by = coalesce(i.handled_by, 'AI_AGENT'),
+                i.handled_by = 'HUMAN_SR',
+                i.edited     = $edited,
+                i.updated_at = $now
+            MERGE (i)-[:HANDLED_BY]->(h)
+            WITH i, h
+            FOREACH (_ IN CASE WHEN $edited THEN [1] ELSE [] END |
+                MERGE (i)-[:EDITED_BY]->(h)
+            )
+            RETURN i.turn_id AS turn_id, i.handled_by AS handled_by,
+                   i.drafted_by AS drafted_by, i.edited AS edited
+            """,
+            {
+                "turn_id": turn_id,
+                "edited": bool(edited),
+                "now": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+        return rows[0] if rows else None
+    except Exception:
+        logger.warning(
+            "neo4j_record_human_handling_failed",
             extra={"turn_id": turn_id},
             exc_info=True,
         )

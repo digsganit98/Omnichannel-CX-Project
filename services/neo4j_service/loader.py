@@ -526,7 +526,7 @@ def _load_interactions(client, wb) -> int:
         conversation_id = str(row.get("ConversationID", ""))
         intent = str(row.get("Intent") or "")
         product_ref = str(row.get("ProductRef") or "general")
-        handled_by = str(row.get("HandledBy") or "AI_GROQ")
+        handled_by = str(row.get("HandledBy") or "AI_AGENT")
         verified = str(row.get("Verified") or "N").upper() == "Y"
 
         client.write(
@@ -639,7 +639,7 @@ def _load_agents(client) -> int:
     # as GroqGenerator so the two can never disagree.
     agents = [
         {
-            "agent_id": "AI_GROQ",
+            "agent_id": "AI_AGENT",
             "agent_type": "ai",
             "name": "InboxIQ AI",
             "model": os.getenv("GROQ_MODEL", "openai/gpt-oss-20b"),

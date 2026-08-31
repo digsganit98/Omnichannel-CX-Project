@@ -791,7 +791,7 @@ def generate_interactions(
                 "Status": "closed",
                 "ResolutionText": resolution,
                 "ProductRef": product_ref,
-                "HandledBy": rng.choices(["AI_GROQ", "HUMAN_SR"], weights=[80, 20])[0],
+                "HandledBy": rng.choices(["AI_AGENT", "HUMAN_SR"], weights=[80, 20])[0],
                 "CreatedAt": iso(created),
                 "UpdatedAt": iso(updated),
                 "Verified": rng.choices(["Y", "N"], weights=[70, 30])[0],
