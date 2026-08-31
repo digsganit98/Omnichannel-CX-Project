@@ -766,11 +766,23 @@ function renderCentre(conv) {
   // different tickets inside the same theme group.
   var ticketTheme = {};
   var ticketIntent = {};
+  // A ticket's subject comes from the TICKET, not from the first turn that happens to
+  // carry its id. The ticket is created DURING the turn that opens it, so the opening
+  // message is not tagged with the id - the first tagged turn is whatever came next.
+  // On a real dispute that was "any update on my dispute?", so a transaction_dispute
+  // case was headed TICKET STATUS: the follow-up question, not the matter.
+  var _tk = [].concat(_allTickets.open, _allTickets.closed);
   for (var ti = 0; ti < steps.length; ti++) {
     var tk = stepTicket[ti];
-    if (tk && rawIntent[ti] && !ticketTheme[tk]) {
-      ticketTheme[tk] = themeOf(rawIntent[ti]);
-      ticketIntent[tk] = rawIntent[ti];
+    if (!tk || ticketTheme[tk]) continue;
+    var rec = null;
+    for (var ri = 0; ri < _tk.length; ri++) {
+      if (_tk[ri].ticket_id === tk) { rec = _tk[ri]; break; }
+    }
+    var subject = (rec && rec.intent) || rawIntent[ti];
+    if (subject) {
+      ticketTheme[tk] = themeOf(subject);
+      ticketIntent[tk] = subject;
     }
   }
   var stepThemes = new Array(steps.length);
@@ -1016,15 +1028,27 @@ function renderCentre(conv) {
       var exUrg = ((ex.inbound && ex.inbound.urgency) || '').toLowerCase();
       var exEmotion = EMOTION_MAP[exUrg] || 'Neutral';
       var exEmotionCls = EMOTION_CLS[exUrg] || 'fe-neutral';
+      // Blank on a turn the classifier never labelled (an outbound-only exchange); the
+      // pill is then not drawn at all, rather than showing a made-up 'General'.
+      var exIntentRaw = (ex.inbound && ex.inbound.intent) || (ex.reply && ex.reply.intent) || '';
+      var exIntent = exIntentRaw ? intentLabel(exIntentRaw) : '';
       rowsHtml +=
           '<div class="det-row" style="--det-clr:' + themeClr + '">'
           // Metadata reads as a header across the top rather than a middle column: as a
           // column these five pills stacked into a tall empty gutter while the query and
           // reply were squeezed either side of it.
+          // The header reads left-to-right in the same direction as the row beneath it.
+          // LEFT describes the customer's message, which sits below-left: how it arrived,
+          // how they sounded, what they wanted. RIGHT describes what the system did, below-
+          // right: the case it opened or attached to, where that stands, when. Intent is the
+          // pivot - the last thing read out of the message and the first thing that decides
+          // the response - and it was missing entirely, so a row about a dispute and a row
+          // about its follow-up looked identical.
         +   '<div class="det-head">'
-        +     '<span class="flow-emotion ' + exEmotionCls + '">' + escH(exEmotion) + '</span>'
-        +     (u.ticket ? '<span class="lin-tkt">' + escH(u.ticket) + '</span>' : '<span class="lin-tkt lin-tkt--none">no ticket</span>')
         +     '<span class="cp ' + chn.pill + '" style="font-size:10px">' + chn.svg + chn.label + '</span>'
+        +     '<span class="flow-emotion ' + exEmotionCls + '">' + escH(exEmotion) + '</span>'
+        +     (exIntent ? '<span class="det-intent">' + escH(exIntent) + '</span>' : '')
+        +     (u.ticket ? '<span class="lin-tkt">' + escH(u.ticket) + '</span>' : '<span class="lin-tkt lin-tkt--none">no ticket</span>')
         +     '<span class="flow-node-status ' + statusCls + '">' + escH(statusLabel(nodeStatus)) + '</span>'
         +     (timeStr ? '<span class="lin-time">' + escH(timeStr) + '</span>' : '')
         +   '</div>'
@@ -1238,7 +1262,10 @@ function renderCentre(conv) {
         if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
       });
     }
-    groupEl.appendChild(header);
+    // Detailed shows ONE request at a time (Fix 31), so this divider divides nothing -
+    // and now that every row carries its own intent pill it just repeats the row beneath
+    // it. Kept in Lineage, where it genuinely separates one request from the next.
+    if (!detailSingle) groupEl.appendChild(header);
 
     // Group body — stacked exchange rows (detailed) or compact summary rows (lineage).
     var bodyEl = document.createElement('div');
