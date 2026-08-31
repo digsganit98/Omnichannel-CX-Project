@@ -95,12 +95,24 @@ _LANGUAGE_NAMES = {
 }
 
 
-# Operations that ask a reasoning model to think LESS. Deliberately a narrow list, not a
-# global setting: only customer_context was ever large enough to hit the provider's
-# per-minute token ceiling. Sorting an already-retrieved record into five categories has
-# no chain of reasoning to discover; grading L1/L2/L3 or writing a customer's reply might,
-# and neither has been measured, so neither is on this list.
-REASONING_EFFORT_OPERATIONS = {"customer_context"}
+# Operations that ask a reasoning model to think LESS. Still a narrow list, not a global
+# setting - an operation earns its place here by measurement, never by assumption.
+#
+# customer_context: the record-sorting call that exceeded the 8000-per-minute ceiling by
+# itself (Fix 95). Sorting an already-retrieved record into five categories has no chain
+# of reasoning to discover.
+#
+# answer_generation: added after measuring all 11 recorded calls. Nine spent 107-498
+# completion tokens and returned a reply; two spent exactly 2048 - the provider's default
+# completion cap - and returned NOTHING (output_chars 0, status "success"). The model had
+# burned the whole budget thinking and had none left to write with, so the caller's
+# `generation.get("text") or raw_data` fallback printed the raw Neo4j record block to the
+# customer. Both failures were the same message ("On 23 March I paid Rs.5,776.55 to
+# Samarth Thaker..."), failing twice 90 minutes apart: reproducible, not a blip. It is the
+# largest prompt of the set and asks the model to match one payment against eleven rows.
+# The earlier note here said a reply "might" need deep reasoning and was unmeasured; the
+# measurement says the nine successful replies used under 500 tokens, so it does not.
+REASONING_EFFORT_OPERATIONS = {"customer_context", "answer_generation"}
 
 
 def _reasoning_effort() -> str:
@@ -146,7 +158,7 @@ class GroqGenerator:
             f"[{item.get('metadata', {}).get('source', 'unknown')}]:\n{item['text']}"
             for item in contexts
         )
-        graph_ctx_text = _format_graph_context(ctx.get("graph_context"))
+        graph_ctx_text = _format_graph_context(ctx.get("graph_context"), ctx.get("intent"))
         conv_history_text = _format_conversation_history(ctx.get("recent_turns", []))
         # Conversation summary is a raw pipe-delimited log — inject it only when there are
         # no recent_turns to avoid sending redundant and hard-to-parse content to the LLM.
@@ -713,8 +725,16 @@ def _safe_amount(value) -> str:
         return str(value) if value else "N/A"
 
 
-def _format_graph_context(graph_ctx: dict | None) -> str:
-    """Convert the Neo4j graph context dict into a clean human-readable string."""
+def _format_graph_context(graph_ctx: dict | None, current_intent: str | None = None) -> str:
+    """Convert the Neo4j graph context dict into a clean human-readable string.
+
+    ``current_intent`` names what THIS message is about. Without it the open-cases block
+    is a list of what the customer has raised with nothing to say which one the message
+    in hand concerns, so a dispute arriving while a card case was open came back as
+    "your dispute has been logged under <the card ticket>". Defaults to None so the
+    classifier caller - the step that decides intent, and which must see every case -
+    is unchanged.
+    """
     if not graph_ctx:
         return ""
     lines = []
@@ -801,14 +821,36 @@ def _format_graph_context(graph_ctx: dict | None) -> str:
     # replayed, so this stays a handful of tokens.
     open_cases = graph_ctx.get("open_cases") or []
     if open_cases:
-        lines.append("Open support cases (already raised — do NOT treat as new):")
+        lines.append("Open support cases (already raised - do NOT treat as new):")
+        matched = []
         for case in open_cases:
             subject = case.get("title") or (case.get("intent") or "").replace("_", " ").title()
             scope = case.get("scope") or ""
-            # "transaction_dispute:imps" → "imps": the specific matter, without repeating the intent.
+            # "transaction_dispute:imps" -> "imps": the specific matter, without repeating the intent.
             detail = f" about {scope.split(':', 1)[1]}" if ":" in scope and scope.split(":", 1)[1] else ""
+            same = bool(current_intent) and case.get("intent") == current_intent
+            if same:
+                matched.append(str(case.get("ticket_id", "")))
             lines.append(
                 f"  - {case.get('ticket_id', '')} | {subject}{detail} | "
                 f"Status: {case.get('status', 'open')}"
+                + (" | SAME SUBJECT as this message" if same else "")
             )
+        # Every case stays listed. The customer may reference any of them across channels,
+        # and hiding one would cost exactly the continuity this block exists to give
+        # (Fix 75). What is added is the one fact the model was missing: what THIS message
+        # is about - so it can tell "continues that case" from "this is something new".
+        if current_intent:
+            readable = current_intent.replace("_", " ")
+            if matched:
+                lines.append(
+                    f"This message is about: {readable}. It continues {', '.join(matched)}."
+                )
+            else:
+                lines.append(
+                    f"This message is about: {readable}, which none of the cases above cover. "
+                    "It is a NEW matter: do NOT tell the customer it has been logged under any "
+                    "ticket id listed above. A reference number is appended automatically, so "
+                    "never write one yourself."
+                )
     return "\n".join(lines)

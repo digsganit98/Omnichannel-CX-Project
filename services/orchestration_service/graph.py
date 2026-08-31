@@ -591,6 +591,10 @@ class OrchestrationGraph:
         enriched_context = {
             **state.context,
             "language": state.analysis.language if state.analysis else "en",
+            # What THIS message is about. The generator lists the customer's open cases
+            # but had no way to say which one the message in hand concerns, so a new
+            # dispute was answered as "logged under <an unrelated open ticket>".
+            "intent": intent_str,
         }
         with llm_observation_context(**self._llm_context(state, "query_resolution_agent", intent=intent_str)):
             state.resolution = self.resolution_agent.run(state.message, enriched_context, intent=intent_str)
