@@ -151,6 +151,10 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 102 — A follow-up supplying the details we asked for opened a second ticket:** the scope label that decides same-matter-or-new came from six payment-rail keywords, so the most specific message in the conversation scored `:other` and was excluded from the refinement path; the scope is now the transaction the message names in the graph.
 - **Fix 103 — The ticket reference printed twice:** `compose_answer` appends it unconditionally, and Fix 100 made the model start naming the right id itself; the append is skipped when the body already contains that same id.
 - **Fix 104 — Both system diagrams drawn with real edges:** replaces the card lists with SVG, and adds a validator that checks every drawn edge against the live payload — it caught three relationships the schema had invented from grid position.
+- **Fix 105 — The box text on both diagrams had never been checked (only the arrows had):** Fix 98's validator proved every EDGE real (19/19 schema, 22/22 workflow) but nothing checked the words inside the boxes — five property names did not exist in Neo4j (`coverage` vs `coverage_inr`), `resolve_query` implied all four sources are consulted per question when it picks one and returns, `decide_ticket` said "rules 1-8" against twelve that do not run in number order, and `create_ticket` never said the decision now comes from the graph.
+- **Fix 106 — The LLM vendor's name was the handler's id:** `AI_GROQ` named a supplier in the data model and on a client-facing diagram, and would have outlived any provider switch; renamed to `AI_AGENT` in six places plus the live node and its 7 interactions.
+- **Fix 107 — A human's review was recorded as the AI's work:** every reply is AI-drafted so the message path writes `handled_by='AI_AGENT'`; when an agent reviewed, rewrote and sent a held draft nothing wrote back, so `HUMAN_SR` sat at zero forever. `record_human_handling` now sets `HANDLED_BY` (always — reviewing IS handling) and `EDITED_BY` (only when reworded), keeping `drafted_by` so "the AI wrote it, a human approved it" stays answerable.
+
 
 ---
 
@@ -4176,3 +4180,117 @@ The measurement that mattered (20% accuracy, five runs) took less effort than an
 - **The ambiguity branch is now hard to reach**: scopes used to collide at `:card`/`:upi`, and
   are now unique per transaction, so *"which ticket did you mean?"* almost never fires.
 - Everything inherited from Sessions 19-20, including the demo script rewrite.
+
+---
+
+## Session 22 — 2026-08-31
+
+Branch: `Sayantini-phase2-ui-changes`. A diagram audit that found the arrows were right and
+the words were not, then two fixes to the `(:Agent)` nodes underneath them.
+
+### Fix 105 — The arrows were validated. The text never was.
+Session 20 built a validator because three schema edges had been invented from grid position,
+and it works: re-run against the live payload this session, **19 drawn / 19 real / 0 invented /
+0 missing** on the schema and **22/22** on the workflow, every node type placed.
+
+That validator checks **edges**. Nobody ever checked the **words inside the boxes**, which are
+hand-written constants. Four claims were wrong:
+
+- **Five property names do not exist.** `min_balance_reqd`, `principal`, `amount`, `coverage`,
+  `amount_claimed`/`amount_approved` — the real fields carry an `_inr` suffix that states the
+  currency. A developer typing what the diagram shows gets `null`.
+- **`resolve_query` implied all four sources are consulted.** It is an if/else chain: one branch
+  answers and returns. Memory serves `kyc_update` **only** — 11 of the 12 stored memories can
+  never be read — ticket lookup only `ticket_status`, the graph only the 7 transactional
+  intents, and the KB everything else.
+- **`decide_ticket` said "rules 1-8".** There are twelve (0-9 plus 2b and 3b), they do not run
+  in number order (**rule 9 runs before 3b**, deliberately), and there is an unnumbered early
+  exit between 2b and 3.
+- **`create_ticket` described the outcomes, not the decision.** Fix 102 moved that decision from
+  six keywords to asking the graph which transaction the message names. The box still read as it
+  had before that change.
+
+**Two proposals were rejected after checking the data, both mine.** `scope = continuity` is
+correct: only **one of four** live tickets carries a transaction scope, so replacing the field's
+purpose with one possible value would have been wrong for the other three. And an `Agent` box
+reading `(:Agent) 1` would have denied that humans handle anything — which is what Fix 107 then
+made true.
+
+### Fix 106 — The vendor's name was the handler's id
+`AI_GROQ` put Groq — a supplier — in the data model and on a diagram shown to clients, and would
+have outlived any provider switch: every historical interaction would still have said "Groq"
+after moving off it. Renamed to `AI_AGENT` in six places across four files, plus the live node
+and its 7 interactions. Nothing else referenced the string.
+
+### Fix 107 — The graph credited the AI for work a human did
+Every reply is drafted by the AI, so the message path writes `handled_by='AI_AGENT'` and links
+`HANDLED_BY` to it. When a reply is **held**, a person reads it, may rewrite it, and presses
+send — and that was never written back. `(:Agent {agent_id:'HUMAN_SR'})` had **0** interactions
+against AI_AGENT's 7, so the store backing the human-in-the-loop story said the AI did 100% of
+the work.
+
+`record_human_handling` runs on send, beside the existing memory verification — same `turn_id`,
+same best-effort contract (a graph failure must never block a reply the agent has already
+approved). **Two relationships, because they answer different questions:**
+
+| Relationship | Meaning |
+|---|---|
+| `HANDLED_BY` | who dealt with this — reviewing and approving IS handling, so it always moves to HUMAN_SR |
+| `EDITED_BY` | who rewrote the AI's answer — only when the text changed |
+
+`drafted_by` keeps `AI_AGENT`, so "the AI wrote it, a human approved it" stays answerable.
+
+The signal was already there: `reply_drafts.py` has computed `edited = text != draft_text` since
+Session 18 and hands it to Neo4j for the RL memory. `handled_by` was written **5 June**, before
+human review existed, and was correct then. It simply never got revisited when the capability
+arrived — the same drift as the diagram text.
+
+**Verified before deploying**, on a real interaction: both relationships land, the old
+`HANDLED_BY` **moves rather than duplicating**, `drafted_by` is preserved — then the test
+interaction was reverted (back to 7 on AI_AGENT). Image rebuilt: `services/` is not
+bind-mounted, so a restart alone would have kept running the old code.
+
+### The architecture question — asked, investigated, and dropped
+A long thread on whether the pipeline's SQL reads should move to Neo4j. Measured: **17 SQL calls**
+and **~18 graph queries** per message (the context loader alone fans out into seven).
+
+**The answer is no, and the architecture is already right.** SQL is the system of record —
+`list_recent_turns` is an ordered range scan, idempotency needs an atomic compare-and-set, audit
+is append-only. Neo4j is the intelligence layer, and it already decides real things: which
+transaction a dispute names (Fix 102), what cases the customer has open (Fix 75), which memory
+answers a problem. A relational system of record beside a graph for traversal is the conventional
+enterprise pattern, not a compromise.
+
+**I argued the wrong side of this repeatedly** — proposed a migration, built a three-step plan on
+it, then found the premise wrong. Two claims in that plan were also unchecked: `get_open_cases`
+is customer-scoped and capped at 5 while `find_active_ticket` is conversation-scoped, so they are
+not interchangeable.
+
+**One real gap survives the analysis:** the graph holds **inbound messages only** — 8 inbound in
+SQLite, 8 `:Interaction` nodes, an exact match; the 15 outbound replies are not nodes at all. The
+reply is stored as a *property on the question*. So the graph cannot answer "show me every message
+on this case and who answered each", which is a connection question it ought to own. Worth fixing
+on its own merit, not as a step toward moving reads.
+
+### Process
+The audit itself was sound — box by box, against live data. The failure was **judgement about
+importance**: three fixes proposed and withdrawn (`scope -> the Transaction`, `(:Agent) 1`, the
+SQL migration), and the user having to push four times before the actual question landed. Twice I
+answered a modelling question when an architecture question was asked. Each reversal came from the
+same root as `verify-claims-before-asserting`: reading the code **after** forming the opinion
+rather than before.
+
+### Still open
+- **`handled_by` has no reader.** The data is correct now; nothing displays it. The follow-up is a
+  surface — "N% of replies were human-handled" — built from it or from `reply_drafts`.
+- **Outbound replies are not graph nodes** (above).
+- **`get_transactions` limits are hardcoded per caller** — 8 for answering, 50 for ticket
+  matching. A dispute about a payment older than the cap silently will not match.
+- **The same product queries run twice per message** — once via `get_customer_context` for the
+  LLM's context block, again inside `neo4j_answer` when the question is about that product.
+- **Jira is not a config problem.** The 400 *"target project doesn't exist"* is misleading: a
+  `/myself` call, which touches no project, returns **401** through the app's own CRMClient. The
+  credentials are rejected. Needs a fresh token from the Atlassian account that owns it.
+- **The demo script still needs rewriting** against real behaviour — inherited from Session 19 and
+  still the only demo blocker.
+- Everything inherited from Sessions 19-21.
