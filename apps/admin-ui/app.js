@@ -1171,6 +1171,11 @@ function renderCentre(conv) {
     focusKey = (stored && allKeys.indexOf(stored) !== -1) ? stored : latestKey;
   }
 
+  // Inbound turns visible in the CURRENT Detailed view (filled in below). A held
+  // draft belongs to one specific question, so its card is only shown when that
+  // question is the one being displayed.
+  var shownInboundTurnIds = {};
+
   // ── Render theme groups with foldable headers ───────────────────────────
   groups.forEach(function(g, gi) {
     var groupKey = convKey + ':' + gi;
@@ -1191,6 +1196,13 @@ function renderCentre(conv) {
     if (detailSingle) {
       units = units.filter(function(u) { return unitKey(u) === focusKey; });
       if (!units.length) return;   // focused request isn't in this group
+      // Remember which inbound turns this focused request actually shows, so the
+      // held-draft card below can tell whether ITS question is the one on screen.
+      units.forEach(function(u) {
+        (u.exchanges || []).forEach(function(ex) {
+          if (ex.inbound && ex.inbound.turn_id) shownInboundTurnIds[ex.inbound.turn_id] = true;
+        });
+      });
     }
 
     var collapsed = !detailSingle && !!state.collapsedThemes[groupKey];
@@ -1279,7 +1291,7 @@ function renderCentre(conv) {
     document.getElementById('cinput').placeholder = 'Reply to ' + nm + '…';
   }
 
-  renderDraftCard(conv);
+  renderDraftCard(conv, viewMode, shownInboundTurnIds);
 }
 
 // Render the human-in-the-loop editable draft card if this conversation has a pending
@@ -1296,7 +1308,7 @@ function confPill(label, score) {
     + escH(label) + ' ' + pct + '%</span>';
 }
 
-function renderDraftCard(conv) {
+function renderDraftCard(conv, viewMode, shownInboundTurnIds) {
   var mount = document.getElementById('draftMount');
   if (!mount) return;
   var draft = state.pendingDrafts[conv.conversation_id];
@@ -1304,6 +1316,31 @@ function renderDraftCard(conv) {
   if (!draft) {
     mount.innerHTML = '';
     return;  // no draft: leave the compose box as renderCentre() set it
+  }
+  // A held draft answers ONE specific question, so it is only shown while that
+  // question is the one on screen. The card used to be keyed on the conversation
+  // alone, so it sat under whichever request the Detailed view happened to be
+  // focused on — an agent could read "What is my credit card limit?" above a
+  // proposed reply about a payment due date and send it against the wrong turn.
+  //
+  // Hidden in Lineage too: that view is an overview of every request, so no single
+  // question is being displayed and there is nothing for the card to belong to.
+  // An offer draft is bank-initiated and answers no question, so it keeps the old
+  // conversation-level behaviour.
+  var isOfferDraft = draft.channel === 'offer';
+  if (!isOfferDraft) {
+    var onDetailed = viewMode !== 'lineage';
+    var shown = shownInboundTurnIds || {};
+    var belongsHere = !!(draft.inbound_turn_id && shown[draft.inbound_turn_id]);
+    if (!onDetailed || !belongsHere) {
+      mount.innerHTML = '';
+      // The compose box was hidden for the draft that is no longer shown; restore
+      // it so the agent still has a reply surface on this request.
+      if (compose && conv.status !== 'resolved' && conv.status !== 'closed') {
+        compose.style.display = 'block';
+      }
+      return;
+    }
   }
   // A held draft IS the reply surface — hide the generic compose box so there is only one
   // (and the real one). renderCentre() runs before this and may have shown compwrap.
