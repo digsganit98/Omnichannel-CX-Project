@@ -1504,12 +1504,16 @@ function renderRight(conv, tickets) {
     // Still called after the snapshot tiles were dropped: this is also what fills the
     // conversation header's name / id / email / phone line.
     api('/admin/customers/' + encodeURIComponent(_snapCustId) + '/graph').then(function(g) {
-      // Extract email and phone from channel identifiers
+      // Contact details from the CUSTOMER RECORD, falling back to the channels they
+      // have written in on. channel_identities lists channels USED, so a customer who
+      // has only ever emailed had no whatsapp row and the header showed no phone -
+      // while the bank held one in the graph. The fallback keeps unverified senders
+      // (not in the graph) showing whatever address they wrote from.
       var ids = g.identifiers || [];
-      var emailId = null, phoneId = null;
+      var emailId = g.email || null, phoneId = g.phone || null;
       ids.forEach(function(id) {
-        if (id.channel === 'email') emailId = id.identifier;
-        if (id.channel === 'whatsapp') phoneId = id.identifier;
+        if (!emailId && id.channel === 'email') emailId = id.identifier;
+        if (!phoneId && id.channel === 'whatsapp') phoneId = id.identifier;
       });
 
       // Use the REAL name from the Neo4j graph payload ONLY if present. Do NOT
@@ -1520,11 +1524,14 @@ function renderRight(conv, tickets) {
         var nameEl = document.getElementById('convName');
         if (nameEl) nameEl.textContent = String(g.name).trim();
       }
-      // Customer id · email · phone, inline beside the name in the centre header.
+      // Email · phone beside the name. The internal cust_... key used to lead this line,
+      // but it is a SQLite row id this app generates - random hex an agent cannot use,
+      // look up, or quote to anyone. The identifier that means something is the CRN the
+      // BFSI dataset is keyed on, and that belongs in the Profile tab with the rest of
+      // the record. Email and phone stay: they are how an agent verifies who is writing.
       var metaEl = document.getElementById('convMeta');
       if (metaEl) {
         var parts = [];
-        if (_snapCustId) parts.push(escH(_snapCustId));
         if (emailId) parts.push(escH(emailId));
         if (phoneId) parts.push(escH(phoneId));
         metaEl.innerHTML = parts.join('<span class="cmeta-sep">·</span>');

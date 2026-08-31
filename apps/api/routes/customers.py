@@ -288,6 +288,12 @@ def customer_graph(customer_id: str) -> dict:
         "loan_count": 0, "claim_count": 0, "identifiers": identifiers or [],
         "registration_date": None, "segment": None,
         "contacts_30d": contacts_30d, "upcoming_event": None,
+        # The bank's record of how to reach this person. The header used to build
+        # this from channel_identities, which lists the channels they have WRITTEN
+        # IN ON - so a customer who has only ever emailed showed no phone at all,
+        # while the graph held one. Contact details are who someone IS; the channel
+        # list is what they have used. None when the sender is not a known customer.
+        "graph_customer_id": None, "phone": None, "email": None,
     }
     if not identifiers:
         return base
@@ -298,6 +304,8 @@ def customer_graph(customer_id: str) -> dict:
         registration_date = None
         segment = None
         graph_name = None
+        graph_phone = None
+        graph_email = None
         for row in identifiers:
             customer = (
                 get_customer_by_id(client, row["identifier"])
@@ -309,6 +317,8 @@ def customer_graph(customer_id: str) -> dict:
                 registration_date = customer.get("registration_date")
                 segment = customer.get("segment")
                 graph_name = customer.get("name")
+                graph_phone = customer.get("phone")
+                graph_email = customer.get("email")
                 break
 
         if not neo4j_cid:
@@ -325,6 +335,9 @@ def customer_graph(customer_id: str) -> dict:
             "registration_date": registration_date,
             "segment": segment,
             "upcoming_event": _upcoming_event(client, neo4j_cid),
+            "graph_customer_id": neo4j_cid,
+            "phone": graph_phone,
+            "email": graph_email,
         }
     except Exception as exc:
         logger.warning("neo4j_graph_lookup_failed customer=%s: %s", customer_id, exc)
@@ -398,12 +411,19 @@ def _build_record_text(client, customer: dict) -> str:
     return "\n".join(lines)
 
 
-def _normalise_categories(parsed: dict) -> dict:
+def _normalise_categories(parsed: dict, graph_customer_id: str | None = None) -> dict:
     """Force the model's output into the shape the renderer requires.
 
     Every category key present, always a list, every item a {label, value} pair with an
     optional {sub}. A model that returns a bare string, a nested object or a missing key
     degrades to a dropped item - never to a broken panel.
+
+    ``graph_customer_id`` is prepended to Profile as "Customer ID". The record handed to
+    the model already opens with customer_id=CRN..., but the model drops it while sorting
+    fields into tabs, so the one identifier an agent can actually use - the CRN the whole
+    BFSI dataset is keyed on - never reached the panel. Added here rather than asked for
+    in the prompt: the same reason every other key is rebuilt server-side, a field that
+    must be present cannot depend on the model choosing to keep it.
     """
     out: dict[str, list[dict]] = {}
     for key in CONTEXT_CATEGORIES:
@@ -429,6 +449,14 @@ def _normalise_categories(parsed: dict) -> dict:
                         entry["sub"] = sub
                 clean.append(entry)
         out[key] = clean
+    if graph_customer_id:
+        # Drop any row the model produced carrying this same id under whatever label it
+        # chose ("CRN", "Customer Number", "Cust ID"...), then add ours. Matching on the
+        # VALUE rather than the label is what makes this safe: a label can be spelled a
+        # dozen ways, the id cannot, so the row can never appear twice.
+        cid = str(graph_customer_id)
+        profile = [i for i in (out.get("profile") or []) if str(i.get("value", "")).strip() != cid]
+        out["profile"] = [{"label": "Customer ID", "value": cid}] + profile
     return out
 
 
@@ -453,6 +481,8 @@ def customer_context(customer_id: str, refresh: bool = False) -> dict:
         return empty
     if not customer:
         return empty
+    # The CRN the BFSI dataset is keyed on, not the internal cust_... row key.
+    graph_cid = customer.get("customer_id")
 
     try:
         record_text = _build_record_text(client, customer)
@@ -472,7 +502,7 @@ def customer_context(customer_id: str, refresh: bool = False) -> dict:
                 "customer_id": customer_id,
                 "status": "cached",
                 "generated_at": cached.get("created_at"),
-                "categories": _normalise_categories(cached.get("categories") or {}),
+                "categories": _normalise_categories(cached.get("categories") or {}, graph_cid),
                 "raw": None,
             }
 
@@ -490,7 +520,7 @@ def customer_context(customer_id: str, refresh: bool = False) -> dict:
                 "categories": {k: [] for k in CONTEXT_CATEGORIES},
                 "raw": result.get("raw")}
 
-    categories = _normalise_categories(result.get("categories") or {})
+    categories = _normalise_categories(result.get("categories") or {}, graph_cid)
     try:
         repo.save_customer_context(customer_id, record_hash, categories, result.get("model"))
     except Exception:
