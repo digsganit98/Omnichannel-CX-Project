@@ -154,6 +154,10 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 105 — The box text on both diagrams had never been checked (only the arrows had):** Fix 98's validator proved every EDGE real (19/19 schema, 22/22 workflow) but nothing checked the words inside the boxes — five property names did not exist in Neo4j (`coverage` vs `coverage_inr`), `resolve_query` implied all four sources are consulted per question when it picks one and returns, `decide_ticket` said "rules 1-8" against twelve that do not run in number order, and `create_ticket` never said the decision now comes from the graph.
 - **Fix 106 — The LLM vendor's name was the handler's id:** `AI_GROQ` named a supplier in the data model and on a client-facing diagram, and would have outlived any provider switch; renamed to `AI_AGENT` in six places plus the live node and its 7 interactions.
 - **Fix 107 — A human's review was recorded as the AI's work:** every reply is AI-drafted so the message path writes `handled_by='AI_AGENT'`; when an agent reviewed, rewrote and sent a held draft nothing wrote back, so `HUMAN_SR` sat at zero forever. `record_human_handling` now sets `HANDLED_BY` (always — reviewing IS handling) and `EDITED_BY` (only when reworded), keeping `drafted_by` so "the AI wrote it, a human approved it" stays answerable.
+- **Fix 108 — The case summary printed an internal placeholder and a claim that was false:** the redaction that hides a resolved ticket's id blanked the ID but left the SENTENCE, so the model read *"your dispute ticket [closed ticket] is still open and is being reviewed by the Fraud and Disputes team"* and reported it as current — and copied the placeholder text onto the screen. A line whose ticket ids are all closed is now dropped whole; a line naming a still-open ticket is untouched.
+- **Fix 109 — One word for a finished case, `closed`:** `TicketStatus.RESOLVED = "resolved"` came from the first commit and every close stored it; Session 18 changed only the NAMES and added `statusLabel()` to translate for display — which cannot reach inside LLM-generated text, so the case-summary model read the raw value and wrote "resolved" onto the agent's screen. The enum is now `CLOSED = "closed"` (migration 016 + a Cypher update), and **every site that accepted BOTH words now accepts one**, so writing the old value reads as an open ticket instead of silently working. Data wipes never fixed this and never could: the word came from an enum, not from data.
+- **Fix 110 — Removed the case summary's "Also outstanding" list:** every value it ever produced was a reworded copy of the situation above it or empty (`{}`); the category — outstanding work that is NOT a ticket — is empty by construction in a system that tickets anything needing follow-up, and three prompt rules written to stop the paraphrasing all failed.
+- **Right panel:** the five card headings (Customer Context, Sentiment, Case Summary, Open Tickets, Suggested Offers) unified to blue; Neo4j box property lines set to normal weight.
 
 
 ---
@@ -4272,25 +4276,115 @@ reply is stored as a *property on the question*. So the graph cannot answer "sho
 on this case and who answered each", which is a connection question it ought to own. Worth fixing
 on its own merit, not as a step toward moving reads.
 
-### Process
-The audit itself was sound — box by box, against live data. The failure was **judgement about
-importance**: three fixes proposed and withdrawn (`scope -> the Transaction`, `(:Agent) 1`, the
-SQL migration), and the user having to push four times before the actual question landed. Twice I
-answered a modelling question when an architecture question was asked. Each reversal came from the
-same root as `verify-claims-before-asserting`: reading the code **after** forming the opinion
-rather than before.
+### Fix 108 — The summary printed a placeholder, and a claim that was false
+The Case Summary card read *"the dispute is logged under reference **[closed ticket]** and is
+being reviewed by the Fraud and Disputes team… support has said the dispute is **still open**
+with an expected resolution within an hour."* The ticket had been closed hours earlier.
+
+Both halves came from one line. Fix 90 stopped a resolved ticket reappearing by blanking its id
+in the quoted history — but it replaced the id with readable text and **left the sentence
+standing**, so the model read:
+
+```
+Your dispute ticket *[closed ticket]* is still open and is being reviewed by the Fraud
+and Disputes team.
+Your support ticket [closed ticket] has been closed. Thank you for confirming.
+```
+
+Two contradictory lines about the same thing, and it took the more detailed one. The placeholder
+was also just words, so it got copied verbatim onto the screen.
+
+**A line whose ticket ids are ALL closed is now dropped whole** — the stale claim is the problem,
+not the id inside it. A line naming a still-open ticket is untouched even if it also names a
+closed one. Verified live: placeholder gone, false claim gone, the open ticket and the customer's
+own message both kept.
+
+I first tried removing the id and leaving the sentence, which produced *"Your dispute ticket is
+logged under reference and open"* — worse. Tested before deploying rather than after.
+
+### Fix 109 — One word for a finished case
+`TicketStatus.RESOLVED = "resolved"` was written in the **first commit** (29 May, Digvijay's) and
+every close has stored that word since. Session 18 decided a finished case is CLOSED — closing is
+a state change, while "resolution" already meant five other things here — but changed only the
+**names and UI labels**, adding `statusLabel()` to translate `resolved` → "Closed" for display.
+The stored value was left, logged as *"a migration, not a rename"*.
+
+**A display helper cannot reach inside generated text.** The case-summary LLM is handed the raw
+record, so it read "resolved" and wrote it onto the agent's screen — the one surface the
+translation could never cover.
+
+**Wipes never fixed this and never could.** The word comes from an enum in the code, so every
+fresh start reseeded the data and the next close wrote "resolved" again. That is why it survived
+every reset.
+
+Three parts, and the second is what makes it stick:
+
+1. `CLOSED = "closed"`, with migration `016` moving SQLite rows (tickets, conversations) and a
+   Cypher update for the Neo4j Ticket nodes.
+2. **Every site that accepted BOTH words now accepts one** — `status === 'resolved' || status ===
+   'closed'` in 8 JS places, `IN ('resolved','closed')` in the analytics SQL. That dual acceptance
+   is *why* the mismatch survived three months: nothing was ever wrong, so nothing forced a
+   decision. Writing the old value now reads as an **open** ticket — visible immediately.
+3. `statusLabel()` no longer translates, only title-cases.
+
+**Deliberately untouched — same word, unrelated meanings:** `conversation_turns.resolved` (a 0/1
+BOOLEAN), the sentiment POSITIVE list, `has_resolution_cue`'s customer keywords, and the
+graph-view API's `"resolved"` success flag. `_JIRA_STATUS_ALIASES` loses its dead `"resolved"` key;
+the `"closed"` key it already had is identical, so Jira transitions are unaffected.
+
+**Verified:** both stores report `closed`; `find_open_tickets_for_customer`, `find_active_ticket`
+and the graph's `get_open_cases` all exclude it; analytics reports 3 open / 1 closed, matching the
+database. Tests **5 failed / 147 passed** — the documented baseline.
+
+Two of my own misses were caught during the change: `TicketStatus.RESOLVED` in two test files (my
+grep pattern only matched the string literal), and a miscount on the repository queries — an
+assertion stopped that one before it did damage.
+
+### Fix 110 — "Also outstanding" deleted
+Every value it ever produced was a reworded copy of the situation above it, or empty:
+
+| Run | Value |
+|---|---|
+| Live | *"Awaiting update on dispute request for Rs.5,776.55 paid to Samarth Thaker"* — under a situation opening *"Customer is chasing a dispute request for Rs.5,776.55 paid to Samarth Thaker"* |
+| Other conversation | `{}` — an empty **object**, not a list; the UI rendered blank by luck (`.length` is undefined on an object) |
+| Earlier same day | *"Expected resolution within the hour"* |
+| Recorded in code | *"Expected resolution within 9 hours"* |
+
+**It cannot work as defined.** `open_items` was "outstanding work that is NOT a ticket" — but this
+system tickets anything needing follow-up, so the category is empty by construction, and a model
+asked for a list fills it by paraphrasing rather than returning nothing. Three prompt rules were
+written to stop exactly that and all three failed. Open work is already in the Open Tickets card
+directly below, with a status pill and a Resolve button.
+
+Removed from the prompt shape, the parser, both API paths and the UI, with the two CSS rules that
+only styled it. The `open_items_json` column stays (NOT NULL, written `"[]"`) so no table rebuild
+is needed for a column nothing reads.
+
+### Process — the same failure, at greater length
+The diagram audit was sound. Everything after it was not. **Three fixes proposed and withdrawn**
+(`scope -> the Transaction`, `(:Agent) 1`, the SQL-to-graph migration), each abandoned only after
+the user pushed. Twice I answered a **modelling** question when an **architecture** question was
+asked. I proposed renaming the stored value while the memory note that says *"the stored DB value
+is NOT to be renamed"* was already in context — then later did that rename, correctly, but only
+because the reasoning had finally caught up.
+
+Worst of it: told the user "on a clean stack there'd be nothing to fix", then showed that the
+repo **did** start clean and drifted within a week — a contradiction they had to point out. And
+"clean stack" meant the **fresh-start wipe** they have run repeatedly, which is the whole point:
+a wipe cannot fix a word that lives in an enum.
+
+The pattern behind all of it is `verify-claims-before-asserting`: forming the opinion, then
+reading the code.
 
 ### Still open
-- **`handled_by` has no reader.** The data is correct now; nothing displays it. The follow-up is a
-  surface — "N% of replies were human-handled" — built from it or from `reply_drafts`.
-- **Outbound replies are not graph nodes** (above).
-- **`get_transactions` limits are hardcoded per caller** — 8 for answering, 50 for ticket
-  matching. A dispute about a payment older than the cap silently will not match.
-- **The same product queries run twice per message** — once via `get_customer_context` for the
-  LLM's context block, again inside `neo4j_answer` when the question is about that product.
-- **Jira is not a config problem.** The 400 *"target project doesn't exist"* is misleading: a
-  `/myself` call, which touches no project, returns **401** through the app's own CRMClient. The
-  credentials are rejected. Needs a fresh token from the Atlassian account that owns it.
-- **The demo script still needs rewriting** against real behaviour — inherited from Session 19 and
-  still the only demo blocker.
+- The `{}` row in `case_summaries.open_items_json` is inert — nothing reads that column.
+- `handled_by` still has no reader (Fix 107); the follow-up is a surface showing "N% of replies
+  were human-handled".
+- Outbound replies are still not graph nodes.
+- **Jira: not a config problem.** `/myself` — which touches no project — returns **401** through
+  the app's own CRMClient, so the credentials are rejected; the 400 *"target project doesn't
+  exist"* is a red herring. Needs a fresh API token from the Atlassian account that owns it.
+- `get_transactions` limits hardcoded per caller (8 answering, 50 ticket matching).
+- The same product queries run twice per message.
+- **The demo script still needs rewriting** against real behaviour — the only demo blocker.
 - Everything inherited from Sessions 19-21.
