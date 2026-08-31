@@ -88,7 +88,7 @@ def test_kyc_rule_fires_for_open_kyc_ticket():
 
 
 def test_kyc_rule_does_not_fire_for_resolved_ticket():
-    ticket = _ticket(intent="kyc_update", status=TicketStatus.RESOLVED)
+    ticket = _ticket(intent="kyc_update", status=TicketStatus.CLOSED)
     assert NextBestActionEngine._rule_kyc_pending(ticket) is None
 
 

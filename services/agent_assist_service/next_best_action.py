@@ -134,7 +134,7 @@ class NextBestActionEngine:
     def _rule_kyc_pending(ticket: dict | None) -> NextBestAction | None:
         if not ticket or ticket.get("intent") != "kyc_update":
             return None
-        if ticket.get("status") == TicketStatus.RESOLVED.value:
+        if ticket.get("status") == TicketStatus.CLOSED.value:
             return None
         return NextBestAction(
             action_type=ActionType.REQUEST_DOCUMENT,

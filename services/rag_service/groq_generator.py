@@ -660,18 +660,35 @@ def _clean_summary_text(value) -> str:
 
 
 def _redact_closed_ticket_ids(history_text: str, open_cases: list[dict]) -> str:
-    """Blank out ticket ids in the history that are not in the open-cases block.
+    """Drop history lines that speak only about cases which are no longer open.
 
-    The open-cases block is the system of record for what is open. An id that appears
-    only in message text is closed business quoted from an older reply, and leaving it
-    in the prompt is what let a resolved ticket reappear in a summary.
+    The open-cases block is the system of record for what is open. A line whose ticket
+    ids are all absent from it is closed business quoted from an older reply - and the
+    stale CLAIM in that sentence ("is still open, being reviewed by...") is the part
+    that misled the summary, so the line goes, not just the id inside it.
     """
     if not history_text:
         return history_text
     open_ids = {str(case.get("ticket_id") or "") for case in (open_cases or [])}
-    def _swap(match: 're.Match') -> str:
-        return match.group(0) if match.group(0) in open_ids else "[closed ticket]"
-    return re.sub(r"tkt_[0-9a-f]{6,}", _swap, history_text)
+    kept = []
+    for line in history_text.split(chr(10)):
+        ids = re.findall(r"tkt_[0-9a-f]{6,}", line)
+        if ids and not any(i in open_ids for i in ids):
+            # Every id on this line is closed business, so the WHOLE line is a stale
+            # claim - not just the id in it. Blanking the id left the sentence around
+            # it standing ("your dispute ticket [closed ticket] is still open and is
+            # being reviewed by the Fraud and Disputes team"), and that sentence is
+            # what the summary then reported as the current state of a resolved case.
+            # It also put the placeholder itself on screen: the model read
+            # "[closed ticket]" as words and copied them into the summary.
+            #
+            # Replaced with a marker that carries no quotable wording and no id. A line
+            # naming a still-open ticket is untouched even if it also names a closed
+            # one - the open case is live business the agent needs.
+            kept.append("  [a message about a case that has since been CLOSED - omitted]")
+        else:
+            kept.append(line)
+    return chr(10).join(kept)
 
 def _format_conversation_history(recent_turns: list[dict]) -> str:
     if not recent_turns:

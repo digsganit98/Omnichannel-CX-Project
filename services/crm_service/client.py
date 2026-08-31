@@ -16,11 +16,10 @@ from shared.schemas.tickets import Ticket
 logger = logging.getLogger(__name__)
 
 
-# Our single status field has to address Jira's separate Status workflow. 'resolved' and
-# 'closed' both mean the ticket is finished; default Jira spells that "Done", and
-# company-managed projects often add a distinct "Closed" step after it.
+# Our status field has to address Jira's separate Status workflow. We spell a finished
+# case "closed"; default Jira spells it "Done", and company-managed projects often add a
+# distinct "Closed" step after it.
 _JIRA_STATUS_ALIASES = {
-    "resolved": ["done", "closed", "resolve issue", "complete"],
     "closed": ["done", "closed", "resolve issue", "complete"],
     "open": ["to do", "open", "backlog"],
     "in_progress": ["in progress", "start progress"],
@@ -148,10 +147,9 @@ class CRMClient:
                 return transitions
             # Jira keeps STATUS (To Do / In Progress / Done) apart from RESOLUTION
             # (Fixed / Won't Fix / Duplicate) — an issue can be Closed with resolution
-            # "Won't Fix". We store one field, and its value 'resolved' is a word default
-            # Jira has no transition for, so this lookup could only ever fail with
-            # "No Jira transition found for status 'resolved'". Map our internal value to
-            # the names Jira actually uses, and try each in turn.
+            # "Won't Fix". We store one field; "closed" is not a transition name in a
+            # default Jira project either (it is "Done"), so map our internal value to
+            # the names Jira actually uses and try each in turn.
             wanted = [status.lower()] + _JIRA_STATUS_ALIASES.get(status.lower(), [])
             match = next(
                 (

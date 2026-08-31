@@ -494,18 +494,19 @@ function customerLabel(conv) {
 // conversation: active/resolved), which read as confusing near-synonyms on screen.
 // This maps the RAW value to a single user-facing word. It must ONLY wrap display
 // text — never feed a class/branch/comparison; all logic keeps using the raw value.
+// One word, stored and shown: a finished case is 'closed'. This used to translate the
+// stored 'resolved' into "Closed" for display, which covered the six places the UI
+// renders a status and nothing else - the case-summary LLM was handed the raw value and
+// wrote "resolved" onto the agent's screen. The value itself is now the word.
 function statusLabel(s) {
-  var v = (s || '').toLowerCase();
-  // 'resolved' is the STORED value and stays as it is in the DB; CLOSING a ticket is a
-  // state change, so the word on screen is Closed. Resolution means answering a query.
-  return (v === 'resolved' || v === 'closed') ? 'Closed' : 'Open';
+  return (s || '').toLowerCase() === 'closed' ? 'Closed' : 'Open';
 }
 
 function urgencyToStatus(conv) {
-  if (conv.status === 'closed' || conv.status === 'resolved') return 'resolved';
+  if (conv.status === 'closed') return 'closed';
   var allTkts = [].concat(_allTickets.open, _allTickets.closed);
   var convTkts = allTkts.filter(function(t) { return t.conversation_id === conv.conversation_id; });
-  if (convTkts.length > 0 && convTkts.every(function(t) { return t.status === 'resolved' || t.status === 'closed'; })) return 'resolved';
+  if (convTkts.length > 0 && convTkts.every(function(t) { return t.status === 'closed'; })) return 'closed';
   return conv.status || 'open';
 }
 
@@ -529,7 +530,7 @@ window.loadConversations = async function() {
     var results = await Promise.all([api('/admin/conversations'), api('/admin/tickets'), loadPendingDrafts()]);
     var convs = results[0], tks = results[1];
     _allTickets.open   = tks.filter(function(t) { return t.status === 'open' || t.status === 'in_progress'; });
-    _allTickets.closed = tks.filter(function(t) { return t.status === 'resolved' || t.status === 'closed'; });
+    _allTickets.closed = tks.filter(function(t) { return t.status === 'closed'; });
     var prevIds = state.convs.map(function(c){ return c.conversation_id; }).sort().join(',');
     var newIds = convs.map(function(c){ return c.conversation_id; }).sort().join(',');
     var hasNew = newIds !== prevIds;
@@ -550,7 +551,7 @@ window.loadConversations = async function() {
 
 async function refreshSelectedConv() {
   if (!state.selectedConvId) return;
-  if (state.convDetail && (state.convDetail.status === 'resolved' || state.convDetail.status === 'closed')) return;
+  if (state.convDetail && state.convDetail.status === 'closed') return;
   try {
     var detail = await api('/admin/conversations/' + encodeURIComponent(state.selectedConvId));
     var prevLen = (state.convDetail && state.convDetail.turns) ? state.convDetail.turns.length : 0;
@@ -581,7 +582,7 @@ function renderQueue() {
     var sts = urgencyToStatus(c);
     var ch = chMeta(c.last_channel);
     var div = document.createElement('div');
-    div.className = 'qi' + (isOn ? ' on' : '') + (sts === 'resolved' ? ' done' : '');
+    div.className = 'qi' + (isOn ? ' on' : '') + (sts === 'closed' ? ' done' : '');
     div.innerHTML = '<div class="cs ' + ch.stripe + '"></div>'
       + '<div class="qb">'
       + '<div class="qr1"><span class="qn">' + escH(customerLabel(c)) + '</span><span class="qt">' + escH(formatTime(c.updated_at)) + '</span></div>'
@@ -637,7 +638,7 @@ function renderCentre(conv) {
   var _metaEl = document.getElementById('convMeta');
   if (_metaEl) _metaEl.innerHTML = '';
 
-  var isDone = urgencyToStatus(conv_meta) === 'resolved';
+  var isDone = urgencyToStatus(conv_meta) === 'closed';
   document.getElementById('resbanner').style.display = isDone ? 'flex' : 'none';
   document.getElementById('compwrap').style.display = isDone ? 'none' : 'block';
 
@@ -725,7 +726,7 @@ function renderCentre(conv) {
 
   // Build a ticket-status lookup from the cached ticket lists.
   // Used below to drive per-turn status display.
-  var convIsResolved = conv.status === 'resolved' || conv.status === 'closed';
+  var convIsResolved = conv.status === 'closed';
   var tktStatusMap = {};
   [].concat(_allTickets.open, _allTickets.closed).forEach(function(t) {
     tktStatusMap[t.ticket_id] = t.status;
@@ -947,10 +948,10 @@ function renderCentre(conv) {
     var tktStatus = u.ticket ? tktStatusMap[u.ticket] : null;
     var isLatestUnit = u.idx === 0;
     var nodeStatus;
-    if (tktStatus === 'resolved' || tktStatus === 'closed') nodeStatus = 'resolved';
+    if (tktStatus === 'closed') nodeStatus = 'closed';
     else if (tktStatus === 'open' || tktStatus === 'in_progress') nodeStatus = 'active';
-    else if (!isLatestUnit) nodeStatus = 'resolved';
-    else nodeStatus = convIsResolved ? 'resolved' : (conv.status || 'active');
+    else if (!isLatestUnit) nodeStatus = 'closed';
+    else nodeStatus = convIsResolved ? 'closed' : (conv.status || 'active');
     var statusCls = (nodeStatus === 'active' || nodeStatus === 'open' || nodeStatus === 'in_progress') ? 'fns-active' : 'fns-done';
 
     // Customer message text (strips a leading duplicated subject line).
@@ -1068,10 +1069,10 @@ function renderCentre(conv) {
     var tktStatus = u.ticket ? tktStatusMap[u.ticket] : null;
     var isLatestUnit = u.idx === 0;
     var nodeStatus;
-    if (tktStatus === 'resolved' || tktStatus === 'closed') nodeStatus = 'resolved';
+    if (tktStatus === 'closed') nodeStatus = 'closed';
     else if (tktStatus === 'open' || tktStatus === 'in_progress') nodeStatus = 'active';
-    else if (!isLatestUnit) nodeStatus = 'resolved';
-    else nodeStatus = convIsResolved ? 'resolved' : (conv.status || 'active');
+    else if (!isLatestUnit) nodeStatus = 'closed';
+    else nodeStatus = convIsResolved ? 'closed' : (conv.status || 'active');
     var statusCls = (nodeStatus === 'active' || nodeStatus === 'open' || nodeStatus === 'in_progress') ? 'fns-active' : 'fns-done';
 
     function fmtTime(turn) {
@@ -1334,7 +1335,7 @@ function renderDraftCard(conv, viewMode, shownInboundTurnIds) {
       mount.innerHTML = '';
       // The compose box was hidden for the draft that is no longer shown; restore
       // it so the agent still has a reply surface on this request.
-      if (compose && conv.status !== 'resolved' && conv.status !== 'closed') {
+      if (compose && conv.status !== 'closed') {
         compose.style.display = 'block';
       }
       return;
@@ -1539,7 +1540,7 @@ function renderRight(conv, tickets) {
   if (convTickets.length) {
     var tktHtml = convTickets.map(function(t) {
       var isOpen = t.status === 'open' || t.status === 'in_progress';
-      var stBg = t.status === 'resolved' ? 'background:var(--grn-bg);border-color:var(--grn-bd);color:var(--grn-t)' :
+      var stBg = t.status === 'closed' ? 'background:var(--grn-bg);border-color:var(--grn-bd);color:var(--grn-t)' :
                  isOpen ? 'background:var(--amb-bg);border-color:var(--amb-bd);color:var(--amb-t)' :
                  'background:var(--surf2);border-color:var(--bdr);color:var(--t3)';
       return '<div class="tkt-item tkt-item--clickable" onclick="goToConversation(\'' + escH(conv.conversation_id) + '\',\'' + escH(t.ticket_id) + '\')"><div class="tkt-head">'
@@ -1699,7 +1700,7 @@ window.resolveTicket = function(btn, ticketId) {
   btn.disabled = true;
   api('/admin/tickets/' + encodeURIComponent(ticketId) + '/status', {
     method: 'PATCH',
-    body: JSON.stringify({ status: 'resolved', actor: adminUser })
+    body: JSON.stringify({ status: 'closed', actor: adminUser })
   }).then(function() {
     toast('Ticket ' + ticketId.slice(0,16) + ' resolved ✓');
     // Re-derive: loadConversations refreshes the _allTickets cache too.
@@ -1711,7 +1712,7 @@ window.resolveTicket = function(btn, ticketId) {
         return t.conversation_id === state.convDetail.conversation_id
           && (t.status === 'open' || t.status === 'in_progress');
       });
-      state.convDetail.status = stillOpen ? 'active' : 'resolved';
+      state.convDetail.status = stillOpen ? 'active' : 'closed';
       state.convs.forEach(function(c) {
         if (c.conversation_id === state.convDetail.conversation_id) c.status = state.convDetail.status;
       });
@@ -2766,7 +2767,7 @@ window.loadUserTickets = async function() {
         var cm = chMeta(ticket.channel);
         var chStyle = 'background:' + cm.bg + ';border-color:' + cm.bd + ';color:' + cm.clr;
         var st = (ticket.status || 'active').toLowerCase();
-        var isResolvedSt = st === 'resolved' || st === 'closed';
+        var isResolvedSt = st === 'closed';
         var stCls = isResolvedSt ? 'user-status-pill user-status-pill--resolved' : 'user-status-pill';
         row.innerHTML =
           '<div class="user-ticket-main"><strong>' + escH(ticket.ticket_id || ticket.conversation_id) + '</strong>'
@@ -3290,7 +3291,7 @@ async function openTicketModal(ticket) {
   var cm = chMeta(ticket.channel);
   document.getElementById('ticketModalId').textContent = ticket.ticket_id || ticket.conversation_id || 'Ticket';
   var st = (ticket.status || 'active').toLowerCase();
-  var stCls = (st === 'resolved' || st === 'closed') ? 'user-status-pill user-status-pill--resolved' : 'user-status-pill';
+  var stCls = st === 'closed' ? 'user-status-pill user-status-pill--resolved' : 'user-status-pill';
   document.getElementById('ticketModalMeta').innerHTML =
     '<span class="user-ch-pill" style="background:' + cm.bg + ';border-color:' + cm.bd + ';color:' + cm.clr + '">' + escH(cm.label) + '</span>'
     + '<span class="' + stCls + '">' + escH(statusLabel(ticket.status)) + '</span>'

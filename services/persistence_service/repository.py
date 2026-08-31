@@ -21,6 +21,12 @@ def json_text(value: dict | list | None) -> str:
     return json.dumps(value or {}, default=str, separators=(",", ":"))
 
 
+
+def _as_list(value) -> list:
+    """A list, whatever the LLM returned. Non-list shapes become []."""
+    return value if isinstance(value, list) else []
+
+
 class CXRepository(Protocol):
     def migrate(self) -> None: ...
     def reserve_message(self, provider: str, external_message_id: str) -> bool: ...
@@ -249,7 +255,7 @@ class SQLiteCXRepository:
                 row = conn.execute(
                     "SELECT * FROM conversations WHERE conversation_id = ?", (conversation_id,)
                 ).fetchone()
-            elif dict(row)["status"] in ("resolved", "closed"):
+            elif dict(row)["status"] == "closed":
                 # Reopen the existing conversation when the customer messages again
                 conn.execute(
                     "UPDATE conversations SET status = 'active', updated_at = ? WHERE conversation_id = ?",
@@ -373,12 +379,12 @@ class SQLiteCXRepository:
             # just-resolved ticket is already committed and cannot be double-counted.
             if values.get("resolved"):
                 still_open = conn.execute(
-                    "SELECT COUNT(*) FROM tickets WHERE conversation_id = ? AND status != 'resolved'",
+                    "SELECT COUNT(*) FROM tickets WHERE conversation_id = ? AND status != 'closed'",
                     (values["conversation_id"],),
                 ).fetchone()[0]
                 conn.execute(
                     "UPDATE conversations SET status = ?, updated_at = ? WHERE conversation_id = ?",
-                    ("active" if still_open else "resolved", created_at, values["conversation_id"]),
+                    ("active" if still_open else "closed", created_at, values["conversation_id"]),
                 )
             else:
                 conn.execute(
@@ -423,7 +429,12 @@ class SQLiteCXRepository:
                 "created_at = excluded.created_at",
                 (
                     conversation_id, latest_turn_id, summary.get("situation", ""),
-                    json_text(summary.get("open_items") or []), summary.get("last_contact", ""),
+                    # The model decides this shape, so it cannot be trusted to be a list:
+                    # a live row holds "{}" because it returned an empty OBJECT, and
+                    # `or []` passes that straight through ({} is falsy but json_text({})
+                    # still writes {}). The reader does `open_items.length`, which is
+                    # undefined on an object - it renders blank by luck, not by design.
+                    json_text(_as_list(summary.get("open_items"))), summary.get("last_contact", ""),
                     summary.get("model"), utc_now(),
                 ),
             )
@@ -521,7 +532,7 @@ class SQLiteCXRepository:
     def find_active_ticket(self, conversation_id: str) -> Ticket | None:
         with self.connection() as conn:
             row = conn.execute(
-                "SELECT * FROM tickets WHERE conversation_id = ? AND status != 'resolved' ORDER BY created_at DESC LIMIT 1",
+                "SELECT * FROM tickets WHERE conversation_id = ? AND status != 'closed' ORDER BY created_at DESC LIMIT 1",
                 (conversation_id,),
             ).fetchone()
         return self._ticket(row) if row else None
@@ -529,7 +540,7 @@ class SQLiteCXRepository:
     def find_active_ticket_for_intent(self, conversation_id: str, intent: str) -> Ticket | None:
         with self.connection() as conn:
             row = conn.execute(
-                "SELECT * FROM tickets WHERE conversation_id = ? AND intent = ? AND status != 'resolved' "
+                "SELECT * FROM tickets WHERE conversation_id = ? AND intent = ? AND status != 'closed' "
                 "ORDER BY created_at DESC LIMIT 1",
                 (conversation_id, intent),
             ).fetchone()
@@ -538,7 +549,7 @@ class SQLiteCXRepository:
     def find_active_ticket_for_scope(self, conversation_id: str, intent: str, ticket_scope: str) -> Ticket | None:
         with self.connection() as conn:
             rows = conn.execute(
-                "SELECT * FROM tickets WHERE conversation_id = ? AND intent = ? AND status != 'resolved' "
+                "SELECT * FROM tickets WHERE conversation_id = ? AND intent = ? AND status != 'closed' "
                 "ORDER BY created_at DESC",
                 (conversation_id, intent),
             ).fetchall()
@@ -551,7 +562,7 @@ class SQLiteCXRepository:
     def list_active_tickets_for_intent(self, conversation_id: str, intent: str) -> list[Ticket]:
         with self.connection() as conn:
             rows = conn.execute(
-                "SELECT * FROM tickets WHERE conversation_id = ? AND intent = ? AND status != 'resolved' "
+                "SELECT * FROM tickets WHERE conversation_id = ? AND intent = ? AND status != 'closed' "
                 "ORDER BY created_at DESC",
                 (conversation_id, intent),
             ).fetchall()
@@ -572,7 +583,7 @@ class SQLiteCXRepository:
         """
         with self.connection() as conn:
             rows = conn.execute(
-                "SELECT * FROM tickets WHERE conversation_id = ? AND status != 'resolved' "
+                "SELECT * FROM tickets WHERE conversation_id = ? AND status != 'closed' "
                 "ORDER BY created_at DESC LIMIT ?",
                 (conversation_id, limit),
             ).fetchall()
@@ -582,7 +593,7 @@ class SQLiteCXRepository:
         """Return all open (non-resolved) tickets for a customer across all channels."""
         with self.connection() as conn:
             rows = conn.execute(
-                "SELECT * FROM tickets WHERE customer_id = ? AND status != 'resolved' "
+                "SELECT * FROM tickets WHERE customer_id = ? AND status != 'closed' "
                 "ORDER BY created_at DESC LIMIT ?",
                 (customer_id, limit),
             ).fetchall()

@@ -7,7 +7,13 @@ from pydantic import BaseModel, Field
 class TicketStatus(StrEnum):
     OPEN = "open"
     IN_PROGRESS = "in_progress"
-    RESOLVED = "resolved"
+    # A finished case is CLOSED. "Resolution" in this repo means answering a query
+    # (resolution_level, QueryResolution, ResolutionMemory, Interaction.resolution) -
+    # a separate idea from a case being over, and conflating the two caused Fixes 87,
+    # 88 and 90. The stored value is the word itself so nothing has to translate it:
+    # a display-only mapping cannot reach inside LLM-generated text, which is how
+    # "resolved" reached the agent's case summary.
+    CLOSED = "closed"
 
 
 class TicketPriority(StrEnum):

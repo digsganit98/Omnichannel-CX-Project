@@ -67,7 +67,7 @@ def get_next_best_actions(conversation_id: str, ticket_id: str | None = None) ->
     # closed). A previously-saved 'pending' row lingers after its ticket is resolved; a done
     # ticket has no live action to take, so hide it. Conversation-level rows (no ticket_id)
     # are unaffected.
-    _terminal = {"resolved", "closed"}
+    _terminal = {"closed"}
     _ticket_status: dict[str, str | None] = {}
 
     def _is_active(ticket_id: str | None) -> bool:

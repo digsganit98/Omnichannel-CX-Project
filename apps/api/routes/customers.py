@@ -232,7 +232,7 @@ def customer_graph_view(customer_id: str) -> dict:
             if t.get("customer_id") != customer_id:
                 continue
             st = str(t.get("status") or "").lower()
-            if st in ("resolved", "closed"):
+            if st == "closed":
                 continue
             scope = ((t.get("metadata") or {}).get("ticket_scope") or "")
             # "transaction_dispute:imps" → "imps": the specific matter, so two disputes

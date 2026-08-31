@@ -595,7 +595,7 @@ class TicketCreationAgent:
         )
 
     def close_ticket(self, ticket_id: str) -> Ticket:
-        updated = self.tickets.update_status(ticket_id, status=TicketStatus.RESOLVED, actor="customer_message")
+        updated = self.tickets.update_status(ticket_id, status=TicketStatus.CLOSED, actor="customer_message")
         return Ticket(**updated)
 
     def create_or_get(

@@ -572,7 +572,7 @@ def test_customer_message_can_resolve_active_ticket_without_rag():
     assert closed.workflow_status == "ticket_closed"
     assert closed.retrieval_backend == "not_required"
     assert closed.rag_contexts == []
-    assert repo.get_ticket(opened.ticket_id)["status"] == TicketStatus.RESOLVED.value
+    assert repo.get_ticket(opened.ticket_id)["status"] == TicketStatus.CLOSED.value
     assert "has been closed" in closed.message
     # The customer has an open case, so check_has_open_case routes into the ticket
     # branch; detect_ticket_action then finds a close request and select_ticket_to_close

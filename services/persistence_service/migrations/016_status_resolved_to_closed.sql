@@ -1,0 +1,25 @@
+-- One word for a finished case: "closed".
+--
+-- TicketStatus.RESOLVED = "resolved" was written in the first commit and every close has
+-- stored that word since. Session 18 decided the app should say CLOSED - closing a case is
+-- a state change, while "resolution" already meant five other things here (the L1/L2/L3
+-- level, answering a query, the answer text on an Interaction, ResolutionMemory, identity
+-- resolution). But only the NAMES and UI labels were changed: a display helper translated
+-- 'resolved' -> "Closed" for the six places the UI renders a status, and the stored value
+-- was left alone.
+--
+-- A display helper cannot reach inside generated text. The case-summary LLM is handed the
+-- raw record, so it read "resolved" and wrote it into a sentence on the agent's screen -
+-- the one surface the translation could never cover.
+--
+-- Data wipes did not fix this and never could: the word comes from an enum in the code, so
+-- every reseed brought it straight back. This migration moves the rows; the enum change
+-- alongside it stops new ones being written.
+--
+-- Deliberately NOT touched - same word, unrelated meanings:
+--   conversation_turns.resolved  a 0/1 BOOLEAN ("was this turn answered"), not a status
+--   conversations.status         'active' is kept; only 'resolved' -> 'closed'
+--   sentiment POSITIVE list      the customer's own word
+--   has_resolution_cue           keywords that detect a customer closing a case
+UPDATE tickets       SET status = 'closed' WHERE status = 'resolved';
+UPDATE conversations SET status = 'closed' WHERE status = 'resolved';

@@ -27,11 +27,11 @@ def get_overview(db_path: str) -> OverviewMetrics:
         row = conn.execute(
             """
             SELECT
-                SUM(CASE WHEN status NOT IN ('resolved','closed') THEN 1 ELSE 0 END) AS open_cnt,
-                SUM(CASE WHEN status IN ('resolved','closed') THEN 1 ELSE 0 END) AS resolved_cnt,
+                SUM(CASE WHEN status <> 'closed' THEN 1 ELSE 0 END) AS open_cnt,
+                SUM(CASE WHEN status = 'closed' THEN 1 ELSE 0 END) AS resolved_cnt,
                 SUM(CASE WHEN escalation_reason IS NOT NULL AND escalation_reason != '' THEN 1 ELSE 0 END) AS escalated_cnt,
                 SUM(CASE WHEN sla_due_at IS NOT NULL AND sla_due_at < datetime('now')
-                              AND status NOT IN ('resolved','closed') THEN 1 ELSE 0 END) AS sla_breach_cnt
+                              AND status <> 'closed' THEN 1 ELSE 0 END) AS sla_breach_cnt
             FROM tickets
             """
         ).fetchone()
@@ -42,7 +42,7 @@ def get_overview(db_path: str) -> OverviewMetrics:
                 (julianday(updated_at) - julianday(created_at)) * 1440
             ) AS avg_mins
             FROM tickets
-            WHERE status IN ('resolved','closed')
+            WHERE status = 'closed'
             """
         ).fetchone()
 
@@ -222,7 +222,7 @@ def get_solution_performance(db_path: str) -> SolutionPerformanceMetrics:
       - by_risk_band   = OPEN tickets bucketed by priority_score band.
       - by_escalation_reason = escalated tickets grouped by escalation_reason.
     """
-    _open = "status NOT IN ('resolved','closed')"
+    _open = "status <> 'closed'"
     _escalated = "escalation_reason IS NOT NULL AND escalation_reason != ''"
     with _connect(db_path) as conn:
         escalations = conn.execute(
@@ -375,7 +375,7 @@ def get_ticket_trend(db_path: str, days: int = 14) -> list[TicketTrendPoint]:
             """
             SELECT DATE(updated_at) AS day, COUNT(*) AS cnt
             FROM tickets
-            WHERE status IN ('resolved','closed') AND DATE(updated_at) >= ?
+            WHERE status = 'closed' AND DATE(updated_at) >= ?
             GROUP BY day ORDER BY day
             """,
             (cutoff,),

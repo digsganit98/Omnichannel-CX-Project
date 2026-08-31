@@ -335,9 +335,9 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .rpbody::-webkit-scrollbar{width:3px}
 .rpbody::-webkit-scrollbar-thumb{background:var(--bdr);border-radius:3px}
 .rpcard{background:var(--surf2);border-radius:var(--r);padding:11px}
-.rplbl{font-size:10px;font-weight:600;color:var(--t3);text-transform:uppercase;letter-spacing:.5px;margin-bottom:9px}
-.rplbl-tickets{color:var(--amb-t)}
-.rplbl-offers{color:var(--pur-t)}
+.rplbl{font-size:10px;font-weight:600;color:var(--blue-t);text-transform:uppercase;letter-spacing:.5px;margin-bottom:9px}
+.rplbl-tickets{color:var(--blue-t)}
+.rplbl-offers{color:var(--blue-t)}
 /* Sentiment header: label + value + count on one line */
 .ssent-head{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;margin-bottom:8px}
 .ssent-head .rplbl{margin-bottom:0}

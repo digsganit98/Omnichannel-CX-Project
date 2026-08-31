@@ -208,7 +208,7 @@ def get_open_cases(client, customer_id: str, limit: int = 5) -> list[dict]:
         return client.query(
             """
             MATCH (c:Customer {customer_id: $cid})-[:HAS_TICKET]->(t:Ticket)
-            WHERE t.status IS NULL OR t.status <> 'resolved'
+            WHERE t.status IS NULL OR t.status <> 'closed'
             RETURN t.ticket_id AS ticket_id, t.intent AS intent, t.status AS status,
                    t.priority AS priority, t.scope AS scope, t.title AS title
             ORDER BY t.ticket_id DESC
