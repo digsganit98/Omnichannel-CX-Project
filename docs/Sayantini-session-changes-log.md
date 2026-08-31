@@ -146,6 +146,11 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 97 — The two system diagrams replace the customer-360 graph:** the conversation-header button became two buttons opening a Neo4j knowledge-graph schema (new `/admin/neo4j/schema`, live counts) and the LangGraph pipeline (the existing `/admin/orchestration/workflow`, which nothing had ever rendered).
 - **Fix 98 — The schema diagram drew three relationships that do not exist:** boxes were connected by grid position, so FixedDeposit hung off Account, Loan off CreditCard and ChargePenalty off Transaction when all three are children of Customer; a validator now checks every drawn edge against the database (19 drawn, 19 real, 0 invented) as well as text overflow, box overlap and edge-crosses-box.
 - **Fix 99 — The Agent node advertised a model Groq had deleted:** the seed hardcoded `llama-3.1-8b-instant` (removed in Fix 78) and so did `GroqGenerator`'s fallback; both now read `GROQ_MODEL`, so an unset variable can no longer 404 every call.
+- **Fix 100 — The reply named an unrelated open ticket:** the generator listed the customer's open cases with nothing to say which one the message concerned, and the message's own ticket does not exist yet at generation time, so it reported the only id it was given; intent now travels with the context and each case is marked SAME SUBJECT or explicitly not this matter.
+- **Fix 101 — A reply printed raw database records:** `answer_generation` spent its entire 2048-token completion budget on invisible reasoning and returned nothing, so the caller's `or raw_data` fallback sent the Neo4j record block to the customer; adding it to the low-reasoning list took the same message from 2048 completion tokens and 0 output to 173 and a real reply.
+- **Fix 102 — A follow-up supplying the details we asked for opened a second ticket:** the scope label that decides same-matter-or-new came from six payment-rail keywords, so the most specific message in the conversation scored `:other` and was excluded from the refinement path; the scope is now the transaction the message names in the graph.
+- **Fix 103 — The ticket reference printed twice:** `compose_answer` appends it unconditionally, and Fix 100 made the model start naming the right id itself; the append is skipped when the body already contains that same id.
+- **Fix 104 — Both system diagrams drawn with real edges:** replaces the card lists with SVG, and adds a validator that checks every drawn edge against the live payload — it caught three relationships the schema had invented from grid position.
 
 ---
 
@@ -4009,3 +4014,165 @@ edges: the measurement was cheap and available every time.
 - Everything inherited from Session 19: the demo script still needs rewriting against real behaviour,
   three portal logins to re-register, `find_open_tickets_for_customer` capped at 5, the
   `'resolved'` -> `'closed'` migration, the learning loop invisible in the UI.
+
+
+---
+
+## Session 21 — 2026-08-31
+
+Branch: `Sayantini-phase2-ui-changes`. One bug took most of the session and three
+attempts. The lesson is worth more than the fix.
+
+### Fix 102 — A follow-up supplying the details we asked for opened a second ticket
+The reproduction is three messages and two channels:
+
+```
+[whatsapp] I want to dispute a charge on my credit card        -> ticket A
+[whatsapp] Sure - please share the transaction date, amount and merchant name.
+[web chat] On 23 March I paid Rs.5,776.55 to Samarth Thaker    -> ticket B  (wrong)
+```
+
+**The scope label measures vocabulary, not specificity.** `_ticket_scope` searches the
+message for six payment-rail words - upi, card, imps, neft, rtgs, atm - and that is what
+decides same-matter-or-new. The follow-up contains none of them, so the most specific
+message in the conversation was labelled `:other`. The refinement path that would have
+attached it is guarded by `scope != ":other"`, so it was skipped, and the decision fell to
+the LLM referee. It answered NEW.
+
+It fails in both directions: *"I also have a problem with a UPI payment"* scores `:upi` and
+reads as an identified matter while naming no transaction at all.
+
+**Three attempts failed before the cause was found**, and all three targeted the referee -
+the last link in the chain rather than the first:
+
+1. **Gave the referee each candidate's linked messages from the graph.** Verified the
+   mechanism with a hand-built two-message case; in reality, on the second message of a
+   case the ticket holds only its opening line, identical to the description. Added nothing.
+   Kept anyway - it is correct from the third message onward.
+2. **Proposed giving it the conversation history.** Probed before building: the LLM
+   answered NEW with history exactly as it did without.
+3. **Proposed rewording its rule** to name the empty-ticket case. One run said `tkt_AAA`
+   and it nearly shipped as a fix. Running the same prompt five times: **NEW 4, tkt_AAA 1 -
+   identical under the old rule and the new one.** The referee is 20% accurate on this case
+   and cannot be improved by prompting.
+
+**The fix asks the graph instead.** A dispute is about a transaction the system holds a
+record of, so the scope becomes that transaction: `transaction_dispute:txn:TXN0001000003`.
+Amount, payee name and txn id all resolve to the same record, so four different wordings of
+one complaint produce one scope. Keyword rails stay for a customer whose graph holds no
+transactions, where a rail word is the only signal there is.
+
+**Measured before choosing it:** 10/10 correct on Sayantini's messages, **0 false positives**
+across all five seeded customers x nine vague messages, and no customer has two transactions
+sharing an amount or a payee, so a match is never ambiguous. Against the referee's 20%.
+
+**Two mistakes caught before deploying, both of the kind that had already cost the session
+twice.** `graph_context` has no `transactions` key - verified against the live payload rather
+than assumed, or the fix would have silently done nothing. And message 1 still scored `:card`
+on the keyword alone, so refinement still did not fire; a rail word no longer claims
+specificity when the graph has transaction records.
+
+**Verified in the running app, not only in tests:** four messages across WhatsApp and web
+chat stayed on one ticket, the scope upgraded to the transaction, the details were appended
+to the description, the status follow-up attached, and *"Okay thanks for helping me out"*
+closed it - with SQLite and Neo4j agreeing on `resolved`.
+
+### Fix 100 — The reply named an unrelated open ticket
+A new dispute came back as *"Your dispute has been logged under tkt_11e57833e42f"* - the
+customer's card ticket from that morning. The generator lists open cases under a heading
+saying *"already raised - do NOT treat as new"*, but nothing said which one the message
+concerned, and the dispute's own ticket does not exist yet at generation time. The only id
+in the prompt was the card case, presented as authoritative and repeated twice more in the
+quoted history. The model reported the only case it was told about.
+
+Intent was computed two lines above and passed as a separate argument, so it never reached
+the prompt. It travels with the context now, and each case is marked SAME SUBJECT or, when
+none match, the block says plainly that this is a new matter and no listed id belongs to it.
+Every case stays listed - hiding the non-matching ones would cost the cross-channel
+continuity the block exists to provide.
+
+### Fix 101 — A reply printed raw database records
+`answer_generation` returned **0 characters on exactly 2048 completion tokens** - the
+provider's default cap - so the caller's `generation.get("text") or raw_data` fallback sent
+the raw Neo4j transaction block to the customer. Groq reported success; the model had spent
+the whole budget on invisible reasoning.
+
+Measured across all eleven recorded calls: nine used 107-498 completion tokens and returned
+a reply, two used exactly 2048 and returned nothing. **Both failures were the same message**,
+failing twice ninety minutes apart - reproducible, not a blip, and the largest prompt of the
+set. Adding `answer_generation` to `REASONING_EFFORT_OPERATIONS` took that message to 173
+completion tokens and 322 characters of correct reply.
+
+The earlier comment there said a customer reply "might" need deep reasoning and was
+explicitly unmeasured. It is measured now.
+
+**Still unguarded:** the `or raw_data` fallback itself. This fix removes the common cause of
+an empty response, not the general case - a network failure or exhausted quota would print
+raw records again. Deliberately parked.
+
+### Fix 103 — The ticket reference printed twice
+Fix 100's side effect: once the model was told which case a message belongs to, it began
+naming the right ticket itself, and `compose_answer` appended the same reference again. The
+append is now skipped when the body already contains that id. A DIFFERENT id does not count,
+so a misattributed reply still carries the correct reference; ticket-status lookups create no
+ticket and never reach the branch, so a reply listing several ids keeps all of them.
+
+### Fix 104 — Both system diagrams drawn with real edges
+The Neo4j and LangGraph views were card lists with relationships printed underneath as text.
+Both are now SVG with drawn edges, orthogonal routing and node properties.
+
+**The schema had invented three relationships.** Boxes were connected by grid position, so
+FixedDeposit hung off Account, Loan off CreditCard and ChargePenalty off Transaction - all
+three are children of Customer. `PRODUCT_IS` was drawn from Loan alone when four node types
+point at the catalogue. A diagram that invents an edge is worse than no diagram, and the data
+proving it wrong had been queried earlier in the same session.
+
+A validator now checks the layout against the live payload: **19 drawn, 19 real, 0 invented,
+0 missing**, plus text overflow, box overlap and edge-crosses-box. It also caught the
+`Customer -> Ticket` line cutting through the KYC column, and a second crossing that had not
+been noticed.
+
+Sizing went wrong in both directions before landing - the modal was `width:max-content`,
+written for the self-sizing radial view, which collapsed a full-width SVG to its 520px
+minimum; then the canvas was taller than the modal and scrolled. Scale is now chosen so
+rendered text lands at ~11px on both diagrams.
+
+### "Agent" is the third overloaded word
+`(:Agent)` is 2, the workflow diagram shows 4, the LLM page shows 8. All correct, all
+unrelated: two handler *types* (`AI_GROQ`, `HUMAN_SR`), four pipeline *components*, eight
+billed *operations*. After "node" (LangGraph vs Neo4j) and "resolution" (six meanings).
+
+### Context audit — what each step is asked vs what it is given
+Eight LLM operations. Three decide something about the customer's *situation* while seeing
+only the message text:
+
+| Step | Question | Gets |
+|---|---|---|
+| `ticket_action_detection` | is this a closure? | message only |
+| `resolution_level_classification` | how hard is this? | `(query, intent, sentiment)` - three strings |
+| `ticket_referee` | same matter or new? | message + a one-line description |
+
+`intent_classification` filters history to `direction == "inbound"`, so our own replies are
+discarded - the classifier cannot see that a message is answering a question we asked.
+Measured: the full graph record is **281 tokens**, open cases **42**, an 8-turn history
+**228** - against calls that already cost 592-2,500.
+
+Not acted on. Recorded because the same shape has now produced Fixes 66, 79, 89, 90, 95, 100
+and 102.
+
+### Process
+Three failed attempts on one bug, each confident, each shipped or nearly shipped on reasoning
+that had not been tested. What broke the pattern was **probing before building** - one throwaway
+LLM call disproved the third hypothesis in seconds, where the first two had cost a deploy each.
+The measurement that mattered (20% accuracy, five runs) took less effort than any of the fixes.
+
+### Still open
+- **The `or raw_data` fallback** can still print raw records when the LLM returns nothing for
+  any other reason. Parked by choice.
+- **"Any update on my dispute?" against a *vague* ticket** still falls to the 20% referee. It
+  worked in testing only because the ticket had by then learned its transaction.
+- **Jira sync fails** with a 400 (*"target project doesn't exist or you don't have
+  permission"*) while the Connectors page shows Jira as Connected. Pre-existing.
+- **The ambiguity branch is now hard to reach**: scopes used to collide at `:card`/`:upi`, and
+  are now unique per transaction, so *"which ticket did you mean?"* almost never fires.
+- Everything inherited from Sessions 19-20, including the demo script rewrite.
