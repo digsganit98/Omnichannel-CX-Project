@@ -114,7 +114,7 @@ def _reasoning_effort() -> str:
 class GroqGenerator:
     def __init__(self) -> None:
         self.api_key = os.getenv("GROQ_API_KEY", "")
-        self.model = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+        self.model = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
         self.timeout = int(os.getenv("GROQ_TIMEOUT_SECONDS", "30"))
         self._client = None
 

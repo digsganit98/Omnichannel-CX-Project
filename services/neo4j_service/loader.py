@@ -20,6 +20,7 @@ Runtime:
 
 from pathlib import Path
 import logging
+import os
 import openpyxl
 
 logger = logging.getLogger(__name__)
@@ -632,12 +633,16 @@ def _load_products(client, wb) -> int:
 
 def _load_agents(client) -> int:
     """Create default Agent nodes for AI handler and stub human handler."""
+    # Read the model actually in use rather than naming one here. A hardcoded id goes
+    # stale silently: this said "llama-3.1-8b-instant" long after Groq removed every
+    # Llama text model (Fix 78), so the graph advertised a model that 404s. Same default
+    # as GroqGenerator so the two can never disagree.
     agents = [
         {
             "agent_id": "AI_GROQ",
             "agent_type": "ai",
             "name": "InboxIQ AI",
-            "model": "llama-3.1-8b-instant",
+            "model": os.getenv("GROQ_MODEL", "openai/gpt-oss-20b"),
         },
         {
             "agent_id": "HUMAN_SR",
