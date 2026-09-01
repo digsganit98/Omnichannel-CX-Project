@@ -22,16 +22,27 @@ def _connect(db_path: str) -> sqlite3.Connection:
     return conn
 
 
+# Analytics counts WORK, so every "open" figure here means SERVICEABLE - a ticket a human
+# is on. Under the ticket-model redesign every customer query gets a LOGGED ticket purely
+# as a grouping id; counting those as open would inflate the headline queue by roughly 4x
+# and make "open tickets" mean "messages received". These are written as inclusion lists
+# because the previous form, `status <> 'closed'`, silently absorbs any new status.
+_SERVICEABLE_SQL = "status IN ('open','in_progress')"
+_CLOSED_SQL = "status = 'closed'"
+
+
 def get_overview(db_path: str) -> OverviewMetrics:
     with _connect(db_path) as conn:
         row = conn.execute(
             """
             SELECT
-                SUM(CASE WHEN status <> 'closed' THEN 1 ELSE 0 END) AS open_cnt,
+                SUM(CASE WHEN status IN ('open','in_progress') THEN 1 ELSE 0 END) AS open_cnt,
                 SUM(CASE WHEN status = 'closed' THEN 1 ELSE 0 END) AS resolved_cnt,
                 SUM(CASE WHEN escalation_reason IS NOT NULL AND escalation_reason != '' THEN 1 ELSE 0 END) AS escalated_cnt,
+                -- An SLA can only be breached on work someone owes: a logging ticket has
+                -- no promised response, so it cannot breach.
                 SUM(CASE WHEN sla_due_at IS NOT NULL AND sla_due_at < datetime('now')
-                              AND status <> 'closed' THEN 1 ELSE 0 END) AS sla_breach_cnt
+                              AND status IN ('open','in_progress') THEN 1 ELSE 0 END) AS sla_breach_cnt
             FROM tickets
             """
         ).fetchone()
@@ -222,7 +233,7 @@ def get_solution_performance(db_path: str) -> SolutionPerformanceMetrics:
       - by_risk_band   = OPEN tickets bucketed by priority_score band.
       - by_escalation_reason = escalated tickets grouped by escalation_reason.
     """
-    _open = "status <> 'closed'"
+    _open = _SERVICEABLE_SQL
     _escalated = "escalation_reason IS NOT NULL AND escalation_reason != ''"
     with _connect(db_path) as conn:
         escalations = conn.execute(

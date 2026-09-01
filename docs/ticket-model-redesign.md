@@ -247,6 +247,84 @@ is meaningless.
 
 ---
 
+### 5.9 The two status vocabularies cannot both be satisfied
+**Raised by the user as the blocker on Phase 2; verified in code 2026-09-01.**
+
+| Side | Question it asks | Sites | Effect of `logged` |
+|---|---|---|---|
+| Backend SQL | `status != 'closed'` | 10 | counted as **open** |
+| Neo4j Cypher | `t.status <> 'closed'` | 1 (`get_open_cases`) | counted as **open** |
+| Frontend JS | `status === 'open'` / `'in_progress'` | 10 | counted as **nothing** |
+
+The two directions are asymmetric, and that is the whole problem: SQL **admits** the new word,
+JS **drops** it. A logging ticket would be **invisible to the agent and authoritative to the
+LLM** — Fix 119's false *"already logged under"*, but now on a ticket no screen can show and no
+agent can close.
+
+*Correction to this document's earlier count:* it said 9 SQL sites. There are **10** on the
+`!= 'closed'` side, plus **7** on the positive `= 'closed'` side it did not count.
+`aggregator.py:30-31` builds `open_cnt` and `resolved_cnt` from that pair, so every logging ticket
+would inflate the headline open-case number.
+
+### 5.10 Deleting a ticket row does not delete its graph node
+**Found by measuring whether the two stores agree, before building Phase 2. They do not.**
+
+| Store | Tickets |
+|---|---|
+| SQLite | 10 |
+| Neo4j | **11** |
+
+`tkt_b6e0598f02a4` (`claim_status`, `open`, Sayantini) exists **only in the graph**.
+`get_open_cases` reads the **graph**, so its own query returns **two** open claim cases for a
+customer who has one — and the ghost sorts first. The trusted account context handed to the reply
+generator asserts a case that exists nowhere else.
+
+**Not an application delete:** there is no `DELETE FROM tickets` or `delete_ticket` in the
+codebase. `PRAGMA foreign_key_check` reports **12 violations** (6 `ticket_events`, 6
+`retrieval_evidence`). Since `ticket_events.ticket_id` is a foreign key and
+`PRAGMA foreign_keys = ON`, those events could only be written while the ticket row existed — so
+rows were removed afterwards, consistent with manual data cleanup, and the graph node was never
+removed with them.
+
+**3 of 13 attempted tickets are orphaned**, including `tkt_451e7ce71a63` from Fix 122.
+
+**The creation path is NOT at fault — measured.** All three orphans logged
+`ticket_created` **and then** `crm_sync_failed`, and `sync_ticket` re-reads the row before it can
+write that second event. So the row existed and the write succeeded. Better: **every one of the 10
+surviving tickets carries the same `crm_sync_failed` event** (the Jira 400), so orphans and
+survivors are *indistinguishable* by what the application did. Nothing about creation separates
+them.
+
+**What is actually missing is a delete path.** Rows were removed by manual cleanup, and:
+
+| Gap | Consequence |
+|---|---|
+| No `delete_ticket` in the codebase | Cleanup is done by hand against SQLite |
+| No `ON DELETE CASCADE` on `ticket_events` / `retrieval_evidence` | 12 FK violations left behind |
+| Nothing deletes the Neo4j node | The graph copy survives its own row — the ghost |
+
+The three writes *are* unsynchronised (`create_ticket`, `add_ticket_event`, and
+`upsert_ticket_node` in `graph.py:842`), and that remains a latent risk worth fixing. But it is
+**not** what produced these orphans, and no evidence in this database shows a failed write ever
+leaving a ghost.
+
+**Why it still matters for this design.** Not because creation is lossy — it is not. Because
+**the graph is the store the reply prompt reads**, and it currently has no way to lose a ticket
+that SQLite has lost. Under Phase 4 every routine question becomes a ticket, so the volume of rows
+that a future cleanup would have to remove — from *two* stores, in step — rises ~4x. A delete path
+that maintains both stores is the precondition; atomic creation is a separate, lesser concern.
+
+*A correlation that was tested and withdrawn:* the ghost logs `crm_sync_failed` (Jira 400) one
+second after creation, which looked causal. `sync_ticket` catches that failure, records it as
+`crm_sync_status`, and returns normally. **Jira is unrelated.**
+
+*Also withdrawn:* carrying serviceability as a flag in `tickets.metadata_json` instead of a third
+status. The column exists (migration 002) and already holds `ticket_scope`, but the graph does
+**not** mirror it — `upsert_ticket_node` takes an explicit parameter list, and `ticket_scope` was
+promoted to its own node property when the graph needed it. A flag would need a new parameter, a
+new `SET t.serviceable`, all three call sites updated, and would leave **two** fields to sync
+across two stores instead of one. `logged` on the status is the better choice; 5.4 wins.
+
 ## 6. Plan
 
 ### Phase 0 — Measure the referee — **DONE, PASSED 10/10**
@@ -290,9 +368,41 @@ a plain stub without the field still holds, `None` still does not. And the two c
 which is what Phase 4 needs: `required=True, hold_required=False` produces a ticket with **no hold**
 — a logging id, auto-sent. Tests 5 failed / 147 passed, the documented baseline.
 
-### Phase 2 — Add the `logged` status
+### Phase 1.5 — Give tickets a delete path that maintains both stores — **NEW (see 5.10)**
+There is no `delete_ticket`, no FK cascade, and nothing removes the Neo4j node — so the manual
+cleanup this project actually does leaves orphaned children and ghost graph nodes. Provide one
+deletion routine that removes row, children and graph node together, and reconcile the existing
+drift (1 ghost node, 12 FK violations).
+
+**Not blocking Phase 2 on the evidence available.** Creation was measured and is not lossy: all
+13 tickets, orphaned and surviving alike, completed the same write sequence. This phase is about
+*cleanup*, which Phase 4 makes ~4x more voluminous — not about a broken write.
+
+### Phase 2 — Add the `logged` status — **DONE (readers only)**
 Enum value + migration + every read site. Follow Fix 109's method: make every site accept exactly
 one word, so a wrong value is visible immediately rather than silently tolerated.
+
+**Built 2026-09-01 as two named inclusion lists rather than by auditing sites**, because
+`!= 'closed'` is defined by *exclusion* and cannot reject a new value (5.9):
+
+- `SERVICEABLE_TICKET_STATUSES` = open, in_progress — a human is involved
+- `ACTIVE_TICKET_STATUSES` = logged, open, in_progress — not finished
+
+All 21 read sites now declare which they mean: 7 SQL, 1 Cypher (`get_open_cases`), 3 analytics,
+10 JS. `_allTickets` gained a third bucket behind an `allTickets()` accessor, since eight callers
+did `concat(open, closed)` and would have dropped `logged` silently. Migration 017 records the
+vocabulary change; `tickets.status` is free TEXT so no schema change was needed.
+
+**Readers only — nothing writes `logged` yet.** That is Phase 4, and it must not land before
+Phase 3 and 3.5.
+
+**Verified** with 9 assertions on a throwaway DB, zero Groq calls: logged is included in all five
+continuity lookups, excluded from the customer/agent panel, and counted as neither open nor
+resolved. Suite unchanged against baseline — note the recorded "5 failed / 147 passed" baseline is
+itself flaky (`test_distinct_l3_fraud_incidents_create_distinct_tickets` gives 5 or 6 on a clean
+tree).
+
+**Still open, not a blocker:** tickets have no delete path that maintains the graph (5.10).
 
 ### Phase 3 — Guard the surfaces (before opening the tap)
 `get_open_cases` excludes `logged`. Right-panel card shows serviceable only. Jira sync skips
@@ -320,6 +430,8 @@ separates two decisions that were never the same question.
 
 **Phase 0 is done and passed 10/10**, so the design is unblocked. The referee can tell same-matter
 from new-matter, with zero wrong merges on the cases that matter.
+
+**The one blocker on Phase 2 is 5.9 (the two status vocabularies).** 5.10 is a real gap in the delete path but does not block it.
 
 **Phases 1 to 3.5 need no LLM calls** — code, migration and query work, verifiable with mocks and DB
 reads. Only Phase 4's end-to-end test costs tokens.

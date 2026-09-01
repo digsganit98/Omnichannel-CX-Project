@@ -201,6 +201,17 @@ def get_open_cases(client, customer_id: str, limit: int = 5) -> list[dict]:
     and the model stops knowing it exists — even though the ticket is still open. A case
     is a durable FACT about the customer, like a card limit, so it belongs in the trusted
     account context rather than depending on luck of the window.
+
+    SERVICEABLE only, and stated as an INCLUSION list. This text is handed to the model as
+    trusted context and can be quoted back to the customer, so a LOGGED ticket — an internal
+    grouping id for a question that needed no human — must never appear here: that is the
+    false "your request is already logged under tkt_x" claim Fix 119 removed.
+
+    The previous form was `t.status IS NULL OR t.status <> 'closed'`, which would have
+    admitted LOGGED silently. Note this also drops nodes with a NULL status, which the old
+    clause deliberately included; a Ticket node is always written with a status by
+    upsert_ticket_node, so a NULL means an incomplete write rather than an open case, and
+    guessing "open" on incomplete data is what puts phantom cases in front of the model.
     """
     if client is None or not customer_id:
         return []
@@ -208,7 +219,7 @@ def get_open_cases(client, customer_id: str, limit: int = 5) -> list[dict]:
         return client.query(
             """
             MATCH (c:Customer {customer_id: $cid})-[:HAS_TICKET]->(t:Ticket)
-            WHERE t.status IS NULL OR t.status <> 'closed'
+            WHERE t.status IN ['open', 'in_progress']
             RETURN t.ticket_id AS ticket_id, t.intent AS intent, t.status AS status,
                    t.priority AS priority, t.scope AS scope, t.title AS title
             ORDER BY t.ticket_id DESC

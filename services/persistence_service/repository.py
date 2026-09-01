@@ -9,12 +9,35 @@ from threading import RLock
 from typing import Iterator, Protocol
 
 from shared.schemas.messages import Channel, InboundMessage
-from shared.schemas.tickets import Ticket, TicketPriority, TicketStatus
+from shared.schemas.tickets import (
+    ACTIVE_TICKET_STATUSES,
+    SERVICEABLE_TICKET_STATUSES,
+    Ticket,
+    TicketPriority,
+    TicketStatus,
+)
 from shared.utils.ids import new_id
 
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _status_in(statuses: tuple[TicketStatus, ...]) -> tuple[str, list[str]]:
+    """An inclusion test for a ticket status, as a SQL fragment plus its parameters.
+
+    Every one of these sites used to read `status != 'closed'`. That is a test defined by
+    EXCLUSION: it silently admits any status added later, so the LOGGED status would have
+    reached the reply prompt (via get_open_cases) while the admin UI - which asks the
+    opposite question, `status === 'open' || 'in_progress'` - dropped it. A ticket the
+    agent cannot see but the model treats as a real case is the Fix 119 failure again.
+
+    Spelling the wanted statuses out forces each call site to answer "which population do
+    I mean?", and a status added in future breaks nothing silently: it is simply absent
+    until someone adds it to a list on purpose.
+    """
+    placeholders = ",".join("?" for _ in statuses)
+    return f"status IN ({placeholders})", [s.value for s in statuses]
 
 
 def json_text(value: dict | list | None) -> str:
@@ -372,10 +395,15 @@ class SQLiteCXRepository:
             # already applies when an agent resolves a ticket by hand (app.js doResolve):
             # resolved only when nothing is left open. Counted in THIS transaction so the
             # just-resolved ticket is already committed and cannot be double-counted.
+            # SERVICEABLE, not ACTIVE: a logging ticket is a grouping id with no work
+            # attached, so it must not hold a conversation open. Under the redesign every
+            # query gets a ticket and most are never escalated - counting those here would
+            # mean no conversation could ever close again.
             if values.get("resolved"):
+                _sql, _params = _status_in(SERVICEABLE_TICKET_STATUSES)
                 still_open = conn.execute(
-                    "SELECT COUNT(*) FROM tickets WHERE conversation_id = ? AND status != 'closed'",
-                    (values["conversation_id"],),
+                    f"SELECT COUNT(*) FROM tickets WHERE conversation_id = ? AND {_sql}",
+                    (values["conversation_id"], *_params),
                 ).fetchone()[0]
                 conn.execute(
                     "UPDATE conversations SET status = ?, updated_at = ? WHERE conversation_id = ?",
@@ -522,28 +550,35 @@ class SQLiteCXRepository:
         return self.get_ticket(ticket_id)
 
     def find_active_ticket(self, conversation_id: str) -> Ticket | None:
+        # ACTIVE: this is the conversation's current matter, used for continuity - which
+        # thread a new message belongs to. A logging thread is exactly as much "the matter
+        # in hand" as an escalated one, so it must be a candidate here.
+        sql, params = _status_in(ACTIVE_TICKET_STATUSES)
         with self.connection() as conn:
             row = conn.execute(
-                "SELECT * FROM tickets WHERE conversation_id = ? AND status != 'closed' ORDER BY created_at DESC LIMIT 1",
-                (conversation_id,),
+                f"SELECT * FROM tickets WHERE conversation_id = ? AND {sql} ORDER BY created_at DESC LIMIT 1",
+                (conversation_id, *params),
             ).fetchone()
         return self._ticket(row) if row else None
 
     def find_active_ticket_for_intent(self, conversation_id: str, intent: str) -> Ticket | None:
+        # ACTIVE: continuity lookup - see find_active_ticket.
+        sql, params = _status_in(ACTIVE_TICKET_STATUSES)
         with self.connection() as conn:
             row = conn.execute(
-                "SELECT * FROM tickets WHERE conversation_id = ? AND intent = ? AND status != 'closed' "
+                f"SELECT * FROM tickets WHERE conversation_id = ? AND intent = ? AND {sql} "
                 "ORDER BY created_at DESC LIMIT 1",
-                (conversation_id, intent),
+                (conversation_id, intent, *params),
             ).fetchone()
         return self._ticket(row) if row else None
 
     def find_active_ticket_for_scope(self, conversation_id: str, intent: str, ticket_scope: str) -> Ticket | None:
         with self.connection() as conn:
+            sql, params = _status_in(ACTIVE_TICKET_STATUSES)
             rows = conn.execute(
-                "SELECT * FROM tickets WHERE conversation_id = ? AND intent = ? AND status != 'closed' "
+                f"SELECT * FROM tickets WHERE conversation_id = ? AND intent = ? AND {sql} "
                 "ORDER BY created_at DESC",
-                (conversation_id, intent),
+                (conversation_id, intent, *params),
             ).fetchall()
         for row in rows:
             ticket = self._ticket(row)
@@ -552,11 +587,13 @@ class SQLiteCXRepository:
         return None
 
     def list_active_tickets_for_intent(self, conversation_id: str, intent: str) -> list[Ticket]:
+        # ACTIVE: continuity lookup - see find_active_ticket.
+        sql, params = _status_in(ACTIVE_TICKET_STATUSES)
         with self.connection() as conn:
             rows = conn.execute(
-                "SELECT * FROM tickets WHERE conversation_id = ? AND intent = ? AND status != 'closed' "
+                f"SELECT * FROM tickets WHERE conversation_id = ? AND intent = ? AND {sql} "
                 "ORDER BY created_at DESC",
-                (conversation_id, intent),
+                (conversation_id, intent, *params),
             ).fetchall()
         return [self._ticket(row) for row in rows]
 
@@ -573,21 +610,32 @@ class SQLiteCXRepository:
         Bounded deliberately: each candidate costs prompt tokens and adds another chance to
         mis-match, so only the most recent few are offered.
         """
+        # ACTIVE, deliberately: these are the referee's candidates, and the whole point of
+        # the redesign is that a logging thread can be continued. Excluding LOGGED here
+        # would starve the referee of exactly the threads it exists to match against.
+        sql, params = _status_in(ACTIVE_TICKET_STATUSES)
         with self.connection() as conn:
             rows = conn.execute(
-                "SELECT * FROM tickets WHERE conversation_id = ? AND status != 'closed' "
+                f"SELECT * FROM tickets WHERE conversation_id = ? AND {sql} "
                 "ORDER BY created_at DESC LIMIT ?",
-                (conversation_id, limit),
+                (conversation_id, *params, limit),
             ).fetchall()
         return [self._ticket(row) for row in rows]
 
     def find_open_tickets_for_customer(self, customer_id: str, limit: int = 5) -> list[dict]:
-        """Return all open (non-resolved) tickets for a customer across all channels."""
+        """Return the customer's SERVICEABLE tickets across all channels.
+
+        SERVICEABLE, not ACTIVE: this feeds agent-facing surfaces and the "open cases" the
+        customer may be told about. A logging ticket is an internal grouping id - quoting
+        one back to a customer as an open case is the false "already logged under" claim
+        Fix 119 removed, and filling an agent's panel with them buries the real work.
+        """
+        sql, params = _status_in(SERVICEABLE_TICKET_STATUSES)
         with self.connection() as conn:
             rows = conn.execute(
-                "SELECT * FROM tickets WHERE customer_id = ? AND status != 'closed' "
+                f"SELECT * FROM tickets WHERE customer_id = ? AND {sql} "
                 "ORDER BY created_at DESC LIMIT ?",
-                (customer_id, limit),
+                (customer_id, *params, limit),
             ).fetchall()
         return [self._ticket_dict(row) for row in rows]
 

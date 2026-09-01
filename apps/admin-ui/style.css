@@ -414,6 +414,9 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .flow-node-status{font-size:9px;font-weight:600;padding:2px 8px;border-radius:20px;display:inline-block;width:fit-content}
 .fns-active{background:var(--amb-bg);color:var(--amb-t);border:1px solid var(--amb-bd)}
 .fns-done{background:var(--grn-bg);color:var(--grn-t);border:1px solid var(--grn-bd)}
+/* A logged thread: recorded, no human needed. Neutral on purpose - amber would read
+   as work waiting on someone, green as a case that was worked and finished. */
+.fns-logged{background:var(--surf2);color:var(--t3);border:1px solid var(--bdr)}
 
 /* highlighted turn (navigated from ticket page) */
 .flow-step--highlight{background:#fffbeb;border-radius:10px;outline:2px solid #fde68a;outline-offset:2px;animation:tkt-highlight-fade 2.6s ease-out forwards}

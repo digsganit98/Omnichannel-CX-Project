@@ -499,14 +499,24 @@ function customerLabel(conv) {
 // renders a status and nothing else - the case-summary LLM was handed the raw value and
 // wrote "resolved" onto the agent's screen. The value itself is now the word.
 function statusLabel(s) {
-  return (s || '').toLowerCase() === 'closed' ? 'Closed' : 'Open';
+  var v = (s || '').toLowerCase();
+  if (v === 'closed') return 'Closed';
+  // "Logged", not "Open": the whole point of the status is that nothing is pending on a
+  // person. Labelling it Open would tell an agent there is work here and would put the
+  // word "Open" in front of a customer for a question already answered.
+  if (v === 'logged') return 'Logged';
+  return 'Open';
 }
 
 function urgencyToStatus(conv) {
   if (conv.status === 'closed') return 'closed';
-  var allTkts = [].concat(_allTickets.open, _allTickets.closed);
-  var convTkts = allTkts.filter(function(t) { return t.conversation_id === conv.conversation_id; });
-  if (convTkts.length > 0 && convTkts.every(function(t) { return t.status === 'closed'; })) return 'closed';
+  var convTkts = allTickets().filter(function(t) { return t.conversation_id === conv.conversation_id; });
+  // Nothing serviceable left => nothing is waiting on a person, so the banner reads as
+  // settled. Logging threads are ignored on BOTH sides of this test: they never keep a
+  // conversation looking active, and a conversation made only of them is not "closed"
+  // work either - it just has no open cases, which is what the banner says (Fix 121).
+  var hasServiceable = convTkts.some(isServiceable);
+  if (convTkts.length > 0 && !hasServiceable) return 'closed';
   return conv.status || 'open';
 }
 
@@ -529,7 +539,8 @@ window.loadConversations = async function() {
   try {
     var results = await Promise.all([api('/admin/conversations'), api('/admin/tickets'), loadPendingDrafts()]);
     var convs = results[0], tks = results[1];
-    _allTickets.open   = tks.filter(function(t) { return t.status === 'open' || t.status === 'in_progress'; });
+    _allTickets.logged = tks.filter(function(t) { return t.status === 'logged'; });
+    _allTickets.open   = tks.filter(isServiceable);
     _allTickets.closed = tks.filter(function(t) { return t.status === 'closed'; });
     var prevIds = state.convs.map(function(c){ return c.conversation_id; }).sort().join(',');
     var newIds = convs.map(function(c){ return c.conversation_id; }).sort().join(',');
@@ -558,7 +569,7 @@ async function refreshSelectedConv() {
     if (detail.turns && detail.turns.length !== prevLen) {
       state.convDetail = detail;
       renderCentre(detail);
-      renderRight(detail, [].concat(_allTickets.open, _allTickets.closed));
+      renderRight(detail, allTickets());
       loadCaseSummary(detail.conversation_id, false);
     }
   } catch(e) {}
@@ -605,8 +616,8 @@ async function selectConv(convId) {
   document.getElementById('compwrap').style.display = 'none';
   document.getElementById('resbanner').style.display = 'none';
   try {
-    var cachedTickets = _allTickets.open.length || _allTickets.closed.length
-      ? Promise.resolve([].concat(_allTickets.open, _allTickets.closed))
+    var cachedTickets = allTickets().length
+      ? Promise.resolve(allTickets())
       : api('/admin/tickets');
     var results = await Promise.all([
       api('/admin/conversations/' + encodeURIComponent(convId)),
@@ -740,7 +751,7 @@ function renderCentre(conv) {
   // Used below to drive per-turn status display.
   var convIsResolved = conv.status === 'closed';
   var tktStatusMap = {};
-  [].concat(_allTickets.open, _allTickets.closed).forEach(function(t) {
+  allTickets().forEach(function(t) {
     tktStatusMap[t.ticket_id] = t.status;
   });
 
@@ -783,7 +794,7 @@ function renderCentre(conv) {
   // message is not tagged with the id - the first tagged turn is whatever came next.
   // On a real dispute that was "any update on my dispute?", so a transaction_dispute
   // case was headed TICKET STATUS: the follow-up question, not the matter.
-  var _tk = [].concat(_allTickets.open, _allTickets.closed);
+  var _tk = allTickets();
   for (var ti = 0; ti < steps.length; ti++) {
     var tk = stepTicket[ti];
     if (!tk || ticketTheme[tk]) continue;
@@ -973,10 +984,15 @@ function renderCentre(conv) {
     var isLatestUnit = u.idx === 0;
     var nodeStatus;
     if (tktStatus === 'closed') nodeStatus = 'closed';
+    // A logged thread is shown, not hidden: this view is the customer's story, and a
+    // grouping id is precisely the thing that makes two messages one matter. It renders
+    // as its own state so it never reads as work waiting on a person.
+    else if (tktStatus === 'logged') nodeStatus = 'logged';
     else if (tktStatus === 'open' || tktStatus === 'in_progress') nodeStatus = 'active';
     else if (!isLatestUnit) nodeStatus = 'closed';
     else nodeStatus = convIsResolved ? 'closed' : (conv.status || 'active');
-    var statusCls = (nodeStatus === 'active' || nodeStatus === 'open' || nodeStatus === 'in_progress') ? 'fns-active' : 'fns-done';
+    var statusCls = nodeStatus === 'logged' ? 'fns-logged'
+      : (nodeStatus === 'active' || nodeStatus === 'open' || nodeStatus === 'in_progress') ? 'fns-active' : 'fns-done';
 
     // Customer message text (strips a leading duplicated subject line).
     function custText(inbound) {
@@ -1106,10 +1122,15 @@ function renderCentre(conv) {
     var isLatestUnit = u.idx === 0;
     var nodeStatus;
     if (tktStatus === 'closed') nodeStatus = 'closed';
+    // A logged thread is shown, not hidden: this view is the customer's story, and a
+    // grouping id is precisely the thing that makes two messages one matter. It renders
+    // as its own state so it never reads as work waiting on a person.
+    else if (tktStatus === 'logged') nodeStatus = 'logged';
     else if (tktStatus === 'open' || tktStatus === 'in_progress') nodeStatus = 'active';
     else if (!isLatestUnit) nodeStatus = 'closed';
     else nodeStatus = convIsResolved ? 'closed' : (conv.status || 'active');
-    var statusCls = (nodeStatus === 'active' || nodeStatus === 'open' || nodeStatus === 'in_progress') ? 'fns-active' : 'fns-done';
+    var statusCls = nodeStatus === 'logged' ? 'fns-logged'
+      : (nodeStatus === 'active' || nodeStatus === 'open' || nodeStatus === 'in_progress') ? 'fns-active' : 'fns-done';
 
     function fmtTime(turn) {
       var dd = turn && turn.created_at ? new Date(turn.created_at) : null;
@@ -1491,8 +1512,10 @@ function renderRight(conv, tickets) {
   }
 
 
-  var _snapTickets = (tickets || [].concat(_allTickets.open, _allTickets.closed))
-    .filter(function(t) { return t.conversation_id === conv.conversation_id && (t.status === 'open' || t.status === 'in_progress'); });
+  // SERVICEABLE: the panel shows the agent what needs a person, so logging threads
+  // stay out of it.
+  var _snapTickets = (tickets || allTickets())
+    .filter(function(t) { return t.conversation_id === conv.conversation_id && isServiceable(t); });
 
   var body = document.getElementById('rpbody');
   body.innerHTML = ''
@@ -1579,14 +1602,13 @@ function renderRight(conv, tickets) {
     }).catch(function() {});
   }
 
-  var allTickets = tickets || [].concat(_allTickets.open, _allTickets.closed);
-  var convTickets = allTickets.filter(function(t) {
-    return t.conversation_id === conv.conversation_id
-      && (t.status === 'open' || t.status === 'in_progress');
+  var _tickets = tickets || allTickets();
+  var convTickets = _tickets.filter(function(t) {
+    return t.conversation_id === conv.conversation_id && isServiceable(t);
   });
   if (convTickets.length) {
     var tktHtml = convTickets.map(function(t) {
-      var isOpen = t.status === 'open' || t.status === 'in_progress';
+      var isOpen = isServiceable(t);
       var stBg = t.status === 'closed' ? 'background:var(--grn-bg);border-color:var(--grn-bd);color:var(--grn-t)' :
                  isOpen ? 'background:var(--amb-bg);border-color:var(--amb-bd);color:var(--amb-t)' :
                  'background:var(--surf2);border-color:var(--bdr);color:var(--t3)';
@@ -1754,10 +1776,11 @@ window.resolveTicket = function(btn, ticketId) {
     return loadConversations();
   }).then(function() {
     if (state.convDetail) {
-      var all = [].concat(_allTickets.open, _allTickets.closed);
+      var all = allTickets();
+      // SERVICEABLE: a logging thread is not outstanding work, so it must not keep a
+      // conversation showing as active (mirrors the same rule in repository.append_turn).
       var stillOpen = all.some(function(t) {
-        return t.conversation_id === state.convDetail.conversation_id
-          && (t.status === 'open' || t.status === 'in_progress');
+        return t.conversation_id === state.convDetail.conversation_id && isServiceable(t);
       });
       state.convDetail.status = stillOpen ? 'active' : 'closed';
       state.convs.forEach(function(c) {
@@ -2668,7 +2691,28 @@ window.loadAudit = async function() {
 // lives in the CRM (Jira sync). This cache remains: it is filled by
 // loadConversations() and consumed by the inbox status logic, the spine/lineage
 // views, and the right-panel Open Tickets card.
-var _allTickets = { open: [], closed: [] };
+// Three buckets, because a ticket now has three states an agent can encounter.
+// LOGGED is a grouping id: the system opened a thread for a question it answered on its
+// own, and no human is needed. It is NOT work, so it must stay out of queues, counts and
+// anything shown as "open" — but it still EXISTS, so it must not vanish from lookups
+// either. The old shape was { open, closed }, and every caller did concat(open, closed) —
+// which silently dropped any third status. allTickets() exists so no caller can forget one.
+var _allTickets = { logged: [], open: [], closed: [] };
+
+// Every ticket, whatever its status. Use for lookups by id and for rendering history.
+function allTickets() {
+  return [].concat(_allTickets.logged, _allTickets.open, _allTickets.closed);
+}
+
+// A human is on it. Use for queues, badges, counts and anything labelled "open".
+function isServiceable(t) {
+  return !!t && (t.status === 'open' || t.status === 'in_progress');
+}
+
+// Not finished — includes logging threads. Use for continuity/grouping questions.
+function isActive(t) {
+  return !!t && t.status !== 'closed';
+}
 
 function fmtDateTime(iso) {
   if (!iso) return '—';
@@ -2796,9 +2840,10 @@ window.loadUserTickets = async function() {
       return;
     }
     list.innerHTML = '';
-    var isOpen = function(t) { return t.status === 'open' || t.status === 'in_progress'; };
-    var openTickets = tickets.filter(isOpen);
-    var closedTickets = tickets.filter(function(t) { return !isOpen(t); });
+    // The CUSTOMER's own view. A logging id is internal and is never shown to them
+    // (redesign decision 1), so it belongs in neither group.
+    var openTickets = tickets.filter(isServiceable);
+    var closedTickets = tickets.filter(function(t) { return t.status === 'closed'; });
 
     function renderGroup(heading, group) {
       if (!group.length) return;
