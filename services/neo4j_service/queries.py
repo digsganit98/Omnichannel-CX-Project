@@ -375,21 +375,16 @@ def neo4j_answer(client, intent: str, customer_id: str) -> str | None:
         if not accounts and not fds:
             return None  # Fall through to RAG
         lines = []
-        # There is NO current/live balance field in this system — no core-banking feed. The
-        # record holds only an AVERAGE MONTHLY figure, which is not what "what is my balance"
-        # asks for. An earlier version handed the model those account rows alongside a note not
-        # to imply a current balance; it did both, and wrote "Your current AVERAGE balances
-        # are: ..." — a phrase that means nothing. Withholding the rows is what settles it:
-        # the model cannot relabel a number it was never given.
-        # Fixed deposits are still listed: "FD details" also routes to this intent, an FD
-        # amount is a real balance-like fact we genuinely hold, and it is not a bank balance.
         if accounts:
-            lines.append(
-                "IMPORTANT: A live/current account balance is NOT available from this system, "
-                "and no account balance figure may be stated or implied. Tell the customer "
-                "their current balance must be checked in the mobile app or netbanking. "
-                f"(The customer holds {len(accounts)} deposit account(s); do not quote figures for them.)"
-            )
+            lines.append("Account records:")
+            for a in accounts:
+                lines.append(
+                    f"  - {a.get('account_type', 'Account')} {a.get('account_sub_type', '')} "
+                    f"(No: {a.get('account_number', '')}): "
+                    f"Status: {a.get('status', 'Unknown')}, "
+                    f"Avg monthly balance: {_fmt_amount(a.get('avg_monthly_balance'))}, "
+                    f"Min balance required: {_fmt_amount(a.get('min_balance_required'))}"
+                )
         if fds:
             lines.append("Fixed deposit records:")
             for fd in fds:
