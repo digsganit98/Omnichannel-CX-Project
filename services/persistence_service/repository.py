@@ -61,6 +61,7 @@ class CXRepository(Protocol):
     def append_turn(self, **values) -> dict: ...
     def update_turn_metadata(self, turn_id: str, extra: dict) -> None: ...
     def update_turn_intent_urgency(self, turn_id: str, intent: str, urgency: str) -> None: ...
+    def set_turn_ticket(self, turn_id: str, ticket_id: str) -> None: ...
     def update_conversation_summary(self, conversation_id: str, summary: str) -> None: ...
     def get_case_summary(self, conversation_id: str) -> dict | None: ...
     def save_case_summary(self, conversation_id: str, latest_turn_id: str, summary: dict) -> None: ...
@@ -70,6 +71,7 @@ class CXRepository(Protocol):
     def save_opportunity_evaluation(self, conversation_id: str, input_hash: str, suppressed: str | None) -> None: ...
     def create_ticket(self, ticket: Ticket) -> Ticket: ...
     def update_ticket(self, ticket_id: str, **values) -> dict | None: ...
+    def touch_ticket_activity(self, ticket_id: str) -> None: ...
     def find_active_ticket(self, conversation_id: str) -> Ticket | None: ...
     def find_active_ticket_for_intent(self, conversation_id: str, intent: str) -> Ticket | None: ...
     def find_active_ticket_for_scope(self, conversation_id: str, intent: str, ticket_scope: str) -> Ticket | None: ...
@@ -373,6 +375,26 @@ class SQLiteCXRepository:
                 (intent, urgency, turn_id),
             )
 
+    def set_turn_ticket(self, turn_id: str, ticket_id: str) -> None:
+        """Attach a turn to its ticket after the fact.
+
+        The INBOUND turn is written before the pipeline knows which matter the message
+        belongs to - the ticket is decided several steps later - so it is inserted with
+        ticket_id NULL and back-filled here. The outbound turn does not need this: by the
+        time the reply is written the ticket is known and it is passed to append_turn.
+
+        Without this the admin UI cannot group anything: buildUnits keys a request on
+        conversation_turns.ticket_id, and a NULL key can never take the merge branch, so
+        every customer message rendered as its own disconnected box no matter how obviously
+        related. That was invisible while tickets were rare; once every query gets one
+        (Phase 4 of the ticket-model redesign) it is the whole feature.
+        """
+        with self.connection() as conn:
+            conn.execute(
+                "UPDATE conversation_turns SET ticket_id = ? WHERE turn_id = ?",
+                (ticket_id, turn_id),
+            )
+
     def append_turn(self, **values) -> dict:
         turn_id = values.get("turn_id") or new_id("turn")
         created_at = values.get("created_at") or utc_now()
@@ -532,6 +554,21 @@ class SQLiteCXRepository:
             )
         return ticket
 
+    def touch_ticket_activity(self, ticket_id: str) -> None:
+        """Record that a message just landed on this ticket.
+
+        Deliberately NOT routed through update_ticket: that method sets updated_at on every
+        call, and updated_at is read as the CLOSE time by three analytics queries (average
+        resolution, per-team average, closed-per-day). Bumping it whenever a message arrives
+        would report average resolution as 18.3 minutes instead of 394.2 - measured, a 21x
+        change on a headline metric. So this writes one column and nothing else.
+        """
+        with self.connection() as conn:
+            conn.execute(
+                "UPDATE tickets SET last_activity_at = ? WHERE ticket_id = ?",
+                (utc_now(), ticket_id),
+            )
+
     def update_ticket(self, ticket_id: str, **values) -> dict | None:
         allowed = {
             "status", "priority", "external_ticket_id", "external_ticket_url", "crm_sync_status", "crm_sync_error",
@@ -614,13 +651,34 @@ class SQLiteCXRepository:
         # the redesign is that a logging thread can be continued. Excluding LOGGED here
         # would starve the referee of exactly the threads it exists to match against.
         sql, params = _status_in(ACTIVE_TICKET_STATUSES)
+        serv_sql, serv_params = _status_in(SERVICEABLE_TICKET_STATUSES)
+
+        # Ordered by LAST ACTIVITY, not creation. Once every query gets a logging ticket,
+        # ordering by created_at means five routine questions asked today outrank a live
+        # dispute opened yesterday - the dispute drops out of the candidate list entirely
+        # and its own follow-up ("any update on my dispute?") forks a duplicate. That reads
+        # as a referee accuracy problem; the cause is this ORDER BY. COALESCE keeps a
+        # never-touched ticket exactly where created_at put it.
+        order = "ORDER BY COALESCE(last_activity_at, created_at) DESC"
         with self.connection() as conn:
-            rows = conn.execute(
-                f"SELECT * FROM tickets WHERE conversation_id = ? AND {sql} "
-                "ORDER BY created_at DESC LIMIT ?",
-                (conversation_id, *params, limit),
+            # Two-tier. A serviceable ticket - one a human is actually on - can never be
+            # crowded out of the candidate list by routine chatter, however recent that
+            # chatter is. Serviceable threads are taken first, then the remaining slots are
+            # filled with the most recently active of the rest.
+            serviceable = conn.execute(
+                f"SELECT * FROM tickets WHERE conversation_id = ? AND {serv_sql} {order} LIMIT ?",
+                (conversation_id, *serv_params, limit),
             ).fetchall()
-        return [self._ticket(row) for row in rows]
+            taken = {row["ticket_id"] for row in serviceable}
+            remaining = limit - len(serviceable)
+            others = []
+            if remaining > 0:
+                others = conn.execute(
+                    f"SELECT * FROM tickets WHERE conversation_id = ? AND {sql} {order} LIMIT ?",
+                    (conversation_id, *params, limit),
+                ).fetchall()
+                others = [row for row in others if row["ticket_id"] not in taken][:remaining]
+        return [self._ticket(row) for row in [*serviceable, *others]]
 
     def find_open_tickets_for_customer(self, customer_id: str, limit: int = 5) -> list[dict]:
         """Return the customer's SERVICEABLE tickets across all channels.

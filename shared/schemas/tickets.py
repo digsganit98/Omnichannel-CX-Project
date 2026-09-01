@@ -67,3 +67,9 @@ class Ticket(BaseModel):
     metadata: dict = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    # When a MESSAGE last landed on this thread - distinct from updated_at, which tracks
+    # administrative edits (created / scope refined / referee attached / status updated)
+    # and is read as the close time by three analytics queries. See migration 018.
+    # None means no message has attached since the column existed; readers fall back to
+    # created_at rather than asserting an activity that never happened.
+    last_activity_at: datetime | None = None
