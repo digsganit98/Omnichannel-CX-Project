@@ -3663,8 +3663,11 @@ window.openSchemaModal = function() {
   var total = (sc.nodes || []).reduce(function(a, n) { return a + (n.count || 0); }, 0);
   kgShowModal('Neo4j knowledge graph',
     'Node types and how they connect — live counts from the running database',
+    // "connections", not "relationship types": PRODUCT_IS is drawn 4x (Account, FD,
+    // CreditCard, Loan -> Product) and HAS_CLAIM twice (Customer, Policy), so the 19
+    // entries here are 15 distinct types. Measured against the live database.
     (sc.nodes || []).length + ' node types · ' + (sc.edges || []).length
-      + ' relationship types · ' + total + ' nodes live',
+      + ' connections · ' + total + ' nodes live',
     renderSchemaSvg(sc));
 };
 
@@ -3679,8 +3682,13 @@ window.openFlowModal = function() {
   // Counted from the LAYOUT, not from wf.steps/wf.edges. The payload's step list comes
   // from the older WorkflowStep enum - it names retrieve_knowledge / decide_resolution /
   // create_or_update_ticket where the graph actually runs resolve_query / decide_ticket /
-  // create_ticket / skip_ticket - and its edge list collapses each branch into one row
-  // ("a | b"), so the header read 15 steps and 17 edges over a diagram showing 16 and 22.
+  // create_ticket - and its edge list collapses each branch into one row ("a | b"), so the
+  // header disagreed with the picture until it was counted from here instead.
+  //
+  // The layout draws only REACHABLE paths. graph.py still wires decide_ticket -> skip_ticket
+  // as a landing spot if `required` ever goes false again, but Phase 4 hardcodes it True
+  // (orchestration_agents.py: `required=True`), so that branch cannot execute and drawing it
+  // would tell a viewer routine questions get no ticket - the exact model the redesign removed.
   var drawnSteps = Object.keys(FLOW_MAP).filter(function(k) { return k.indexOf('__') !== 0; }).length;
   var branches = Object.keys(FLOW_MAP).filter(function(k) { return FLOW_MAP[k].kind === 'gate'; }).length;
   kgShowModal('LangGraph workflow',
@@ -4023,15 +4031,13 @@ var FLOW_MAP = {
                                    note: 'ask them to write from|a registered address' },
   'resolve_query':               { x: 3090, y: 470, w: FL_W, h: 164, kind: 'agent', owner: 'Query Resolution', llm: 'grade+answer',
                                    note: 'answers from the RL memory, their|tickets or records (graph),|or the KB (kb)|- then grades it L1 / L2 / L3' },
-  'decide_ticket':               { x: 3580, y: 470, w: FL_W, h: 136, kind: 'gate', owner: 'Ticket Creation',
-                                   note: 'does a human need to see this?|L2/L3 always -> ticket' },
+  'decide_ticket':               { x: 3580, y: 470, w: FL_W, h: 136, kind: 'step', owner: 'Ticket Creation',
+                                   note: 'a ticket is created either way -|this decides the HOLD only|L2/L3 -> a human reviews' },
   'create_ticket':               { x: 4070, y: 446, w: FL_W, h: 145, kind: 'agent', owner: 'Ticket Creation', llm: 'same matter?',
                                    note: 'same matter or new? matched on|transactions (graph)|the ticket is written (sql)' },
-  'skip_ticket':                 { x: 4070, y: 600, w: FL_W, h: 92, kind: 'step', owner: 'Ticket Creation',
-                                   note: 'answer directly' },
 
   'send_outbound_reply':         { x: 4030, y: 212, w: 500, h: 200, kind: 'gate', owner: 'Workflow Automation',
-                                   note: 'REVIEW GATE|hold <=> ticket required|customer gets a holding message|an agent edits or approves,|then sends it manually' },
+                                   note: 'REVIEW GATE|hold <=> hold_required|customer gets a holding message|an agent edits or approves,|then sends it manually' },
   'persist_audit_events':        { x: 4600, y: 240, w: FL_W, h: 145, kind: 'step',
                                    note: 'turn + citations + evidence (sql)|Interaction closed, memory (graph)' },
   '__end__':                     { x: 5090, y: 264, w: 122, h: 58, kind: 'end', label: 'END' }
@@ -4057,10 +4063,8 @@ var FLOW_EDGES = [
   { f: 'validate_customer', t: 'reject_unregistered_customer', fs: 'b', ts: 't', cond: 'not' },
   { f: 'reject_unregistered_customer', t: 'send_outbound_reply', band: 800, gx: 4590, ts: 'b' },
   { f: 'resolve_query', t: 'decide_ticket', fs: 'r', ts: 'l' },
-  { f: 'decide_ticket', t: 'create_ticket', fs: 'r', ts: 'l', cond: 'required' },
-  { f: 'decide_ticket', t: 'skip_ticket', fs: 'b', ts: 'l', cond: 'no' },
+  { f: 'decide_ticket', t: 'create_ticket', fs: 'r', ts: 'l' },
   { f: 'create_ticket', t: 'send_outbound_reply', fs: 't', ts: 'b' },
-  { f: 'skip_ticket', t: 'send_outbound_reply', band: 800, gx: 4630, ts: 'b' },
 
   { f: 'send_outbound_reply', t: 'persist_audit_events', fs: 'r', ts: 'l' },
   { f: 'persist_audit_events', t: '__end__', fs: 'r', ts: 'l' }

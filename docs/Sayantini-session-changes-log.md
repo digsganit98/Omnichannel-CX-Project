@@ -179,6 +179,7 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 125 - Phases 3 and 3.5: guard the surfaces and bound the candidate set:** re-scoping Phase 3 against the code found **3 of its 4 items already delivered by Phase 2** (`get_open_cases`, agent surfaces, analytics counts), leaving the Jira filter - `sync_ticket` now returns early for a LOGGED ticket and records `crm_sync_skipped`, placed at the sync boundary so both callers are covered. **A fifth item the plan had not listed:** `get_agent_metrics` had **no status filter at all**, so after Phase 4 its "handled" count would silently mean "messages received"; each column now states its population. Phase 3.5 adds migration **018** (`last_activity_at`, NULL default + COALESCE so untouched tickets keep their old ordering) and a dedicated `touch_ticket_activity` - **deliberately not `update_ticket`**, which moves `updated_at`, the field measured as a 21x analytics error if repurposed. Candidates are now ranked by activity with a **guaranteed slot for serviceable tickets**. **15/15 verified, zero Groq calls**, including the negative control: the old `ORDER BY created_at` returns five routine tickets and **drops the live dispute entirely**. Suite unchanged (5 failed / 147 passed); migration tested against a copy of the live DB.
 - **Fix 126 - Phase 4: every customer query now gets a ticket:** `decide()` returns `required=True` always with `hold_required = reason is not None`, so the escalation rules are unchanged but now answer only the HOLD question; status follows the hold (no hold -> LOGGED, hold -> OPEN) and a logging thread is **promoted** to open the first time a message on it needs a person, which also releases it to Jira. **Two things broke that the plan had not predicted, both the same conflation surviving elsewhere:** (1) `_ticket_scope` began `if not escalation_reason: return None`, so under Phase 4 most tickets got a NULL scope - and `find_active_ticket_for_scope`, the `:other` refinement path and **the referee itself** are all gated on scope, so every follow-up would have forked a new ticket, reintroducing the exact failure this redesign removes; (2) `workflow_status` read `"human_follow_up" if state.ticket`, conflating "a ticket exists" with "a person is involved" - every routine question would have reported human follow-up while being auto-sent. **17/17 verified, zero Groq calls, zero network**, including all three 5.7 regressions (117 auto-send, 123 approval holds, 119 no logging ticket in customer-facing open cases). Two tests were **updated, not fixed** - they asserted the old model ("a routine question skips ticket creation", "ticket_id is None"). Suite back to baseline 5 failed / 147 passed. **Not yet observed on screen** - the 61 existing turns predate the model, which is what Phase 4.5 exists for.
 - **Fix 127 - six ticket-reading surfaces the redesign never audited:** Phase 2 audited the 21 sites that FILTER on status; these were sites that do not filter at all, so they were invisible to it - the customer 360 graph (the exclusion form, on the one surface already documented as unable to absorb ~4x the nodes), the portal's ticket count and its unguarded detail endpoint, the opportunity engine's cache key (a ~1000-token LLM call re-fired by every routine question), Tickets-by-channel (which became a second copy of message_count), and avg resolution time (diluted 180 -> 90.5 by a logging ticket closed in a minute). Promotion was also writing `escalation_reason` only to the event log, never the ticket row, so a promoted case was indistinguishable from a logging one. 25/25 verified with negative controls, zero Groq, zero network.
+- **Fix 128 - the workflow diagram still drew the model Phase 4 replaced:** the LangGraph picture's 22 edges matched the live graph exactly, but three boxes described the OLD behaviour - `decide_ticket` read *"does a human need to see this? L2/L3 always -> ticket"* (the conflation Phase 1 split apart), the review gate read *"hold <=> ticket required"* when `review_gate.py` reads `hold_required`, and `skip_ticket` was drawn as a live path labelled *"no"* / *"answer directly"* when `required=True` is hardcoded, so it **cannot execute**. Together they told a viewer routine questions get no ticket - the exact model the redesign removed. Diagram now draws reachable paths only (15 steps, 20 edges, 4 decision points); `skip_ticket` stays wired in `graph.py` as a landing spot. Neo4j header *"19 relationship types"* -> *"19 connections"* (19 drawn, 15 distinct types). 9/9 verified against the live graph with a negative control.
 
 
 ---
@@ -5720,3 +5721,63 @@ so the assertion reads **120.0, not 61.0** - it now genuinely discriminates.
 1. Tickets have no delete path maintaining both stores (`delete_ticket`, redesign Phase 1.5).
 2. 5.6 - move `case_summary` + `opportunity_generation` off the message path (~35% of tokens).
 3. Optional: a formatted scope chip in Lineage.
+
+### Fix 128 - the workflow diagram still drew the model Phase 4 replaced
+
+**Found by the user asking "are you sure about the diagrams?"** - twice. The first answer was
+wrong in both directions and is worth recording as the lesson.
+
+**What I got wrong the first time.** I validated the Neo4j diagram properly (every edge and count
+against the live database) and then said the LangGraph diagram was "correct" having checked only
+that its 16 node NAMES were real `add_node()` calls. I never compared its edges and never read the
+box text - the exact failure Fix 105 was written about ("every EDGE was proved real but nothing
+checked the words inside the boxes"). Challenged, I then reported `[Agent 1/2/3]` labels as a
+diagram defect; they live in `WORKFLOW_EDGES`, which feeds only the `/orchestration` API payload.
+`renderFlowSvg` takes that payload as an argument and **never reads it for labels** - it draws
+from the local `FLOW_MAP` / `FLOW_EDGES` constants. Those labels are on no diagram. **Withdrawn.**
+
+**Structure was genuinely correct.** Measured, not assumed: 22 drawn edges vs 22 live edges,
+**exact match, zero invented and zero missing**; 16 real steps; header counts accurate.
+
+**Three box texts were not.** All the same root cause - they describe the pre-Phase-4 model:
+
+| Box | Drawn | Reality |
+|---|---|---|
+| `decide_ticket` | "does a human need to see this? / L2/L3 always -> ticket" | the conflation Phase 1 split: a ticket is now created either way, this decides only the HOLD |
+| `send_outbound_reply` | "hold <=> ticket required" | `review_gate.py:87` reads **`hold_required`**; the two diverge on every routine question |
+| `skip_ticket` | a live path, edge labelled "no", box "answer directly" | **unreachable** |
+
+**Why `skip_ticket` cannot execute - the chain, each link verified in the running container:**
+
+1. `_route_ticket_decision` (`graph.py:631`) returns `answer_directly` only when
+   `ticket_decision.required` is falsy, and that is the only route into the node.
+2. `decide()` hardcodes `required=True` (`orchestration_agents.py:538`) - Phase 4's core change.
+3. Only **two** places in the codebase write `ticket_decision`: `graph.py:623` (before routing,
+   uses point 2) and `graph.py:732`, the secondary-intent path - which sits inside
+   `_generate_and_send_reply`, i.e. **after** the branch has already been taken, and uses `or`.
+
+Confirmed empirically by the user's own run: the most routine question possible
+(*"What is my current savings account balance?"*) produced `ticket_created` in `audit_events`, and
+`_skip_ticket`'s `reason="ticket_not_required"` appears nowhere.
+
+**Remove, not grey out.** Marking it "unreachable" was considered and rejected: it still puts the
+words "no" and "answer directly" on screen, and makes the diagram track code structure rather than
+runtime behaviour - the opposite of the principle Fix 115 established when the header was changed
+to count the layout instead of the API payload. The distinction that settled it:
+`reject_unregistered_customer` also rarely fires, but it **can** fire given the right input, so it
+belongs; `skip_ticket` cannot, so it does not. `skip_ticket` stays wired in `graph.py` as a landing
+spot if `required` ever goes false again - that is a code decision, and it does not earn a box.
+
+**Consequence:** with one outcome, `decide_ticket` is no longer a branch - `kind` changed from
+`gate` to `step`, and the `"required"` edge label was dropped. Header now reads **15 steps ·
+20 edges · 4 decision points**, all counted from the layout.
+
+**Neo4j diagram: correct, one wording fix.** All 19 drawn edges exist in the live database and all
+15 node counts match exactly (181 nodes). But the header said *"19 relationship types"* when there
+are **15** distinct types - `PRODUCT_IS` is drawn 4x (Account, FD, CreditCard, Loan -> Product) and
+`HAS_CLAIM` twice (Customer, Policy). Now reads *"19 connections"*.
+
+**Verified 9/9** against the live graph, including the negative control that matters: both dead
+edges are confirmed **present in the live graph** and confirmed **absent from the drawing**, so the
+check distinguishes "removed from the diagram" from "removed from the system". Zero Groq, zero
+network. No pytest run - `app.js` is not covered by the suite and no Python changed.
