@@ -280,11 +280,15 @@ function returned NEW. **~6,400 tokens wasted re-running it.**
 None`, so a **database failure while attaching silently becomes a forked ticket**, with nothing
 logged. Safe-by-default, but invisible — worth narrowing the except or logging the swallow.
 
-### Phase 1 — Separate the two decisions (no behaviour change)
-Introduce `ticket_required` (always true) and `hold_required` (today's rules) as distinct values,
-with `hold_required` wired to the review gate exactly as `required` is now. **Ship with
-`ticket_required` still gated**, so nothing changes yet. This is the refactor that makes the rest
-safe.
+### Phase 1 — Separate the two decisions — **DONE**
+`TicketDecision` gains `hold_required`, which **defaults to `required`** via `model_post_init`.
+`review_gate.py` now reads `hold_required` instead of `required`, with a fallback for callers and
+test stubs that do not carry the field.
+
+**Verified behaviour-neutral:** `required=True -> hold=True`, `required=False -> hold=False`,
+a plain stub without the field still holds, `None` still does not. And the two can now **diverge**,
+which is what Phase 4 needs: `required=True, hold_required=False` produces a ticket with **no hold**
+— a logging id, auto-sent. Tests 5 failed / 147 passed, the documented baseline.
 
 ### Phase 2 — Add the `logged` status
 Enum value + migration + every read site. Follow Fix 109's method: make every site accept exactly

@@ -84,8 +84,27 @@ class QueryResolution(BaseModel):
 
 
 class TicketDecision(BaseModel):
+    """Two decisions that are currently the same value, deliberately named apart.
+
+    `required` has always answered TWO questions at once: does a ticket exist, and does a
+    human review the reply? `review_gate.py` gates the hold on it, so they cannot disagree —
+    which was the point, but it also means there is no way to say "this is a distinct matter,
+    and no human is needed". That is the common case: a customer asking why a claim was
+    rejected needs a thread id and no person.
+
+    `hold_required` is that second question, named separately so the review gate stops reading
+    the ticket question. It DEFAULTS to `required`, so behaviour is identical today; a later
+    phase can make ticket creation unconditional without touching the hold.
+    """
+
     required: bool
     reason: str | None = None
+    # None means "same as required" - see model_post_init below.
+    hold_required: bool | None = None
+
+    def model_post_init(self, __context) -> None:
+        if self.hold_required is None:
+            object.__setattr__(self, "hold_required", self.required)
 
 
 class TicketAction(StrEnum):
