@@ -112,8 +112,9 @@ everywhere, with **no change to `buildUnits` at all**. No heuristic, no time win
 this, it is a set of named matters — which is what an agent actually needs, and what the Lineage
 view was built to show.
 
-**The customer gets a reference for everything.** *"Logged under TKT-123"* on a routine question is
-normal bank behaviour and gives them something to quote on any channel.
+**The customer gets a reference when there is something to follow up.** Once a thread becomes
+serviceable it has a stable id the customer can quote on any channel. A logging id stays internal
+(see 5.5).
 
 **"This looks like a different issue"** in the reply, when a new thread starts, is genuinely good
 service — it is what a human agent says.
@@ -192,6 +193,58 @@ regressions to guard:
 - Fix 123: `approval_required` must still hold
 - Fix 119: a logging ticket must not be quoted to the customer as *"already logged under"*
 
+### 5.8 The candidate set is bounded in a way this design breaks
+**Found by the user asking "for how long history will it try to match?"** — a gap in the first
+version of this plan.
+
+Today's bounds, all deliberate:
+
+| Bound | Value |
+|---|---|
+| Candidate tickets offered to the referee | **5** most recent |
+| Messages shown per candidate | **4** newest |
+| Text per item | 300 chars description, 160 per message |
+
+The candidate query is:
+
+```sql
+WHERE conversation_id = ? AND status != 'closed' ORDER BY created_at DESC LIMIT 5
+```
+
+**`status != 'closed'` is doing the real filtering today**, because tickets only exist when
+something escalated and they get closed. Under this design, logging tickets accumulate with **no
+natural close event** — nobody resolves *"what is my card limit?"*. Five routine questions would
+fill all five slots and **push a live dispute out of view**, so the referee could not match a
+follow-up to it. That is the same failure the intent filter used to cause (see §2).
+
+**A proposal of mine was tested and withdrawn.** I suggested ranking by `updated_at` ("last
+touched"). Two things, both **measured**:
+
+1. **`updated_at` does not mean last touched.** `create_or_get_ticket` ends `if existing: return
+   existing` — attaching a message never calls `update_ticket`. Proven on ticket `7f590b`:
+   `updated_at` = 13:11:19, with a message attached at **13:11:49** that did not move it. The field
+   tracks *administrative* changes (created, scope refined, referee attached, status updated).
+2. **Repurposing it would corrupt analytics by an order of magnitude.** Three readers assume
+   `updated_at` = close time — avg resolution, per-team average, and closed-per-day. Measured on
+   live data: average resolution time would report **18.3 minutes instead of 394.2** — a 21x change
+   on a headline demo metric. Ticket `33e42f` alone: 1,867 minutes -> 50.
+
+**The fix is a separate field, not a repurposed one:** `last_activity_at`, bumped when a message
+attaches. `updated_at` keeps its meaning, analytics is untouched, and the referee gets a field that
+says what it needs.
+
+```sql
+WHERE conversation_id = ? AND status != 'closed'
+ORDER BY COALESCE(last_activity_at, created_at) DESC LIMIT 5
+```
+
+Plus a **two-tier guarantee**: serviceable tickets always get a slot, so a live case can never be
+crowded out by routine chatter.
+
+*Also noticed, pre-existing and unrelated:* the per-team query (aggregator.py:343) has **no status
+filter**, so it already averages `updated_at - created_at` over open tickets, where that difference
+is meaningless.
+
 ---
 
 ## 6. Plan
@@ -219,6 +272,11 @@ one word, so a wrong value is visible immediately rather than silently tolerated
 `logged`. Analytics denominators reviewed. **This must land before Phase 4**, or the first
 logging ticket corrupts the reply prompt.
 
+### Phase 3.5 — Bound the candidate set (before opening the tap)
+Add `last_activity_at` (column + migration), bump it when a message attaches at
+`create_or_get_ticket`, rank candidates by it, and guarantee serviceable tickets a slot. **Without
+this, Phase 4 causes mis-grouping that looks like referee errors** — see 5.8.
+
 ### Phase 4 — Create a ticket for every query
 Remove the `required` gate from creation. Referee runs on every message. Promote to `open` on the
 first hold.
@@ -236,6 +294,9 @@ separates two decisions that were never the same question.
 **Do Phase 0 first, and let it decide.** Everything rests on the referee, and its behaviour at this
 volume is unmeasured. One measurement is cheap; discovering it silently merges unrelated matters
 after Phase 4 is not.
+
+**Phase 3.5 is not optional.** Without it, Phase 4 silently degrades the referee by starving it of
+the right candidates, and the symptom looks like an LLM accuracy problem rather than a query bound.
 
 **Phases 1-3 are the real work** — the meaning change across analytics, the prompt, the panel and
 Jira is larger than the ticket-creation change itself. Phase 4 is a few lines once they are done.
