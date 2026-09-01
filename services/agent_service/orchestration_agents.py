@@ -10,7 +10,7 @@ from services.pii_service.masker import mask_text
 from services.rag_service.groq_generator import GroqGenerator
 from services.rag_service.rag_pipeline import RAGPipeline
 from services.ticket_service.ticket_manager import TicketManager
-from shared.schemas.intents import Intent, IntentResult, Urgency
+from shared.schemas.intents import Intent, IntentResult
 from shared.schemas.messages import InboundMessage
 from shared.schemas.tickets import Ticket, TicketStatus
 
@@ -687,23 +687,25 @@ class TicketCreationAgent:
         if analysis.intent in INFORMATIONAL_INTENTS:
             return None
 
-        # Rule 4: High urgency
-        if analysis.urgency == Urgency.HIGH:
-            return "high_urgency"
+        # Rule 4 (high urgency) REMOVED. Urgency is set by the intent classifier reading TONE —
+        # capitals, "urgent", "ASAP". Escalating on it contradicted the system's own stated
+        # principle in two places: the L1/L2/L3 prompt ("frustration or urgency in wording does
+        # NOT by itself justify L2/L3; the actual content of the query does") and Rule 3b's
+        # comment ("high urgency on a status query means the customer is anxious, not that an
+        # incident needs tracking"). Rule 3b shielded only three intents, so "URGENT!! what are
+        # your FD rates??" was held for a human. Urgency still feeds ticket PRIORITY scoring,
+        # which is where a tone signal belongs — it just no longer decides that a ticket exists.
 
         # Rule 5: Low intent confidence (industry threshold: 0.6)
         if analysis.confidence < 0.6:
             return "low_intent_confidence"
 
-        # Rule 6: Repeat customer with many open tickets — only escalate if this specific intent
-        # is not already covered by an existing ticket (prevents piling on more tickets when
-        # the customer is already overwhelmed with open cases).
-        customer_tickets = context.get("customer_tickets", [])
-        if len(customer_tickets) >= 3:
-            existing_intents = {t.get("intent") for t in customer_tickets}
-            if analysis.intent.value not in existing_intents:
-                return "repeat_customer_new_issue"
-            return None  # Existing ticket already covers this intent — no new one needed
+        # Rule 6 (>=3 open tickets, new intent) REMOVED. How many OTHER cases a customer has open
+        # says nothing about whether THIS message needs a human: a customer with three open
+        # tickets asking "what are your branch timings?" was escalated for being unlucky. The
+        # threshold of 3 was never derived from anything. If the new issue genuinely needs a
+        # person, the content rules (0, 2, 5, 7) catch it on its own merits. Like urgency, a
+        # crowded case load is a PRIORITY signal, not a reason a ticket exists.
 
         # Rule 7: We have no answer good enough to send. Merged from the former Rules 7 and 8,
         # which asked the same question ("can we actually answer this?") split by an

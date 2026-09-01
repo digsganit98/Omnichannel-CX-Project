@@ -165,6 +165,7 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 116 — Per-exchange intent, and the case named by its ticket:** a transaction dispute was headed `TICKET STATUS` because the theme label took the first turn carrying the ticket id — and only **outbound** turns are ever tagged, so the first was the status follow-up. The label now comes from the ticket record, and each Detailed row carries its own intent.
 - **Right panel:** the five card headings (Customer Context, Sentiment, Case Summary, Open Tickets, Suggested Offers) unified to blue; Neo4j box property lines set to normal weight.
 - **Fix 117 — A correct answer was held for a human anyway:** L2 escalated on *category* ("needs customer-specific data") — exactly what the graph does best — so 7 of 7 live tickets were `assisted_resolution_required`, five of them questions the graph had already answered correctly. L2 now escalates only when the customer's own record did NOT answer; L3 stays unconditional. Also: the balance reply said "your current account balance is Rs. 0" (the LLM relabelled an *average monthly* figure — there is no live-balance field), Rule 2b narrowed to `fund_transfer`, and Rules 7+8 merged onto one exemption list.
+- **Fix 118 — Two rules that escalated on the customer's circumstances, not their question:** Rule 4 ticketed on *tone* (urgency is read from capitals/"ASAP"), contradicting the system's own "tone is not severity" principle stated in the L1/L2/L3 prompt AND in Rule 3b's comment; Rule 6 ticketed because the customer had 3+ *other* open cases, which says nothing about the message in hand. Both removed from the ticket decision — urgency still feeds ticket **priority**. Also: the balance reply said "your current **average** balances are…" — Fix 117 told the model not to state a current balance but still handed it the account rows, so it did both; the rows are now withheld (FDs kept).
 
 
 ---
@@ -4691,3 +4692,56 @@ bind-mounted) and the deployed code re-verified.
 - Rules 4, 6 and 9 above.
 - Everything inherited from Sessions 19-23: the demo script rewrite (the only demo blocker), Jira
   401, `handled_by` has no reader, outbound replies are not graph nodes.
+
+### Fix 118 — Two rules that escalated on the customer's circumstances, not their question
+
+Follow-on from Fix 117, after the user asked what Rules 4, 6 and 9 actually do. Explaining them
+plainly was enough to show two of the three could not be justified.
+
+**Rule 4 (high urgency) removed.** Urgency is set by the intent classifier reading **tone** —
+capitals, "urgent", "ASAP". Escalating on it contradicted the system's own principle in two
+places: the L1/L2/L3 prompt (*"frustration or urgency in wording does NOT by itself justify
+L2/L3; the actual content of the query does"*) and Rule 3b's own comment (*"high urgency on a
+status query means the customer is anxious, not that an incident needs tracking"*). Rule 3b
+shielded only three intents, so **"URGENT!! what are your FD rates??" was held for a human.**
+Urgency still feeds ticket **priority scoring**, which is where a tone signal belongs.
+
+**Rule 6 (>=3 open tickets, new intent) removed.** How many *other* cases a customer has open says
+nothing about whether *this* message needs a person — a customer with three open tickets asking
+"what are your branch timings?" was escalated for being unlucky. The threshold of 3 was never
+derived from anything. Content rules (0, 2, 5, 7) still catch a genuinely hard new issue.
+
+Both are better expressed as priority signals than as reasons a ticket exists. Their labels are
+left in `review_gate.py` and the analytics aggregator so **historical** tickets carrying those
+reasons still render (none in the current DB, but older databases may have them).
+
+### The balance reply said "your current average balances are"
+Fix 117 told the model no live balance was available **and still handed it the account rows**, so
+it did both — producing a phrase that means nothing, over figures the customer had not asked for.
+The user caught it on screen.
+
+The rows are now **withheld**: the model cannot relabel a number it was never given. This is
+[[redact-dont-instruct-llm]] applied a second time in two days — the first attempt was an
+instruction, and instructions lose to data that is present.
+
+**Fixed deposits are still listed.** "FD details" also routes to `account_balance_inquiry`, an FD
+amount is a real fact we genuinely hold, and it is not a bank balance.
+
+### Verified
+Replay harness, mocked resolutions, **zero Groq calls**. Rule 4 and 6 cases now auto-send; fraud
+(incl. an URGENT-worded one), fund_transfer, human-request, dispute, failed-graph, KB-empty and
+low-intent-confidence all still escalate.
+
+**One surprise, investigated:** a low-intent-confidence case auto-sent when Rule 5 should have
+caught it. Cause is **pre-existing and unrelated** — `_is_strong_l1_knowledge_answer` sits above
+Rule 5 and returns early on a strong KB answer. Confirmed Rule 5 fires normally when that
+shortcut does not apply (0.4 -> `low_intent_confidence`, 0.9 -> auto-send). Not introduced here;
+worth knowing that a confident KB answer outranks a weak intent classification.
+
+Removed the now-unused `Urgency` import. Tests **5 failed / 147 passed**, the documented baseline,
+same five names. Image rebuilt and the deployed code re-verified.
+
+### Still open after this
+- **Rule 9** untouched: its premise is broken (`resolved=0` is written on *every* held reply, so it
+  means "was held", not "we failed"). Fix what `resolved` means before touching the rule.
+- The strong-L1 shortcut outranking Rule 5, above.
