@@ -181,6 +181,7 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 127 - six ticket-reading surfaces the redesign never audited:** Phase 2 audited the 21 sites that FILTER on status; these were sites that do not filter at all, so they were invisible to it - the customer 360 graph (the exclusion form, on the one surface already documented as unable to absorb ~4x the nodes), the portal's ticket count and its unguarded detail endpoint, the opportunity engine's cache key (a ~1000-token LLM call re-fired by every routine question), Tickets-by-channel (which became a second copy of message_count), and avg resolution time (diluted 180 -> 90.5 by a logging ticket closed in a minute). Promotion was also writing `escalation_reason` only to the event log, never the ticket row, so a promoted case was indistinguishable from a logging one. 25/25 verified with negative controls, zero Groq, zero network.
 - **Fix 128 - the workflow diagram still drew the model Phase 4 replaced:** the LangGraph picture's 22 edges matched the live graph exactly, but three boxes described the OLD behaviour - `decide_ticket` read *"does a human need to see this? L2/L3 always -> ticket"* (the conflation Phase 1 split apart), the review gate read *"hold <=> ticket required"* when `review_gate.py` reads `hold_required`, and `skip_ticket` was drawn as a live path labelled *"no"* / *"answer directly"* when `required=True` is hardcoded, so it **cannot execute**. Together they told a viewer routine questions get no ticket - the exact model the redesign removed. Diagram now draws reachable paths only (15 steps, 20 edges, 4 decision points); `skip_ticket` stays wired in `graph.py` as a landing spot. Neo4j header *"19 relationship types"* -> *"19 connections"* (19 drawn, 15 distinct types). 9/9 verified against the live graph with a negative control.
 - **Fix 129 - the LLM referee never decided ticket identity; a keyword string did:** a customer's savings-balance question and their credit-card dues question merged into ONE ticket, and the referee was never called (measured: 0 calls). `_ticket_scope` matches KEYWORDS, so it answers "what kind of thing is this?" - never "is this the same instance?": **9 of 16 intents have no scope rules at all** and collapse to `:manual_review`, and the 7 that do fail identically ("dispute ANOTHER charge" scores the same `:card` as the original; two different claim ids both score `:other`). The referee now decides, reading the text, with code still building the candidate set and validating the answer. Gate-probed **30/30 unanimous** before building. `_referee_rejects` deleted - it vetoed a string merge that no longer exists, and its tie-break was "when in doubt answer SAME", the inverse of this system's rule. **A regression the plan had not predicted:** an identical repeated message forked, because the string match used to absorb it - fixed with a deterministic exact-text guard that needs no LLM. 15/15 verified, net -41 lines.
+- **Fix 130 - three faults found by the user's own demo run:** (1) *"This looks like a separate issue from your existing request"* appeared on the THIRD message of a thread the customer was plainly continuing - `forked_from` is stored on the TICKET, so it stays true for the ticket's whole life, and `compose_answer` read it on every reply; forking is a fact about ONE message, now carried as `forked_now` while the metadata stays as provenance. (2) A correct answer was held for review because `_answered_from_customer_record` asked *"did retrieval route to the graph?"* - which depends on `intent in TRANSACTIONAL_INTENTS` - so a message misclassified `general_inquiry` was escalated while the reply it held quoted the card's balance and due date correctly from the always-on context block; it now asks whether the answer was GROUNDED in the customer's records, by either path. **Fix 117 preserved and proven**: empty records still escalate. (3) The Case Summary card sat on "Summarising..." forever - `renderRight` resets it to that placeholder and the old guard (`_csumFor === id`) then returned before refilling; the RESULT is now cached, so a re-render restores it instantly with no LLM call. 29/29 verified with negative controls, zero Groq.
 
 
 ---
@@ -5895,3 +5896,93 @@ message**.
 *(First test run reported 3 failures: it executed inside the api container, which runs the baked
 image, not the edit on disk. The fix was correct; the test was invalid - see
 [[rebuild-image-to-deploy-python]].)*
+### Fix 130 - three faults found by the user's own demo run
+
+The user ran the demo set and listed seven symptoms. They were not seven bugs: four were
+policy working as designed, and three were real faults with distinct root causes.
+
+### 1. The split note fired for the ticket's whole life, not on the message that forked
+
+*"This looks like a separate issue from your existing request"* appeared on the THIRD card
+message - on a ticket all three messages had correctly attached to, and which the same reply
+then named by reference. Grouping was right; the sentence was wrong.
+
+`forked_from` is written once at ticket creation and stored on the TICKET, so it stays true
+forever. `compose_answer` read it on every reply. **Forking is a fact about ONE message at ONE
+moment**, so it is now carried as `forked_now` - set per call, read straight after - while the
+metadata stays exactly as it was, for agent-visible provenance. No flag to clear, no counter,
+no "show once" state: the condition is true exactly when it is true.
+
+### 2. A correct answer was held for review, because escalation read a routing label
+
+*"What is the amount due on my credit card and by when?"* was held. The reply it held said
+*"balance due Rs.91,821, payment due 2026-07-08"* - correct, from the record.
+
+`_answered_from_customer_record` asked **"did retrieval route to the graph?"**
+(`retrieval_backend in CUSTOMER_RECORD_BACKENDS`), and that backend is set only when
+`intent in TRANSACTIONAL_INTENTS`. The message classified as `general_inquiry`, retrieval went
+to the KB pdf at 0.66, the rule concluded "no customer data" and escalated - while the
+customer-context block, which runs on EVERY message regardless of intent, had already put the
+full record set in front of the model. **A misclassification became a false hold on a question
+the system had already answered.**
+
+It now asks whether the answer was **grounded** in the customer's records, by either path.
+`TRANSACTIONAL_INTENTS` still improves retrieval; it just stops deciding escalation.
+
+**Fix 117 is preserved, and proven rather than assumed:** with empty record collections the
+rule still escalates, and identity fields (name/email/phone) and `open_cases` are explicitly
+not counted as records.
+
+### 3. The Case Summary card sat on "Summarising..." forever
+
+The summary had **succeeded** - two calls, `status=success`, stored in `case_summaries`. The
+card never showed it. `renderRight` rebuilds the panel and resets `#csum-body` to the literal
+placeholder; the guard `_csumFor === conversationId` then returned before refilling it, so the
+text sat there with nothing in flight.
+
+The guard tracked *"I fetched for this conversation"* when what matters is *"the rendered card
+holds the summary"*. The **result** is now cached and re-applied on render. Clearing the guard
+in `renderRight` would also have worked but costs a fresh ~650-token call on every re-render;
+caching restores it instantly for free, and also serves the guard's original purpose better -
+switching conversations and back no longer refetches.
+
+### Not bugs - policy working as designed
+
+- **"Why was I charged Rs.1,284.14?"** - `transaction_dispute` is in `MANUAL_REVIEW_INTENTS`,
+  always held. The reply was also right: that charge is a card FEE in `penalty_details`, not a
+  transaction row.
+- **NEFT pending** - Rule 2b holds every `fund_transfer` (`no_live_banking_data`). Worth
+  revisiting, since the record showed the status, but deliberate.
+- **Documents question** - answered correctly. To force a hold, ask for an APPROVAL
+  ("I want you to approve my claim urgently") -> `approval_required` (Fix 123).
+
+### Still open - the most serious of the seven
+
+**A real transaction was reported as non-existent.** *"I didn't make the UPI debit of
+Rs.22,788"* -> *"we do not have a record of this transaction"*. `TXN0001000007,
+Rs.22,788.21, UPI, Success` **is in the graph**. Two causes: `fraud_report` is in
+`TRANSACTIONAL_INTENTS` but has **no branch** in `neo4j_answer`, so it falls through to the KB
+entirely; and the `transaction_dispute` branch is **capped at 8 of 14 rows** by date, so that
+transaction is not in the block. Also unfixed: `account_balance_inquiry` returns accounts AND
+FDs, and the accounts block carries a hard instruction to point the customer at the mobile app -
+so an FD maturity question got a correct answer plus an irrelevant balance disclaimer.
+
+Both are the same shape: **retrieval returns a canned per-intent block rather than the records
+the message references.** Deliberately NOT patched by raising the cap - that trades one failure
+for another, and the block is pasted into the prompt. Needs a measured design pass.
+
+### Verification - 29/29, zero Groq, zero network
+
+- **Fork, 11/11** - replays the user's real sequence (live fraud ticket, then three card
+  messages): msg1 forks and says so, msg2 and msg3 attach and stay silent, the ticket keeps its
+  `forked_from`. Negative control: the old condition still announces the split on msg3.
+- **Grounding, 10/10** - the real `_escalation_reason`. The misclassified case no longer holds;
+  empty records still escalate; identity-only and `open_cases`-only are not records; Fix 123
+  approvals, L3, Fix 117 auto-send and `transaction_dispute` policy all unchanged. Negative
+  control: the old form would have held it.
+- **Case summary, 8/8** - drives the real functions against a fake DOM with a fetch counter: a
+  re-render refills the card with **zero** extra fetches, Refresh still refetches, and switching
+  conversations and back is served from cache. Negative control: the old guard leaves the
+  placeholder forever.
+
+Suite at the 5 failed / 147 passed baseline.

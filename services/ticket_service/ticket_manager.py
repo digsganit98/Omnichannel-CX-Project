@@ -29,6 +29,16 @@ class TicketManager:
         # Optional graph client, used only to keep a resolved ticket's status in step with
         # the graph copy. Optional so every existing caller keeps working untouched.
         self.neo4j_client = neo4j_client
+        # Did the LAST create_or_get_ticket call open a new thread away from live ones?
+        # Reset at the start of every call and read by the caller straight afterwards.
+        #
+        # Deliberately NOT taken from the ticket's own `forked_from` metadata: that is
+        # stored on the ticket, so it stays true for the ticket's whole life. Reading it
+        # per-reply told a customer "this looks like a separate issue from your existing
+        # request" on the third message of a thread they were plainly continuing, on a
+        # ticket the same reply then named. Forking is a fact about ONE message at ONE
+        # moment; the metadata is the permanent record of it, this is the event.
+        self.forked_now = False
 
     def create_or_get_ticket(
         self,
@@ -75,6 +85,10 @@ class TicketManager:
         # genuine doubt - returns None, which forks. Doubt forks, never merges.
         ticket_scope = _ticket_scope(intent.value, message.text, escalation_reason, graph_context)
         forked_from: list[str] = []
+        # Whether THIS call opened a new thread away from live ones. Reset per call and read
+        # by the caller immediately after; see `forked_now` on __init__ for why it is not
+        # taken from the ticket's own metadata.
+        self.forked_now = False
         existing = None
         # DETERMINISTIC FIRST, and only this one: the SAME message text on an already-open
         # thread is the same matter by definition - a retry, a webhook redelivery, or a
@@ -105,6 +119,9 @@ class TicketManager:
                 # whether "my dispute" now means one thing or two.
                 forked_from = [t.ticket_id for t in candidates
                                if t.status in SERVICEABLE_TICKET_STATUSES]
+                # This MESSAGE forked. Distinct from the metadata below, which records the
+                # same fact permanently on the ticket for provenance.
+                self.forked_now = bool(forked_from)
         # REFINEMENT, re-triggered by the referee's decision rather than by comparing scope
         # strings. A vague opener ("I want to dispute a transaction") takes the ":other" /
         # ":manual_review" fallback; when the specifics arrive the thread must LEARN them:
@@ -179,8 +196,13 @@ class TicketManager:
                 "ticket_scope": ticket_scope,
                 # Serviceable threads that were open when the referee judged this a
                 # separate matter. Empty for the common case (nothing else was live, or
-                # the referee was never consulted). Read by compose_answer to tell the
-                # customer their new issue was raised separately.
+                # the referee was never consulted). PROVENANCE ONLY - kept so an agent and
+                # the lineage view can see where a thread came from. It must NOT drive
+                # customer-facing text: it lives on the TICKET, so it stays true for the
+                # ticket's whole life, and reading it in compose_answer announced "this
+                # looks like a separate issue" on every later message of a thread the
+                # customer was plainly continuing. That is a per-MESSAGE fact - see
+                # `forked_now`.
                 "forked_from": forked_from,
             },
         )

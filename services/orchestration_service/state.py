@@ -66,6 +66,12 @@ class OrchestrationState(BaseModel):
     resolution: QueryResolution | None = None
     ticket_decision: TicketDecision | None = None
     ticket: Ticket | None = None
+    # True only when THIS message opened a new thread while other live threads existed -
+    # i.e. the referee judged it a separate matter. A per-message fact, deliberately not
+    # read from the ticket: `forked_from` is stored on the ticket and therefore persists
+    # for its whole life, so reading that told a customer "this looks like a separate
+    # issue" on every later message of a thread they were plainly continuing.
+    ticket_forked_now: bool = False
     answer: str | None = None
     delivery: dict = Field(default_factory=dict)
     workflow_trace: list[WorkflowTraceEntry] = Field(default_factory=list)

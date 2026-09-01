@@ -690,7 +690,7 @@ class TicketCreationAgent:
             # resolution classifier reads — so it is made there and read here.
             if decision.get("l2_kind") == "action":
                 return f"approval_required:{analysis.intent.value}"
-            if not _answered_from_customer_record(resolution):
+            if not _answered_from_customer_record(resolution, context):
                 return f"assisted_resolution_required:{analysis.intent.value}"
 
         # Rule 1: Customer explicitly asked for human
@@ -783,13 +783,50 @@ class TicketCreationAgent:
 CUSTOMER_RECORD_BACKENDS = {"neo4j_graph", "customer_ticket_lookup"}
 
 
-def _answered_from_customer_record(resolution: QueryResolution) -> bool:
-    """True when the reply came from this customer's own data with real content behind it."""
-    if resolution.retrieval_backend not in CUSTOMER_RECORD_BACKENDS:
-        return False
-    if not resolution.contexts:
-        return False
-    return resolution.confidence >= 0.3
+# Collections in graph_context that ARE the customer's own records. Presence of a non-empty
+# one means the customer's record set was in the prompt. Deliberately excludes the identity
+# fields (name/email/phone/city/segment), which are always present and prove nothing, and
+# open_cases, which is ticket state rather than a record that can answer a question.
+CUSTOMER_RECORD_COLLECTIONS = (
+    "accounts", "credit_cards", "fixed_deposits", "loans", "policies", "claims",
+)
+
+
+def _customer_records_supplied(context: dict | None) -> bool:
+    """True when this customer's own records were put in front of the model.
+
+    The customer-context block in groq_generator runs on EVERY message regardless of intent
+    and emits whatever graph_context holds, so the records reach the model by that path as
+    well as by intent-routed retrieval.
+    """
+    graph_context = (context or {}).get("graph_context") or {}
+    return any(graph_context.get(k) for k in CUSTOMER_RECORD_COLLECTIONS)
+
+
+def _answered_from_customer_record(resolution: QueryResolution, context: dict | None = None) -> bool:
+    """True when the reply was grounded in this customer's own data.
+
+    This asks about GROUNDING, not about which retrieval branch ran. It used to ask only the
+    latter - `retrieval_backend in CUSTOMER_RECORD_BACKENDS` - and that backend is set only
+    when `intent in TRANSACTIONAL_INTENTS`, so the answer depended on a CLASSIFICATION LABEL.
+    Observed live: "What is the amount due on my credit card and by when?" classified as
+    general_inquiry, retrieval therefore went to the KB pdf, this returned False, and the
+    reply was held for a human - while the reply it held quoted the card's balance and due
+    date correctly, because the customer-context block had supplied the record set anyway.
+    A misclassification became a false hold on a question the system had already answered.
+
+    So either path counts: the intent-routed retrieval, or the records being supplied. The
+    confidence and contexts checks still apply to the retrieval path, because there a low
+    score means retrieval genuinely failed.
+
+    Fix 117 is preserved: when the customer's records hold nothing relevant, graph_context
+    carries no non-empty collection and this still returns False, so the question is still
+    escalated - which is what that rule exists for.
+    """
+    if resolution.retrieval_backend in CUSTOMER_RECORD_BACKENDS:
+        if resolution.contexts and resolution.confidence >= 0.3:
+            return True
+    return _customer_records_supplied(context)
 
 
 def _is_strong_l1_knowledge_answer(resolution: QueryResolution) -> bool:
@@ -824,6 +861,7 @@ class WorkflowAutomationAgent:
         ticket: Ticket | None,
         channel: str = "",
         customer_name: str = "",
+        forked_now: bool = False,
     ) -> str:
         body = _strip_email_boilerplate((resolution.answer or "").strip()) if resolution else ""
 
@@ -860,7 +898,12 @@ class WorkflowAutomationAgent:
             # now refers to one case or two, and neither can anyone reading the thread.
             # Only serviceable threads count - announcing a split from a logging id would
             # expose an internal reference (decision 1).
-            if (ticket.metadata or {}).get("forked_from"):
+            # `forked_now`, not the ticket's forked_from metadata. The metadata is stored on
+            # the TICKET and so stays true for its whole life: reading it here announced the
+            # split on every later message of the thread, including ones that plainly
+            # continued it and that this same reply then names by reference. Forking is a
+            # fact about ONE message; only the message that actually forked should say so.
+            if forked_now:
                 ticket_note = (
                     "This looks like a separate issue from your existing request, "
                     "so we have raised it on its own. " + ticket_note

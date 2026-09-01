@@ -637,6 +637,10 @@ class OrchestrationGraph:
             state.analysis, state.ticket_decision, state.customer,
             graph_context=state.context.get("graph_context", {}) if state.context else {},
         )
+        # Did THIS message fork? Read straight after the call that set it. compose_answer
+        # uses this rather than the ticket's forked_from metadata, which persists for the
+        # ticket's whole life and so re-announced the split on every later message.
+        state.ticket_forked_now = bool(getattr(self.ticket_agent.tickets, "forked_now", False))
         # Back-fill the INBOUND turn, which was written before the ticket was decided.
         # This is the link the admin UI groups on: buildUnits keys a request on
         # conversation_turns.ticket_id, and a NULL key can never merge. The outbound turn
@@ -672,6 +676,7 @@ class OrchestrationGraph:
                 state.ticket,
                 channel=state.message.channel.value,
                 customer_name=state.customer.get("display_name", ""),
+                forked_now=state.ticket_forked_now,
             )
         # GAP-I1: Secondary intent processing — if the customer's message contained a second
         # distinct intent that requires manual review (e.g. "check loan AND report fraud"),

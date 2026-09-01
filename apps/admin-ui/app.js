@@ -2906,10 +2906,29 @@ function kgEsc(s) { return escH(String(s == null ? '' : s)); }
 // rest of the panel. The endpoint caches against the newest turn, so re-opening an
 // unchanged conversation costs nothing; only Refresh forces a regeneration.
 var _csumFor = null;
+// The fetched summary HTML, keyed by conversation id. Caching the RESULT rather than the
+// fact that a fetch happened is what makes this correct: renderRight rebuilds the right
+// panel and resets #csum-body to the literal "Summarising…" placeholder, but the old guard
+// (`_csumFor === conversationId`) then returned before re-filling it - so the card sat on
+// that placeholder forever with nothing in flight. Holding the text lets a re-render restore
+// it instantly and for free; a fetch happens only when nothing is cached, or on Refresh.
+var _csumCache = {};
+
+function applyCaseSummary(conversationId) {
+  var el = document.getElementById('csum-body');
+  if (!el) return false;
+  var cached = _csumCache[conversationId];
+  if (cached === undefined) return false;
+  el.innerHTML = cached;
+  return true;
+}
 
 async function loadCaseSummary(conversationId, force) {
   if (!conversationId) return;
-  if (!force && _csumFor === conversationId) return;   // already loaded for this conversation
+  // A re-render wiped the card back to the placeholder: refill it from the cache. This runs
+  // even when the fetch is skipped below, which is exactly the case the old guard broke.
+  if (!force && applyCaseSummary(conversationId)) return;
+  if (!force && _csumFor === conversationId) return;   // fetch already in flight for this one
   _csumFor = conversationId;
   var bodyEl = document.getElementById('csum-body');
   if (!bodyEl) return;
@@ -2923,6 +2942,8 @@ async function loadCaseSummary(conversationId, force) {
     if (!bodyEl) return;
     if (!p.summary) {
       // Say why there is nothing rather than showing an empty card.
+      // NOT cached: "no messages yet" and "unavailable" are transient states, and caching
+      // them would keep the card empty after the conversation gains its first message.
       bodyEl.innerHTML = '<span class="csum-muted">'
         + (p.status === 'empty' ? 'No messages yet.' : 'Summary unavailable right now.')
         + '</span>';
@@ -2934,8 +2955,9 @@ async function loadCaseSummary(conversationId, force) {
     // rewording the situation instead of returning nothing. Every value it ever
     // produced was an echo or empty, through three prompt rules written to stop it.
     // Open work is in the Open Tickets card directly below, with status and Resolve.
-    bodyEl.innerHTML =
-      (p.summary.situation ? '<div class="csum-sit">' + escH(p.summary.situation) + '</div>' : '');
+    var html = (p.summary.situation ? '<div class="csum-sit">' + escH(p.summary.situation) + '</div>' : '');
+    _csumCache[conversationId] = html;   // survives the next renderRight
+    bodyEl.innerHTML = html;
   } catch (e) {
     if (_csumFor !== conversationId) return;
     var el = document.getElementById('csum-body');
