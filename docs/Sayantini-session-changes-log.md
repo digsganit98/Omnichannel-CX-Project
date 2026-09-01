@@ -160,6 +160,9 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 111 — The agent view identified customers by this app's internal keys:** the header led with `cust_56ac6c67338f`, a SQLite row id an agent cannot look up or quote; the Profile tab carried no customer id at all even though the record handed to the model opens with `customer_id=CRN...`; and Fathima showed no phone because the header read `channel_identities` (channels she has WRITTEN IN ON) rather than the customer record, which holds her number.
 - **Fix 112 — The workflow diagram showed the LangGraph nodes and nothing else:** each step now names the data it reads and from where, and three properties that are not nodes — PII masking, the deterministic safety net, the learning loop — are stated beneath it. Idempotency and tracing were dropped as plumbing.
 - **Fix 113 — The schema diagram's edge labels were one strip of text:** every label sat at the midpoint of its own edge, so Customer's seven-way fan-out landed on a single line; labels are now centred on the arrowhead they name and staggered between two heights. Counts came off the labels (11 of 13 repeated the box), `:PRODUCT_IS` is drawn once instead of four times, and three labels lost on the long-routed edges were restored. The colour key moved into the header bar.
+- **Fix 114 — The diagram marked the wrong steps as LLM callers:** the blue "LLM agent" fill sat on `classify_intent` and `resolve_query` while `detect_ticket_action` (83 calls, the highest-volume operation in the system) read as an ordinary decision point and `create_ticket` as an ordinary step; the `AGENT 1 / 1B / 3` badges named conceptual roles nothing could look up. Every step now names the agent class that owns it, and the four that actually reach a model carry the question they ask it.
+- **Fix 115 — The workflow header counted a different thing than the picture:** it read *"15 steps · 17 edges"* over a diagram drawing **16 and 22**, because it counted the API payload — whose step list comes from the older `WorkflowStep` enum and whose edge list collapses each branch into one `"a | b"` row. Counted from the layout now.
+- **Fix 116 — Per-exchange intent, and the case named by its ticket:** a transaction dispute was headed `TICKET STATUS` because the theme label took the first turn carrying the ticket id — and only **outbound** turns are ever tagged, so the first was the status follow-up. The label now comes from the ticket record, and each Detailed row carries its own intent.
 - **Right panel:** the five card headings (Customer Context, Sentiment, Case Summary, Open Tickets, Suggested Offers) unified to blue; Neo4j box property lines set to normal weight.
 
 
@@ -4479,6 +4482,87 @@ scale factors. Applied properly both diagrams have a **10.6px** gap; the schema 
 relative room. Same error as the notes font, which I set to 11.5px to "match" box text that
 renders at 9.2px after scaling.
 
+### Fix 114 — The diagram marked the wrong steps as LLM callers
+The blue "LLM agent" fill sat on `classify_intent` and `resolve_query`. Checked against the
+source, **four** nodes reach a model — and the two it missed were the least expected:
+`detect_ticket_action`, which makes the **highest-volume call in the system** (83), read as an
+ordinary amber decision point, and `create_ticket` as a plain white step.
+
+The `AGENT 1 / 1B / 3` badges came from the original architecture doc, where those were
+conceptual roles. Only two survived on the diagram, they named nothing a reader could look up,
+and they sat in the same slot and colour as the LLM badge as if related. `AGENT 3` in
+particular labelled `decide_ticket`, which runs twelve Python rules and calls nothing.
+
+Every step now names the agent class that owns it — read off `graph.py`'s wiring, not the doc —
+and the four that call a model carry the question they ask it:
+
+| Node | Badge |
+|---|---|
+| `detect_ticket_action` | TICKET CREATION AGENT · LLM · CLOSURE? |
+| `classify_intent` | INTENT CLASSIFICATION AGENT · LLM · INTENT |
+| `resolve_query` | QUERY RESOLUTION AGENT · LLM · GRADE+ANSWER |
+| `create_ticket` | TICKET CREATION AGENT · LLM · SAME MATTER? |
+| `validate_customer` | CUSTOMER VALIDATION AGENT |
+| `send_outbound_reply` | WORKFLOW AUTOMATION AGENT |
+
+**Per-box badge, not a band:** `TicketCreationAgent` owns six nodes spanning x 2110-4536 and
+y 40-692 — closure detection top-left, the ticket decision bottom-right. Its bounding box would
+swallow every other agent's nodes, so a grouping band was measured and rejected.
+
+Also: **"ONE Groq call" → "ONE LLM call"**, the last mention of the vendor left in the admin UI
+after the `AI_GROQ` rename; and `.fl-llm` was missing the uppercase transform `.fl-agent` had,
+so blue badges rendered lowercase beside grey ones in caps.
+
+### Fix 115 — The header counted a different thing than the picture
+It read **"15 steps · 17 edges"** over a diagram drawing **16 and 22**. The header counted the
+API payload: its `steps` come from the older `WorkflowStep` enum, which names
+`retrieve_knowledge` / `decide_resolution` / `create_or_update_ticket` — none of them nodes in
+this graph, which runs `resolve_query` / `decide_ticket` / `create_ticket` / `skip_ticket`. Its
+edges collapse each branch into one `"a | b"` row, so 22 drawn arrows counted as 17.
+
+Counted from the layout now, so the header cannot disagree with the picture. The
+**"Decision point (N)"** tally is gone for the same reason: two real decision points are now
+blue because they call an LLM, so the number matched neither the amber boxes nor the branches.
+
+**The same shape as Fix 105:** a surface reporting a *different source* than the thing on
+screen, with nobody comparing them.
+
+### Fix 116 — The case named by its ticket, and intent per exchange
+A transaction dispute was headed **TICKET STATUS**. The theme label took the first turn carrying
+the ticket's id — and only **outbound** turns are ever tagged (measured: all 5 inbound turns on
+that conversation hold NULL, all 6 outbound hold the id). The first tagged turn whose intent
+survived was the status follow-up, so the case was named after a question asked *about* it.
+
+The label now comes from the ticket record. That is the right source regardless of tagging: a
+ticket knows its own subject, while a turn's intent is what the classifier made of one message —
+*"any update on my dispute?"* really **is** `ticket_status`.
+
+Each Detailed row now carries its own intent, which it could not show before: this case runs
+dispute → dispute → ticket status → closure and every row looked identical. The header reads
+left-to-right in the same direction as the row beneath it — channel, sentiment, intent describe
+the customer's message on the left; ticket, status, time describe what the system did on the
+right, with intent at the pivot.
+
+The theme divider is **dropped in Detailed**: that view shows one request at a time (Fix 31), so
+it divided nothing, and once each row names its own intent it only repeated the row below.
+Lineage keeps it.
+
+### What the agent list actually is
+Asked to check a description of the architecture, and two things in it were wrong:
+
+- **Five agent classes, not four.** `CustomerValidationAgent` is a real agent and a real node.
+- **`WorkflowAutomationAgent` does not "manage SLA, escalation and approval workflows".** It has
+  two methods: `compose_answer` and `send_reply`. `sla_hours` and `requires_approval` are
+  one-line lookups called by `TicketManager` to stamp two fields on a ticket. **Nothing monitors
+  an SLA or routes an approval** — the values are written once and counted by analytics. Worth
+  knowing before saying "manages SLA" to a client, because the follow-up question is "what
+  happens when one breaches?"
+
+Also measured: the **ticket referee has made 39 calls against 4 tickets**, is 20% accurate on
+the case Session 21 tested, and had its primary job replaced by Fix 102's graph lookup. Worth
+measuring whether it still earns its place. `ticket_refine_referee` has fired **once**, costs
+nothing, and is a pure veto — leave it.
+
 ### Process
 The user found nearly all of this. My original answer to *"is the workflow diagram correct?"*
 checked the **edges** — 22 drawn, 22 real — and reported the diagram correct. That was the wrong
@@ -4491,6 +4575,12 @@ called it done, without checking 13 against the 16 that existed before.
 **Groq quota**: ~115 calls and 56K tokens went on running the test suite repeatedly — roughly
 11% of a day's free tier, against the standing rule to verify with mocks and DB reads. Stopped
 once the user asked.
+
+Almost every defect in this session was found by the user looking at the screen. My checks kept
+validating the thing I had just built rather than the thing that was supposed to work: I
+verified 13 labels placed with 0 overlaps without checking 13 against the 16 that existed
+before, and reported a header fix as done when the script that wrote it had **exited on a failed
+assertion before saving the file**.
 
 ### Still open
 - The `handled_by` fix from Session 22 still has no reader.
