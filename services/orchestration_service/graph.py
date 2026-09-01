@@ -702,6 +702,24 @@ class OrchestrationGraph:
                         f"for our {team} team (reference: {ref})."
                     )
                     state.answer = (state.answer or "") + sec_note
+                    # Tell the rest of the pipeline this ticket exists. Without these two
+                    # lines the block created a real ticket and told nobody: everything
+                    # downstream reads state.ticket / state.ticket_decision, so all of it
+                    # still believed there was none. Three consequences, one cause:
+                    #   - the TURN was written with ticket_id NULL, so the UI badge read
+                    #     "NO TICKET" beside a reply quoting that very ticket's reference;
+                    #   - buildUnits keys a request on ticket_id (app.js), so turns on the
+                    #     same matter could not merge and rendered as disconnected boxes;
+                    #   - the review gate reads ticket_decision.required, which was still
+                    #     the PRIMARY decision (claim_status -> informational -> False), so
+                    #     a customer contesting a rejected claim was auto-answered instead
+                    #     of reaching a person. A ticket existing while nothing is held
+                    #     breaks the invariant review_gate.py documents: gating on that one
+                    #     boolean is what keeps holding and ticketing from drifting apart.
+                    # `or` keeps the primary decision authoritative when it made its own
+                    # ticket; this only fills the gap when the primary path made none.
+                    state.ticket = state.ticket or sec_ticket
+                    state.ticket_decision = state.ticket_decision or sec_decision
             except Exception:
                 pass
         self._audit("answer_generated", state, intent=self._intent(state),

@@ -169,6 +169,7 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 119 — A shared topic label was treated as the same case, and an average was presented as a balance:** a customer with any open ticket on the topic was told a brand-new message was *"already logged under"* it, while the ticket logic had created no ticket at all — the reply writer matched on the **intent label** while `TicketManager` matches on the specific matter. Continuity is now claimed from `active_ticket` (the ticket the conversation is actually on). Also: `avg_monthly_balance` now carries its own qualifier in **both** prompt blocks that emit it, so the figure cannot be read as a current balance.
 - **Fix 120 — Rule 9 removed: it counted repeated TOPICS, not repeated failures:** it escalated on >=2 prior outbound turns carrying `resolved=0`, read as "we have failed this customer twice" — but **nothing sets `resolved=1` on a reply** (measured all-time: 1 row at 1, a ticket-closure notice; 20 at 0; 10 NULL), so a correct answer is recorded identically to a failure. It ticketed a demo question whose predecessor had been answered correctly. Every failure it targeted is already caught at the point of failure by Rules 0, 5 and 7.
 - **Fix 121 — "Customer has been notified" was a hardcoded string, and closing a conversation removed the agent's only reply surface:** closing notifies nobody — verified: no outbound turn is written, the discarded draft has `sent_text: None` — yet the banner stated it as fact, so an agent would reasonably believe the customer knew. Now reads "Conversation closed." Separately, the compose box was hidden on a closed conversation, leaving the agent reading a thread they could not answer; it now stays.
+- **Fix 122 — A secondary-intent ticket was created and nobody was told:** a message carrying two intents (a `claim_status` question AND a `complaint`) created a real ticket on the secondary path, which then never set `state.ticket` or `state.ticket_decision`. Everything downstream reads those, so the turn was written with `ticket_id` NULL (badge read **NO TICKET** beside a reply quoting that ticket's reference), `buildUnits` could not merge the exchanges (they rendered as disconnected boxes), and the review gate still saw the primary decision's `required=False` — so **a customer contesting a rejected Rs.96,400 claim was auto-answered instead of reaching a person.** Two lines.
 
 
 ---
@@ -4956,3 +4957,67 @@ after a case is closed, and an agent who has just closed one may still owe them 
 sites now keep it.
 
 Frontend only; `apps/admin-ui` is bind-mounted, so no rebuild.
+
+### Fix 122 — One missing assignment, three symptoms, and the serious one was invisible
+
+The user asked three questions about one screen: why does it say NO TICKET but quote a ticket
+reference, why is there no continuity between the two exchanges, and shouldn't this kind of
+question have created a ticket. **All three had the same cause.**
+
+Her message — *"That doesn't make sense, I've never missed a premium payment... I need this claim
+honoured, I have hospital bills pending"* — carried two intents: `claim_status` (primary) and
+`complaint` (secondary). The GAP-I1 secondary-intent path **did** create a real ticket,
+`tkt_451e7ce71a63`, and appended its reference to the reply.
+
+**Then it told nobody.** It never set `state.ticket` or `state.ticket_decision`, and everything
+downstream reads exactly those two:
+
+| Reader | Consequence |
+|---|---|
+| The turn writer | `ticket_id` NULL -> badge read **NO TICKET** next to a reply quoting that ticket |
+| `buildUnits` (app.js) | keys a request on `ticket_id`; with NULL keys each turn became its own unit, so the exchanges rendered as **disconnected boxes** — the missing continuity was a direct consequence of the missing id, not a separate bug |
+| `should_hold_for_review` | reads `ticket_decision.required`, still the PRIMARY decision (`claim_status` -> informational -> False) -> **the reply was auto-sent** |
+
+The third is the one that matters and the only one not visible on screen: a customer contesting a
+rejected **Rs.96,400** claim, saying she had hospital bills pending, got an automated answer with
+no human involved. **A ticket existed and nothing was held** — which breaks the invariant
+`review_gate.py` documents in its own docstring: gating the hold on that one boolean is what stops
+holding and ticketing drifting apart. The secondary path drifted by creating a ticket without
+touching the boolean.
+
+```python
+state.ticket = state.ticket or sec_ticket
+state.ticket_decision = state.ticket_decision or sec_decision
+```
+
+`or` keeps the primary decision authoritative when it made its own ticket; this only fills the gap
+when the primary path made none. Verified all three: primary-only decision -> auto-send (the bug),
+secondary decision -> **HOLD** (*"Escalated: secondary issue needs review"*), and the guard keeps
+`manual_review_required:transaction_dispute` when a primary ticket already exists.
+
+**Not fixed, separate:** the second reply repeated the first almost verbatim instead of engaging
+with *"I've never missed a payment"*. That is a generation problem, not a routing one.
+
+Tests 5 failed / 147 passed, the documented baseline. Image rebuilt.
+
+### Demo scenarios rewritten from each customer's own record
+`docs/demo-storyline.md` deleted, replaced by `docs/demo-scenarios.md` — **8 scenarios across
+Sayantini, Digvijay and Fathima**, each read from that customer's full holdings rather than from
+fragments.
+
+The previous doc connected Sayantini's card to her stuck transfer without checking the dates: the
+transfer went to a **person** by IMPS on **23 March**, the card bill was due **8 July**. The user
+called it out. The new doc states the two are unrelated and gives the dates that prove it, so it
+cannot be reintroduced.
+
+**The best scenario was found only by looking properly.** Fathima's e-NACH auto-debit bounced on
+**2026-05-05** (`CHG00100003`, Rs.828.26, *"insufficient funds"*) and her loan `LN001002` is now
+**15 days overdue** with a **Rs.2,371** penalty — and the bounce charge and the loan carry the
+**same `account_number`, 40900000100007** (verified, not assumed). A customer who has paid **53 of
+54 EMIs** was charged twice and marked overdue because an auto-debit failed. She also has a charge
+already marked **Disputed** in the graph.
+
+Digvijay has **no credit card**, so nothing card-related is scripted for him; his strongest is two
+structural-damage claims, one approved at Rs.4,07,292 and one **rejected** at Rs.4,97,729. No
+`rejection_reason` is stored, so a reply admitting it cannot see the reason is **correct** — the
+doc calls that out as a strength to demo rather than a gap to hide.
