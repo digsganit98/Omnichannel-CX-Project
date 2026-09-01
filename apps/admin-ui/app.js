@@ -640,7 +640,12 @@ function renderCentre(conv) {
 
   var isDone = urgencyToStatus(conv_meta) === 'closed';
   document.getElementById('resbanner').style.display = isDone ? 'flex' : 'none';
-  document.getElementById('compwrap').style.display = isDone ? 'none' : 'block';
+  // The compose box stays on a closed conversation. Closing is not the end of contact:
+  // a customer writes back after a case is closed, and an agent who has just closed one
+  // may still owe them a word - closing notifies nobody, which is why the banner above no
+  // longer claims it does. Removing the only reply surface left the agent reading a
+  // conversation they could not answer.
+  document.getElementById('compwrap').style.display = 'block';
 
   // Channel filter bar
   // Counts here must match what the pane below actually renders, not raw DB turns: turns
@@ -1361,8 +1366,9 @@ function renderDraftCard(conv, viewMode, shownInboundTurnIds) {
     if (!onDetailed || !belongsHere) {
       mount.innerHTML = '';
       // The compose box was hidden for the draft that is no longer shown; restore
-      // it so the agent still has a reply surface on this request.
-      if (compose && conv.status !== 'closed') {
+      // it so the agent still has a reply surface on this request. Restored on closed
+      // conversations too - see renderCentre: a closed case still gets replies.
+      if (compose) {
         compose.style.display = 'block';
       }
       return;

@@ -168,6 +168,7 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 118 — Two rules that escalated on the customer's circumstances, not their question:** Rule 4 ticketed on *tone* (urgency is read from capitals/"ASAP"), contradicting the system's own "tone is not severity" principle stated in the L1/L2/L3 prompt AND in Rule 3b's comment; Rule 6 ticketed because the customer had 3+ *other* open cases, which says nothing about the message in hand. Both removed from the ticket decision — urgency still feeds ticket **priority**. Also: the balance reply said "your current **average** balances are…" — Fix 117 told the model not to state a current balance but still handed it the account rows, so it did both; the rows are now withheld (FDs kept).
 - **Fix 119 — A shared topic label was treated as the same case, and an average was presented as a balance:** a customer with any open ticket on the topic was told a brand-new message was *"already logged under"* it, while the ticket logic had created no ticket at all — the reply writer matched on the **intent label** while `TicketManager` matches on the specific matter. Continuity is now claimed from `active_ticket` (the ticket the conversation is actually on). Also: `avg_monthly_balance` now carries its own qualifier in **both** prompt blocks that emit it, so the figure cannot be read as a current balance.
 - **Fix 120 — Rule 9 removed: it counted repeated TOPICS, not repeated failures:** it escalated on >=2 prior outbound turns carrying `resolved=0`, read as "we have failed this customer twice" — but **nothing sets `resolved=1` on a reply** (measured all-time: 1 row at 1, a ticket-closure notice; 20 at 0; 10 NULL), so a correct answer is recorded identically to a failure. It ticketed a demo question whose predecessor had been answered correctly. Every failure it targeted is already caught at the point of failure by Rules 0, 5 and 7.
+- **Fix 121 — "Customer has been notified" was a hardcoded string, and closing a conversation removed the agent's only reply surface:** closing notifies nobody — verified: no outbound turn is written, the discarded draft has `sent_text: None` — yet the banner stated it as fact, so an agent would reasonably believe the customer knew. Now reads "Conversation closed." Separately, the compose box was hidden on a closed conversation, leaving the agent reading a thread they could not answer; it now stays.
 
 
 ---
@@ -4922,3 +4923,29 @@ ticket. That sequence is only true **because** Rules 4, 6 and 9 were removed tod
 
 **First draft was wrong:** three single messages, one per capability — a checklist, not a scenario.
 The user's three categories were the ARC, not the message count.
+
+### Fix 121 — A banner claiming a notification nobody sent, over a hidden reply box
+
+The user closed a conversation and the UI said **"Conversation closed. Customer has been
+notified."** They asked whether the customer really had been.
+
+**No.** Verified in the data: the last outbound turn is the 10:59 *"Support Agent will help you
+with this shortly"* holding message, written **before** the close. Closing wrote **no turn at
+all**, and the discarded draft carries `sent_text: None`. The string is hardcoded in
+`index.html` — it reports nothing.
+
+What the customer actually experienced: asked a question, was promised an agent, then silence.
+Her case was closed and she was never told. **Worse than a mislabelled figure** — an agent reads
+"customer has been notified", believes it, and moves on. Now reads **"Conversation closed."**
+
+Whether closing *should* notify the customer is a product decision, deliberately left open. The
+banner no longer claims it does.
+
+**The reply box is no longer removed on close.** `compwrap` was hidden whenever the conversation
+was closed (`app.js`, plus a matching `conv.status !== 'closed'` guard in `renderDraftCard`), so
+the agent lost their only reply surface on exactly the conversation where the customer had been
+promised contact and never got it. Closing is not the end of contact: a customer writes back
+after a case is closed, and an agent who has just closed one may still owe them a word. Both
+sites now keep it.
+
+Frontend only; `apps/admin-ui` is bind-mounted, so no rebuild.
