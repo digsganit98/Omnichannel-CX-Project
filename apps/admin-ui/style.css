@@ -1029,5 +1029,6 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
   font-family:ui-monospace,Menlo,Consolas,monospace}
 .fl-agent{font-size:17px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;
   fill:var(--blue-t)}
+.fl-llm{font-size:17px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;fill:var(--blue-t);font-family:ui-monospace,Menlo,Consolas,monospace}
 .fl-end{font-size:25px;font-weight:800;letter-spacing:1px}
 

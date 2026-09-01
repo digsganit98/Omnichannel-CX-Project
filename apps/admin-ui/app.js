@@ -3619,10 +3619,16 @@ window.openFlowModal = function() {
     loadSystemDiagrams();
     return;
   }
-  var branches = (wf.edges || []).filter(function(e) { return String(e.to).indexOf('|') >= 0; }).length;
+  // Counted from the LAYOUT, not from wf.steps/wf.edges. The payload's step list comes
+  // from the older WorkflowStep enum - it names retrieve_knowledge / decide_resolution /
+  // create_or_update_ticket where the graph actually runs resolve_query / decide_ticket /
+  // create_ticket / skip_ticket - and its edge list collapses each branch into one row
+  // ("a | b"), so the header read 15 steps and 17 edges over a diagram showing 16 and 22.
+  var drawnSteps = Object.keys(FLOW_MAP).filter(function(k) { return k.indexOf('__') !== 0; }).length;
+  var branches = Object.keys(FLOW_MAP).filter(function(k) { return FLOW_MAP[k].kind === 'gate'; }).length;
   kgShowModal('LangGraph workflow',
     'The pipeline every inbound message runs through — WhatsApp, email and web chat alike',
-    (wf.steps || []).length + ' steps · ' + (wf.edges || []).length + ' edges · '
+    drawnSteps + ' steps · ' + FLOW_EDGES.length + ' edges · '
       + branches + ' decision points · ' + (wf.framework || 'LangGraph'),
     renderFlowSvg(wf));
 };
@@ -3945,33 +3951,29 @@ var FLOW_MAP = {
   'check_has_open_case':         { x: 1620, y: 270, w: FL_W, h: 120, kind: 'gate',
                                    note: 'does this CUSTOMER have|an open case?' },
 
-  'detect_ticket_action':        { x: 2110, y:  40, w: FL_W, h: 102, kind: 'gate',
+  'detect_ticket_action':        { x: 2110, y:  40, w: FL_W, h: 102, kind: 'agent', owner: 'Ticket Creation', llm: 'closure?',
                                    note: 'is this turn about closing?' },
-  'select_ticket_to_close':      { x: 2600, y:  40, w: FL_W, h: 102, kind: 'gate',
+  'select_ticket_to_close':      { x: 2600, y:  40, w: FL_W, h: 102, kind: 'gate', owner: 'Ticket Creation',
                                    note: 'WHICH ticket?' },
-  'close_ticket':                { x: 3090, y:  40, w: FL_W, h: 102, kind: 'step',
+  'close_ticket':                { x: 3090, y:  40, w: FL_W, h: 102, kind: 'step', owner: 'Ticket Creation',
                                    note: 'mark the selected ticket closed' },
 
-  'classify_intent':             { x: 2110, y: 470, w: FL_W, h: 136, kind: 'agent',
-                                   agent: 'Agent 1',
-                                   note: 'ONE Groq call returns intent +|urgency + sentiment + language|written onto the turn (sql)' },
-  'validate_customer':           { x: 2600, y: 470, w: FL_W, h: 136, kind: 'gate',
-                                   agent: 'Agent 1b',
+  'classify_intent':             { x: 2110, y: 470, w: FL_W, h: 136, kind: 'agent', owner: 'Intent Classification', llm: 'intent',
+                                   note: 'ONE LLM call returns intent +|urgency + sentiment + language|written onto the turn (sql)' },
+  'validate_customer':           { x: 2600, y: 470, w: FL_W, h: 136, kind: 'gate', owner: 'Customer Validation',
                                    note: 'registered for this intent?' },
-  'reject_unregistered_customer':{ x: 2600, y: 650, w: FL_W, h: 108, kind: 'step',
+  'reject_unregistered_customer':{ x: 2600, y: 650, w: FL_W, h: 108, kind: 'step', owner: 'Customer Validation',
                                    note: 'ask them to write from|a registered address' },
-  'resolve_query':               { x: 3090, y: 470, w: FL_W, h: 164, kind: 'agent',
-                                   agent: 'Agent 2',
+  'resolve_query':               { x: 3090, y: 470, w: FL_W, h: 164, kind: 'agent', owner: 'Query Resolution', llm: 'grade+answer',
                                    note: 'answers from the RL memory, their|tickets or records (graph),|or the KB (kb)|- then grades it L1 / L2 / L3' },
-  'decide_ticket':               { x: 3580, y: 470, w: FL_W, h: 136, kind: 'gate',
-                                   agent: 'Agent 3',
+  'decide_ticket':               { x: 3580, y: 470, w: FL_W, h: 136, kind: 'gate', owner: 'Ticket Creation',
                                    note: 'does a human need to see this?|L2/L3 always -> ticket' },
-  'create_ticket':               { x: 4070, y: 446, w: FL_W, h: 145, kind: 'step',
+  'create_ticket':               { x: 4070, y: 446, w: FL_W, h: 145, kind: 'agent', owner: 'Ticket Creation', llm: 'same matter?',
                                    note: 'same matter or new? matched on|transactions (graph)|the ticket is written (sql)' },
-  'skip_ticket':                 { x: 4070, y: 600, w: FL_W, h: 92, kind: 'step',
+  'skip_ticket':                 { x: 4070, y: 600, w: FL_W, h: 92, kind: 'step', owner: 'Ticket Creation',
                                    note: 'answer directly' },
 
-  'send_outbound_reply':         { x: 4030, y: 212, w: 500, h: 200, kind: 'gate',
+  'send_outbound_reply':         { x: 4030, y: 212, w: 500, h: 200, kind: 'gate', owner: 'Workflow Automation',
                                    note: 'REVIEW GATE|hold <=> ticket required|customer gets a holding message|an agent edits or approves,|then sends it manually' },
   'persist_audit_events':        { x: 4600, y: 240, w: FL_W, h: 145, kind: 'step',
                                    note: 'turn + citations + evidence (sql)|Interaction closed, memory (graph)' },
@@ -4079,9 +4081,11 @@ function renderFlowSvg(wf) {
            + '" text-anchor="middle" fill="' + c[2] + '">' + kgEscape(n.label) + '</text>';
     } else {
       var ty = n.y + 38;
-      if (n.agent) {
-        svg += '<text class="fl-agent" x="' + (n.x + n.w - 10) + '" y="' + (n.y + 19)
-             + '" text-anchor="end">' + kgEscape(n.agent) + '</text>';
+      if (n.owner) {
+        var tag = n.owner + ' agent' + (n.llm ? ' · LLM · ' + n.llm : '');
+        svg += '<text class="' + (n.llm ? 'fl-llm' : 'fl-agent') + '" x="'
+             + (n.x + n.w - 10) + '" y="' + (n.y + 19) + '" text-anchor="end">'
+             + kgEscape(tag) + '</text>';
       }
       svg += '<text class="fl-name" x="' + (n.x + 11) + '" y="' + ty + '" fill="' + c[2] + '">'
            + kgEscape(key) + '</text>';
@@ -4101,7 +4105,10 @@ function renderFlowSvg(wf) {
   });
   svg += '</svg>';
 
-  var gates = Object.keys(FLOW_MAP).filter(function(k) { return FLOW_MAP[k].kind === 'gate'; }).length;
+  // The count is gone. It read "Decision point (6)" and counted kind==='gate' - but
+  // two real decision points (detect_ticket_action, create_ticket) are now blue
+  // because they call an LLM, so the number matched neither the amber boxes nor the
+  // branches in the graph. A swatch does not need a tally; the branches are visible.
   return '<div class="kgs-wrap">'
     + '<div class="kgs-note kgs-note-2"><b>PII masking</b> \u2014 around every LLM call: PAN, '
     + 'Aadhaar, phone numbers, email addresses and card numbers are replaced with placeholders '
@@ -4115,8 +4122,8 @@ function renderFlowSvg(wf) {
     + svg
     + '<div class="kgs-key">'
     + '<span><i style="background:#ffffff;border-color:#cbd5e1"></i>Step</span>'
-    + '<span><i style="background:#fffbeb;border-color:#fcd34d"></i>Decision point (' + gates + ')</span>'
-    + '<span><i style="background:#eff6ff;border-color:#93c5fd"></i>LLM agent</span>'
+    + '<span><i style="background:#fffbeb;border-color:#fcd34d"></i>Decision point</span>'
+    + '<span><i style="background:#eff6ff;border-color:#93c5fd"></i>Calls an LLM</span>'
     + '<span><i style="background:#0f172a;border-color:#0f172a"></i>Start / end</span>'
     + '</div></div>';
 }
