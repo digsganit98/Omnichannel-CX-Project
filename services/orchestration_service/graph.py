@@ -82,6 +82,7 @@ class OrchestrationGraph:
         crm: CRMClient | None = None,
         neo4j_client=None,
         resolution_engine=None,
+        generator=None,
     ) -> None:
         self.repository = repository
         self.crm = crm or CRMClient()
@@ -99,7 +100,10 @@ class OrchestrationGraph:
         self.intent_agent = IntentClassificationAgent(agent, neo4j_client=self.neo4j_client)
         self.validation_agent = CustomerValidationAgent(neo4j_client=self.neo4j_client)
         self.resolution_agent = QueryResolutionAgent(rag, neo4j_client=self.neo4j_client, resolution_engine=resolution_engine)
-        self.ticket_agent = TicketCreationAgent(self.tickets)
+        # Injectable like every other dependency here (agent, rag, crm, neo4j_client):
+        # without it TicketCreationAgent builds a REAL GroqGenerator, so every test that
+        # constructed a graph carried a live Groq client and spent real quota.
+        self.ticket_agent = TicketCreationAgent(self.tickets, generator=generator)
         # Share the ticket agent's LLM with the manager's tier-4 ticket referee
         # (one generator instance; TicketManager stays LLM-free by default).
         self.tickets.generator = self.ticket_agent.generator
@@ -633,6 +637,12 @@ class OrchestrationGraph:
             state.analysis, state.ticket_decision, state.customer,
             graph_context=state.context.get("graph_context", {}) if state.context else {},
         )
+        # Back-fill the INBOUND turn, which was written before the ticket was decided.
+        # This is the link the admin UI groups on: buildUnits keys a request on
+        # conversation_turns.ticket_id, and a NULL key can never merge. The outbound turn
+        # gets its ticket_id directly at append_turn - only the inbound one needs this.
+        if state.inbound_turn_id:
+            self.repository.set_turn_ticket(state.inbound_turn_id, state.ticket.ticket_id)
         self._audit("ticket_created", state, intent=state.analysis.intent.value,
                     ticket_id=state.ticket.ticket_id)
         self._audit("ticket_crm_sync_" + state.ticket.crm_sync_status, state,
@@ -720,6 +730,12 @@ class OrchestrationGraph:
                     # ticket; this only fills the gap when the primary path made none.
                     state.ticket = state.ticket or sec_ticket
                     state.ticket_decision = state.ticket_decision or sec_decision
+                    # Same back-fill as _create_ticket: this path can be the ONLY one that
+                    # produced a ticket, and it does not run through that node, so without
+                    # this the inbound turn keeps a NULL ticket_id and cannot group.
+                    if state.inbound_turn_id and state.ticket:
+                        self.repository.set_turn_ticket(
+                            state.inbound_turn_id, state.ticket.ticket_id)
             except Exception:
                 pass
         self._audit("answer_generated", state, intent=self._intent(state),
@@ -885,7 +901,13 @@ class OrchestrationGraph:
                 "customer_validation_required" if (
                     state.customer_validation.validation_required and not state.customer_validation.is_registered
                 ) else
-                ("human_follow_up" if state.ticket else "answer_delivered")
+                # The HOLD decides this, not the existence of a ticket. Reading
+                # `if state.ticket` was the same conflation Phase 1 split apart, surviving
+                # in one more place: under Phase 4 every query has a ticket, so this would
+                # have reported "human_follow_up" for a routine question that was answered
+                # and auto-sent. A logging ticket means "this is a matter", not "a person
+                # is on it" - the reply draft is what says a human is involved.
+                ("human_follow_up" if state.held_for_review else "answer_delivered")
             ),
             analysis_source=state.analysis.analysis_source if state.analysis else "operational_command",
             rag_contexts=state.resolution.contexts if state.resolution else [],

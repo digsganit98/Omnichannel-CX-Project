@@ -41,7 +41,16 @@ class TicketManager:
         customer: dict | None = None,
         sentiment: str = "neutral",
         graph_context: dict | None = None,
+        hold_required: bool = True,
     ) -> Ticket:
+        """Get the ticket this message belongs to, creating one if it is a new matter.
+
+        ``hold_required`` decides the STATUS, not whether a ticket exists (Phase 4 of the
+        ticket-model redesign): False means a LOGGED thread - a grouping id nobody is
+        working - and True means OPEN, a case a human is on. It defaults to True so any
+        caller that has not been updated keeps producing serviceable tickets exactly as
+        before, rather than silently creating invisible ones.
+        """
         ticket_scope = _ticket_scope(intent.value, message.text, escalation_reason, graph_context)
         existing = (
             self.repository.find_active_ticket_for_scope(conversation_id, intent.value, ticket_scope)
@@ -92,6 +101,34 @@ class TicketManager:
             if candidates:
                 existing = self._referee_match(candidates, message)
         if existing:
+            # PROMOTION: a logging thread becomes serviceable the first time any message on
+            # it needs a person. This is the "logged -> open" transition the redesign is
+            # built around, and it is one-way: nothing here ever demotes an open ticket back
+            # to logged, because a human being done is a separate decision (closing it).
+            if hold_required and existing.status == TicketStatus.LOGGED:
+                self.repository.update_ticket(
+                    existing.ticket_id, status=TicketStatus.OPEN.value
+                )
+                self.repository.add_ticket_event(
+                    existing.ticket_id, "ticket_promoted", "orchestration",
+                    {"from": TicketStatus.LOGGED.value, "to": TicketStatus.OPEN.value,
+                     "escalation_reason": escalation_reason},
+                )
+                self._mirror_status_to_graph(existing, TicketStatus.OPEN.value)
+                # Re-read through _ticket(): update_ticket returns a RAW row (metadata_json,
+                # priority_breakdown_json), not the model's field shape.
+                # A promoted ticket is now real work, so it also reaches Jira - which it
+                # never did while it was logged (sync_ticket skips those).
+                existing = self.sync_ticket(existing.ticket_id, customer=customer)
+            # This message just landed on an existing thread. Record it as ACTIVITY so the
+            # referee's candidate list can rank by "last touched" (migration 018).
+            #
+            # This is the exact spot where the old model lost that fact: the function
+            # returned here without writing anything, so a ticket could receive messages
+            # for days while every timestamp on it stayed frozen at creation. Deliberately
+            # not update_ticket() - that would move updated_at, which analytics reads as
+            # the close time.
+            self.repository.touch_ticket_activity(existing.ticket_id)
             return existing
         priority, breakdown = score_priority(intent, urgency, sentiment, graph_context)
         ticket = Ticket(
@@ -103,6 +140,8 @@ class TicketManager:
             intent=intent.value,
             priority=priority,
             assigned_team=assign_team(intent.value),
+            # Phase 4: no hold -> a LOGGED grouping id; a hold -> an OPEN case.
+            status=TicketStatus.OPEN if hold_required else TicketStatus.LOGGED,
             approval_status="pending" if requires_approval(intent.value) else "not_required",
             escalation_reason=escalation_reason,
             sla_due_at=datetime.now(timezone.utc) + timedelta(hours=sla_hours(priority.value)),
@@ -294,6 +333,21 @@ class TicketManager:
 
     def sync_ticket(self, ticket_id: str, customer: dict | None = None) -> Ticket:
         ticket = self._ticket(ticket_id)
+        # A LOGGED ticket is a grouping id for a question that needed no human, so there is
+        # nothing for anyone to work in Jira. Under the ticket-model redesign every customer
+        # query gets one (~10 tickets -> ~40+), so without this filter "what is my card
+        # limit?" would raise a Jira issue for a question answered instantly.
+        #
+        # The filter is HERE, at the sync boundary, rather than at the create call site:
+        # sync_ticket has two callers (create_or_get_ticket and the admin re-sync route),
+        # and a logging ticket must not reach Jira through either. The record still exists
+        # in our own store, so a future logging/monitoring system can read it (decision 2).
+        if ticket.status == TicketStatus.LOGGED:
+            self.repository.add_ticket_event(
+                ticket_id, "crm_sync_skipped", "crm_integration",
+                {"reason": "logged_ticket_not_serviceable"},
+            )
+            return ticket
         result = self.crm.create_ticket(ticket, customer)
         updates = {
             "crm_sync_status": result.status,
@@ -351,23 +405,35 @@ class TicketManager:
         # keeps feeding a closed case to the model as trusted context — so a customer
         # asking "anything pending?" after resolution would still be told their dispute
         # is open. Best-effort: a graph failure must never block resolving a ticket.
-        if self.neo4j_client is not None:
-            try:
-                from services.neo4j_service import writer as neo4j_writer
-                neo4j_writer.upsert_ticket_node(
-                    self.neo4j_client,
-                    ticket_id=ticket_id,
-                    customer_id=self._graph_customer_id(ticket),
-                    intent=ticket.intent or "",
-                    priority=ticket.priority.value if hasattr(ticket.priority, "value") else str(ticket.priority),
-                    status=status.value,
-                    ticket_scope=(ticket.metadata or {}).get("ticket_scope"),
-                    title=ticket.title,
-                )
-            except Exception:
-                pass
+        self._mirror_status_to_graph(ticket, status.value)
         self._audit(ticket, "ticket_status_updated", {"status": status.value})
         return updated
+
+    def _mirror_status_to_graph(self, ticket: Ticket, status: str) -> None:
+        """Copy a ticket's status onto its graph node.
+
+        get_open_cases reads the GRAPH, not SQLite, and hands the result to the reply
+        generator as trusted context. A status change that does not reach the node means
+        the model is told about a case whose state is stale - which is how a resolved
+        dispute kept being reported as open. Best-effort by design: a graph failure must
+        never block the SQLite write that already succeeded.
+        """
+        if self.neo4j_client is None:
+            return
+        try:
+            from services.neo4j_service import writer as neo4j_writer
+            neo4j_writer.upsert_ticket_node(
+                self.neo4j_client,
+                ticket_id=ticket.ticket_id,
+                customer_id=self._graph_customer_id(ticket),
+                intent=ticket.intent or "",
+                priority=ticket.priority.value if hasattr(ticket.priority, "value") else str(ticket.priority),
+                status=status,
+                ticket_scope=(ticket.metadata or {}).get("ticket_scope"),
+                title=ticket.title,
+            )
+        except Exception:
+            pass
 
     def _graph_customer_id(self, ticket: Ticket) -> str:
         """The ticket's customer as the GRAPH keys it (CRN…), not the SQLite id (cust_…).
@@ -497,9 +563,26 @@ def _referenced_txn(text: str, graph_context: dict | None) -> str | None:
 
 def _ticket_scope(intent: str, text: str, escalation_reason: str | None,
                   graph_context: dict | None = None) -> str | None:
-    """Keep active L3/L2 tickets from merging unrelated incidents under one broad intent."""
-    if not escalation_reason:
-        return None
+    """Name the MATTER this message is about, so two messages on it can be matched.
+
+    The scope answers "which incident is this?" - a phishing report and a disputed UPI
+    charge are both fraud_report, and must not merge into one ticket.
+
+    This used to begin `if not escalation_reason: return None`, which made sense while a
+    ticket existed only when something escalated. Under Phase 4 every query gets a ticket,
+    and most are NOT escalated - so that guard left the majority of tickets with a NULL
+    scope. The consequences compound, because three things are gated on scope:
+
+      * find_active_ticket_for_scope cannot match a scopeless ticket;
+      * the refinement path (":other" -> specific) never runs;
+      * the REFEREE never runs at all - it sits behind `if not existing and ticket_scope`.
+
+    So a follow-up on the same matter would fork a new ticket every time, which is the
+    exact failure the redesign exists to remove. Relatedness is a property of the text,
+    not of whether a human was needed, so the scope is now computed for every message.
+    `escalation_reason` is still accepted because some branches read it, and callers pass
+    it unchanged.
+    """
     lowered = text.lower()
     tokens = set(re.findall(r"[a-z0-9]+", lowered))
 

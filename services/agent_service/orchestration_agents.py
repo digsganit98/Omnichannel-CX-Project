@@ -12,7 +12,7 @@ from services.rag_service.rag_pipeline import RAGPipeline
 from services.ticket_service.ticket_manager import TicketManager
 from shared.schemas.intents import Intent, IntentResult
 from shared.schemas.messages import InboundMessage
-from shared.schemas.tickets import Ticket, TicketStatus
+from shared.schemas.tickets import SERVICEABLE_TICKET_STATUSES, Ticket, TicketStatus
 
 
 MANUAL_REVIEW_INTENTS = {
@@ -522,8 +522,24 @@ class TicketCreationAgent:
         self.generator = generator or GroqGenerator()
 
     def decide(self, analysis: IntentResult, resolution: QueryResolution, context: dict | None = None) -> TicketDecision:
+        """Two independent answers, from one escalation judgement.
+
+        PHASE 4 of the ticket-model redesign. `required` used to be `reason is not None`,
+        which made a ticket exist only when a human was needed - so the common case ("this
+        is a distinct matter, nobody needs to look at it") had no vocabulary, and the admin
+        UI, which groups a conversation by ticket_id, could not group it. Every unticketed
+        exchange rendered as its own disconnected box however obviously related.
+
+        Now a ticket ALWAYS exists (it is the name of a matter), and the escalation rules -
+        entirely unchanged - decide only the HOLD. The two questions were never the same
+        question; Phase 1 split the field so this line could stop conflating them.
+        """
         reason = self._escalation_reason(analysis, resolution, context or {})
-        return TicketDecision(required=reason is not None, reason=reason)
+        return TicketDecision(
+            required=True,                     # a ticket is a grouping id: always
+            hold_required=reason is not None,  # a human is needed: unchanged rules
+            reason=reason,
+        )
 
     def detect_action(self, message: InboundMessage, context: dict) -> TicketActionDecision:
         if not context.get("active_ticket"):
@@ -637,6 +653,10 @@ class TicketCreationAgent:
             customer=customer,
             sentiment=analysis.sentiment,
             graph_context=graph_context,
+            # Phase 4: the hold decides the status. No hold -> LOGGED, a grouping id nobody
+            # is working. A hold -> OPEN, a case a human is on. An existing thread that now
+            # needs a person is PROMOTED logged -> open inside create_or_get_ticket.
+            hold_required=bool(decision.hold_required),
         )
 
     @staticmethod
@@ -807,7 +827,19 @@ class WorkflowAutomationAgent:
     ) -> str:
         body = _strip_email_boilerplate((resolution.answer or "").strip()) if resolution else ""
 
-        if ticket:
+        # SERVICEABLE only, not "a ticket exists". Under Phase 4 of the ticket-model
+        # redesign every query gets a ticket, so `if ticket:` told a customer asking
+        # "what is my card limit?" that their request was "logged under reference tkt_x"
+        # and a team "will follow up" - for a question that was answered completely, in
+        # full, in the same message. Nobody is following up, and the reference is an
+        # internal grouping id they cannot use.
+        #
+        # This is decision 1 of the redesign: the customer sees a reference only once the
+        # thread is serviceable, which is exactly when there IS something to follow up on.
+        # It is also the Fix 119 false-reference failure, reappearing through the door the
+        # redesign opened. A LOGGED ticket still exists and still groups the conversation -
+        # it is simply not mentioned to the customer.
+        if ticket and ticket.status in SERVICEABLE_TICKET_STATUSES:
             ref = f"*{ticket.ticket_id}*" if channel == "whatsapp" else ticket.ticket_id
             team = ticket.assigned_team.replace("_", " ")
             if getattr(ticket, "escalation_reason", None) == "customer_requested_human":
