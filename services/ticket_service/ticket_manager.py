@@ -13,7 +13,7 @@ from services.workflow_service.approvals import requires_approval
 from services.workflow_service.sla import sla_hours
 from shared.schemas.intents import Intent, Urgency
 from shared.schemas.messages import InboundMessage
-from shared.schemas.tickets import Ticket, TicketStatus
+from shared.schemas.tickets import SERVICEABLE_TICKET_STATUSES, Ticket, TicketStatus
 from shared.utils.ids import new_id
 
 
@@ -52,6 +52,7 @@ class TicketManager:
         before, rather than silently creating invisible ones.
         """
         ticket_scope = _ticket_scope(intent.value, message.text, escalation_reason, graph_context)
+        forked_from: list[str] = []
         existing = (
             self.repository.find_active_ticket_for_scope(conversation_id, intent.value, ticket_scope)
             if ticket_scope
@@ -100,6 +101,13 @@ class TicketManager:
             candidates = self.repository.list_active_tickets_for_conversation(conversation_id)
             if candidates:
                 existing = self._referee_match(candidates, message)
+                if existing is None:
+                    # The referee looked at live threads and judged this a DIFFERENT
+                    # matter. Recorded so the reply can say so: forking is the decision
+                    # the customer most needs told, because otherwise they cannot know
+                    # whether "my dispute" now means one thing or two.
+                    forked_from = [t.ticket_id for t in candidates
+                                   if t.status in SERVICEABLE_TICKET_STATUSES]
         if existing:
             # PROMOTION: a logging thread becomes serviceable the first time any message on
             # it needs a person. This is the "logged -> open" transition the redesign is
@@ -151,6 +159,11 @@ class TicketManager:
                 "channel": message.channel.value,
                 "provider": message.provider,
                 "ticket_scope": ticket_scope,
+                # Serviceable threads that were open when the referee judged this a
+                # separate matter. Empty for the common case (nothing else was live, or
+                # the referee was never consulted). Read by compose_answer to tell the
+                # customer their new issue was raised separately.
+                "forked_from": forked_from,
             },
         )
         self.repository.create_ticket(ticket)

@@ -854,6 +854,17 @@ class WorkflowAutomationAgent:
                     f"Your request has been logged under reference {ref}. "
                     f"Our {team} team will follow up with you."
                 )
+            # The referee judged this a separate matter while other threads were live.
+            # Saying so is what a human agent does, and it is the one continuity decision
+            # the customer needs told: without it they cannot know whether "my dispute"
+            # now refers to one case or two, and neither can anyone reading the thread.
+            # Only serviceable threads count - announcing a split from a logging id would
+            # expose an internal reference (decision 1).
+            if (ticket.metadata or {}).get("forked_from"):
+                ticket_note = (
+                    "This looks like a separate issue from your existing request, "
+                    "so we have raised it on its own. " + ticket_note
+                )
             # Skip the appended reference when the reply already gave it. The note exists
             # so every reply carries its ticket id; a reply naming that id already
             # satisfies it, and appending anyway printed it twice ("your dispute tkt_X is
