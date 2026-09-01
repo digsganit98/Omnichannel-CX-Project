@@ -638,6 +638,13 @@ function renderCentre(conv) {
   var _metaEl = document.getElementById('convMeta');
   if (_metaEl) _metaEl.innerHTML = '';
 
+  // The banner reads "No open tickets", not "Conversation closed", because that is what
+  // urgencyToStatus actually reports: it returns 'closed' either when the conversation is
+  // closed OR when every ticket on it is closed while the conversation itself is still
+  // active (see line ~509). The second case is the common one - a customer whose cases are
+  // all settled but who is still in the queue - and calling that "conversation closed" told
+  // the agent something the record did not say. Nothing here notifies the customer, so the
+  // banner no longer claims that either.
   var isDone = urgencyToStatus(conv_meta) === 'closed';
   document.getElementById('resbanner').style.display = isDone ? 'flex' : 'none';
   // The compose box stays on a closed conversation. Closing is not the end of contact:

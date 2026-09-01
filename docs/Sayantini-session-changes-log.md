@@ -4941,6 +4941,13 @@ Her case was closed and she was never told. **Worse than a mislabelled figure** 
 Whether closing *should* notify the customer is a product decision, deliberately left open. The
 banner no longer claims it does.
 
+**The banner now reads "No open tickets", not "Conversation closed."** The user pointed out the
+wording was wrong, and the code agrees: `urgencyToStatus` returns `'closed'` either when the
+conversation is closed **or** when every ticket on it is closed while the conversation is still
+active. Verified live — Sayantini's conversation is `active` with all six tickets closed, so the
+banner was on screen saying "Conversation closed" about a conversation that was not. The second
+case is the common one: a customer whose cases are all settled but who is still in the queue.
+
 **The reply box is no longer removed on close.** `compwrap` was hidden whenever the conversation
 was closed (`app.js`, plus a matching `conv.status !== 'closed'` guard in `renderDraftCard`), so
 the agent lost their only reply surface on exactly the conversation where the customer had been
