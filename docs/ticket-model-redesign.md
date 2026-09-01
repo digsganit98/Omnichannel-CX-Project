@@ -249,13 +249,36 @@ is meaningless.
 
 ## 6. Plan
 
-### Phase 0 — Measure the referee (no code)
-Replay real message pairs through `_referee_match` and score its answers against a hand-labelled
-expectation. Include: a status follow-up, a second dispute about a different charge, a topic change,
-and a cross-channel follow-up.
+### Phase 0 — Measure the referee — **DONE, PASSED 10/10**
+Ten hand-labelled cases replayed through `_referee_match` on 2026-09-01.
 
-**Gate: if the referee cannot reliably tell same-matter from new-matter, stop.** The whole design
-rests on it. Cost: ~15 calls, ~10K tokens.
+| Case | Expected | Got |
+|---|---|---|
+| "Any update on my dispute request?" | match dispute | match |
+| "The Rs.5,776 to Samarth Thaker still has not reached him." | match dispute | match |
+| "I want to dispute **another** charge - my gym billed me twice." | NEW | NEW |
+| "When is my next insurance premium due?" | NEW | NEW |
+| "That does not make sense... I need this claim honoured." | match claim | match |
+| "What about my **other** claim CLM001003?" | NEW | NEW |
+| "Can I pay just the minimum on that late fee?" | match card | match |
+| 3 open: "Any update on the transfer to Samarth Thaker?" | match dispute | match |
+| 3 open: "How do I open a new savings account?" | NEW | NEW |
+| 3 open: "I still want that rejected claim reconsidered." | match claim | match |
+
+**10/10 correct. Zero wrong merges** — the dangerous direction. It separated *"another charge"* from
+the open dispute and *"my other claim"* from the open claim, which is exactly the discrimination
+this design needs. **Gate passed.** Cost ~640 tokens per call.
+
+**My first harness was broken and nearly produced a false finding.** It returned NEW on all ten and
+I was about to conclude the referee could not match at all. The cause was mine: I passed
+`repository=None`, and after a *correct* match the code calls `repository.add_ticket_event(...)`,
+which raised `AttributeError` into the function's bare `except Exception: return None` — turning
+every right answer into NEW. Caught only because the raw LLM output said `tkt_dispute01` while the
+function returned NEW. **~6,400 tokens wasted re-running it.**
+
+**A real finding falls out of that:** `_referee_match` wraps everything in `except Exception: return
+None`, so a **database failure while attaching silently becomes a forked ticket**, with nothing
+logged. Safe-by-default, but invisible — worth narrowing the except or logging the swallow.
 
 ### Phase 1 — Separate the two decisions (no behaviour change)
 Introduce `ticket_required` (always true) and `hold_required` (today's rules) as distinct values,
@@ -291,9 +314,11 @@ When the referee answers NEW and an open thread exists, the reply notes it is a 
 **The design is right.** It fixes the UI grouping at its root rather than with a proxy, and it
 separates two decisions that were never the same question.
 
-**Do Phase 0 first, and let it decide.** Everything rests on the referee, and its behaviour at this
-volume is unmeasured. One measurement is cheap; discovering it silently merges unrelated matters
-after Phase 4 is not.
+**Phase 0 is done and passed 10/10**, so the design is unblocked. The referee can tell same-matter
+from new-matter, with zero wrong merges on the cases that matter.
+
+**Phases 1 to 3.5 need no LLM calls** — code, migration and query work, verifiable with mocks and DB
+reads. Only Phase 4's end-to-end test costs tokens.
 
 **Phase 3.5 is not optional.** Without it, Phase 4 silently degrades the referee by starving it of
 the right candidates, and the symptom looks like an LLM accuracy problem rather than a query bound.
