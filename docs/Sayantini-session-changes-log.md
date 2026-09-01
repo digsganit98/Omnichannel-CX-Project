@@ -180,6 +180,7 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 126 - Phase 4: every customer query now gets a ticket:** `decide()` returns `required=True` always with `hold_required = reason is not None`, so the escalation rules are unchanged but now answer only the HOLD question; status follows the hold (no hold -> LOGGED, hold -> OPEN) and a logging thread is **promoted** to open the first time a message on it needs a person, which also releases it to Jira. **Two things broke that the plan had not predicted, both the same conflation surviving elsewhere:** (1) `_ticket_scope` began `if not escalation_reason: return None`, so under Phase 4 most tickets got a NULL scope - and `find_active_ticket_for_scope`, the `:other` refinement path and **the referee itself** are all gated on scope, so every follow-up would have forked a new ticket, reintroducing the exact failure this redesign removes; (2) `workflow_status` read `"human_follow_up" if state.ticket`, conflating "a ticket exists" with "a person is involved" - every routine question would have reported human follow-up while being auto-sent. **17/17 verified, zero Groq calls, zero network**, including all three 5.7 regressions (117 auto-send, 123 approval holds, 119 no logging ticket in customer-facing open cases). Two tests were **updated, not fixed** - they asserted the old model ("a routine question skips ticket creation", "ticket_id is None"). Suite back to baseline 5 failed / 147 passed. **Not yet observed on screen** - the 61 existing turns predate the model, which is what Phase 4.5 exists for.
 - **Fix 127 - six ticket-reading surfaces the redesign never audited:** Phase 2 audited the 21 sites that FILTER on status; these were sites that do not filter at all, so they were invisible to it - the customer 360 graph (the exclusion form, on the one surface already documented as unable to absorb ~4x the nodes), the portal's ticket count and its unguarded detail endpoint, the opportunity engine's cache key (a ~1000-token LLM call re-fired by every routine question), Tickets-by-channel (which became a second copy of message_count), and avg resolution time (diluted 180 -> 90.5 by a logging ticket closed in a minute). Promotion was also writing `escalation_reason` only to the event log, never the ticket row, so a promoted case was indistinguishable from a logging one. 25/25 verified with negative controls, zero Groq, zero network.
 - **Fix 128 - the workflow diagram still drew the model Phase 4 replaced:** the LangGraph picture's 22 edges matched the live graph exactly, but three boxes described the OLD behaviour - `decide_ticket` read *"does a human need to see this? L2/L3 always -> ticket"* (the conflation Phase 1 split apart), the review gate read *"hold <=> ticket required"* when `review_gate.py` reads `hold_required`, and `skip_ticket` was drawn as a live path labelled *"no"* / *"answer directly"* when `required=True` is hardcoded, so it **cannot execute**. Together they told a viewer routine questions get no ticket - the exact model the redesign removed. Diagram now draws reachable paths only (15 steps, 20 edges, 4 decision points); `skip_ticket` stays wired in `graph.py` as a landing spot. Neo4j header *"19 relationship types"* -> *"19 connections"* (19 drawn, 15 distinct types). 9/9 verified against the live graph with a negative control.
+- **Fix 129 - the LLM referee never decided ticket identity; a keyword string did:** a customer's savings-balance question and their credit-card dues question merged into ONE ticket, and the referee was never called (measured: 0 calls). `_ticket_scope` matches KEYWORDS, so it answers "what kind of thing is this?" - never "is this the same instance?": **9 of 16 intents have no scope rules at all** and collapse to `:manual_review`, and the 7 that do fail identically ("dispute ANOTHER charge" scores the same `:card` as the original; two different claim ids both score `:other`). The referee now decides, reading the text, with code still building the candidate set and validating the answer. Gate-probed **30/30 unanimous** before building. `_referee_rejects` deleted - it vetoed a string merge that no longer exists, and its tie-break was "when in doubt answer SAME", the inverse of this system's rule. **A regression the plan had not predicted:** an identical repeated message forked, because the string match used to absorb it - fixed with a deterministic exact-text guard that needs no LLM. 15/15 verified, net -41 lines.
 
 
 ---
@@ -5781,3 +5782,116 @@ are **15** distinct types - `PRODUCT_IS` is drawn 4x (Account, FD, CreditCard, L
 edges are confirmed **present in the live graph** and confirmed **absent from the drawing**, so the
 check distinguishes "removed from the diagram" from "removed from the system". Zero Groq, zero
 network. No pytest run - `app.js` is not covered by the suite and no Python changed.
+
+### Fix 129 - the LLM referee never decided ticket identity; a keyword string did
+
+**Found by the user running two questions.** "What is my current savings account balance?" then
+"What is the amount due on my credit card and by when?" - 22 minutes apart, same conversation.
+They merged into ONE ticket, and the reply to the second said *"check the exact due date in the
+mobile app"* while the record held `payment_due_date = 2026-07-08` and `dpd = 45`.
+
+**Measured, not assumed: the referee was never called.** `llm_usage_events` for that run shows
+`ticket_referee` = **0 calls** and `ticket_refine_referee` = **0 calls**. Both are gated behind
+`if not existing`, and the string match had already set `existing`.
+
+### Why a scope string cannot decide identity
+
+`_ticket_scope` matches **keywords**, so it can only ever answer *"what kind of thing is this
+about?"* - never *"is this the same instance?"*. Measured against the live code:
+
+| | |
+|---|---|
+| Intents with **no scope rules at all** | **9 of 16** - every message collapses to `<intent>:manual_review` |
+| Intents that DO have rules | **7** - and they fail the same way |
+
+The 7 "covered" intents are no better:
+
+| Two genuinely different matters | Scope produced |
+|---|---|
+| "dispute a charge on my credit card" / "dispute **ANOTHER** charge - my gym billed me twice" | both `transaction_dispute:card` |
+| "status of claim **CLM001003**?" / "why was my other claim **CLM001001** rejected?" | both `claim_status:other` |
+| "my card is lost" / "my **other** card was **also** stolen" | both `card_management:lost_or_stolen` |
+
+Two different claim IDs produce the same scope. The word "another" changes nothing. This is the
+same root cause as Fix 102, which corrected `transaction_dispute` only.
+
+### The design: one decision point
+
+Relatedness is judged by the referee, reading the text. Scope is demoted from judge to
+**attribute** - it still keys the resolution memory (`search_resolution_memory`), labels each
+candidate in the referee prompt (`_scope_label`), mirrors onto the Ticket node and filters
+agent-assist, so it is still computed and stored.
+
+Every guardrail is kept: code builds the candidate set (bounded 5, ranked by activity,
+serviceable guaranteed a slot), code validates the answer is one of the ids it supplied, and
+every failure path - no generator, LLM error, unparseable answer, genuine doubt - forks.
+**Doubt forks, never merges.**
+
+### Gate-probed BEFORE building - 30/30 unanimous
+
+Per [[probe-before-building]]: Session 21 shipped three referee fixes on untested assumptions and
+all three failed. Six cases, 5 runs each, production prompt, zero variance:
+
+| Must FORK (string match merges these today) | Result |
+|---|---|
+| two card disputes ("another charge") | NEW 5/5 |
+| two different claim ids | NEW 5/5 |
+| two stolen cards | NEW 5/5 |
+| **the real bug**: savings balance + card dues | NEW 5/5 |
+
+| Must ATTACH (over-forking risk) | Result |
+|---|---|
+| "any update on my disputed card charge?" - **different intent** | attached 5/5 |
+| "It was the Rs.1,258 late fee on my Mastercard" - supplying specifics | attached 5/5 |
+
+The must-attach pair is what would have killed the design; both held.
+
+### `_referee_rejects` deleted
+
+It existed to veto the string-based `:other` merge. With no string-based merge there is nothing
+to guard - and it could not simply be kept: its tie-break was **"When in doubt answer SAME"**,
+i.e. doubt MERGES. Correct when the fallback was a working refinement; the exact inverse of this
+system's rule now that the fallback is a new ticket.
+
+Refinement itself survives, re-triggered by the referee's decision: a stale `:other` scope files
+a verified resolution under the wrong memory key, and the frozen description is what the admin UI
+shows and what the referee falls back to when Neo4j is unavailable.
+
+### A regression the plan had not predicted
+
+The full suite went 5 failed -> 6. `test_distinct_l3_fraud_incidents` **passed on a clean tree and
+failed with the change** - verified by stashing, so not the flaky one the log records.
+
+**An identical repeated message forked.** The string match used to absorb that case incidentally;
+with it gone, a retry, a webhook redelivery or a customer repeating themselves creates a duplicate
+whenever the LLM is unavailable. Fixed with a **deterministic exact-text guard** that runs before
+the referee and needs no LLM. It scans **every** active ticket, not the newest of that intent -
+the first attempt used `find_active_ticket_for_intent` and still failed, because an unrelated
+fraud ticket opened in between hid the thread the repeat belonged to.
+
+### Verification
+
+**15/15**, real `create_or_get_ticket`, fake generators, zero Groq, zero network: referee NEW forks
+/ id attaches / **bogus id rejected** / no generator forks / LLM error forks; refinement upgrades
+the scope AND appends the details, with a negative control proving an already-specific scope is not
+overwritten; the repeat guard attaches with no generator, survives an interleaved ticket, and a
+negative control proves different text still forks.
+
+**Suite back to the 5 failed / 147 passed baseline, same five tests.** Two tests were **updated,
+not fixed** - both encoded the old model (a generator-less manager refining and forking by string
+comparison); their asserted BEHAVIOUR is unchanged, only who decides it moved. `ticket_manager.py`
+is net **-41 lines**.
+
+### Fix A (same session) - the reply withheld a due date the record held
+
+The customer-context block emitted credit limit and balance only. `get_credit_cards` already
+returns `min_amount_due`, `payment_due_date` and `dpd` - they were simply never printed, while the
+card-intent block in `queries.py` has always emitted them. Which block runs depends on how the
+message was classified, so the same question answered differently by route. Added conditionally,
+following the Policies block's own pattern so a card with nothing outstanding emits no empty
+labels. **9/9 verified against the live graph record**, negative control included, **~10 tokens per
+message**.
+
+*(First test run reported 3 failures: it executed inside the api container, which runs the baked
+image, not the edit on disk. The fix was correct; the test was invalid - see
+[[rebuild-image-to-deploy-python]].)*

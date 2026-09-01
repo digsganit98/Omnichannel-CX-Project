@@ -1860,13 +1860,23 @@ def test_generate_answer_masks_pii_before_sending_to_groq_and_restores_name():
 def test_specific_scope_refines_open_other_ticket_instead_of_forking():
     """Omnichannel continuation: a vague dispute ("...:other" scope) followed by a
     specific follow-up ("...:card") on ANY channel must refine the open ticket,
-    not create a duplicate (Sayantini email->web_chat split, 23 Jul 2026)."""
+    not create a duplicate (Sayantini email->web_chat split, 23 Jul 2026).
+
+    UPDATED, not fixed: this test was written when a STRING COMPARISON on the scope
+    decided all three outcomes below, so a generator-less manager could refine, attach and
+    fork on its own. Relatedness is now judged by the referee, so the manager needs one -
+    and the three outcomes are now its verdicts, scripted here in order:
+      1. attach  -> the card details refine the vague ticket
+      2. NEW     -> "I ALSO want to dispute a UPI payment" is a separate matter
+      3. attach  -> repeating the card details lands on the refined ticket
+    The BEHAVIOUR asserted is unchanged; only who decides it has moved."""
     from services.ticket_service.ticket_manager import TicketManager
     from shared.schemas.intents import Urgency
     from shared.schemas.messages import Channel, InboundMessage
 
     repo = SQLiteCXRepository(":memory:")
-    manager = TicketManager(repo)
+    referee = _FakeRefereeGenerator([], attach_first=True)
+    manager = TicketManager(repo, generator=referee)
 
     def inbound(channel: Channel, text: str, msg_id: str) -> InboundMessage:
         return InboundMessage(
@@ -1904,7 +1914,10 @@ def test_specific_scope_refines_open_other_ticket_instead_of_forking():
     events = [e["event_type"] for e in repo.list_ticket_events(vague.ticket_id)]
     assert "ticket_scope_refined" in events
 
-    # Guard rail: a DIFFERENT specific scope (UPI) is a distinct incident -> new ticket.
+    # Guard rail: a genuinely different matter is a distinct incident -> new ticket.
+    # The referee makes this call now (it reads "I ALSO want to dispute a UPI payment"),
+    # where the old model inferred it from ":upi" != ":card".
+    referee.answers = ["NEW"]
     upi = manager.create_or_get_ticket(
         conv_id, cust_id,
         inbound(Channel.WHATSAPP, "I also want to dispute a UPI payment of Rs. 900.", "m3"),
@@ -1915,6 +1928,10 @@ def test_specific_scope_refines_open_other_ticket_instead_of_forking():
     assert upi.metadata["ticket_scope"] == "transaction_dispute:upi"
 
     # Idempotency: repeating the card details still lands on the refined ticket.
+    # Scripted explicitly: two tickets are open by now, and "attach to the first id in the
+    # prompt" would pick whichever the candidate ranking put first (the newer UPI one).
+    # Naming the ticket is what this step is actually asserting.
+    referee.answers = [vague.ticket_id]
     repeat = manager.create_or_get_ticket(
         conv_id, cust_id,
         inbound(Channel.WEB_CHAT, "Again: the card charge at TechMart is the disputed one.", "m4"),
@@ -1930,16 +1947,27 @@ class _FakeRefereeGenerator:
     """Stands in for GroqGenerator: returns a scripted answer per call and
     records the prompts it was given."""
 
-    def __init__(self, answers: list[str]):
+    def __init__(self, answers: list[str], attach_first: bool = False):
         self.answers = list(answers)
         self.prompts: list[str] = []
         self.raise_error = False
+        # When the scripted answers run out: NEW by default (the safe fallback), or attach
+        # to the first candidate id in the prompt. The fixture needs the latter, because the
+        # refinement it sets up is now the referee's decision rather than a string compare.
+        self.attach_first = attach_first
 
     def _generate(self, system_prompt: str, user_prompt: str, operation: str = "llm_generation", metadata=None) -> dict:
         if self.raise_error:
             raise RuntimeError("llm down")
         self.prompts.append(user_prompt)
-        answer = self.answers.pop(0) if self.answers else "NEW"
+        if self.answers:
+            answer = self.answers.pop(0)
+        elif self.attach_first:
+            import re as _re
+            found = _re.search(r"tkt_[0-9a-f]+", user_prompt)
+            answer = found.group(0) if found else "NEW"
+        else:
+            answer = "NEW"
         return {"text": answer, "llm_used": True, "model": "fake"}
 
 
@@ -1951,7 +1979,12 @@ def _referee_fixture():
     from shared.schemas.messages import Channel, InboundMessage
 
     repo = SQLiteCXRepository(":memory:")
-    manager = TicketManager(repo)
+    # The refinement step below (":other" opener + specific follow-up) is now decided by the
+    # REFEREE, not by comparing scope strings - so the fixture has to supply a generator for
+    # it to attach at all. Without one the manager forks, which is the correct safe default
+    # (doubt forks, never merges) but leaves the fixture with two tickets instead of one.
+    # Each test replaces manager.generator with its own scripted fake afterwards.
+    manager = TicketManager(repo, generator=_FakeRefereeGenerator([], attach_first=True))
 
     counter = {"n": 0}
 

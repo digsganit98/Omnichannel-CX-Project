@@ -801,11 +801,25 @@ def _format_graph_context(graph_ctx: dict | None, current_intent: str | None = N
     if credit_cards:
         lines.append("Credit Cards:")
         for cc in credit_cards:
+            # Min due / due date / days-past-due are ALREADY fetched by get_credit_cards and
+            # were simply never printed here. This block runs on every message, so a customer
+            # asking "what do I owe and by when?" was answered from limit+balance alone and
+            # told to "check the exact due date in the mobile app" - while the record held
+            # the date AND said the payment was 45 days overdue. The card-intent block in
+            # neo4j_service/queries.py has always emitted these three; only this one did not,
+            # and which block runs depends on how the message was classified.
+            #
+            # Appended conditionally, the same way the Policies block above builds `maturity`
+            # and `next_due`: a card with nothing outstanding must not emit an empty label.
+            min_due = f" | Min due: {_safe_amount(cc['min_amount_due'])}" if cc.get("min_amount_due") else ""
+            due_date = f" | Payment due: {cc['payment_due_date']}" if cc.get("payment_due_date") else ""
+            dpd = f" | {cc['dpd']} days past due" if cc.get("dpd") else ""
             lines.append(
                 f"  - {cc.get('card_network', 'Card')} {cc.get('card_variant', '')} "
                 f"(ID: {cc.get('card_id', '')}) | "
                 f"Credit limit: {_safe_amount(cc.get('credit_limit', 0))} | "
                 f"Balance due: {_safe_amount(cc.get('balance_due', 0))}"
+                f"{min_due}{due_date}{dpd}"
             )
     accounts = graph_ctx.get("accounts") or []
     if accounts:
