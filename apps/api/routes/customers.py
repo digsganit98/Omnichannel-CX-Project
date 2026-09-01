@@ -22,6 +22,7 @@ from services.neo4j_service.queries import (
     get_transactions,
 )
 from services.rag_service.groq_generator import GroqGenerator
+from shared.schemas.tickets import SERVICEABLE_TICKET_STATUSES
 
 logger = logging.getLogger(__name__)
 
@@ -221,18 +222,23 @@ def customer_graph_view(customer_id: str) -> dict:
             health, "HAS_CLAIM", source=parent, props=cl)
 
     # Tickets (Fix 63 put these in the graph; read them from SQLite, the system of record).
-    # OPEN ONLY — a resolved ticket is closed business, and including them let one node type
-    # grow without bound: a long-standing customer accumulates tickets forever while the
+    # SERVICEABLE ONLY — a closed ticket is closed business, and including them let one node
+    # type grow without bound: a long-standing customer accumulates tickets forever while the
     # radial layout is sized for ~12 nodes, so their products would eventually be crowded
     # out by their history. Matches the right panel's "Open Tickets (N)" card (Fix 47).
-    # Resolved-ticket history stays visible in Lineage and the portal's My Tickets.
+    # Closed-ticket history stays visible in Lineage and the portal's My Tickets.
+    #
+    # This was the EXCLUSION form (`status == "closed": continue`) that the ticket-model
+    # redesign replaced everywhere else, and it silently admitted LOGGED. That matters most
+    # on THIS surface: a logging id is an internal grouping key for a question already
+    # answered, and Phase 4 gives one to every customer query — roughly 4x the ticket volume
+    # this node type was already documented (above) as unable to absorb.
     ticket_ids: list[str] = []
     try:
         for t in get_repository().list_tickets():
             if t.get("customer_id") != customer_id:
                 continue
-            st = str(t.get("status") or "").lower()
-            if st == "closed":
+            if str(t.get("status") or "").lower() not in SERVICEABLE_TICKET_STATUSES:
                 continue
             scope = ((t.get("metadata") or {}).get("ticket_scope") or "")
             # "transaction_dispute:imps" → "imps": the specific matter, so two disputes
@@ -240,7 +246,7 @@ def customer_graph_view(customer_id: str) -> dict:
             detail = scope.split(":", 1)[1] if ":" in scope else ""
             add(f"tkt:{t.get('ticket_id')}", "Ticket", t.get("ticket_id") or "Ticket",
                 f"{t.get('intent') or ''}{' · ' + detail if detail else ''} · {t.get('status')}",
-                "warn",  # every ticket reaching here is open — resolved ones are skipped above
+                "warn",  # every ticket reaching here is serviceable — see the filter above
                 "HAS_TICKET", props={k: t.get(k) for k in ("ticket_id", "intent", "status", "priority")})
             ticket_ids.append(t.get("ticket_id"))
     except Exception as exc:

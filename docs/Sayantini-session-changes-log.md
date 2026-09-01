@@ -178,6 +178,7 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Plan audit - the redesign had no definition of done; added Phases 4.5 and 6:** asked at the start of the session whether the plan is correct, I audited the *process* and not the *plan*. Re-reading it against the goal: the mechanism is right (root-cause fix, no proxy, Phase 0 gate) but it **ended at Phase 4 with nothing that checks the screen** - every phase is verified by unit assertions, DB reads and token counts, none of which can tell you the UI grouped anything. It also ignored that the **61 existing turns** were written under the old model and can never get a ticket id, so the UI after Phase 4 would show old disconnected boxes interleaved with new grouped matters - indistinguishable from a half-working feature. Added **Phase 4.5** (fresh start via the runbook, AFTER Phase 4, which also clears the ghost node + 12 FK violations without bespoke surgery) and **Phase 6** (acceptance against `docs/demo-question-set.md`'s own on-screen criteria). Phase 5 demoted to optional polish and moved last; 5.6 (move `case_summary`/`opportunity_generation` off the message path, ~35% of tokens) promoted from footnote to a decision; a goal statement added at the top. **The targeted ghost delete was dropped** - it treats one symptom on data Phase 4.5 discards.
 - **Fix 125 - Phases 3 and 3.5: guard the surfaces and bound the candidate set:** re-scoping Phase 3 against the code found **3 of its 4 items already delivered by Phase 2** (`get_open_cases`, agent surfaces, analytics counts), leaving the Jira filter - `sync_ticket` now returns early for a LOGGED ticket and records `crm_sync_skipped`, placed at the sync boundary so both callers are covered. **A fifth item the plan had not listed:** `get_agent_metrics` had **no status filter at all**, so after Phase 4 its "handled" count would silently mean "messages received"; each column now states its population. Phase 3.5 adds migration **018** (`last_activity_at`, NULL default + COALESCE so untouched tickets keep their old ordering) and a dedicated `touch_ticket_activity` - **deliberately not `update_ticket`**, which moves `updated_at`, the field measured as a 21x analytics error if repurposed. Candidates are now ranked by activity with a **guaranteed slot for serviceable tickets**. **15/15 verified, zero Groq calls**, including the negative control: the old `ORDER BY created_at` returns five routine tickets and **drops the live dispute entirely**. Suite unchanged (5 failed / 147 passed); migration tested against a copy of the live DB.
 - **Fix 126 - Phase 4: every customer query now gets a ticket:** `decide()` returns `required=True` always with `hold_required = reason is not None`, so the escalation rules are unchanged but now answer only the HOLD question; status follows the hold (no hold -> LOGGED, hold -> OPEN) and a logging thread is **promoted** to open the first time a message on it needs a person, which also releases it to Jira. **Two things broke that the plan had not predicted, both the same conflation surviving elsewhere:** (1) `_ticket_scope` began `if not escalation_reason: return None`, so under Phase 4 most tickets got a NULL scope - and `find_active_ticket_for_scope`, the `:other` refinement path and **the referee itself** are all gated on scope, so every follow-up would have forked a new ticket, reintroducing the exact failure this redesign removes; (2) `workflow_status` read `"human_follow_up" if state.ticket`, conflating "a ticket exists" with "a person is involved" - every routine question would have reported human follow-up while being auto-sent. **17/17 verified, zero Groq calls, zero network**, including all three 5.7 regressions (117 auto-send, 123 approval holds, 119 no logging ticket in customer-facing open cases). Two tests were **updated, not fixed** - they asserted the old model ("a routine question skips ticket creation", "ticket_id is None"). Suite back to baseline 5 failed / 147 passed. **Not yet observed on screen** - the 61 existing turns predate the model, which is what Phase 4.5 exists for.
+- **Fix 127 - six ticket-reading surfaces the redesign never audited:** Phase 2 audited the 21 sites that FILTER on status; these were sites that do not filter at all, so they were invisible to it - the customer 360 graph (the exclusion form, on the one surface already documented as unable to absorb ~4x the nodes), the portal's ticket count and its unguarded detail endpoint, the opportunity engine's cache key (a ~1000-token LLM call re-fired by every routine question), Tickets-by-channel (which became a second copy of message_count), and avg resolution time (diluted 180 -> 90.5 by a logging ticket closed in a minute). Promotion was also writing `escalation_reason` only to the event log, never the ticket row, so a promoted case was indistinguishable from a logging one. 25/25 verified with negative controls, zero Groq, zero network.
 
 
 ---
@@ -5608,3 +5609,114 @@ to the verification that was asked for; worth deleting or converting to
 `ACTIVE_TICKET_STATUSES` when Phase 3 touches this file.
 
 **Conclusion: Phase 2 is correct as built.** Readers-only remains true - nothing writes `logged`.
+
+
+---
+
+## Session 27 - 2026-09-02
+
+Branch: `Sayantini-phase2-ui-changes`. The ticket-model redesign was complete and verified on
+screen at the end of Session 26. This session asked one question of it: **is there anywhere else
+that still assumes the old model?**
+
+### Fix 127 - six ticket-reading surfaces the redesign never audited
+
+**Why they were missed, in one line.** Phase 2 audited the **21 read sites that FILTER on
+status**. Every finding below is a site that does **not filter at all** - structurally invisible
+to that audit. It is the same shape as `get_agent_metrics`, which Phase 3 caught only by accident
+while re-scoping.
+
+Confirmed by git: **no redesign commit (`b1d5ba7`..`71ff4d1`) touched `customers.py`,
+`user_portal.py` or `agent_assist.py`.**
+
+**No live impact could be measured** - the database is empty after the Phase 4.5 wipe. These are
+structural findings from reading the code, and each is proven by a negative control instead.
+
+| # | Surface | What Phase 4 did to it |
+|---|---|---|
+| A1 | Customer 360 graph (`/graph-view`) | exclusion form admitted LOGGED |
+| A2 | Portal ticket count | counted the raw response, not the rendered list |
+| A3 | Portal `/user/ticket-detail/{id}` | no status guard on a customer-facing endpoint |
+| A4 | Opportunity-engine cache key | `len(tickets)` churns on every question |
+| A5 | Tickets by channel | no filter; became a second `message_count` |
+| B2 | Avg resolution time | diluted by closed logging ids |
+
+**A1 is the worst of them.** The filter was `if st == "closed": continue` - the **exclusion**
+form the redesign replaced everywhere else, which admits any new status silently. It matters most
+here because this file's own comment already documents the constraint: the radial layout is sized
+for **~12 nodes**, and tickets were filtered precisely so a long-standing customer's history could
+not crowd out their products. Phase 4 multiplies ticket volume ~4x. A second defect two lines
+down: `"warn",  # every ticket reaching here is open` had become false.
+
+**A3** is not reachable through the UI (the list it opens from filters correctly), but the
+endpoint takes a `ticket_id` directly and is customer-facing, so it is closed at the source.
+
+**A4** is the one with a running cost. That endpoint's own comment records it: *"the engine's LLM
+call costs ~1000 tokens whether or not it finds anything - measured at 53 calls in one day with
+zero customer messages."* Before Phase 4 the ticket count moved only on escalation; now every
+routine question changes the fingerprint and re-runs the call on the next right-panel render.
+
+### B2 - and the promotion bug it uncovered
+
+`AVG RESOLUTION TIME` filters on `status = 'closed'`, which was never wrong. **What changed is
+which tickets reach closed.** Closing is a live pipeline path - `TicketAction.CLOSE` fires when a
+customer says "that's sorted" (`graph.py:191`) - and nothing stops a LOGGED ticket taking it. A
+logging id created and closed in the same exchange drops a ~0-minute sample into the same average
+as a multi-day dispute, dragging the headline tile toward zero **while looking like an
+improvement**.
+
+Fixed in analytics only (`escalation_reason IS NOT NULL` = "a person was ever needed"), not by
+blocking closure: if the customer says the matter is over, it is over, and blocking it would leave
+logging threads with no terminal state.
+
+**That fix did not work when first written, and the reason was a real bug.** The comment asserted
+that promotion writes `escalation_reason`. Checking it: promotion passed the reason to
+`add_ticket_event` - the **event log** - and called `update_ticket` with `status` alone. So a
+promoted ticket carried `escalation_reason = NULL` **forever**, while an identical ticket that
+opened OPEN carried the reason. Analytics could not tell the two apart. `escalation_reason` was
+already in `update_ticket`'s allow-list, so the fix is one argument - and it is correct
+independently of B2: that column is the row's own record of why a human became involved.
+
+### B1 - a finding that was wrong, and the correction
+
+The plan listed "Top intent trends" as an unfiltered ticket count. **It was not.**
+`get_intent_metrics` reads **`conversation_turns`, not `tickets`** - so it was never affected by
+Phase 4 and needs no filter. My own harness caught it by returning `None` where the test expected
+3.
+
+The retitle was kept anyway (**"Top intent trends" -> "Top query intents"**): the chart is
+message-based, and the old title invited exactly the misreading that produced the false finding.
+The docstring and tooltip now say which table it reads. `Tickets by channel`'s tooltip was also
+corrected - it said "Counts everything on record", which A5 made false.
+
+**Also removed:** `isActive()` (`app.js`), dead code in the exact exclusion form Phase 2 replaced.
+Zero callers, flagged in Session 26 as a trap for the next person; deleted here since this pass
+touched the file.
+
+### Verification - 25/25, zero Groq, zero network
+
+Run in the api image with `--network none`, `generator=None` (referee skipped, the documented safe
+default) and the project's own offline CRM stand-in (`CRM_PROVIDER=disabled`) rather than a
+hand-rolled stub, so the return shapes are real.
+
+**Analytics: 14/14**, three tickets differing ONLY by status so any difference is attributable to
+the vocabulary alone. Every group carries a negative control proving the assertion can fail:
+
+| Check | New | Old (negative control) |
+|---|---|---|
+| Tickets-by-channel `ticket_count` | **1** (serviceable only) | **3** - equal to `message_count` |
+| Avg resolution time | **180.0** min | **90.5** - diluted by a 1-minute logging ticket |
+
+**Promotion: 11/11**, through the **real** `create_or_get_ticket` against a real SQLite
+repository, seeded via `resolve_customer` / `get_or_create_conversation` (FKs are enforced) rather
+than raw inserts. A routine question produces LOGGED with no reason; a follow-up needing a person
+promotes the SAME ticket to OPEN **carrying the reason**. The control was sharpened after first
+passing trivially: both closed tickets were backdated to different durations (120 min vs 2 min),
+so the assertion reads **120.0, not 61.0** - it now genuinely discriminates.
+
+**Suite: 5 failed / 147 passed** - the documented baseline, the same five tests, no regression.
+
+### Still open (unchanged)
+1. Tickets have no delete path maintaining both stores (`delete_ticket`, redesign Phase 1.5).
+2. 5.6 - move `case_summary` + `opportunity_generation` off the message path (~35% of tokens).
+3. Optional: a formatted scope chip in Lineage.

@@ -16,6 +16,7 @@ from apps.api.dependencies.security import require_admin_key
 from services.agent_assist_service.next_best_action import NextBestActionEngine
 from services.agent_assist_service import opportunity_engine
 from shared.schemas.agent_assist import NBADecisionUpdate
+from shared.schemas.tickets import SERVICEABLE_TICKET_STATUSES
 
 logger = logging.getLogger(__name__)
 
@@ -135,7 +136,16 @@ def get_opportunities(conversation_id: str) -> dict:
 
     # Conversation-side inputs. list_customer_turns returns newest-first; the
     # engine (and its prompt) expect chronological order — normalize here.
-    tickets = [t for t in repository.list_tickets() if t.get("customer_id") == customer_id]
+    # SERVICEABLE only. len(tickets) feeds the cache fingerprint below, so counting LOGGED
+    # ids - which the redesign now creates for EVERY customer query - would change the
+    # fingerprint on every message and re-run the engine's ~1000-token LLM call on the next
+    # render. check_gates takes the list but does not read it (sentiment-only since
+    # 2026-07-23), so this only affects the fingerprint and the engine's own ticket view.
+    tickets = [
+        t for t in repository.list_tickets()
+        if t.get("customer_id") == customer_id
+        and str(t.get("status") or "").lower() in SERVICEABLE_TICKET_STATUSES
+    ]
     turns = list(reversed(repository.list_customer_turns(customer_id)))
 
     # "Do not repeat": every offer already suggested for this conversation,

@@ -114,8 +114,17 @@ class TicketManager:
             # built around, and it is one-way: nothing here ever demotes an open ticket back
             # to logged, because a human being done is a separate decision (closing it).
             if hold_required and existing.status == TicketStatus.LOGGED:
+                # escalation_reason is written HERE, not just into the event below: it is the
+                # ticket row's own record of why a person became involved, and until now a
+                # promoted ticket carried NULL forever while an identically-serviceable
+                # ticket that opened OPEN carried the reason. Analytics reads the column to
+                # tell "a human worked this" from "this was only ever a grouping id" (the
+                # avg-resolution-time average), so leaving it NULL made a promoted case
+                # indistinguishable from a logging one.
                 self.repository.update_ticket(
-                    existing.ticket_id, status=TicketStatus.OPEN.value
+                    existing.ticket_id,
+                    status=TicketStatus.OPEN.value,
+                    escalation_reason=escalation_reason,
                 )
                 self.repository.add_ticket_event(
                     existing.ticket_id, "ticket_promoted", "orchestration",

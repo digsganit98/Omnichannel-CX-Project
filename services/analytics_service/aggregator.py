@@ -47,6 +47,19 @@ def get_overview(db_path: str) -> OverviewMetrics:
             """
         ).fetchone()
 
+        # Average handling time over cases a human actually worked.
+        #
+        # `status = 'closed'` is the right filter and was never wrong - what changed is WHICH
+        # tickets reach closed. Under the ticket-model redesign every customer query gets a
+        # LOGGED ticket, and closing is a live pipeline path (the customer says "that's
+        # sorted" -> TicketAction.CLOSE), so a logging id created and closed within the same
+        # exchange would drop a ~0-minute sample into the same average as a multi-day dispute
+        # and drag this headline tile toward zero - while looking like an improvement.
+        #
+        # `escalation_reason IS NOT NULL` is the test for "a person was ever needed on this":
+        # it is written when the ticket opens OPEN, and promotion (logged -> open) writes it
+        # too, so a thread that started as a grouping id and later needed a human is still
+        # counted. A ticket that never left LOGGED has none, and is excluded.
         avg_row = conn.execute(
             """
             SELECT AVG(
@@ -54,6 +67,7 @@ def get_overview(db_path: str) -> OverviewMetrics:
             ) AS avg_mins
             FROM tickets
             WHERE status = 'closed'
+              AND escalation_reason IS NOT NULL AND escalation_reason != ''
             """
         ).fetchone()
 
@@ -169,6 +183,11 @@ def get_channel_metrics(db_path: str) -> ChannelMetrics:
         # (The old query joined tickets → channel_identities, which (a) surfaced internal identifier
         #  types like 'graph'/'portal' that are NOT contact channels, and (b) counted a ticket once
         #  per identity the customer had, inflating every channel to a flat identical number.)
+        #
+        # SERVICEABLE only. This query had NO status filter, which was correct while a ticket
+        # meant "a human is needed" - under the ticket-model redesign every customer query gets
+        # a LOGGED grouping id, so counting those would make ticket_count a second copy of
+        # message_count and the chart would stop comparing the two things it exists to compare.
         ticket_rows = conn.execute(
             """
             SELECT channel, COUNT(*) AS cnt
@@ -177,6 +196,7 @@ def get_channel_metrics(db_path: str) -> ChannelMetrics:
                 FROM tickets t
                 JOIN conversation_turns ct ON ct.ticket_id = t.ticket_id
                 WHERE ct.channel IS NOT NULL AND ct.channel != ''
+                  AND t.status IN ('open','in_progress')
                 GROUP BY t.ticket_id
             )
             GROUP BY channel
@@ -304,6 +324,14 @@ def _pretty_reason(reason: str) -> str:
 
 
 def get_intent_metrics(db_path: str, top_n: int = 10) -> IntentMetrics:
+    """What customers are contacting us ABOUT, counted from conversation_turns.
+
+    Reads TURNS, not tickets - so it is unaffected by the ticket-model redesign, and no
+    status filter belongs here. It has always counted every classified customer message,
+    which is the right population for a demand chart. The title says "query intents" rather
+    than "ticket intents" so it is not read as a view of the agent queue, where every other
+    ticket figure on the dashboard means SERVICEABLE.
+    """
     with _connect(db_path) as conn:
         rows = conn.execute(
             """

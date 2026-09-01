@@ -2709,11 +2709,6 @@ function isServiceable(t) {
   return !!t && (t.status === 'open' || t.status === 'in_progress');
 }
 
-// Not finished — includes logging threads. Use for continuity/grouping questions.
-function isActive(t) {
-  return !!t && t.status !== 'closed';
-}
-
 function fmtDateTime(iso) {
   if (!iso) return '—';
   var d = new Date(iso);
@@ -2833,17 +2828,21 @@ window.loadUserTickets = async function() {
   refresh.textContent = 'Refreshing...';
   try {
     var tickets = await userApi('/user/tickets');
-    document.getElementById('userTicketCount').textContent =
-      tickets.length + ' ticket' + (tickets.length === 1 ? '' : 's');
-    if (!tickets.length) {
-      list.innerHTML = '<div class="user-empty">No requests submitted yet.</div>';
-      return;
-    }
-    list.innerHTML = '';
     // The CUSTOMER's own view. A logging id is internal and is never shown to them
     // (redesign decision 1), so it belongs in neither group.
     var openTickets = tickets.filter(isServiceable);
     var closedTickets = tickets.filter(function(t) { return t.status === 'closed'; });
+    // Count what is actually RENDERED. Counting the raw response instead would report every
+    // logging id the endpoint returns - so a customer with two real requests would read
+    // "14 tickets" above a list showing two.
+    var shownCount = openTickets.length + closedTickets.length;
+    document.getElementById('userTicketCount').textContent =
+      shownCount + ' ticket' + (shownCount === 1 ? '' : 's');
+    if (!shownCount) {
+      list.innerHTML = '<div class="user-empty">No requests submitted yet.</div>';
+      return;
+    }
+    list.innerHTML = '';
 
     function renderGroup(heading, group) {
       if (!group.length) return;
