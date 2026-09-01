@@ -632,7 +632,12 @@ class TicketCreationAgent:
         level = str(decision.get("resolution_level", "")).upper()
         if level == "L3":
             return f"critical_escalation:{analysis.intent.value}"
-        if level == "L2":
+        # L2 means "needs customer-specific data or an operational check". That is only a
+        # reason to involve a human when we could NOT get that data. When the customer's own
+        # record answered the question (the graph, or their own ticket), holding the correct
+        # answer for review adds a wait and no accuracy — the agent would read the same record.
+        # L3 stays unconditional: risk always reaches a human regardless of how well we answered.
+        if level == "L2" and not _answered_from_customer_record(resolution):
             return f"assisted_resolution_required:{analysis.intent.value}"
 
         # Rule 1: Customer explicitly asked for human
@@ -643,10 +648,13 @@ class TicketCreationAgent:
         if analysis.intent in MANUAL_REVIEW_INTENTS:
             return f"manual_review_required:{analysis.intent.value}"
 
-        # Rule 2b: Intents that need live banking data this system does not have.
-        # RAG may return generic KB content that looks like an answer but isn't the
-        # customer's actual balance or transfer status — always escalate to a human.
-        if analysis.intent in {Intent.ACCOUNT_BALANCE_INQUIRY, Intent.FUND_TRANSFER}:
+        # Rule 2b: Moving money needs a human. Narrowed from {balance, transfer}: escalating a
+        # balance question sent the customer a holding message and a wait for an answer the
+        # agent could not give either — this system has no core-banking feed, so nobody on
+        # this side can see a live balance. The graph branch now says so directly and the
+        # reply is auto-sent. fund_transfer stays: it is a request to ACT on money, not to
+        # read it, and that warrants a person regardless of what we can retrieve.
+        if analysis.intent == Intent.FUND_TRANSFER:
             return "no_live_banking_data"
 
         if _is_strong_l1_knowledge_answer(resolution):
@@ -697,20 +705,36 @@ class TicketCreationAgent:
                 return "repeat_customer_new_issue"
             return None  # Existing ticket already covers this intent — no new one needed
 
-        # Rule 7: No knowledge found and not sourced from Neo4j
-        if not resolution.contexts and resolution.retrieval_backend != "neo4j_graph":
-            return "knowledge_not_found"
-
-        # Rule 8: Very low retrieval confidence (industry threshold: 0.3)
-        if resolution.confidence < 0.3 and resolution.retrieval_backend not in (
-            "neo4j_graph", "customer_ticket_lookup"
-        ):
-            return "low_retrieval_confidence"
+        # Rule 7: We have no answer good enough to send. Merged from the former Rules 7 and 8,
+        # which asked the same question ("can we actually answer this?") split by an
+        # implementation detail — nothing retrieved vs. something retrieved but weak. They
+        # carried DIFFERENT exemption lists, so a customer_ticket_lookup returning zero rows
+        # escalated while one returning a weak row did not; that asymmetry was unintended.
+        # One rule, one exemption list, so the two halves cannot drift apart again.
+        if resolution.retrieval_backend not in CUSTOMER_RECORD_BACKENDS:
+            if not resolution.contexts:
+                return "knowledge_not_found"
+            if resolution.confidence < 0.3:
+                return "low_retrieval_confidence"
 
         return None
 
 
 # ── Backwards-compatible aliases ─────────────────────────────────────────────
+# Backends that read the CUSTOMER'S OWN record rather than general knowledge. An answer from
+# one of these is customer-specific by construction, which is exactly what L2 asks for.
+CUSTOMER_RECORD_BACKENDS = {"neo4j_graph", "customer_ticket_lookup"}
+
+
+def _answered_from_customer_record(resolution: QueryResolution) -> bool:
+    """True when the reply came from this customer's own data with real content behind it."""
+    if resolution.retrieval_backend not in CUSTOMER_RECORD_BACKENDS:
+        return False
+    if not resolution.contexts:
+        return False
+    return resolution.confidence >= 0.3
+
+
 def _is_strong_l1_knowledge_answer(resolution: QueryResolution) -> bool:
     decision = resolution.resolution_decision or {}
     if str(decision.get("resolution_level", "")).upper() != "L1":

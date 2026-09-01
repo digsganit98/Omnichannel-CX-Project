@@ -375,6 +375,17 @@ def neo4j_answer(client, intent: str, customer_id: str) -> str | None:
         if not accounts and not fds:
             return None  # Fall through to RAG
         lines = []
+        # This system has no core-banking feed, so there is NO current/live balance field —
+        # only an average monthly figure from the seeded record. The graph text is passed
+        # through an LLM to be made conversational, and without this statement the model read
+        # "Avg monthly balance: Rs. 0" and wrote "Your current account balance is Rs. 0" to a
+        # real customer. Stating the absence is what stops the relabelling; a prompt rule
+        # cannot, because the model is only ever shown this block.
+        lines.append(
+            "IMPORTANT: A live/current account balance is NOT available from this system. "
+            "Do not state or imply a current balance. Tell the customer their current balance "
+            "must be checked in the mobile app or netbanking, then share the record details below."
+        )
         if accounts:
             lines.append("Account records:")
             for a in accounts:

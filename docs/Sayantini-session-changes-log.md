@@ -164,6 +164,7 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 115 — The workflow header counted a different thing than the picture:** it read *"15 steps · 17 edges"* over a diagram drawing **16 and 22**, because it counted the API payload — whose step list comes from the older `WorkflowStep` enum and whose edge list collapses each branch into one `"a | b"` row. Counted from the layout now.
 - **Fix 116 — Per-exchange intent, and the case named by its ticket:** a transaction dispute was headed `TICKET STATUS` because the theme label took the first turn carrying the ticket id — and only **outbound** turns are ever tagged, so the first was the status follow-up. The label now comes from the ticket record, and each Detailed row carries its own intent.
 - **Right panel:** the five card headings (Customer Context, Sentiment, Case Summary, Open Tickets, Suggested Offers) unified to blue; Neo4j box property lines set to normal weight.
+- **Fix 117 — A correct answer was held for a human anyway:** L2 escalated on *category* ("needs customer-specific data") — exactly what the graph does best — so 7 of 7 live tickets were `assisted_resolution_required`, five of them questions the graph had already answered correctly. L2 now escalates only when the customer's own record did NOT answer; L3 stays unconditional. Also: the balance reply said "your current account balance is Rs. 0" (the LLM relabelled an *average monthly* figure — there is no live-balance field), Rule 2b narrowed to `fund_transfer`, and Rules 7+8 merged onto one exemption list.
 
 
 ---
@@ -4590,3 +4591,103 @@ assertion before saving the file**.
 - `get_transactions` limits hardcoded per caller; product queries run twice per message.
 - **The demo script still needs rewriting** against real behaviour — the only demo blocker,
   inherited from Session 19.
+
+---
+
+## Session 24 — 2026-09-01
+
+Branch: `Sayantini-phase2-ui-changes`. Continuous with Session 23. Started as orientation,
+became an audit of the ticket rules after the user challenged why so many of them fire.
+
+### Fix 117 — A correct answer was held for a human anyway
+
+The user asked why six specific rules create tickets, saying most of them should not. Reading
+them, three were defensible and three were not — and the worst was the one generating **every
+ticket in the database**.
+
+**L2 escalated on category, not outcome.** L2 means "needs a customer-specific data lookup".
+But customer-specific lookup is *what the graph is for* — Fixes 71, 75 and 102 all exist to make
+it answer these. So L2 fired on precisely the queries the system handles best. Measured on the
+live data: **7 of 7 tickets** carried `assisted_resolution_required`, and five of them were
+questions the graph had **already answered correctly** — card limit Rs.10,65,000, payment due
+2026-07-08, loan status, premium due date, dispute status. Each customer saw "Support Agent will
+help you shortly" and waited for an answer the system already had on screen.
+
+Rule 0 also runs before everything, so `ticket_status` was ticketed despite Rule 3 existing
+specifically to prevent that.
+
+L2 now escalates only when the customer's own record did **not** answer:
+
+```python
+if level == "L2" and not _answered_from_customer_record(resolution):
+```
+
+`_answered_from_customer_record` requires a trusted backend (`neo4j_graph`,
+`customer_ticket_lookup`) **and** real contexts **and** confidence >= 0.3 — so a *failed* graph
+lookup still reaches a human. **L3 is untouched and unconditional:** risk escalates regardless of
+how well we answered.
+
+Ticket rate on the seven real cases: **7/7 -> 1/7**. The survivor is "I want to dispute a charge",
+which is an actual problem report and escalates via Rule 2 anyway.
+
+### The balance reply was false, and not for the reason I first said
+
+The customer got **"Your current account balance is Rs. 0."**
+
+My first diagnosis was that the formatter printed a missing field. **Wrong** — it correctly emits
+`"Avg monthly balance: Rs. 0"`, and Sayantini's CSA account genuinely holds 0. The graph text is
+then passed through the LLM to make it conversational, and **the model relabelled an average as a
+current balance**.
+
+There is no live-balance field anywhere: an Account carries `avg_monthly_balance`,
+`min_balance_required`, `ifsc`, `branch`, `status`. A current balance is a core-banking number
+that changes every transaction and cannot live in a seeded graph.
+
+The fix states the absence **in the block the model reads**, since that is the only text it sees:
+no current balance is available, do not imply one, send the customer to the app or netbanking.
+A prompt rule could not do this — same lesson as [[redact-dont-instruct-llm]].
+
+**Rule 2b narrowed to `fund_transfer`.** Escalating a balance question made the customer wait for
+an answer *the agent cannot give either* — nobody on this side can see a live balance. Transfers
+stay: that is a request to **act** on money, not read it.
+
+### Rules 7 and 8 merged
+They asked the same question — "can we actually answer this?" — split by an implementation detail
+(nothing retrieved vs. something weak). Their exemption lists **differed**: a
+`customer_ticket_lookup` returning zero rows escalated, while one returning a weak row did not.
+Nothing justified that; it read as Rule 8's exemption being extended and Rule 7's forgotten. Now
+one rule, one list.
+
+### What was deliberately NOT changed
+- **Rules 4 (high urgency) and 6 (>=3 open tickets)** — both look wrong (Rule 4 contradicts the
+  system's own "tone is not severity" principle, stated in the L1/L2/L3 prompt *and* in Rule 3b's
+  comment; Rule 6's threshold of 3 is underived). Deleting them is a real behavioural call and is
+  the user's to make, separately.
+- **Rule 9 (repeated unresolved query)** — its premise is broken: `resolved=0` is written on
+  **every held reply** automatically, so it means "was held", not "failed to help". The rule only
+  survives because `and not active_ticket` accidentally excludes the turns it would misread. Fix
+  what `resolved` means before touching the rule.
+
+### A claim of mine that was wrong
+**"Rules 1-9 are effectively dead code."** Inferred from ticket reasons alone. The thread shows
+Rule 3b alive and working: `general_inquiry` ("how do I open a savings account") got no ticket and
+an immediate real answer. The true statement is narrower — every ticket that *exists* came from
+Rule 0, because Rule 0 runs first and fired on nearly everything.
+
+### Verification
+Mocked `QueryResolution` objects fed straight into `_escalation_reason` — **zero Groq calls**,
+per [[preserve-llm-quota-in-tests]]. The harness reproduced the live database exactly (8/9 ticket)
+**before** any edit, then re-ran after. Six regression cases held: L3 fraud, fund_transfer,
+customer-requested-human, L2-with-failed-graph, L2-with-weak-graph, and KB-found-nothing all still
+escalate.
+
+Tests **5 failed / 147 passed**, identical before and after, same five names — proven by stashing
+the changes and re-running, not by matching the count. Image rebuilt (`services/` is not
+bind-mounted) and the deployed code re-verified.
+
+### Still open
+- `test_investment_faqs_are_l1_kb_answers_without_tickets` is in the failing five and tests
+  exactly this behaviour — worth reading now that L2 changed.
+- Rules 4, 6 and 9 above.
+- Everything inherited from Sessions 19-23: the demo script rewrite (the only demo blocker), Jira
+  401, `handled_by` has no reader, outbound replies are not graph nodes.
