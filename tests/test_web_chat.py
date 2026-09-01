@@ -3,6 +3,10 @@ from services.channel_service.adapters.web_chat_adapter import WebChatAdapter
 from services.channel_service.delivery import OutboundDeliveryService
 from services.orchestration_service.graph import OrchestrationGraph
 from services.persistence_service.repository import SQLiteCXRepository
+
+# Reuse the shared offline stand-ins rather than duplicating them: without these this
+# module's graphs built a real GroqGenerator and a real (Jira-configured) CRMClient.
+from tests.test_phase1 import FakeGenerator, offline_crm
 from shared.schemas.messages import Channel, WebChatWebhookPayload
 
 
@@ -82,8 +86,10 @@ def build_graph(llm=None, repository=None):
         agent=CXAgent(llm or GeneralInquiryLLM()),
         rag=FakeRAG(),
         delivery=OutboundDeliveryService(),
+        crm=offline_crm(),
         neo4j_client=EmptyNeo4j(),
         resolution_engine=FakeResolutionEngine(),
+        generator=FakeGenerator(),
     ), repo
 
 

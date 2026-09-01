@@ -16,7 +16,7 @@ from services.channel_service.adapters.email_adapter import EmailAdapter
 from services.channel_service.adapters.whatsapp_adapter import WhatsAppAdapter
 from services.channel_service.connectors.email_sender import SMTPEmailConnector
 from services.channel_service.delivery import OutboundDeliveryService
-from services.crm_service.client import CRMResult
+from services.crm_service.client import CRMClient, CRMResult
 from services.intent_service.classifier import classify_intent
 from services.orchestration_service.graph import OrchestrationGraph
 from services.orchestration_service.router import OmnichannelRouter
@@ -62,7 +62,43 @@ class UnderstatedLLM:
         }
 
 
+class FakeGenerator:
+    """Stands in for GroqGenerator so a test graph never builds a real Groq client.
+
+    Before this existed, TicketCreationAgent fell back to `generator or GroqGenerator()`
+    and OrchestrationGraph had no way to pass one in, so EVERY test that built a graph
+    carried a live client: a measured 10 real Groq calls per suite run, billed against
+    the demo's free-tier quota.
+
+    Returns llm_used=False so both consumers take their non-LLM branch, which is the
+    pre-existing behaviour these tests were written against:
+      * detect_action  — only acts when llm_used is true, so it falls through to its
+                         deterministic keyword result
+      * _referee_match — treats a non-answer as NEW, the documented safe default
+    """
+
+    model = "test"
+
+    def __init__(self):
+        self.calls = []
+
+    def _generate(self, system_prompt="", user_prompt="", operation="llm_generation",
+                  metadata=None, json_mode=False, max_tokens=None):
+        self.calls.append(operation)
+        return {"text": "", "model": self.model, "llm_used": False}
+
+    def generate_answer(self, query, contexts, conversation_context=None):
+        self.calls.append("answer_generation")
+        return {"text": "", "model": self.model, "llm_used": False}
+
+
 class FakeRAG:
+    # QueryResolutionAgent's Neo4j and ticket-lookup branches call
+    # `self.rag.generator.generate_answer(...)` directly, bypassing .answer().
+    # Without this attribute those branches reach whatever generator the real
+    # RAGPipeline built - i.e. a live Groq client.
+    generator = FakeGenerator()
+
     def answer(self, query, context):
         if "unknown" in query.lower():
             return {"answer": "manual review", "confidence": 0.0, "contexts": [], "citations": [], "llm": {}}
@@ -223,7 +259,29 @@ class Recorder:
 _DEFAULT_TEST_NEO4J = object()
 
 
-def graph(repository, whatsapp=None, email=None, crm=None, neo4j_client=_DEFAULT_TEST_NEO4J, resolution_engine=None):
+def offline_crm():
+    """A CRMClient that cannot reach the network.
+
+    `CRMClient()` reads CRM_PROVIDER/CRM_BASE_URL from .env, which point at the real
+    Jira. OrchestrationGraph does `crm or CRMClient()`, so every test that passed no
+    crm POSTed to promptlings.atlassian.net — a measured 30 real POSTs per suite run.
+    They 400'd, were swallowed as `crm_sync_failed`, and the test carried on, which is
+    why this went unnoticed.
+
+    Forcing provider="disabled" makes `configured` False, so create_ticket returns
+    CRMResult("not_configured") without any HTTP. That is the same *shape* of outcome
+    the tests already ran against (a non-"synced" result), so behaviour is unchanged.
+    """
+    client = CRMClient()
+    client.provider = "disabled"
+    client.base_url = ""
+    client.api_token = ""
+    client.project_key = ""
+    return client
+
+
+def graph(repository, whatsapp=None, email=None, crm=None, neo4j_client=_DEFAULT_TEST_NEO4J,
+          resolution_engine=None, generator=None):
     if neo4j_client is _DEFAULT_TEST_NEO4J:
         neo4j_client = EmptyNeo4j()
     return OrchestrationGraph(
@@ -231,9 +289,12 @@ def graph(repository, whatsapp=None, email=None, crm=None, neo4j_client=_DEFAULT
         agent=CXAgent(NoLLM()),
         rag=FakeRAG(),
         delivery=OutboundDeliveryService(whatsapp=whatsapp, email=email),
-        crm=crm,
+        # Both default to offline stand-ins: passing None here reached the real
+        # Groq and the real Jira on every run.
+        crm=crm or offline_crm(),
         neo4j_client=neo4j_client,
         resolution_engine=resolution_engine or FakeResolutionEngine(),
+        generator=generator or FakeGenerator(),
     )
 
 
@@ -275,8 +336,14 @@ def test_whatsapp_bfsi_query_resolves_with_citation_and_sends_reply():
     assert response.citations[0]["source"] == "InboxIQ_BFSI_KB.pdf:p3"
     assert response.outbound_status == "sent"
     assert sender.sent
+    # Phase 4 of the ticket-model redesign: a routine question now DOES get a ticket - a
+    # LOGGED grouping id, so the UI can thread it - but no human is involved, so the reply
+    # is still auto-sent (workflow_status above). The old assertion here was
+    # `skipped is True`, which encoded the model where a ticket meant "a person is needed".
     ticket_step = next(entry for entry in response.workflow_trace if entry["step"] == "create_or_update_ticket")
-    assert ticket_step["details"]["skipped"] is True
+    assert "skipped" not in ticket_step["details"]
+    assert response.ticket_id is not None
+    assert repo.get_ticket(response.ticket_id)["status"] == "logged"
     evidence = repo.list_retrieval_evidence()
     assert evidence[0]["source"] == "InboxIQ_BFSI_KB.pdf:p3"
 
@@ -315,6 +382,8 @@ def test_registered_customer_account_query_is_not_blocked():
         delivery=OutboundDeliveryService(whatsapp=sender),
         neo4j_client=neo4j,
         resolution_engine=FakeResolutionEngine(),
+        crm=offline_crm(),
+        generator=FakeGenerator(),
     )
     response = workflow.run(message)
     assert response.workflow_status != "customer_validation_required"
@@ -344,6 +413,8 @@ def test_resolution_l3_overrides_never_escalate_intent():
         delivery=OutboundDeliveryService(whatsapp=sender),
         neo4j_client=neo4j,
         resolution_engine=FakeResolutionEngine(level="L3"),
+        crm=offline_crm(),
+        generator=FakeGenerator(),
     )
     response = workflow.run(message)
     assert response.intent == "loan_status"
@@ -374,10 +445,17 @@ def test_resolution_l1_preserves_never_escalate_intent():
         delivery=OutboundDeliveryService(whatsapp=sender),
         neo4j_client=neo4j,
         resolution_engine=FakeResolutionEngine(level="L1"),
+        crm=offline_crm(),
+        generator=FakeGenerator(),
     )
     response = workflow.run(message)
     assert response.intent == "loan_status"
-    assert response.ticket_id is None
+    # "Never escalate" now means NO HOLD, not "no ticket": Phase 4 gives every query a
+    # grouping id, and the escalation rules - unchanged - decide only whether a human sees
+    # it. A LOGGED status is exactly the assertion "no escalation happened".
+    assert repo.get_ticket(response.ticket_id)["status"] == "logged"
+    assert response.held_for_review is False
+    assert response.workflow_status == "answer_delivered"
 
 
 def test_high_risk_keyword_forces_l3_before_llm_call():
@@ -401,6 +479,8 @@ def test_high_risk_keyword_forces_l3_before_llm_call():
         rag=FakeRAG(),
         delivery=OutboundDeliveryService(whatsapp=sender),
         neo4j_client=neo4j,
+        crm=offline_crm(),
+        generator=FakeGenerator(),
     )
     response = workflow.run(message)
     assert response.ticket_id is not None
@@ -418,6 +498,8 @@ def test_distinct_l3_intents_create_distinct_team_tickets():
         delivery=OutboundDeliveryService(whatsapp=sender),
         neo4j_client=WorkbookNeo4j(),
         resolution_engine=FakeResolutionEngine(level="L3"),
+        crm=offline_crm(),
+        generator=FakeGenerator(),
     )
 
     fraud = workflow.run(
@@ -457,6 +539,8 @@ def test_distinct_l3_fraud_incidents_create_distinct_tickets():
         delivery=OutboundDeliveryService(whatsapp=sender),
         neo4j_client=WorkbookNeo4j(),
         resolution_engine=FakeResolutionEngine(level="L3"),
+        crm=offline_crm(),
+        generator=FakeGenerator(),
     )
 
     takeover = workflow.run(
@@ -901,7 +985,11 @@ def test_query_resolution_agent_routes_transactional_intent_to_neo4j():
     from services.channel_service.adapters.whatsapp_adapter import WhatsAppAdapter
     from shared.schemas.messages import WhatsAppWebhookPayload
 
-    agent = QueryResolutionAgent(neo4j_client=FakeNeo4j(), resolution_engine=FakeResolutionEngine())
+    # Without rag=, QueryResolutionAgent falls back to `rag or RAGPipeline()`, which
+    # builds a REAL Groq client - this test previously passed only because a live API
+    # answered it.
+    agent = QueryResolutionAgent(rag=FakeRAG(), neo4j_client=FakeNeo4j(),
+                                 resolution_engine=FakeResolutionEngine())
     msg = WhatsAppAdapter().normalize(
         WhatsAppWebhookPayload(from_="+919999999999", text="What is my loan status?",
                                message_id="test-1", metadata={"provider": "test"})
@@ -1078,6 +1166,8 @@ def test_five_question_kb_and_graph_e2e_matrix():
             delivery=delivery,
             neo4j_client=neo4j,
             resolution_engine=FakeResolutionEngine(),
+            crm=offline_crm(),
+            generator=FakeGenerator(),
         )
         response = workflow.run(case["message"])
 
@@ -1120,8 +1210,10 @@ def test_investment_faqs_are_l1_kb_answers_without_tickets():
         agent=CXAgent(NoLLM()),
         rag=RAGPipeline(store=EmptyStore(), generator=NoGeneration()),
         delivery=OutboundDeliveryService(whatsapp=Recorder()),
+        crm=offline_crm(),
         neo4j_client=EmptyNeo4j(),
         resolution_engine=FakeResolutionEngine(),
+        generator=FakeGenerator(),
     )
 
     sip = workflow.run(whatsapp_message(message_id="sip-l1", text="What is SIP?"))
@@ -1493,7 +1585,10 @@ def test_invalid_crm_url_does_not_block_whatsapp_reply(monkeypatch):
 
     repo = SQLiteCXRepository(":memory:")
     sender = Recorder()
-    response = graph(repo, whatsapp=sender).run(
+    # This test is ABOUT a misconfigured CRM, so it must get a real CRMClient reading the
+    # env above — not the suite's offline_crm() default. The URL is invalid, so requests
+    # rejects it locally without any network call.
+    response = graph(repo, whatsapp=sender, crm=CRMClient()).run(
         whatsapp_message(message_id="crm-failure-reply", text="unknown question xyz")
     )
 
