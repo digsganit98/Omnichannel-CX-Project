@@ -158,7 +158,11 @@ class GroqGenerator:
             f"[{item.get('metadata', {}).get('source', 'unknown')}]:\n{item['text']}"
             for item in contexts
         )
-        graph_ctx_text = _format_graph_context(ctx.get("graph_context"), ctx.get("intent"))
+        _active = ctx.get("active_ticket") or {}
+        graph_ctx_text = _format_graph_context(
+            ctx.get("graph_context"), ctx.get("intent"),
+            active_ticket_id=_active.get("ticket_id") if isinstance(_active, dict) else None,
+        )
         conv_history_text = _format_conversation_history(ctx.get("recent_turns", []))
         # Conversation summary is a raw pipe-delimited log — inject it only when there are
         # no recent_turns to avoid sending redundant and hard-to-parse content to the LLM.
@@ -727,7 +731,8 @@ def _safe_amount(value) -> str:
         return str(value) if value else "N/A"
 
 
-def _format_graph_context(graph_ctx: dict | None, current_intent: str | None = None) -> str:
+def _format_graph_context(graph_ctx: dict | None, current_intent: str | None = None,
+                          active_ticket_id: str | None = None) -> str:
     """Convert the Neo4j graph context dict into a clean human-readable string.
 
     ``current_intent`` names what THIS message is about. Without it the open-cases block
@@ -736,6 +741,15 @@ def _format_graph_context(graph_ctx: dict | None, current_intent: str | None = N
     "your dispute has been logged under <the card ticket>". Defaults to None so the
     classifier caller - the step that decides intent, and which must see every case -
     is unchanged.
+
+    ``active_ticket_id`` is the ticket this CONVERSATION is on, already resolved by
+    TicketManager (scope-matched, Fix 102). Continuity is claimed from it rather than
+    from a shared intent label: two balance questions hours apart carry the same label
+    and are not one case, and a customer with any open ticket on the topic was told a
+    brand-new message was "already logged under" it while the ticket logic had created
+    no ticket at all. Defaults to None, which claims no continuity - the safe direction,
+    since the cost is a case listed without a continuity line rather than a false claim
+    that a customer's request is being tracked when nothing is tracking it.
     """
     if not graph_ctx:
         return ""
@@ -795,7 +809,17 @@ def _format_graph_context(graph_ctx: dict | None, current_intent: str | None = N
             )
     accounts = graph_ctx.get("accounts") or []
     if accounts:
-        lines.append("Accounts:")
+        # Same statement as the graph branch in neo4j_service/queries.py, for the same reason:
+        # this block sends account figures on EVERY message regardless of intent, so an
+        # unqualified average sits in the prompt whenever a customer asks about their balance.
+        # A previous attempt qualified only the other block and reported the problem fixed
+        # while this one was still handing the model the bare number.
+        lines.append(
+            "Accounts. NOTE: the balance below is an AVERAGE MONTHLY balance, not a current "
+            "balance. A live/current balance is NOT available from this system — say so and "
+            "point the customer to the mobile app or netbanking. Never describe this figure "
+            "as their current balance."
+        )
         for a in accounts:
             lines.append(
                 f"  - {a.get('account_type', 'Account')} {a.get('account_sub_type', '')} "
@@ -822,6 +846,7 @@ def _format_graph_context(graph_ctx: dict | None, current_intent: str | None = N
     # like a card limit. Summary only (id/subject/status) — the case's messages are not
     # replayed, so this stays a handful of tokens.
     open_cases = graph_ctx.get("open_cases") or []
+    active_id = str(active_ticket_id or "")
     if open_cases:
         lines.append("Open support cases (already raised - do NOT treat as new):")
         matched = []
@@ -830,13 +855,24 @@ def _format_graph_context(graph_ctx: dict | None, current_intent: str | None = N
             scope = case.get("scope") or ""
             # "transaction_dispute:imps" -> "imps": the specific matter, without repeating the intent.
             detail = f" about {scope.split(':', 1)[1]}" if ":" in scope and scope.split(":", 1)[1] else ""
-            same = bool(current_intent) and case.get("intent") == current_intent
+            # Sharing an INTENT LABEL is not being the same case. Two balance questions
+            # hours apart are both "account_balance_inquiry" and are not one matter, but a
+            # customer with any open ticket on the topic was told their new message was
+            # "already logged under" it — while the ticket logic, asked the same question,
+            # had created no ticket at all.
+            same_intent = bool(current_intent) and case.get("intent") == current_intent
+            # Continuity is claimed from the ticket the CONVERSATION is actually on, not
+            # from a shared label. active_ticket is what TicketManager already resolved for
+            # this thread (scope-matched, Fix 102) and is in context before the reply is
+            # written. If this message belongs to an open case, that IS the case.
+            same = same_intent and bool(active_id) and str(case.get("ticket_id", "")) == active_id
             if same:
                 matched.append(str(case.get("ticket_id", "")))
             lines.append(
                 f"  - {case.get('ticket_id', '')} | {subject}{detail} | "
                 f"Status: {case.get('status', 'open')}"
                 + (" | SAME SUBJECT as this message" if same else "")
+                + (" | same topic, different matter" if same_intent and not same else "")
             )
         # Every case stays listed. The customer may reference any of them across channels,
         # and hiding one would cost exactly the continuity this block exists to give
@@ -850,9 +886,11 @@ def _format_graph_context(graph_ctx: dict | None, current_intent: str | None = N
                 )
             else:
                 lines.append(
-                    f"This message is about: {readable}, which none of the cases above cover. "
-                    "It is a NEW matter: do NOT tell the customer it has been logged under any "
-                    "ticket id listed above. A reference number is appended automatically, so "
-                    "never write one yourself."
+                    f"This message is about: {readable}. None of the cases above is known to "
+                    "cover THIS matter. Do NOT tell the customer it has been logged, tracked or "
+                    "referenced under any ticket id listed above, even one on the same topic — "
+                    "a shared subject is not the same case. You may still answer their question "
+                    "using the account facts above. A reference number is appended "
+                    "automatically when one exists, so never write one yourself."
                 )
     return "\n".join(lines)

@@ -376,7 +376,22 @@ def neo4j_answer(client, intent: str, customer_id: str) -> str | None:
             return None  # Fall through to RAG
         lines = []
         if accounts:
-            lines.append("Account records:")
+            # The figure below is an AVERAGE MONTHLY balance and there is no current-balance
+            # field anywhere in this system (no core-banking feed). Sitting unqualified beside
+            # "what is my balance?", it was presented to the customer as THE balance — the
+            # reply read "your current account balance is Rs. 0", and later "your CURRENT
+            # AVERAGE balances are", a phrase that means nothing. The fact is real and worth
+            # sending; what was missing is what it is NOT. Stated here, next to the number, so
+            # the qualifier cannot be separated from the value it qualifies. The same line is
+            # emitted by the customer-context block in groq_generator.py and carries the same
+            # statement: fixing one and not the other left the model still holding an
+            # unqualified figure.
+            lines.append(
+                "Account records. NOTE: the balance below is an AVERAGE MONTHLY balance, not a "
+                "current balance. A live/current balance is NOT available from this system — "
+                "say so and point the customer to the mobile app or netbanking for it. Never "
+                "describe this figure as their current balance."
+            )
             for a in accounts:
                 lines.append(
                     f"  - {a.get('account_type', 'Account')} {a.get('account_sub_type', '')} "
