@@ -5,7 +5,19 @@ the *hold*. A ticket starts as a **logging id**, and becomes **serviceable** the
 in that thread needs a human. Grouping is by *matter*, not by intent label; a genuine topic change
 gets a new id and the reply says so.
 
-Everything below was measured against the live system on 2026-09-01. No code has been changed.
+**Goal.** A customer's history should read as a set of **named matters** — "health claim dispute",
+"card late fee", "failed transfer" — each carrying its own exchanges across every channel, instead
+of a flat wall of disconnected boxes. The system already *has* this continuity (the graph links
+messages to cases; `get_open_cases` feeds them to the reply). The screen cannot show it, so the
+product looks like it has no memory when it does. **This redesign exists to make that memory
+visible.** Success is judged on screen — see Phase 6, not the unit tests.
+
+**Root cause in one line.** The system had no name for a *topic*. It named customers, conversations
+and messages, but the only relatedness assertion it ever made was `ticket_id` — and that appeared
+only when a human was needed. This gives a topic a name that always exists.
+
+Everything below was measured against the live system on 2026-09-01. Phases 0–2 are built;
+3 onward are not.
 
 ---
 
@@ -404,22 +416,146 @@ tree).
 
 **Still open, not a blocker:** tickets have no delete path that maintains the graph (5.10).
 
-### Phase 3 — Guard the surfaces (before opening the tap)
-`get_open_cases` excludes `logged`. Right-panel card shows serviceable only. Jira sync skips
-`logged`. Analytics denominators reviewed. **This must land before Phase 4**, or the first
-logging ticket corrupts the reply prompt.
+### Phase 3 — Guard the surfaces (before opening the tap) — **DONE**
+**Re-scoped 2026-09-01 after checking the code: three of the four items were already delivered by
+Phase 2.** Verified, not assumed:
 
-### Phase 3.5 — Bound the candidate set (before opening the tap)
-Add `last_activity_at` (column + migration), bump it when a message attaches at
-`create_or_get_ticket`, rank candidates by it, and guarantee serviceable tickets a slot. **Without
-this, Phase 4 causes mis-grouping that looks like referee errors** — see 5.8.
+| Item | State | Evidence |
+|---|---|---|
+| `get_open_cases` excludes `logged` | **DONE** | `queries.py`: `WHERE t.status IN ['open','in_progress']` |
+| Right panel / agent surfaces show serviceable only | **DONE** | `find_open_tickets_for_customer` uses SERVICEABLE; its 2 callers are `routes/conversations.py:69` and `graph.py:405` (the reply pipeline's `_load_context`), so both the panel AND the prompt are covered |
+| Analytics `open_cnt` / `resolved_cnt` / `sla_breach_cnt` | **DONE** | `aggregator.py:30-45`, inclusion lists |
+| **Jira sync skips `logged`** | **TO DO** | see below |
 
-### Phase 4 — Create a ticket for every query
-Remove the `required` gate from creation. Referee runs on every message. Promote to `open` on the
-first hold.
+**The one real item.** `create_or_get_ticket` calls `sync_ticket` on **every** ticket it creates
+(`ticket_manager.py:124`). After Phase 4 that means *"what is my card limit?"* POSTs a Jira issue,
+and the project fills with issues for questions that were answered instantly — ~10 tickets becomes
+~40+. Decision 2 already settled the behaviour; this implements it as a filter **at the sync
+boundary**, so the id still exists in our store for a future logging/monitoring system to read.
 
-### Phase 5 — Topic-change acknowledgement
-When the referee answers NEW and an open thread exists, the reply notes it is a separate matter.
+**Found while re-scoping — a fifth item the plan had not listed.** `get_agent_metrics`
+(`aggregator.py:352-357`) has **no status filter at all**: it groups every ticket by
+`assigned_team` and reports `COUNT(*)` as "handled" plus `AVG(updated_at - created_at)` as average
+handle time. 5.8 noted the missing filter as pre-existing and unrelated — that judgement is
+correct today but **stops being correct at Phase 4**, when every routine question becomes a row in
+that count. "Handled" would silently come to mean "messages received", on a dashboard metric.
+Add the SERVICEABLE (or CLOSED, for handle time) filter here in the same pass.
+
+### Phase 3.5 — Bound the candidate set (before opening the tap) — **DONE**
+Migration **018** adds `last_activity_at` (NULL default — NULL means "no message has attached",
+and readers use `COALESCE(last_activity_at, created_at)` so an untouched ticket keeps exactly its
+old ordering; backfilling `created_at` would assert an activity that never happened).
+
+**A new repository method, not `update_ticket`.** `touch_ticket_activity` writes that one column
+and nothing else. `update_ticket` sets `updated_at` on every call, and `updated_at` is the field
+5.8 measured as unsafe to move — routing the bump through it would have reproduced the 21x
+analytics error the separate column exists to avoid.
+
+It is called at `create_or_get_ticket`'s `if existing: return existing` — the exact line where the
+old model lost the fact, so a ticket could take messages for days with every timestamp frozen at
+creation.
+
+**Two-tier candidate query.** Serviceable tickets are taken first and the remaining slots filled
+with the most recently active of the rest, so a thread a human is on can never be crowded out by
+routine chatter.
+
+**Verified 15/15, zero Groq calls**, including the failure this phase exists to prevent,
+reproduced: one dispute opened first, then five newer routine questions.
+
+| Query | Candidates returned |
+|---|---|
+| **Old** (`ORDER BY created_at`) | 5 routine tickets — **the dispute is absent** |
+| **New** | dispute **first**, then the 4 most recently active |
+
+Also verified: `touch` does not move `updated_at`; a touched logging thread outranks newer
+untouched ones; the 5-candidate bound still holds. Migration tested against a **copy of the live
+database** — 10 rows preserved, all NULL. Suite unchanged at 5 failed / 147 passed.
+
+### Phase 4 — Create a ticket for every query — **DONE (code); UI unverified until 4.5/6**
+`decide()` now returns `required=True` always and `hold_required = reason is not None`. The
+escalation rules are **completely unchanged** — they simply answer a different question now.
+Status follows the hold: no hold → `LOGGED`, hold → `OPEN`. An existing logging thread is
+**promoted** to `open` the first time a message on it needs a person (one-way; only closing
+ends a case), which also releases it to Jira.
+
+**Two things this phase broke that the plan had not predicted — both the SAME conflation
+surviving elsewhere, and neither would have been caught without running it:**
+
+1. **`_ticket_scope` began `if not escalation_reason: return None`.** Sensible when tickets only
+   existed on escalation; under Phase 4 it left the *majority* of tickets with a NULL scope — and
+   three things are gated on scope: `find_active_ticket_for_scope`, the `:other` refinement path,
+   and **the referee itself** (`if not existing and ticket_scope`). Every follow-up would have
+   forked a new ticket: the exact failure this redesign exists to remove, reintroduced by the fix
+   for it. Relatedness is a property of the text, not of whether a human was needed, so the scope
+   is now computed for every message.
+2. **`workflow_status` read `"human_follow_up" if state.ticket`** — conflating "a ticket exists"
+   with "a person is involved", which is precisely what Phase 1 split apart. Every routine question
+   would have reported `human_follow_up` while being auto-sent. Now reads `state.held_for_review`.
+
+**Verified 17/17, zero Groq calls, zero network** — including all three 5.7 regressions:
+Fix 117 (a graph-answered question has a ticket and is still auto-sent), Fix 123 (an approval
+escalation still holds), Fix 119 (a logging ticket is absent from customer-facing open cases,
+with an OPEN one present as the control). Also verified: promotion reuses the same ticket rather
+than forking, is recorded as a `ticket_promoted` event, and releases the ticket to Jira.
+
+**Two tests were updated, not "fixed" — they encoded the old model.** One asserted a routine
+question SKIPS ticket creation; the other asserted `ticket_id is None` for a never-escalate
+intent. Both now assert the new contract: a ticket exists, its status is `logged`, and the reply
+is auto-sent. Suite back to the 5 failed / 147 passed baseline, same five tests.
+
+**Not yet observed on screen.** Phases 4.5 and 6 are what close that — the 61 existing turns
+predate this and can never be grouped.
+
+### Phase 4.5 — Fresh start, because the existing data cannot show the result
+**Added 2026-09-01. The plan had no step between "Phase 4 is built" and "it works", and that gap
+is real, not procedural.**
+
+Phase 4 changes what a ticket *means* from the moment it lands. It does **not** backfill. Every one
+of the **61 conversation turns** now in the database was written under the old model, where a ticket
+existed only if a human was needed — so those turns have `ticket_id = NULL` and always will.
+
+Open the UI against that data after Phase 4 and a single conversation renders as **old turns still
+in disconnected boxes, new turns grouped into matters, interleaved**. That is
+indistinguishable from a half-working feature, and it is not a state anything can be judged from.
+
+A wipe is therefore not tidying-up after the work — it is **the only way to observe whether the work
+succeeded**. `docs/fresh-start-runbook.md` is written and verified for exactly this.
+
+It also clears, in one step and without bespoke surgery, the drift 5.10 documents: the ghost graph
+node, the 12 FK violations, 13 stale reply drafts. A targeted delete of the ghost was considered and
+**dropped** — it treats one symptom on data that is about to be discarded.
+
+**Known cost, decided knowingly:** the wipe destroys the **17 ResolutionMemory nodes**, some marked
+`verified: True` by a human agent. They are the RL learning loop and are rebuilt by re-running the
+demo, but they are not free.
+
+**Order matters: wipe AFTER Phase 4 lands**, so the fresh data is produced by the finished system
+rather than a half-migrated one.
+
+### Phase 6 — Acceptance: look at the screen
+**The plan's own purpose (§4: "It fixes the UI grouping at the root") was never stated as a
+checkable outcome.** Every phase above is verified by unit assertions, DB reads and token counts —
+none of which can tell you the screen changed. This phase closes that.
+
+Run `docs/demo-question-set.md` (3 sequenced runs, every question already verified against real
+records) and check its own stated criteria, which are the right ones:
+
+| Must be true on screen | Proves |
+|---|---|
+| **Lineage: each thread is ONE row** with its exchanges as dots — not one row per message | grouping works |
+| **Detailed: ticket A is ONE request** containing its steps, even though two other threads happened in between | grouping survives interleaving |
+| An *"Any update on…"* step (a **different intent** from its ticket) lands on the right thread | the referee matches on meaning, not labels |
+| An *"I also want to dispute…"* step opens a **separate** ticket | it forks rather than merges — the dangerous direction |
+| *"Do I have anything pending?"* names the open cases with no reference given | continuity is real, not staged |
+| A routine question is answered with **no ticket reference quoted** to the customer | decision 1 held: logging ids stay internal |
+
+**If these do not hold, Phase 4 is not done** — regardless of what the unit tests say.
+
+### Phase 5 — Topic-change acknowledgement — *optional polish*
+When the referee answers NEW and an open thread exists, the reply notes it is a separate
+matter. Genuinely good service (§4), but the grouping goal is met without it — do it only
+if time allows after Phase 6 passes.
+
 
 ---
 
@@ -439,11 +575,25 @@ reads. Only Phase 4's end-to-end test costs tokens.
 **Phase 3.5 is not optional.** Without it, Phase 4 silently degrades the referee by starving it of
 the right candidates, and the symptom looks like an LLM accuracy problem rather than a query bound.
 
-**Phases 1-3 are the real work** — the meaning change across analytics, the prompt, the panel and
-Jira is larger than the ticket-creation change itself. Phase 4 is a few lines once they are done.
+**Phase 2 was the real work** — the meaning change across analytics, the prompt and the panel. It
+is done, and it absorbed most of what Phase 3 was written to do (see the re-scope there). What
+remains before the tap opens is small: the Jira filter, the `get_agent_metrics` filter, and
+Phase 3.5's new field. Phase 4 itself is a few lines.
 
-**Consider 5.6 alongside this.** Moving `case_summary` and `opportunity_generation` off the message
-path frees ~35% of per-message tokens — more than this design costs — and is independent of it.
+**Phases 2, 3 and 3.5 are inert on their own.** They change nothing anyone can see. That is by
+design — they exist to make Phase 4 safe — but it means progress through them is not progress
+toward the goal in any observable sense. **Phase 4 is the change**; everything before it is its
+precondition, and everything after it is checking that it worked.
+
+**Remaining order: 3 → 3.5 → 4 → 4.5 → 6**, then 5 if time allows. Phases 3 and 3.5 are best done
+as one block, since neither is separately observable.
+
+**5.6 is a decision, not a footnote — promoted 2026-09-01.** `case_summary` (57 calls) and
+`opportunity_generation` (48) fire more often than `answer_generation` (45) and are agent-panel
+features sitting on the customer message path. Moving them off it frees ~35% of per-message
+tokens — the largest single lever in this document, larger than the referee costs. Against a
+200,000/day cap on a demo that must be rehearsed, that is the difference between ~28 and ~40
+messages a day. Independent of this redesign; worth doing before the rehearsals, not after.
 
 ---
 

@@ -173,6 +173,11 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 123 - L2 meant two different things, and only one needs a person:** a customer asking *"why was my claim rejected?"* and one saying *"I need this claim honoured, I have hospital bills pending"* are the same intent (`claim_status`), the same level (L2), and both answerable from the graph - so every rule treated them identically and neither reached a human. L2's own definition already names two things (*a backend/data lookup* AND *operational approval*); the classifier now says which, and Rule 0 escalates the approval kind regardless of how well retrieval did. Fix 117 preserved intact.
 - **Finding (no fix) - deleting a ticket row leaves its graph node behind:** measured 2026-09-01 before any Phase 2 work. Live SQLite holds **10** tickets, Neo4j holds **11**: `tkt_b6e0598f02a4` (`claim_status`, `open`, Sayantini) exists **only in the graph**. `get_open_cases` reads the GRAPH, so the reply prompt is told she has **two** open claim cases when she has one. Cause is **manual cleanup with no delete path**: there is no `delete_ticket` in the codebase, no FK cascade (`PRAGMA foreign_key_check` reports **12 violations**), and nothing removes the Neo4j node. **Creation is not at fault** - all 3 orphans AND all 10 survivors logged the identical `ticket_created` + `crm_sync_failed` sequence, so the application did the same thing in every case. Does **not** block Phase 2 (5.9, the two status vocabularies, is the only blocker); it matters because Phase 4 multiplies the rows any future cleanup must remove from both stores.
 - **Phase 2 of the ticket-model redesign - the `logged` status, readers first:** added `TicketStatus.LOGGED` (a grouping id; no human needed) plus migration 017, and taught all 21 read sites to expect it BEFORE anything writes it. Every site was defined by EXCLUSION (`status != 'closed'` in SQL, `t.status <> 'closed'` in Cypher) or by a hardcoded pair (`=== 'open' || 'in_progress'` in JS), so the new value would have been **admitted by the backend and dropped by the UI** - a ticket the agent cannot see but the model quotes to the customer. Replaced with two named inclusion lists, `SERVICEABLE` (open/in_progress - a human is on it) and `ACTIVE` (+logged - not finished), each site now declaring which it means. **Nothing writes `logged` yet** (that is Phase 4); this makes the vocabulary safe first. Verified with 9 hand-built assertions on a throwaway DB. **The verification itself used no model, but the FULL TEST SUITE RUNS DID - see the correction below: each `pytest` run makes ~9 real Groq calls.**
+- **Fix 124 - the test suite called real Groq and real Jira on every run:** `pytest` made **10 real Groq `_generate` calls** and **30 real POSTs to production Jira** per run, because three dependencies defaulted to live clients with no way to inject a fake (`TicketCreationAgent` -> `generator or GroqGenerator()`, `OrchestrationGraph` -> `crm or CRMClient()` with `CRM_PROVIDER=jira` in `.env`, and `QueryResolutionAgent` -> `rag or RAGPipeline()`). Added a `generator` parameter to `OrchestrationGraph` (2 lines of production code, default-preserving), injected offline stand-ins at all 10 test construction sites, and added `tests/conftest.py` as a transport-level guard so a new test fails loudly instead of spending quota. **Measured 0 network calls after the fix**, with the probe proven to fire on a known positive first.
+- **Phase 2 re-verified independently - 28/28 assertions, one dead-code trap found:** the original Phase 2 verification was written by the session that built it, with a harness whose first version was broken, so it was re-checked with a fresh one that calls the **real** repository/analytics/Cypher functions, asserts the NEGATIVE direction (logged must be absent from agent- and customer-facing reads), and carries negative controls proving each assertion can fail. All 5 continuity reads include `logged`; the agent panel, `get_open_cases` and both analytics counts exclude it; `app.js` keeps its third bucket and labels it "Logged". **Found:** `isActive()` (app.js:2713) is the exclusion form (`!== 'closed'`) this phase removed everywhere else - measured to have **zero callers**, so harmless today, but a trap for the next one; left in place, worth deleting when Phase 3 touches that file.
+- **Plan audit - the redesign had no definition of done; added Phases 4.5 and 6:** asked at the start of the session whether the plan is correct, I audited the *process* and not the *plan*. Re-reading it against the goal: the mechanism is right (root-cause fix, no proxy, Phase 0 gate) but it **ended at Phase 4 with nothing that checks the screen** - every phase is verified by unit assertions, DB reads and token counts, none of which can tell you the UI grouped anything. It also ignored that the **61 existing turns** were written under the old model and can never get a ticket id, so the UI after Phase 4 would show old disconnected boxes interleaved with new grouped matters - indistinguishable from a half-working feature. Added **Phase 4.5** (fresh start via the runbook, AFTER Phase 4, which also clears the ghost node + 12 FK violations without bespoke surgery) and **Phase 6** (acceptance against `docs/demo-question-set.md`'s own on-screen criteria). Phase 5 demoted to optional polish and moved last; 5.6 (move `case_summary`/`opportunity_generation` off the message path, ~35% of tokens) promoted from footnote to a decision; a goal statement added at the top. **The targeted ghost delete was dropped** - it treats one symptom on data Phase 4.5 discards.
+- **Fix 125 - Phases 3 and 3.5: guard the surfaces and bound the candidate set:** re-scoping Phase 3 against the code found **3 of its 4 items already delivered by Phase 2** (`get_open_cases`, agent surfaces, analytics counts), leaving the Jira filter - `sync_ticket` now returns early for a LOGGED ticket and records `crm_sync_skipped`, placed at the sync boundary so both callers are covered. **A fifth item the plan had not listed:** `get_agent_metrics` had **no status filter at all**, so after Phase 4 its "handled" count would silently mean "messages received"; each column now states its population. Phase 3.5 adds migration **018** (`last_activity_at`, NULL default + COALESCE so untouched tickets keep their old ordering) and a dedicated `touch_ticket_activity` - **deliberately not `update_ticket`**, which moves `updated_at`, the field measured as a 21x analytics error if repurposed. Candidates are now ranked by activity with a **guaranteed slot for serviceable tickets**. **15/15 verified, zero Groq calls**, including the negative control: the old `ORDER BY created_at` returns five routine tickets and **drops the live dispute entirely**. Suite unchanged (5 failed / 147 passed); migration tested against a copy of the live DB.
+- **Fix 126 - Phase 4: every customer query now gets a ticket:** `decide()` returns `required=True` always with `hold_required = reason is not None`, so the escalation rules are unchanged but now answer only the HOLD question; status follows the hold (no hold -> LOGGED, hold -> OPEN) and a logging thread is **promoted** to open the first time a message on it needs a person, which also releases it to Jira. **Two things broke that the plan had not predicted, both the same conflation surviving elsewhere:** (1) `_ticket_scope` began `if not escalation_reason: return None`, so under Phase 4 most tickets got a NULL scope - and `find_active_ticket_for_scope`, the `:other` refinement path and **the referee itself** are all gated on scope, so every follow-up would have forked a new ticket, reintroducing the exact failure this redesign removes; (2) `workflow_status` read `"human_follow_up" if state.ticket`, conflating "a ticket exists" with "a person is involved" - every routine question would have reported human follow-up while being auto-sent. **17/17 verified, zero Groq calls, zero network**, including all three 5.7 regressions (117 auto-send, 123 approval holds, 119 no logging ticket in customer-facing open cases). Two tests were **updated, not fixed** - they asserted the old model ("a routine question skips ticket creation", "ticket_id is None"). Suite back to baseline 5 failed / 147 passed. **Not yet observed on screen** - the 61 existing turns predate the model, which is what Phase 4.5 exists for.
 
 
 ---
@@ -5426,3 +5431,180 @@ report token cost **before** any Groq call; that commitment was broken throughou
 2. **The 46 Jira POSTs.**
 3. **The ghost ticket** `tkt_b6e0598f02a4` (Neo4j only) still feeding `get_open_cases`.
 
+---
+
+## Session 26 - 2026-09-01
+
+Branch: `Sayantini-phase2-ui-changes`. Continuous with Session 25. Fixes the item Session 25
+listed as NOT FIXED #1 and #2.
+
+### Fix 124 - the test suite called real Groq and real Jira on every run
+
+**Why this was step 1.** Every remaining phase of the ticket redesign (3, 3.5, 4) is verified by
+running the suite. Verification therefore cost demo quota and POSTed to production on every run.
+
+### Measured first, with a probe proven to fire
+
+Per [[verify-probe-fires-before-trusting-a-negative]], the probe was validated on a known positive
+BEFORE any number was trusted: one deliberate call recorded exactly 1.
+
+| | Session 25 log said | **Measured now** |
+|---|---|---|
+| Groq `_generate` calls | 9 | **10** |
+| Jira `create_ticket` POSTs | 46 | **30** |
+
+Both figures in the previous session's log were wrong. The Jira number is materially lower.
+
+Origins of the 10 Groq calls:
+
+| Origin | Calls |
+|---|---|
+| `orchestration_agents.py:545` `detect_action` | 5 |
+| `ticket_manager.py:244` `_referee_match` | 2 |
+| `groq_generator.py:220` `generate_answer` | 3 |
+
+29 of the 30 Jira POSTs came from `ticket_manager.py:297` `sync_ticket`.
+
+### Root cause - THREE independent leaks, not one
+
+Session 25 diagnosed only the first. All three are the same shape: `x or RealClient()` with no
+parameter to inject through.
+
+| # | Leak | Where |
+|---|---|---|
+| 1 | `generator or GroqGenerator()` | `TicketCreationAgent.__init__`, and `OrchestrationGraph` had no `generator` param to pass one |
+| 2 | `crm or CRMClient()` | `OrchestrationGraph:87`; `CRM_PROVIDER=jira` in `.env`, and only 2 of 10 test sites passed a fake |
+| 3 | `rag or RAGPipeline()` | `QueryResolutionAgent:268`; **not reachable through the graph**, so fixing #1 does not fix it |
+
+**Leak 2 was the largest by volume (30 vs 10) and had never been diagnosed.**
+
+A detail worth recording: `TicketManager` *already* accepted `generator=None` and deliberately
+documents that None means "referee skipped". But `graph.py:106` then did
+`self.tickets.generator = self.ticket_agent.generator`, overwriting that safe default with a live
+client. So one injection point fixes both `detect_action` and the referee.
+
+### The fix - injection, not patching
+
+A `conftest.py` that monkeypatched `GroqGenerator._generate` / `CRMClient.create_ticket` globally
+was tried and rejected: it breaks the two tests that legitimately exercise those classes with their
+own fakes underneath. Constructor injection is the app's own existing pattern here - `agent`, `rag`,
+`crm`, `neo4j_client` and `resolution_engine` all already work that way.
+
+**Production code (2 lines + comment, additive and default-preserving):**
+- `OrchestrationGraph.__init__` gains `generator=None`, passed to `TicketCreationAgent`.
+
+**Tests:**
+- `FakeGenerator` added beside the existing fakes; returns `llm_used=False` so both consumers take
+  their documented non-LLM branch (`detect_action` falls through to its keyword result,
+  `_referee_match` treats it as NEW - the safe default).
+- `offline_crm()` returns a real `CRMClient` with `provider="disabled"`, so `create_ticket` returns
+  `not_configured` without HTTP. Chosen over the existing `FakeCRM` deliberately: `FakeCRM` returns
+  `"synced"`, whereas the real client was *failing* - using it would have changed test behaviour.
+- All **10** `OrchestrationGraph(...)` construction sites (9 in `test_phase1.py`, 1 in
+  `test_web_chat.py`) now inject both. Audited programmatically, not by eye.
+- `FakeRAG` gained a `.generator`, because `QueryResolutionAgent`'s Neo4j and ticket-lookup branches
+  call `self.rag.generator.generate_answer(...)` directly, bypassing `.answer()`.
+- `FakeGenerator` had to be moved ABOVE `FakeRAG` in the file - the class-level reference is
+  evaluated at import.
+
+**`tests/conftest.py` (new) - a guard, not a stub.** Patches the *transport* boundary only
+(`requests` / `HTTPAdapter.send` and the `groq.Groq` constructor), so an un-injected client fails
+loudly while tests that legitimately exercise the higher-level methods keep passing.
+
+### Two things that were NOT masked
+
+- `test_invalid_crm_url_does_not_block_whatsapp_reply` broke when `offline_crm()` became the
+  default - correctly, because that test is *about* a misconfigured CRM and must get a real
+  `CRMClient` reading its own env. Given one explicitly. The invalid URL is rejected locally by
+  `requests`, so still no network call.
+- `test_query_resolution_agent_routes_transactional_intent_to_neo4j` was **failing at baseline and
+  now passes** - it had been depending on a live Groq call answering it (leak 3).
+
+### Verification
+
+| | Failures | Real network calls |
+|---|---|---|
+| Baseline (before) | 6 | 10 Groq + 30 Jira |
+| **After** | **5** | **0** |
+
+- **0 network calls**, measured with a transport-level probe whose self-test recorded 1 (so a zero
+  is meaningful). The earlier method-level probe was **discarded as invalid** - it patched
+  `CRMClient.create_ticket`, which also intercepts our own offline stand-in, and so reported 33
+  "calls" that would never have reached the network.
+- The 5 remaining failures are a strict **subset** of the baseline 6 - no new failure introduced.
+  They are pre-existing and out of scope.
+- The guard itself was proven on known positives: a throwaway test confirmed it blocks both a real
+  Jira POST and a real `groq.Groq()` construction. Removed after the check.
+- The recorded "5 failed / 147 passed" baseline remains flaky
+  (`test_distinct_l3_fraud_incidents_create_distinct_tickets` gives 5 or 6 on a clean tree).
+
+**Cost of this fix: one baseline suite run** (~10 Groq calls, ~30 Jira POSTs) to establish the
+before-number honestly. Every run after it is free.
+
+### Still open (unchanged from Session 25)
+1. The ghost ticket `tkt_b6e0598f02a4` (Neo4j only) still feeds `get_open_cases`.
+2. Tickets still have no delete path that maintains both stores (redesign 5.10 / Phase 1.5).
+3. Phase 3 -> 3.5 -> 4 of the ticket-model redesign.
+
+
+### Phase 2 re-verified independently - 28/28, and one dead-code trap found
+
+Phase 2 was originally verified by the session that built it, with a harness whose first
+version was broken. This is a fresh check, written to differ deliberately:
+
+- it calls the **real** repository / analytics / Cypher functions rather than restating their SQL;
+- it asserts the **negative** direction (a logged ticket must be ABSENT from agent- and
+  customer-facing reads), which is the direction that actually causes harm;
+- every group carries a **negative control** proving the assertions can fail.
+
+Zero Groq calls, zero network - SQLite plus source reads.
+
+**Part 1 - SQL and analytics (13/13).** Three tickets differing ONLY by status, so any
+difference in a read is attributable to the vocabulary and nothing else.
+
+| Read | List | logged present? | Result |
+|---|---|---|---|
+| `find_active_ticket` | ACTIVE | yes | PASS |
+| `find_active_ticket_for_intent` | ACTIVE | yes | PASS |
+| `list_active_tickets_for_intent` | ACTIVE | yes | PASS |
+| `list_active_tickets_for_conversation` (**referee candidates**) | ACTIVE | yes | PASS |
+| `find_open_tickets_for_customer` (**agent panel**) | SERVICEABLE | **no** | PASS |
+| analytics open / closed counts | SERVICEABLE | **neither** | PASS |
+| conversation-close count | SERVICEABLE | **no** | PASS |
+
+*Negative control:* closing the OPEN ticket emptied every serviceable read and dropped the
+candidate list to the logged ticket alone - so the checks were measuring something.
+
+**Part 2 - the graph and the UI (15/15).** These two were the gap, and they are the pair that
+produced the original Fix 119 failure (authoritative to the model, invisible to the agent).
+
+- `get_open_cases` admits **only** `open` + `in_progress`. LOGGED is not served to the reply
+  prompt; nor is a NULL status (an incomplete write, not an open case).
+  The harness **parses the filter out of the real Cypher text** rather than restating it, so a
+  future edit to that clause cannot silently pass.
+- *Negative control:* the previous clause (`status IS NULL OR status <> 'closed'`) **does** leak
+  the logged ticket when run against the same data - confirming the check detects the failure.
+- `app.js`: the third `_allTickets.logged` bucket exists and is populated, `allTickets()`
+  concatenates all three, `statusLabel` renders **"Logged"** (not "Open"), the neutral
+  `.fns-logged` class exists in `style.css`, and **no caller still does the old
+  `concat(open, closed)`** that would have dropped a third status.
+
+**Finding - `isActive()` in app.js:2713 is dead code in the exact form Phase 2 removed.**
+
+```js
+function isActive(t) { return !!t && t.status !== 'closed'; }
+```
+
+It is the **exclusion** test (`!== 'closed'`) that this whole phase replaced with inclusion
+lists, and it is the only one left anywhere - every other `!= 'closed'` in the repo is now a
+comment or the migration's explanatory text.
+
+**Measured: it has zero callers** (one definition, no references across `apps/`, `services/`,
+`shared/`, `tests/`). So it is harmless today and **not a defect in Phase 2** - nothing reads it.
+It is a trap for the next person: it is named as the natural counterpart to `isServiceable()`
+(which IS used, 4 callers), so a future caller reaching for "is this ticket active?" would get
+the exclusion semantics back. Left in place rather than changed, since removing it is unrelated
+to the verification that was asked for; worth deleting or converting to
+`ACTIVE_TICKET_STATUSES` when Phase 3 touches this file.
+
+**Conclusion: Phase 2 is correct as built.** Readers-only remains true - nothing writes `logged`.
