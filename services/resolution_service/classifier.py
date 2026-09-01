@@ -14,6 +14,14 @@ from services.resolution_service.resolution_loader import ResolutionExampleLoade
 logger = logging.getLogger(__name__)
 
 ALLOWED_LEVELS = {"L1", "L2", "L3"}
+# L2's definition names two different things - "a backend/data lookup specific to this customer"
+# and "operational approval" - and only the second needs a person. Both arrived as plain "L2", so
+# a customer asking WHY a claim was rejected and one demanding it be HONOURED were indistinguishable
+# to every rule downstream; the intent label is identical too (claim_status), so nothing could tell
+# them apart. "lookup" is the default everywhere it is missing or unrecognised: unknown input must
+# not manufacture tickets, and that keeps the old behaviour when the field is absent.
+ALLOWED_L2_KINDS = {"lookup", "action"}
+DEFAULT_L2_KIND = "lookup"
 DEFAULT_TOP_K = 5
 
 # ── Deterministic safety net ─────────────────────────────────────────────────
@@ -89,6 +97,9 @@ class ResolutionDecisionEngine:
                 "intent": clean_intent,
                 "sentiment": clean_sentiment,
                 "resolution_level": "L3",
+                # L3 escalates unconditionally, so the kind is never consulted; carried only
+                # so every decision dict has the same shape.
+                "l2_kind": DEFAULT_L2_KIND,
                 "confidence": 0.95,
                 "reason": f"Deterministic safety net matched high-risk term '{risk_term}'.",
             }
@@ -254,6 +265,12 @@ class ResolutionDecisionEngine:
         if level not in ALLOWED_LEVELS:
             return None
 
+        # Validated like the level above rather than trusted: an unrecognised value defaults
+        # to lookup, so a malformed reply degrades to today's behaviour instead of escalating.
+        l2_kind = str(payload.get("l2_kind") or "").strip().lower()
+        if l2_kind not in ALLOWED_L2_KINDS:
+            l2_kind = DEFAULT_L2_KIND
+
         try:
             confidence = float(payload.get("confidence", 0.0))
         except (TypeError, ValueError):
@@ -263,6 +280,7 @@ class ResolutionDecisionEngine:
             "intent": str(payload.get("intent") or intent),
             "sentiment": str(payload.get("sentiment") or sentiment),
             "resolution_level": level,
+            "l2_kind": l2_kind,
             "confidence": max(0.0, min(1.0, confidence)),
             "reason": str(payload.get("reason") or "Resolution level selected by LLM.").strip(),
         }
@@ -300,6 +318,11 @@ class ResolutionDecisionEngine:
             "intent": intent,
             "sentiment": sentiment,
             "resolution_level": level,
+            # Both fallbacks land here: a majority vote over labelled examples, and the
+            # no-examples default of L2 during an infra outage. Neither read the message, so
+            # neither can claim the customer demanded an outcome - lookup, which does not
+            # escalate on its own. An outage must not start manufacturing approval tickets.
+            "l2_kind": DEFAULT_L2_KIND,
             "confidence": confidence,
             "reason": fallback_reason.strip(),
         }

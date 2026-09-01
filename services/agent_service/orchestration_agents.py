@@ -637,8 +637,22 @@ class TicketCreationAgent:
         # record answered the question (the graph, or their own ticket), holding the correct
         # answer for review adds a wait and no accuracy — the agent would read the same record.
         # L3 stays unconditional: risk always reaches a human regardless of how well we answered.
-        if level == "L2" and not _answered_from_customer_record(resolution):
-            return f"assisted_resolution_required:{analysis.intent.value}"
+        if level == "L2":
+            # Two different things arrive as "L2" — L2's own definition says so: "a backend/data
+            # lookup specific to this customer" AND "operational approval". Fix 117 made the gate
+            # ask "did the customer's record answer this?", which is right for the lookup half:
+            # holding a correct card limit or premium date helps nobody. It is wrong for the other
+            # half. "I need this claim honoured, I have hospital bills pending" was answered from
+            # the graph — accurately — and auto-sent, because the gate saw a good answer. She was
+            # not asking for data. Retrieval cannot honour a claim; only a person can. And no rule
+            # below catches it: claim_status is INFORMATIONAL, so Rule 3b returns None on the
+            # label alone, and the label is identical to "why was my claim rejected?", which
+            # genuinely is a lookup. The distinction lives in the message text, which only the
+            # resolution classifier reads — so it is made there and read here.
+            if decision.get("l2_kind") == "action":
+                return f"approval_required:{analysis.intent.value}"
+            if not _answered_from_customer_record(resolution):
+                return f"assisted_resolution_required:{analysis.intent.value}"
 
         # Rule 1: Customer explicitly asked for human
         if analysis.intent == Intent.HUMAN_ESCALATION:

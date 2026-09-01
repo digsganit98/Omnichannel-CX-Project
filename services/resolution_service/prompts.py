@@ -5,6 +5,7 @@ RESOLUTION_SCHEMA = {
     "intent": "",
     "sentiment": "",
     "resolution_level": "L1 | L2 | L3",
+    "l2_kind": "lookup | action",
     "confidence": 0.0,
     "reason": "",
 }
@@ -28,6 +29,17 @@ Resolution levels:
   compromise, phishing/OTP sharing, identity theft, SIM swap, forged documents, legal or regulatory
   complaint (e.g. RBI Ombudsman), data leakage, an unexplained account freeze, or any safety issue
   where delay could cause real harm. Always takes priority over L1/L2 signals.
+
+When resolution_level is L2, also set l2_kind. L2's own definition names TWO different things —
+"a backend/data lookup" and "operational approval" — and only the second needs a person:
+- "lookup"  – the customer wants INFORMATION we hold. Answering the question completes the
+  request. "What is my claim status?", "Why was my claim rejected?", "What is my card limit?",
+  "When is my premium due?" A correct answer leaves the customer with what they asked for.
+- "action"  – the customer wants an OUTCOME the system cannot produce: a decision reversed, a
+  fee waived, a claim honoured, a penalty cancelled, an exception made, a record corrected.
+  "I need this claim honoured", "Reverse this charge", "Please check it again — that is wrong."
+  Retrieval cannot satisfy this however good the data is, because they are not asking for data.
+Set "lookup" when unsure. For L1 and L3 set l2_kind to null.
 
 Decision principles:
 - Use the provided intent and sentiment as signals, not as the only decision.

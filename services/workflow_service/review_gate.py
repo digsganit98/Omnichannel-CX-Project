@@ -60,6 +60,10 @@ def _friendly_reason(level: str, ticket_reason: str) -> str:
         "secondary_intent_manual_review": "Escalated: secondary issue needs review",
         "critical_escalation": "Critical escalation",
         "assisted_resolution_required": "Assisted resolution",
+        # The customer wants an outcome (a reversal, a waiver, a claim honoured), not
+        # information — a decision only a person can make. Distinct from "assisted
+        # resolution", which means we could not retrieve what they asked for.
+        "approval_required": "Approval needed — customer asked for a decision",
     }
     return mapping.get(code, "Escalated — needs human review")
 

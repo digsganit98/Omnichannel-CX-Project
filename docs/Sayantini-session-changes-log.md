@@ -170,6 +170,7 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 120 — Rule 9 removed: it counted repeated TOPICS, not repeated failures:** it escalated on >=2 prior outbound turns carrying `resolved=0`, read as "we have failed this customer twice" — but **nothing sets `resolved=1` on a reply** (measured all-time: 1 row at 1, a ticket-closure notice; 20 at 0; 10 NULL), so a correct answer is recorded identically to a failure. It ticketed a demo question whose predecessor had been answered correctly. Every failure it targeted is already caught at the point of failure by Rules 0, 5 and 7.
 - **Fix 121 — "Customer has been notified" was a hardcoded string, and closing a conversation removed the agent's only reply surface:** closing notifies nobody — verified: no outbound turn is written, the discarded draft has `sent_text: None` — yet the banner stated it as fact, so an agent would reasonably believe the customer knew. Now reads "Conversation closed." Separately, the compose box was hidden on a closed conversation, leaving the agent reading a thread they could not answer; it now stays.
 - **Fix 122 — A secondary-intent ticket was created and nobody was told:** a message carrying two intents (a `claim_status` question AND a `complaint`) created a real ticket on the secondary path, which then never set `state.ticket` or `state.ticket_decision`. Everything downstream reads those, so the turn was written with `ticket_id` NULL (badge read **NO TICKET** beside a reply quoting that ticket's reference), `buildUnits` could not merge the exchanges (they rendered as disconnected boxes), and the review gate still saw the primary decision's `required=False` — so **a customer contesting a rejected Rs.96,400 claim was auto-answered instead of reaching a person.** Two lines.
+- **Fix 123 - L2 meant two different things, and only one needs a person:** a customer asking *"why was my claim rejected?"* and one saying *"I need this claim honoured, I have hospital bills pending"* are the same intent (`claim_status`), the same level (L2), and both answerable from the graph - so every rule treated them identically and neither reached a human. L2's own definition already names two things (*a backend/data lookup* AND *operational approval*); the classifier now says which, and Rule 0 escalates the approval kind regardless of how well retrieval did. Fix 117 preserved intact.
 
 
 ---
@@ -5021,3 +5022,78 @@ Digvijay has **no credit card**, so nothing card-related is scripted for him; hi
 structural-damage claims, one approved at Rs.4,07,292 and one **rejected** at Rs.4,97,729. No
 `rejection_reason` is stored, so a reply admitting it cannot see the reason is **correct** — the
 doc calls that out as a strength to demo rather than a gap to hide.
+
+### Fix 123 - "L2" meant two different things, and only one of them needs a person
+
+The user put the test precisely: *"do you think query 1 should get a ticket? (I think no). Do you
+think query 2 should? (I think yes)."*
+
+| | |
+|---|---|
+| **Q1** *"Why was my hospitalisation claim rejected?"* | wants INFORMATION. The graph knew, answered correctly, and she has what she asked for. **No ticket.** |
+| **Q2** *"That doesn't make sense... I need this claim honoured, I have hospital bills pending."* | wants an OUTCOME. The graph cannot honour a claim. After the answer she has **nothing** she asked for. **Ticket.** |
+
+Both are `claim_status`. Both are L2. Both were answerable from her record. **Every signal in the
+pipeline was identical**, so both got no ticket and Q2 was auto-sent to a customer contesting a
+rejected **Rs.96,400** claim.
+
+**Three separate things failed, and each alone would have caused it:**
+
+1. **Rule 3b vetoes on the intent label.** `claim_status` is INFORMATIONAL, so it returns None
+   unconditionally. Measured across every combination: **only L3 escapes** - not high urgency, not
+   negative sentiment, not the words *"I have hospital bills pending"*.
+2. **`secondary_intent` is a coin flip.** It caught this once and not the second time on the same
+   message. Prompt rule 4 says *"a SECOND distinct request"* - a grievance is not a "request" - and
+   8 of 9 few-shot examples demonstrate `null`. **This is why Fix 122 did not fire**; that fix is
+   correct but depends on a lottery, and reporting it as tested was wrong.
+3. **`sentiment` is backwards on exactly this pair.** `sentiment.py` is a 28-word substring match:
+   Q1 contains *"claim rejected"* -> **negative**; Q2 contains none of the 28 words -> **neutral**.
+   The one deterministic signal that might have separated them scores them **inverted**.
+
+**And Fix 117 removed the last accidental safety net.** Before it, Rule 0 escalated *every* L2, so
+Q2 would have been ticketed - for the wrong reason, but ticketed. Tightening the gate moved all the
+weight onto Rule 3b, which does not hold it. Fix 117 was right; I did not check what was downstream.
+
+**The fix is in L2's own definition**, which already names two things: *"a backend/data lookup
+specific to this customer"* **and** *"operational approval"*. Only the second needs a person.
+
+- `l2_kind: "lookup"` - wants information we hold; answering completes the request
+- `l2_kind: "action"` - wants an outcome we cannot produce: a decision reversed, a fee waived, a
+  claim honoured, an exception made
+
+Rule 0 escalates `action` **regardless of retrieval**, because retrieval is not what was asked for.
+Reason code `approval_required:<intent>`; the review gate reads *"Approval needed - customer asked
+for a decision."*
+
+**A proposal of mine was tested against the user's two queries and withdrawn.** I first suggested
+*"if L2 and intent is INFORMATIONAL, escalate"* - both queries are L2 because both need her claim
+record, so it would have ticketed Q1 too. It failed their test, not mine.
+
+**Probed before building**, per [[probe-before-building]]: the model classified all four cases
+correctly first time, with no tuning - Q1 `lookup`, Q2 `action`, card limit `lookup`, *"reverse the
+late fee"* `action`. It separated Q1 from Q2 **about the same claim**, which intent and sentiment
+could not.
+
+*Learned during the probe:* `gpt-oss-20b` is a reasoning model, and at `max_tokens=100` it spent the
+entire budget thinking and returned **empty** (`output_chars: 0`) - not truncated, deleted. It
+needed ~900.
+
+**Defaults fail safe.** Missing or unrecognised -> `lookup`, so a malformed reply degrades to
+today's behaviour rather than manufacturing tickets. Both fallback paths (majority-vote and the
+no-examples L2 default) get `lookup`: neither reads the message, so neither can claim the customer
+demanded an outcome, and an infra outage must not start raising approval tickets.
+
+**Verified, no Groq calls:** Q1 auto-sends, Q2 -> `approval_required:claim_status`. All five Fix 117
+cases still auto-send (card limit, loan status, premium due, dispute update, balance). Fraud L3,
+failed-graph L2, and transaction_dispute all still escalate. Tests 5 failed / 147 passed.
+
+**Found, not fixed:** `llm_usage_events.resolution_level` is always NULL - `_llm_context` reads
+`state.resolution`, which is still None while the resolution itself is being produced. Pre-existing
+ordering issue; it is why the level driving these decisions cannot be audited.
+
+**Problem 2 (UI continuity) deliberately NOT touched.** `buildUnits` keys a request on `ticket_id`
+alone, so untagged turns can never merge. My suggestion to group by conversation + a 30-minute
+window was **rejected by the user and rightly** - adjacency is not relatedness, and her own thread
+holds three unrelated matters. A ticket is currently the only thing in this system that asserts two
+messages concern the same matter. Fixing Q2's ticket resolves this instance; the general gap needs a
+deliberate signal, not a proxy.
