@@ -345,16 +345,36 @@ def get_sentiment_metrics(db_path: str) -> SentimentMetrics:
 
 
 def get_agent_metrics(db_path: str) -> list[AgentMetrics]:
+    """Per-team workload. Every figure here counts WORK, so LOGGED is excluded.
+
+    This query had no status filter at all: it counted every ticket as "handled" and
+    averaged `updated_at - created_at` over all of them. Both were already imperfect
+    (the average is meaningless on a ticket that is still open — that difference is just
+    "time since the last administrative edit"), but they become WRONG under the
+    ticket-model redesign, where every customer query gets a LOGGED ticket. "Handled"
+    would quietly come to mean "messages received", inflated roughly 4x, on a dashboard.
+
+    So each column now says which population it means:
+      * handled     - SERVICEABLE: a human is on it, or was
+      * avg_mins    - CLOSED only: elapsed time is only meaningful once the case ended
+      * escalations - SERVICEABLE: a logging ticket has no escalation_reason anyway,
+                      but stating it keeps the three columns consistent
+    """
     with _connect(db_path) as conn:
         rows = conn.execute(
-            """
+            f"""
             SELECT
                 assigned_team AS agent,
-                COUNT(*) AS handled,
-                AVG((julianday(updated_at) - julianday(created_at)) * 1440) AS avg_mins,
-                SUM(CASE WHEN escalation_reason IS NOT NULL AND escalation_reason != '' THEN 1 ELSE 0 END) AS escalations
+                SUM(CASE WHEN {_SERVICEABLE_SQL} THEN 1 ELSE 0 END) AS handled,
+                AVG(CASE WHEN {_CLOSED_SQL}
+                         THEN (julianday(updated_at) - julianday(created_at)) * 1440
+                    END) AS avg_mins,
+                SUM(CASE WHEN {_SERVICEABLE_SQL}
+                          AND escalation_reason IS NOT NULL AND escalation_reason != ''
+                         THEN 1 ELSE 0 END) AS escalations
             FROM tickets
             GROUP BY assigned_team
+            HAVING handled > 0
             ORDER BY handled DESC
             """
         ).fetchall()
