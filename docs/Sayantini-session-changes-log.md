@@ -167,6 +167,7 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 117 — A correct answer was held for a human anyway:** L2 escalated on *category* ("needs customer-specific data") — exactly what the graph does best — so 7 of 7 live tickets were `assisted_resolution_required`, five of them questions the graph had already answered correctly. L2 now escalates only when the customer's own record did NOT answer; L3 stays unconditional. Also: the balance reply said "your current account balance is Rs. 0" (the LLM relabelled an *average monthly* figure — there is no live-balance field), Rule 2b narrowed to `fund_transfer`, and Rules 7+8 merged onto one exemption list.
 - **Fix 118 — Two rules that escalated on the customer's circumstances, not their question:** Rule 4 ticketed on *tone* (urgency is read from capitals/"ASAP"), contradicting the system's own "tone is not severity" principle stated in the L1/L2/L3 prompt AND in Rule 3b's comment; Rule 6 ticketed because the customer had 3+ *other* open cases, which says nothing about the message in hand. Both removed from the ticket decision — urgency still feeds ticket **priority**. Also: the balance reply said "your current **average** balances are…" — Fix 117 told the model not to state a current balance but still handed it the account rows, so it did both; the rows are now withheld (FDs kept).
 - **Fix 119 — A shared topic label was treated as the same case, and an average was presented as a balance:** a customer with any open ticket on the topic was told a brand-new message was *"already logged under"* it, while the ticket logic had created no ticket at all — the reply writer matched on the **intent label** while `TicketManager` matches on the specific matter. Continuity is now claimed from `active_ticket` (the ticket the conversation is actually on). Also: `avg_monthly_balance` now carries its own qualifier in **both** prompt blocks that emit it, so the figure cannot be read as a current balance.
+- **Fix 120 — Rule 9 removed: it counted repeated TOPICS, not repeated failures:** it escalated on >=2 prior outbound turns carrying `resolved=0`, read as "we have failed this customer twice" — but **nothing sets `resolved=1` on a reply** (measured all-time: 1 row at 1, a ticket-closure notice; 20 at 0; 10 NULL), so a correct answer is recorded identically to a failure. It ticketed a demo question whose predecessor had been answered correctly. Every failure it targeted is already caught at the point of failure by Rules 0, 5 and 7.
 
 
 ---
@@ -4860,3 +4861,64 @@ outside what was approved.
   of anything.
 - Rule 9's broken premise; the strong-L1 shortcut outranking Rule 5.
 - Three commits unpushed.
+
+### Fix 120 — Rule 9 counted repeated topics, not repeated failures
+
+Found by the user mid-demo: *"What is my credit card outstanding?"* produced a held draft and
+`tkt_d2388b7555ff`, reason **`repeated_unresolved_query`**. The reply itself was correct
+(Rs.91,821.95, her real Mastercard balance) and the L2 gate had passed at 95% retrieval
+confidence — the ticket came entirely from Rule 9.
+
+**The rule read a flag that means nothing.** It counted prior outbound turns on the same intent
+carrying `resolved=0`, treating that as "we failed". Measured across every outbound turn ever
+written in this database:
+
+| `resolved` | Count |
+|---|---|
+| `1` | **1** — a ticket-closure notice |
+| `0` | 20 |
+| `NULL` | 10 |
+
+**Nothing sets `resolved=1` on a reply.** The only code writing `True` is an unrelated API route
+in `customers.py`. So a perfect answer and an outright failure are recorded identically, and the
+rule was counting **repeated topics**. The customer's previous balance question had been answered
+correctly at 10:38; that success counted as a failure.
+
+**Nothing is lost by removing it.** Every failure it aimed at is already caught *at the point of
+failure* — better, because it does not require the customer to ask twice first:
+
+| Real failure | Already caught by |
+|---|---|
+| The customer's record could not answer an L2 question | Rule 0 (L2 gate) |
+| Intent classification weak | Rule 5 |
+| Retrieval found nothing, or found it weakly | Rule 7 |
+| Customer asked for a human | Rule 1 |
+
+Rule 9 was the only rule judging failure **retrospectively by counting history** rather than by
+reading the answer in hand. Same reasoning as Fix 118's Rules 4 and 6: escalate on the question
+asked, not on the customer's circumstances.
+
+**Its entire firing record was one ticket, and it was wrong.**
+
+`conversation_turns.resolved` is left in place but is now read by nothing on this path — an
+effectively dead column, kept because dropping it needs a table rebuild. The
+`repeated_unresolved_query` label stays in `review_gate.py` so the historical ticket still renders.
+
+**Also noted:** *"What is my credit card outstanding?"* classified as `account_balance_inquiry`
+rather than `card_management`. The answer was right, but the mislabelling is what grouped it with
+the balance questions and tripped the counter. Not fixed — separate issue.
+
+### Demo storyline written
+`docs/demo-storyline.md` — one customer, one problem, **11 sequential messages across 3 channels,
+1 ticket**. Built on Sayantini's real data: her Mastercard is 45 days past due (Rs.91,821.95, late
+fee `CHG00100004` Rs.1,284.14 charged 2026-07-01) and an IMPS transfer of Rs.5,776.55 to Samarth
+Thaker (`TXN0001000003`, 2026-03-23) is still `Debited-Pending-Credit`. Her complaint — *"I paid
+the card with that transfer, the money left my account, and now I'm being fined"* — is a real bank
+scenario already present in the graph.
+
+The arc is built so escalation lands on a defensible message: msg 3 (*"why was I charged?"*) does
+not escalate, msg 4 (*"but I already paid that"*) does, and msg 5 (*"I'm losing patience"*) adds no
+ticket. That sequence is only true **because** Rules 4, 6 and 9 were removed today.
+
+**First draft was wrong:** three single messages, one per capability — a checklist, not a scenario.
+The user's three categories were the ARC, not the message count.

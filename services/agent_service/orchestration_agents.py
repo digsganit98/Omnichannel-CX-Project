@@ -664,22 +664,24 @@ class TicketCreationAgent:
         if analysis.intent == Intent.TICKET_STATUS:
             return None
 
-        # Rule 9: Same intent handled ≥ 2 times (outbound, unresolved) with no active ticket.
-        # Only count turns where resolved=False/0 — if prior turns were resolved successfully,
-        # the customer asking again is a new check, not an unresolved follow-up.
-        # MUST come before Rule 3b so informational intents (loan_status etc.) can still
-        # escalate when the system has repeatedly failed to give a useful answer.
-        recent_turns = context.get("recent_turns", [])
-        repeat_count = sum(
-            1 for t in recent_turns
-            if (
-                t.get("direction") == "outbound"
-                and t.get("intent") == analysis.intent.value
-                and not t.get("resolved")
-            )
-        )
-        if repeat_count >= 2 and not context.get("active_ticket"):
-            return "repeated_unresolved_query"
+        # Rule 9 (repeated unresolved query) REMOVED. It counted prior outbound turns on the
+        # same intent carrying resolved=0, meaning "we have failed this customer twice". That
+        # is not what the flag says: NOTHING sets resolved=1 on a reply. Measured across every
+        # outbound turn ever written here — 1 row at 1 (a ticket-closure notice), 20 at 0,
+        # 10 NULL — so a correct, well-delivered answer is recorded identically to a failure.
+        # The rule was therefore counting REPEATED TOPICS, not repeated failures, and it
+        # ticketed a customer whose previous question had been answered correctly.
+        #
+        # Nothing is lost. Every failure it aimed at is already caught AT THE POINT OF FAILURE,
+        # which is strictly better because it does not require the customer to ask twice first:
+        # Rule 0 (L2 gate) when the customer's record could not answer, Rule 5 on a weak intent
+        # classification, Rule 7 when retrieval found nothing or found it weakly. Rule 9 was the
+        # only rule judging failure retrospectively by counting history rather than by reading
+        # the answer in hand. Same reasoning as Rules 4 and 6: escalate on the question asked,
+        # not on the customer's circumstances.
+        #
+        # `conversation_turns.resolved` is left in place but is now read by nothing on this
+        # path — an effectively dead column, kept because dropping it needs a table rebuild.
 
         # Rule 3b: Pure informational intents — customer is asking for data, not reporting a
         # problem. High urgency/negative sentiment on a status query means they are anxious,
