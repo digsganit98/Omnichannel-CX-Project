@@ -111,6 +111,39 @@ Invoke-RestMethod -Method Post -Headers $H "http://localhost:8888/admin/rag/inde
 ```
 Expect a JSON result with `indexed` > 0 and `errors: 0`.
 
+### ⑧ Recreate the portal / admin logins (they were in the wiped SQLite volume)
+
+**The 5 BFSI customers come back automatically; YOUR LOGIN DOES NOT.** `customer_users` and
+`admin_users` live in `cx-data`, so step ③ deletes them. The first sign-in after a wipe fails with
+"Invalid user ID or password", which looks like a broken app and is not.
+
+Sign up again on the portal, and **match the seeded customer's email or phone exactly** — identity
+resolution links a portal signup to the BFSI record on those fields (Fix 1). A mismatch is treated
+as an unregistered customer and rejected.
+
+| Customer | Email | Phone |
+|---|---|---|
+| Sayantini Sarkar | `sayantini.s.55@gmail.com` | 7890864700 |
+| Sireesha | `s.sireesha28092004@gmail.com` | 9398314492 |
+| Digvijay Yadav | `digvijayyadav48@gmail.com` | 7700920746 |
+| Hirithi Nandha | `hirithi.nandha@gmail.com` | 9150697784 |
+| Fathima Devasahayam | `fathimawork511@gmail.com` | 7538870992 |
+
+The admin login needs recreating the same way.
+
+### ⑨ Check the model has daily quota left
+
+A wipe does not reset Groq's daily token cap, and an exhausted model does not fail loudly: the
+reply comes back empty and the caller prints the raw retrieved records to the customer. Before a
+run, confirm the model in `GROQ_MODEL` still answers:
+
+```
+docker exec omnichannel-cx-project-api-1 python -c "import os; from groq import Groq; print(Groq(api_key=os.getenv('GROQ_API_KEY')).chat.completions.create(model=os.getenv('GROQ_MODEL'),messages=[{'role':'user','content':'hi'}],max_tokens=1).choices[0].message.content is not None)"
+```
+
+A 429 mentioning `tokens per day (TPD)` means switch `GROQ_MODEL` to another model — each has its
+own 200K/day — and `docker compose up -d api`.
+
 ---
 
 ## ⑧ Verification checklist — verify EVERY external dependency (all read-only)
