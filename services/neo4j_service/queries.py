@@ -9,6 +9,28 @@
 # 5 demo customers), including real failure states such as 'Debited-Pending-Credit' with a
 # reason. The exclusion meant the single most common inbound intent answered from the generic
 # KB while the customer's own disputed transaction sat unread in the graph.
+# The balance figure's qualifier lives IN ITS FIELD NAME, so the number cannot be emitted
+# without it and it cannot attach to anything else.
+#
+# This used to be a NOTE line above the account rows, and it did two jobs: it stated facts
+# ("this is an average, there is no live balance") AND it issued orders ("say so and point
+# the customer to the mobile app", "Never describe this figure as their current balance").
+# The orders are the problem. They sit inside a data block that goes to the model on every
+# message, so the model obeyed them on questions that never touched the balance - an FD
+# maturity question and a credit-card dues question both came back correct and then told the
+# customer to check the app for their current balance. The prompt already carries the right
+# rule ("Do NOT volunteer info about unrelated products"), but a directive next to the data
+# outranks a general rule fifty lines earlier. See [[redact-dont-instruct-llm]]: removing the
+# input works where instructing the model does not.
+#
+# The FACT is kept, because the balance answer depends on it: asked for a CURRENT balance,
+# the model sees the only figure available is labelled as having no live/current counterpart,
+# and the standing rule "answer ONLY using the retrieved context, do NOT invent facts" leaves
+# it nothing else to say. Stating the absence is what makes that answer correct - not the
+# instruction telling it what to write.
+_BALANCE_LABEL = "Average monthly balance (this system has no live/current balance figure)"
+
+
 TRANSACTIONAL_INTENTS = {
     "loan_status",
     "loan_default_notice",
@@ -397,18 +419,13 @@ def neo4j_answer(client, intent: str, customer_id: str) -> str | None:
             # emitted by the customer-context block in groq_generator.py and carries the same
             # statement: fixing one and not the other left the model still holding an
             # unqualified figure.
-            lines.append(
-                "Account records. NOTE: the balance below is an AVERAGE MONTHLY balance, not a "
-                "current balance. A live/current balance is NOT available from this system — "
-                "say so and point the customer to the mobile app or netbanking for it. Never "
-                "describe this figure as their current balance."
-            )
+            lines.append("Account records:")
             for a in accounts:
                 lines.append(
                     f"  - {a.get('account_type', 'Account')} {a.get('account_sub_type', '')} "
                     f"(No: {a.get('account_number', '')}): "
                     f"Status: {a.get('status', 'Unknown')}, "
-                    f"Avg monthly balance: {_fmt_amount(a.get('avg_monthly_balance'))}, "
+                    f"{_BALANCE_LABEL}: {_fmt_amount(a.get('avg_monthly_balance'))}, "
                     f"Min balance required: {_fmt_amount(a.get('min_balance_required'))}"
                 )
         if fds:

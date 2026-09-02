@@ -4,6 +4,9 @@ import re
 import time
 from pathlib import Path
 
+# The account-balance qualifier is defined ONCE, beside the graph branch that also emits
+# it. neo4j_service.queries imports nothing from this package, so there is no cycle.
+from services.neo4j_service.queries import _BALANCE_LABEL
 from services.observability_service import record_llm_call
 from services.pii_service.masker import mask_text, unmask_text
 
@@ -823,23 +826,23 @@ def _format_graph_context(graph_ctx: dict | None, current_intent: str | None = N
             )
     accounts = graph_ctx.get("accounts") or []
     if accounts:
-        # Same statement as the graph branch in neo4j_service/queries.py, for the same reason:
-        # this block sends account figures on EVERY message regardless of intent, so an
-        # unqualified average sits in the prompt whenever a customer asks about their balance.
-        # A previous attempt qualified only the other block and reported the problem fixed
-        # while this one was still handing the model the bare number.
-        lines.append(
-            "Accounts. NOTE: the balance below is an AVERAGE MONTHLY balance, not a current "
-            "balance. A live/current balance is NOT available from this system — say so and "
-            "point the customer to the mobile app or netbanking. Never describe this figure "
-            "as their current balance."
-        )
+        # The qualifier is the FIELD NAME, imported from the graph branch so both emitters
+        # say exactly the same thing - this block sends account figures on EVERY message
+        # regardless of intent, and a previous fix qualified only the other block and
+        # reported the problem solved while this one still handed the model a bare number.
+        #
+        # What was removed here is the ORDER that used to sit above these rows ("say so and
+        # point the customer to the mobile app", "Never describe this figure as their current
+        # balance"). Being inside the data, it applied to every question routed through this
+        # block, so an FD and a credit-card answer each ended with a balance disclaimer the
+        # customer had not asked for. The fact survives in the label; the instruction does not.
+        lines.append("Accounts:")
         for a in accounts:
             lines.append(
                 f"  - {a.get('account_type', 'Account')} {a.get('account_sub_type', '')} "
                 f"(No: {a.get('account_number', '')}) | "
                 f"Status: {a.get('status', '')} | "
-                f"Avg monthly balance: {_safe_amount(a.get('avg_monthly_balance', 0))}"
+                f"{_BALANCE_LABEL}: {_safe_amount(a.get('avg_monthly_balance', 0))}"
             )
     fixed_deposits = graph_ctx.get("fixed_deposits") or []
     if fixed_deposits:

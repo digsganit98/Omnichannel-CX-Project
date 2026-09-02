@@ -182,6 +182,7 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 128 - the workflow diagram still drew the model Phase 4 replaced:** the LangGraph picture's 22 edges matched the live graph exactly, but three boxes described the OLD behaviour - `decide_ticket` read *"does a human need to see this? L2/L3 always -> ticket"* (the conflation Phase 1 split apart), the review gate read *"hold <=> ticket required"* when `review_gate.py` reads `hold_required`, and `skip_ticket` was drawn as a live path labelled *"no"* / *"answer directly"* when `required=True` is hardcoded, so it **cannot execute**. Together they told a viewer routine questions get no ticket - the exact model the redesign removed. Diagram now draws reachable paths only (15 steps, 20 edges, 4 decision points); `skip_ticket` stays wired in `graph.py` as a landing spot. Neo4j header *"19 relationship types"* -> *"19 connections"* (19 drawn, 15 distinct types). 9/9 verified against the live graph with a negative control.
 - **Fix 129 - the LLM referee never decided ticket identity; a keyword string did:** a customer's savings-balance question and their credit-card dues question merged into ONE ticket, and the referee was never called (measured: 0 calls). `_ticket_scope` matches KEYWORDS, so it answers "what kind of thing is this?" - never "is this the same instance?": **9 of 16 intents have no scope rules at all** and collapse to `:manual_review`, and the 7 that do fail identically ("dispute ANOTHER charge" scores the same `:card` as the original; two different claim ids both score `:other`). The referee now decides, reading the text, with code still building the candidate set and validating the answer. Gate-probed **30/30 unanimous** before building. `_referee_rejects` deleted - it vetoed a string merge that no longer exists, and its tie-break was "when in doubt answer SAME", the inverse of this system's rule. **A regression the plan had not predicted:** an identical repeated message forked, because the string match used to absorb it - fixed with a deterministic exact-text guard that needs no LLM. 15/15 verified, net -41 lines.
 - **Fix 130 - three faults found by the user's own demo run:** (1) *"This looks like a separate issue from your existing request"* appeared on the THIRD message of a thread the customer was plainly continuing - `forked_from` is stored on the TICKET, so it stays true for the ticket's whole life, and `compose_answer` read it on every reply; forking is a fact about ONE message, now carried as `forked_now` while the metadata stays as provenance. (2) A correct answer was held for review because `_answered_from_customer_record` asked *"did retrieval route to the graph?"* - which depends on `intent in TRANSACTIONAL_INTENTS` - so a message misclassified `general_inquiry` was escalated while the reply it held quoted the card's balance and due date correctly from the always-on context block; it now asks whether the answer was GROUNDED in the customer's records, by either path. **Fix 117 preserved and proven**: empty records still escalate. (3) The Case Summary card sat on "Summarising..." forever - `renderRight` resets it to that placeholder and the old guard (`_csumFor === id`) then returned before refilling; the RESULT is now cached, so a re-render restores it instantly with no LLM call. 29/29 verified with negative controls, zero Groq.
+- **Fix 131 - a data block that gave the model ORDERS, not just facts:** an FD maturity answer and a credit-card dues answer each came back correct and then told the customer to *"check the mobile app for your current balance"* - a question neither had asked. The account block carried *"say so and point the customer to the mobile app"* and *"Never describe this figure as their current balance"*: **instructions living inside the data**, sent on every message, so the model obeyed them wherever that block went. The prompt already had the right rule (*"Do NOT volunteer info about unrelated products"*) but a directive beside the data outranks a general rule fifty lines earlier. The orders are gone and the FACT moved into the field name - `Average monthly balance (this system has no live/current balance figure)` - so it cannot be separated from the number, cannot attach to an FD or a card, and still gives the balance question the one thing its answer depends on. Both emitters share one constant. **Three earlier proposals were wrong and were caught before shipping** (filter retrieval - misses the always-on block; delete the note - breaks the balance answer; split the intents - 8 coupled sites including the RL memory key). 15/15 verified, zero Groq, and confirmed on real replies.
 
 
 ---
@@ -5986,3 +5987,78 @@ for another, and the block is pasted into the prompt. Needs a measured design pa
   placeholder forever.
 
 Suite at the 5 failed / 147 passed baseline.
+### Fix 131 - a data block that gave the model ORDERS, not just facts
+
+**Reported by the user, three times, on three different questions.** An FD maturity answer and a
+credit-card dues answer each came back correct and then added *"we cannot provide a live current
+balance here; check the mobile app or net-banking"* - about a balance neither question mentioned.
+
+### The cause
+
+The account block carried this above its rows:
+
+> NOTE: the balance below is an AVERAGE MONTHLY balance, not a current balance. A live/current
+> balance is NOT available from this system - **say so and point the customer to the mobile app or
+> netbanking for it. Never describe this figure as their current balance.**
+
+Two facts and **two orders**. The orders sit inside a data block that goes to the model on every
+message, so the model obeyed them wherever the block went - including questions that never touched
+the balance.
+
+The prompt already carries the correct rule (*"Answer ONLY the specific question the customer
+asked. Do NOT volunteer info about unrelated products"*), and it was losing: a directive next to
+the data outranks a general rule fifty lines earlier. Exactly [[redact-dont-instruct-llm]] -
+removing the input works where instructing the model does not.
+
+### Three wrong fixes, caught before shipping
+
+Each was proposed and then withdrawn when checked. Recorded because the reasoning matters more
+than the outcome:
+
+| Proposal | Why it was wrong |
+|---|---|
+| Filter retrieval to the records the question is about | The **always-on** customer-context block emits every collection regardless of intent, so this fixes one of two emitters. The code comment already warns about exactly this: a previous fix qualified one block and reported the problem solved while the other still sent a bare number. |
+| Delete the NOTE | Breaks *"What is my current savings account balance?"* - the case the NOTE exists for. |
+| Split the overloaded intents | `account_balance_inquiry` is defined as "balance **and also FDs**" and cards fall to it by default, so the classification really is wrong. But splitting touches **8 coupled sites** - the enum, `INTENT_TO_TEAM`, `INTENT_CRITICALITY`, the keyword classifier, `TRANSACTIONAL_INTENTS`, `_ticket_scope`, the JS offer map, and **the RL memory key** (`intent:subtype`), where a rename orphans every verified memory. A taxonomy migration, not a fix, and not one to run days before a demo. |
+
+### The fix
+
+The orders are deleted. The **fact** moves into the field name:
+
+```
+Account records:
+  - CSA Salary (No: 40900000100001): Status: Active,
+    Average monthly balance (this system has no live/current balance figure): Rs.0,
+    Min balance required: Rs.0
+```
+
+- **Structurally inseparable** - the qualifier is part of the label, so the number cannot be
+  emitted without it, and it cannot attach to an FD or a card.
+- **The balance answer is protected by the fact, not the order.** Asked for a CURRENT balance, the
+  model sees the only figure available is labelled as having no live counterpart, and the standing
+  rule *"answer ONLY using the retrieved context, do NOT invent facts"* leaves it nothing else to
+  say. The earlier wording ("average over the month, not a live balance") stated what the figure
+  IS but not what is MISSING, which would have let "Rs.0" through as a valid answer.
+- Both emitters import **one** constant, so they cannot drift.
+
+### Verification - 15/15, zero Groq
+
+FD-only and card-only contexts contain no order text and no balance label; the accounts line
+carries the fact on the figure's own line; both emitters produce identical wording; negative
+control confirms the bare `Avg monthly balance:` label is gone. Suite at the 5 failed / 147 passed
+baseline.
+
+**Then confirmed on real replies** (the assertions prove the INPUT is right, not the behaviour):
+*"Your credit-card statement shows a balance due of Rs 91,821, payable by 08 July 2026."* and
+*"Your Fixed Deposit FD001001 will mature on 12 January 2028. At maturity you will receive a total
+of Rs 183,712."* - both clean.
+
+### Two things found while diagnosing, NOT fixed
+
+- **A 429 dumps raw records to the customer.** When the daily token cap was reached mid-test,
+  `answer_generation` returned nothing and the caller's `generation.get("text") or raw_data`
+  fallback printed the whole account block on screen. A quota error should not become a data
+  leak.
+- **The record set is still over-broad.** An FD question still RECEIVES account data; it simply
+  has no instruction attached any more. That, the UPI "no record" bug and the generic status
+  replies are all the same undifferentiated-context-block problem, still open.
