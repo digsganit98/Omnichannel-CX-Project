@@ -6150,3 +6150,50 @@ transactions or claims. Not attempted.
 **5 failed / 147 passed - identical to the baseline**, verified by stashing the diff and re-running.
 Same five tests both times. **Zero Groq tokens** (`llm_usage_events` empty), confirmed after the run
 rather than assumed.
+
+### Open (Round 2, first message) - "why was I charged Rs.1,284" answered wrongly
+
+First real Round 2 message, web chat, CRN00010001:
+*"Why was I charged Rs.1,284 as on my credit card?"* The reply said **"I'm not seeing a
+transaction of Rs.1,284 in the recent activity you shared"** and asked for a date or merchant.
+
+**The charge exists.** `MATCH (c:Customer {customer_id:'CRN00010001'})-[:HAS_CHARGE]->(ch)`
+returns `LateFee, 1284.14, "Credit card payment overdue", 2026-07-01`. The customer was
+asking about a real fee and was told it could not be found.
+
+**The hold was correct and is not the bug.** `reply_drafts.reason_code` =
+`manual_review_required:transaction_dispute`; intent and retrieval confidence were both 0.95.
+L2 disputes always require a human. That policy worked. The reply was still sent
+(`outbound_sent status: sent`) with wrong content.
+
+**Why retrieval missed it - `ChargePenalty` is in NO retrieval path at all:**
+
+| Path | Reads charges? |
+|---|---|
+| `neo4j_answer` -> `transaction_dispute` (queries.py:446) | No - only `HAS_TRANSACTION`, capped at 8 |
+| `get_customer_context_for_customer` (the always-on block, queries.py:280) | No - loans, claims, policies, cards, accounts, FDs, open cases |
+| `get_charges()` (queries.py:179) | Correct query, right relationship, **zero callers** |
+
+So a late fee, annual fee or min-balance penalty cannot be explained on ANY intent, for ANY
+customer. Every seeded customer has 1-2 of them.
+
+**The fix is NOT to add charges to the dispute branch.** A fee is not a transaction, and
+bolting charge-lookup into an intent named `transaction_dispute` stretches the intent past
+what it says. The customer's question was not a dispute at all - it was *"explain this fee"*.
+The classifier chose `transaction_dispute` at 0.95 because **there is no `fee_enquiry` or
+`charge_explanation` intent to choose**. The defect is a missing intent, not a missing query.
+
+That places it with the overloaded-intent problem already recorded against
+`account_balance_inquiry` ("balance **and also FDs**"): the correct repair is splitting the
+intents, which touches 8 coupled sites including the RL memory key (`intent:subtype`), where a
+rename orphans every verified memory. A migration, not a fix - deliberately not started
+mid-Round-2.
+
+**Correction to an earlier note:** `fraud_report` is **not** in `TRANSACTIONAL_INTENTS`
+(queries.py:34). It was previously recorded as "in the set but with no branch"; in fact
+`neo4j_answer` returns `None` at the guard and it falls through to RAG by design. The effect
+(a fraud report gets no transaction data) is similar; the mechanism is not.
+
+**Also measured:** the 8-row cap on `transaction_dispute` hides 6 of Sayantini's 14
+transactions - real, but smaller than the "8 of 14" previously recorded, and not the cause
+here.
