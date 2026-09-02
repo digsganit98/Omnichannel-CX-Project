@@ -3683,14 +3683,30 @@ function kgShowModal(title, sub, counts, body) {
   document.getElementById('graphModal').classList.remove('hidden');
 }
 
-window.openSchemaModal = function() {
+window.openSchemaModal = function(_isRedraw) {
   var sc = _schemaData;
+  // Refetch on every open, then redraw. The database changes with every conversation -
+  // each message writes an :Interaction, its :Ticket and a :ResolutionMemory - so a
+  // cached payload from page load shows a graph that no longer exists. Draw from cache
+  // first so the modal opens instantly, then replace it when the fresh data arrives.
+  // _isRedraw guards the recursion.
+  if (!_isRedraw) {
+    loadSystemDiagrams().then(function() {
+      var modal = document.getElementById('graphModal');
+      // Only redraw if this view is still the one on screen: the user may have closed the
+      // modal or switched to the live tab while the fetch was in flight.
+      if (modal && !modal.classList.contains('hidden')
+          && document.querySelector('.kg-vtab.on')
+          && document.querySelector('.kg-vtab.on').textContent === 'Schema') {
+        openSchemaModal(true);
+      }
+    });
+  }
   if (!sc || !sc.reachable) {
     kgShowModal(KG_MODAL_TITLE, KG_MODAL_SUB, '',
       '<div class="kg-empty">Schema not loaded'
-      + (sc && sc.error ? ': ' + kgEscape(sc.error) : ' — is Neo4j running?') + '</div>'
+      + (sc && sc.error ? ': ' + kgEscape(sc.error) : ' — is the graph database running?') + '</div>'
       + kgToggleHtml('schema'));
-    loadSystemDiagrams();
     return;
   }
   var total = (sc.nodes || []).reduce(function(a, n) { return a + (n.count || 0); }, 0);
@@ -3726,6 +3742,8 @@ window.openFlowModal = function() {
   // as a landing spot if `required` ever goes false again, but Phase 4 hardcodes it True
   // (orchestration_agents.py: `required=True`), so that branch cannot execute and drawing it
   // would tell a viewer routine questions get no ticket - the exact model the redesign removed.
+  // decide_ticket moved from kind 'step' to 'agent' when Rule 2c gave it an LLM call.
+  // Neither counts as a 'gate', so the step and decision-point totals below are unchanged.
   var drawnSteps = Object.keys(FLOW_MAP).filter(function(k) { return k.indexOf('__') !== 0; }).length;
   var branches = Object.keys(FLOW_MAP).filter(function(k) { return FLOW_MAP[k].kind === 'gate'; }).length;
   kgShowModal('Workflow',
@@ -3750,13 +3768,19 @@ function loadSystemDiagrams() {
       return r.json();
     });
   }
-  kgFetch('/admin/neo4j/schema')
-    .then(function(d) { _schemaData = d; })
-    .catch(function(e) { _schemaData = { reachable: false, error: String(e.message || e) }; });
-  kgFetch('/admin/orchestration/workflow')
-    .then(function(d) { _flowData = d; })
-    .catch(function() { _flowData = null; });
-  loadLiveGraph();
+  // Returns a promise so a modal opener can REDRAW when fresh data lands. The payloads
+  // used to be fetched once at page load and rendered from cache forever, so the graph
+  // showed the database as it was before the conversation you just had - the counts and
+  // the picture both stale until a browser refresh.
+  return Promise.all([
+    kgFetch('/admin/neo4j/schema')
+      .then(function(d) { _schemaData = d; })
+      .catch(function(e) { _schemaData = { reachable: false, error: String(e.message || e) }; }),
+    kgFetch('/admin/orchestration/workflow')
+      .then(function(d) { _flowData = d; })
+      .catch(function() { _flowData = null; }),
+    loadLiveGraph(),
+  ]);
 }
 
 // Real SVG with drawn edges. Layout is a fixed hand-authored map, NOT a physics sim: the
@@ -4061,21 +4085,21 @@ var FLOW_MAP = {
   'close_ticket':                { x: 3090, y:  40, w: FL_W, h: 102, kind: 'step', owner: 'Ticket Creation',
                                    note: 'mark the selected ticket closed' },
 
-  'classify_intent':             { x: 2110, y: 470, w: FL_W, h: 136, kind: 'agent', owner: 'Intent Classification', llm: 'intent',
-                                   note: 'ONE LLM call returns intent +|urgency + sentiment + language|written onto the turn (sql)' },
+  'classify_intent':             { x: 2110, y: 470, w: FL_W, h: 150, kind: 'agent', owner: 'Intent Classification', llm: 'intent',
+                                   note: 'ONE LLM call returns intent +|urgency + sentiment + language|reads the last 5 turns, both sides|written onto the turn (sql)' },
   'validate_customer':           { x: 2600, y: 470, w: FL_W, h: 136, kind: 'gate', owner: 'Customer Validation',
                                    note: 'registered for this intent?' },
   'reject_unregistered_customer':{ x: 2600, y: 650, w: FL_W, h: 108, kind: 'step', owner: 'Customer Validation',
                                    note: 'ask them to write from|a registered address' },
   'resolve_query':               { x: 3090, y: 470, w: FL_W, h: 164, kind: 'agent', owner: 'Query Resolution', llm: 'grade+answer',
                                    note: 'answers from the RL memory, their|tickets or records (graph),|or the KB (kb)|- then grades it L1 / L2 / L3' },
-  'decide_ticket':               { x: 3580, y: 470, w: FL_W, h: 136, kind: 'step', owner: 'Ticket Creation',
-                                   note: 'a ticket is created either way -|this decides the HOLD only|L2/L3 -> a human reviews' },
+  'decide_ticket':               { x: 3580, y: 470, w: FL_W, h: 150, kind: 'agent', owner: 'Ticket Creation', llm: 'needs a person?',
+                                   note: 'a ticket is created either way -|this decides the HOLD only|risk, the words themselves,|or no answer good enough' },
   'create_ticket':               { x: 4070, y: 446, w: FL_W, h: 145, kind: 'agent', owner: 'Ticket Creation', llm: 'same matter?',
                                    note: 'same matter or new? matched on|transactions (graph)|the ticket is written (sql)' },
 
-  'send_outbound_reply':         { x: 4030, y: 212, w: 500, h: 200, kind: 'gate', owner: 'Workflow Automation',
-                                   note: 'REVIEW GATE|hold <=> hold_required|customer gets a holding message|an agent edits or approves,|then sends it manually' },
+  'send_outbound_reply':         { x: 4030, y: 212, w: 500, h: 214, kind: 'gate', owner: 'Workflow Automation',
+                                   note: 'REVIEW GATE|hold <=> hold_required|the hold reason is shown, not the level|customer gets a holding message|an agent edits or approves,|then sends it manually' },
   'persist_audit_events':        { x: 4600, y: 240, w: FL_W, h: 145, kind: 'step',
                                    note: 'turn + citations + evidence (sql)|Interaction closed, memory (graph)' },
   '__end__':                     { x: 5090, y: 264, w: 122, h: 58, kind: 'end', label: 'END' }
@@ -4247,7 +4271,7 @@ var _liveGraph = null;
 // One modal, one heading. Both tabs show the same graph — Schema is its shape, Live is
 // its contents — so the title must not change when you switch, or the switch reads as
 // navigation to a different feature rather than a change of view.
-var KG_MODAL_TITLE = 'Neo4j knowledge graph';
+var KG_MODAL_TITLE = 'Knowledge graph';
 var KG_MODAL_SUB = 'The shape of the graph, and every node and relationship in it right now';
 
 var KG_COLOURS = {
@@ -4465,14 +4489,25 @@ function renderLiveGraphSvg(g) {
   return svg + key;
 }
 
-window.openLiveGraphModal = function() {
+window.openLiveGraphModal = function(_isRedraw) {
   var g = _liveGraph;
+  // Refetch and redraw — see openSchemaModal. This view is the one that visibly grows as
+  // messages arrive, so a stale payload is most obvious here.
+  if (!_isRedraw) {
+    loadLiveGraph().then(function() {
+      var modal = document.getElementById('graphModal');
+      if (modal && !modal.classList.contains('hidden')
+          && document.querySelector('.kg-vtab.on')
+          && document.querySelector('.kg-vtab.on').textContent === 'Graph') {
+        openLiveGraphModal(true);
+      }
+    });
+  }
   if (!g || !g.reachable) {
     kgShowModal(KG_MODAL_TITLE, KG_MODAL_SUB, '',
       '<div class="kg-empty">Graph not loaded'
-      + (g && g.error ? ': ' + kgEscape(g.error) : ' — is Neo4j running?') + '</div>'
+      + (g && g.error ? ': ' + kgEscape(g.error) : ' — is the graph database running?') + '</div>'
       + kgToggleHtml('live'));
-    loadLiveGraph();
     return;
   }
   var rels = {};

@@ -188,6 +188,8 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 134 - the hold decision now reads the message, not a 16-way label:** a real complaint auto-sent to a customer - *"I've uploaded those documents already and nothing has happened. This is unacceptable."* - because `_escalation_reason` receives an Intent label, a level and a score, and **never the message**. It classified `claim_status` (0.95), which Rule 3b exempts, so no rule could see the words; sentiment was detected as `negative` and read by nothing. New `handoff.py` asks one question of the text and returns a closed reason set, wired as **Rule 2c placed before Rule 3b** - the exemption that swallowed it - and after Rule 0/2 so risk and already-escalating intents keep their own reasons. A short regex floor holds "speak to a human" with no LLM at all. Probed before building: 14 cases x 3 runs, **identical answer every run**, including the two real messages (complaint holds, the polite document question does not - with no carve-out for "please help me", which was deliberately NOT written into the prompt).
 - **Fix 135 - `max_tokens=120` silently killed the whole feature:** Fix 134 shipped and never fired once. `gpt-oss-20b` bills **reasoning** tokens against the same budget, so a 120 cap returned HTTP 400 on every call; `needs_human` fell through to its fail-open path and no error surfaced anywhere - the hold simply never happened. Measured: 120 -> 400 error, 400 -> correct verdict, no cap -> correct verdict. **The 18/18 verification missed it because it used a fake generator** that never enforced a limit: the wiring was tested, the actual call was not.
 - **Fix 136 - the classifier was starved of its own conversation:** the same message classified `claim_status` on one turn and `kyc_update` on the next. The history window kept **3 INBOUND turns only** - and "claim"/`CLM001003` appear exclusively in OUR REPLIES, which the direction filter discarded. Measured on the live thread: the 3-turn window contains no "claim" anywhere, 4+ contains both. The model picked the one intent whose definition says "documents" and its stated reason was a fair reading of what it was shown. Now **5 turns, both directions, speaker-labelled** (~1420 -> ~1528 prompt tokens against an 8000/min tier cap), mirroring what answer generation has always done - the classifier was the only consumer stripping replies. Verified against the real classifier: `kyc_update` -> **`claim_status`** at 0.95.
+- **Fix 137 - the graph diagrams showed the database as it was at page load:** `loadSystemDiagrams()`/`loadLiveGraph()` ran ONCE on load and every modal open rendered that cache, so after a conversation the knowledge graph still drew the pre-conversation snapshot - counts and picture both stale until a browser refresh. Worst possible case for a demo, where showing the graph grow IS the point. Both views now refetch on open: draw from cache instantly, then redraw when fresh data lands, guarded so nothing redraws into a closed modal or over the other tab. Verified live: 178 nodes/195 edges before Round 2, **191/221 after**, with `HAS_TICKET` 0 -> 2, `HAS_MESSAGE` 0 -> 6 and `HANDLED_BY` 0 -> 6 - the Customer->Ticket->Interaction->ResolutionMemory chain that was invisible before this fix. Also removed the last user-visible **"Neo4j"** strings (button, modal title, two error messages); endpoint paths and code comments keep the name.
+- **Fix 138 - the workflow diagram claimed holds come from the resolution level:** `decide_ticket` read *"L2/L3 -> a human reviews"*, which Rule 2c made false - a hold now fires on an **L1** message purely because of what the customer wrote, which is exactly what happens to the complaint in Fix 134. A viewer would see that hold and conclude the system was broken. The box now reads *"risk, the words themselves, or no answer good enough"* and is an `agent` with an LLM badge, because it genuinely makes a call now. `classify_intent` gains *"reads the last 5 turns, both sides"* (Fix 136) and the review gate gains *"the hold reason is shown, not the level"* (the label precedence fix). **Header counts unchanged at 15 steps / 20 edges / 4 decision points**, 0 box overlaps after the height changes, 0 dangling edges - the third time this diagram has drifted from the code it draws (see Fix 128).
 
 
 ---
@@ -6316,3 +6318,76 @@ and all three group under one open ticket carrying `escalation_reason`.
 ### Test status
 
 **5 failed / 147 passed - the documented baseline, unchanged.**
+
+### Fix 137 - diagrams frozen at page load, and the last "Neo4j" strings
+
+The knowledge-graph payloads were fetched once on page load and cached; opening the modal
+re-rendered that cache. Every conversation writes to the graph - an `:Interaction`, its
+`:Ticket`, a `:ResolutionMemory`, a `:HANDLED_BY` edge - so the picture went stale the moment
+the first message arrived and stayed stale until a browser refresh.
+
+Both openers now refetch and redraw. The modal still opens instantly from cache so there is no
+spinner; the fresh render replaces it a moment later. Two guards, both verified in a simulated
+DOM: no redraw if the modal was closed while the fetch was in flight, and none if the user
+switched tabs. A `_isRedraw` flag bounds the recursion (measured: one fetch per open, no runaway).
+
+Measured before and after Round 2 testing on the same database:
+
+| | before | after |
+|---|---|---|
+| nodes | 178 | **191** |
+| edges | 195 | **221** |
+| `HAS_TICKET` | 0 | 2 |
+| `HAS_MESSAGE` | 0 | 6 |
+| `HANDLED_BY` | 0 | 6 |
+
+That delta is the whole point of the live view and was invisible without this fix.
+
+"Neo4j" is gone from every user-visible surface: the header button and the modal title are now
+**"Knowledge graph"**, and the two not-loaded messages say *"is the graph database running?"*.
+The endpoint paths (`/admin/neo4j/schema`, `/admin/neo4j/graph`) and the code comments keep the
+product name - neither is on screen.
+
+### Fix 138 - the workflow diagram drew the pre-Rule-2c model
+
+**Third time this diagram has drifted** (Fix 128 was the second). The edges were right; the box
+TEXT described behaviour the code no longer has.
+
+`decide_ticket` read *"a ticket is created either way - this decides the HOLD only - L2/L3 -> a
+human reviews"*. The last line is now false: Rule 2c holds on the message text regardless of
+level, and the complaint in Fix 134 is `claim_status`, exempt by Rule 3b, held anyway. Someone
+reading the diagram would see that hold and think the system had misfired. It was also drawn as
+a plain `step` while it now makes an LLM call.
+
+| box | now reads |
+|---|---|
+| `decide_ticket` | `agent` + LLM badge "needs a person?" - *risk, the words themselves, or no answer good enough* |
+| `classify_intent` | + *reads the last 5 turns, both sides* |
+| `send_outbound_reply` | + *the hold reason is shown, not the level* |
+
+Verified: header still **15 steps / 20 edges / 4 decision points** (`step` -> `agent` changes
+neither total, since neither kind is a `gate` - noted in a comment beside the counting code), 0
+box overlaps after the height increases, 0 dangling edges, LLM badges 4 -> 5.
+
+### LLM calls per message - measured, not counted from code
+
+One complete burst from `llm_usage_events`:
+
+| call | tokens | when |
+|---|---|---|
+| `ticket_action_detection` | 190 | only with an open case |
+| `intent_classification` | 2,495 | every message |
+| `answer_generation` | 2,521 | every message |
+| `resolution_level_classification` | 1,328 | every message |
+| **`handoff_check`** | **501** | every message (new, Fix 134) |
+| `ticket_referee` | 722 | only with a candidate ticket |
+| `opportunity_generation` | 969 | cross-sell |
+| `case_summary` | 1,359 | agent panel |
+
+**~8 calls / ~10,100 tokens** on an open thread; 6 calls on a first message. `handoff_check`
+averages **148 tokens** across 42 calls - the cheapest operation in the system, ~1.5% of a
+message, against the ~600 estimated when it was proposed.
+
+The two classifiers remain the largest spend (~3,500 tokens, a third of every message), and
+`case_summary` + `opportunity_generation` (~2,300) are still agent-panel features sitting on the
+customer message path - the largest unclaimed saving.
