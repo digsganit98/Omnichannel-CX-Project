@@ -183,6 +183,8 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 129 - the LLM referee never decided ticket identity; a keyword string did:** a customer's savings-balance question and their credit-card dues question merged into ONE ticket, and the referee was never called (measured: 0 calls). `_ticket_scope` matches KEYWORDS, so it answers "what kind of thing is this?" - never "is this the same instance?": **9 of 16 intents have no scope rules at all** and collapse to `:manual_review`, and the 7 that do fail identically ("dispute ANOTHER charge" scores the same `:card` as the original; two different claim ids both score `:other`). The referee now decides, reading the text, with code still building the candidate set and validating the answer. Gate-probed **30/30 unanimous** before building. `_referee_rejects` deleted - it vetoed a string merge that no longer exists, and its tie-break was "when in doubt answer SAME", the inverse of this system's rule. **A regression the plan had not predicted:** an identical repeated message forked, because the string match used to absorb it - fixed with a deterministic exact-text guard that needs no LLM. 15/15 verified, net -41 lines.
 - **Fix 130 - three faults found by the user's own demo run:** (1) *"This looks like a separate issue from your existing request"* appeared on the THIRD message of a thread the customer was plainly continuing - `forked_from` is stored on the TICKET, so it stays true for the ticket's whole life, and `compose_answer` read it on every reply; forking is a fact about ONE message, now carried as `forked_now` while the metadata stays as provenance. (2) A correct answer was held for review because `_answered_from_customer_record` asked *"did retrieval route to the graph?"* - which depends on `intent in TRANSACTIONAL_INTENTS` - so a message misclassified `general_inquiry` was escalated while the reply it held quoted the card's balance and due date correctly from the always-on context block; it now asks whether the answer was GROUNDED in the customer's records, by either path. **Fix 117 preserved and proven**: empty records still escalate. (3) The Case Summary card sat on "Summarising..." forever - `renderRight` resets it to that placeholder and the old guard (`_csumFor === id`) then returned before refilling; the RESULT is now cached, so a re-render restores it instantly with no LLM call. 29/29 verified with negative controls, zero Groq.
 - **Fix 131 - a data block that gave the model ORDERS, not just facts:** an FD maturity answer and a credit-card dues answer each came back correct and then told the customer to *"check the mobile app for your current balance"* - a question neither had asked. The account block carried *"say so and point the customer to the mobile app"* and *"Never describe this figure as their current balance"*: **instructions living inside the data**, sent on every message, so the model obeyed them wherever that block went. The prompt already had the right rule (*"Do NOT volunteer info about unrelated products"*) but a directive beside the data outranks a general rule fifty lines earlier. The orders are gone and the FACT moved into the field name - `Average monthly balance (this system has no live/current balance figure)` - so it cannot be separated from the number, cannot attach to an FD or a card, and still gives the balance question the one thing its answer depends on. Both emitters share one constant. **Three earlier proposals were wrong and were caught before shipping** (filter retrieval - misses the always-on block; delete the note - breaks the balance answer; split the intents - 8 coupled sites including the RL memory key). 15/15 verified, zero Groq, and confirmed on real replies.
+- **Fix 132 - the workflow diagram moved to the nav rail, and "LangGraph" left the screen:** `LangGraph workflow` was a header button beside the Neo4j one; it is now the 5th left-rail item (`Workflow`), and every user-visible mention of the framework name is gone - the modal title, the fallback title, and the framework suffix the header read from `wf.framework`. The nav SVG is redrawn filled, not reused: `.nav-item svg` is `fill:currentColor`, so the header button's stroked icon would have rendered as a solid blob. `/orchestration` still sends the field; nothing displays it. Header text verified by computing it from the live constants - 15 steps, 20 edges, 4 decision points - matching Fix 128.
+- **Fix 133 - a live graph view beside the schema diagram, and the layout handed to d3-force:** new `GET /admin/neo4j/graph` + `get_full_graph()` return every node and relationship (178/195 on the seeded database, verified against Cypher; embeddings stripped, dangling edges dropped), drawn force-directed under a Schema/Graph toggle - **the existing schema diagram is untouched and still the default**. The layout was hand-written Fruchterman-Reingold for eight rounds and never produced an even distribution; raising repulsion to spread the nodes drove them onto the frame and hollowed the centre, while the metric said it had improved (301px to 143px) because border nodes keep every sample point near something. Replaced with vendored d3-force (15KB, tree-shaken, local not CDN): spacing uniformity p90/median **1.5x against the hand-rolled 5.6x**. Also fixed a `.kg-sw` collision with the existing 9px legend swatch, and a caption drawn inside the diagram to explain the 13 unheld-catalogue/idle-agent nodes. **The 5 pre-existing test failures are unchanged** (verified with the diff stashed); zero Groq tokens.
 
 
 ---
@@ -6062,3 +6064,89 @@ of Rs 183,712."* - both clean.
 - **The record set is still over-broad.** An FD question still RECEIVES account data; it simply
   has no instruction attached any more. That, the UPI "no record" bug and the generic status
   replies are all the same undifferentiated-context-block problem, still open.
+
+---
+
+## Session 28 - 2026-09-02
+
+Branch `Sayantini-phase2-ui-changes`. Admin-UI work only: no pipeline, prompt or data change.
+Round 2 testing had **not** started (0 turns, 0 tickets, 0 Ticket nodes), so nothing here
+touches accumulated history.
+
+### Fix 132 - the workflow diagram moved to the nav rail, and "LangGraph" left the screen
+
+`LangGraph workflow` sat as a second button in the conversation header next to
+`Neo4j knowledge graph`. It is now the **5th left-rail item**, labelled `Workflow`, opening the
+same modal - `openFlowModal` was already `window.`-scoped so no JS change was needed.
+
+**The icon is redrawn, not moved.** `.nav-item svg` is `fill:currentColor` (style.css:181) while
+the header button's glyph is stroke-only; reusing it would have rendered a solid blob.
+
+**Framework name removed from every user-visible surface:** the modal title, the not-loaded
+fallback title, and the suffix the header read from `wf.framework`. The suffix was dropped rather
+than renamed - the other three counts are measured facts about the drawing, the framework name was
+branding. `routes/orchestration.py` still returns the field; nothing reads it. The four remaining
+mentions are **code comments**, deliberately kept: they accurately name the framework the code wraps.
+
+Verified by computing the header from the live constants: 15 steps, 20 edges, 4 decision points -
+unchanged from Fix 128. `snap-flow-btn` has zero remaining references.
+
+### Fix 133 - a live graph view beside the schema diagram, and the layout handed to d3-force
+
+**New, not a replacement.** `openSchemaModal` and its hand-positioned diagram are untouched and
+still the default; a Schema/Graph toggle in the modal header switches between them. The schema
+answers "what does this system know how to know"; the live view answers "what does it hold now".
+
+- `get_full_graph()` (`query_library.py`) - every node and relationship. Embeddings are stripped
+  (a `ResolutionMemory` carries hundreds of floats); edges whose endpoints fall outside the node
+  limit are dropped so nothing draws to a node that is not on the canvas.
+- `GET /admin/neo4j/graph` - verified against the live database: **178 nodes, 195 relationships,
+  14 node types, 12 relationship types**, matching Cypher exactly.
+
+**The layout was wrong for eight rounds and the metric hid it.** A hand-written
+Fruchterman-Reingold never produced an even distribution. Nodes clumped where their seed positions
+fell; raising repulsion to 1.0 to spread them instead drove them onto the frame and hollowed out the
+centre. The measurement said that was an *improvement* - "largest empty circle" fell 301px to 143px -
+because nodes lining all four borders keep every sample point near something while the middle is
+empty. **A proxy metric was optimised while the picture got visibly worse.** The value is reverted
+with a comment recording why it must not be raised, and the useful metric (share of nodes in the
+central half) is now the one in the code.
+
+Replaced with **vendored d3-force** - 15KB, tree-shaken to 7 functions, served locally rather than
+from a CDN so a demo never waits on a network fetch. A grid fallback runs if the bundle fails to
+load, because an ugly graph beats a blank modal.
+
+| | hand-rolled | d3-force |
+|---|---|---|
+| spacing uniformity (p90/median) | 5.6x | **1.5x** |
+| min gap | 13px | 19px |
+| near frame | 12% | 10% |
+| render | ~150ms | 874ms |
+
+**Two self-inflicted defects also fixed:** `.kg-sw` collided with the existing 9x9 legend swatch
+(style.css:852) and shrank the toggle to a blob - renamed `kg-vtab`; and a caption was drawn
+*inside* the diagram to explain 13 unconnected nodes. Those 13 are the **unheld product catalogue**
+(11 products no customer holds - the inventory the opportunity engine recommends into) and the
+**2 agents**, which connect via `HANDLED_BY` on the first handled message. They are grouped in
+whichever corner is emptiest and left to the legend; no prose on the canvas.
+
+**Known limitation, stated plainly:** at 178 nodes and 1.1 edges per node this reads as five
+clusters with space between them. That is the shape of the data, not the renderer - the seed
+workbook holds exactly 5 customers.
+
+### Rejected: expanding the seed data to 25 customers
+
+Proposed to raise density to ~890 nodes, then **abandoned on evidence**. Running
+`generate_bfsi_data.py` unmodified produces **117 cells that differ** from the live
+`data/bfsi.xlsx` (94 Transactions, 14 Interactions, 7 Policies, 2 Demographics) despite the same
+`SEED`. The generator is **not reproducible** - most likely `faker` version drift - so a diff gate
+protecting the five pinned customers would fail on every run and prove nothing. Also found: a single
+shared `rng` drives all generators sequentially, so adding customers shifts the random stream for
+every sheet generated afterwards; "pinned first" protects the CRNs but **not** their balances,
+transactions or claims. Not attempted.
+
+### Test status
+
+**5 failed / 147 passed - identical to the baseline**, verified by stashing the diff and re-running.
+Same five tests both times. **Zero Groq tokens** (`llm_usage_events` empty), confirmed after the run
+rather than assumed.

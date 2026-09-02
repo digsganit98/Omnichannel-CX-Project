@@ -325,3 +325,91 @@ def get_graph_schema(client) -> dict:
             for r in rels if r.get("source") and r.get("target")
         ],
     }
+
+
+# Label -> the property that carries a human-readable name, best first. Falls back to
+# the label plus a short id, so a node never renders as a bare dot with no identity.
+_GRAPH_NAME_PROPS = {
+    "Customer": ("name", "customer_id"),
+    "Account": ("account_type", "account_number"),
+    "CreditCard": ("card_type", "card_id"),
+    "FixedDeposit": ("fd_type", "fd_id"),
+    "Loan": ("loan_type", "loan_id"),
+    "Policy": ("policy_type", "policy_id"),
+    "Claim": ("claim_type", "claim_id"),
+    "Transaction": ("txn_type", "transaction_id"),
+    "ChargePenalty": ("charge_type", "charge_id"),
+    "Product": ("name", "product_id"),
+    "Interaction": ("channel", "conversation_id"),
+    "Ticket": ("intent", "ticket_id"),
+    "ResolutionMemory": ("intent", "memory_key"),
+    "Agent": ("name", "agent_id"),
+    "KYC": ("status", "customer_id"),
+}
+
+
+def get_full_graph(client, limit: int = 3000) -> dict:
+    """Every node and relationship in the graph, for the live graph view.
+
+    Distinct from get_graph_schema (one node per LABEL, the system's shape) and from
+    customers.py::customer_graph_view (one customer's neighbourhood). This is the whole
+    database as it stands right now, so it GROWS as traffic runs: every inbound message
+    adds an (:Interaction), its (:Ticket), a (:ResolutionMemory) and a [:HANDLED_BY]
+    edge to the (:Agent) that answered it. A snapshot of a freshly wiped database is
+    therefore the floor, not the shape.
+
+    ``limit`` bounds each of the two queries independently. At demo scale (hundreds of
+    nodes) it never binds; it exists so a runaway graph degrades to a partial picture
+    instead of hanging the browser. ``truncated`` tells the caller which happened.
+    """
+    if client is None:
+        return {"nodes": [], "edges": [], "reachable": False}
+    try:
+        rows = client.query(
+            "MATCH (n) RETURN id(n) AS nid, labels(n)[0] AS label, properties(n) AS props "
+            f"LIMIT {int(limit)}"
+        )
+        rels = client.query(
+            "MATCH (a)-[r]->(b) RETURN id(a) AS source, id(b) AS target, type(r) AS rel "
+            f"LIMIT {int(limit)}"
+        )
+    except Exception as exc:
+        return {"nodes": [], "edges": [], "reachable": False, "error": str(exc)[:200]}
+
+    nodes = []
+    for r in rows:
+        label = r.get("label") or "Node"
+        props = r.get("props") or {}
+        name_props = _GRAPH_NAME_PROPS.get(label, ())
+        label_text = ""
+        for p in name_props:
+            val = props.get(p)
+            if val not in (None, ""):
+                label_text = str(val)
+                break
+        # Never send an embedding to the browser: ResolutionMemory carries a
+        # resolution_embedding of hundreds of floats, which would dwarf the payload
+        # and means nothing on screen.
+        safe = {k: v for k, v in props.items()
+                if not k.endswith("_embedding") and not isinstance(v, (list, dict))}
+        nodes.append({
+            "id": r["nid"],
+            "type": label,
+            "label": label_text or label,
+            "props": safe,
+        })
+
+    node_ids = {n["id"] for n in nodes}
+    # Drop edges whose endpoints fell outside the node LIMIT — a dangling edge would
+    # otherwise draw to a node that is not on the canvas.
+    edges = [
+        {"source": r["source"], "target": r["target"], "rel": r["rel"]}
+        for r in rels
+        if r.get("source") in node_ids and r.get("target") in node_ids
+    ]
+    return {
+        "reachable": True,
+        "nodes": nodes,
+        "edges": edges,
+        "truncated": len(rows) >= int(limit) or len(rels) >= int(limit),
+    }

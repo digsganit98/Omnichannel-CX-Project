@@ -1035,3 +1035,33 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .fl-llm{font-size:17px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;fill:var(--blue-t);font-family:ui-monospace,Menlo,Consolas,monospace}
 .fl-end{font-size:25px;font-weight:800;letter-spacing:1px}
 
+
+
+/* ── Live knowledge graph: force-directed, every node and relationship ────────
+   Companion to the fixed schema diagram above, not a replacement. Positions come
+   from a simulation run to convergence before paint (app.js::kgForceLayout), so
+   this is still a STATIC picture — nothing animates after the modal opens. */
+.kgs-live{background:#0f1420;border-radius:10px}
+/* Edges are the DOMINANT element, not faint threads behind the nodes: in a graph
+   drawing you should see the web first and the dots second. fill:none matters now
+   that these are <path> arcs rather than <line>. */
+.kgl-e{fill:none;stroke:#6b7fb5;stroke-width:.7;stroke-opacity:.75}
+.kgl-n{stroke:none;cursor:pointer;transition:stroke .12s}
+.kgl-n:hover{stroke:#fff;stroke-width:1.4}
+/* Small, dim: a label must not out-weigh the node it names. */
+.kgl-lab{font-size:9px;fill-opacity:.85;font-weight:600;fill:#e2e8f0;pointer-events:none}
+/* The live view colours by node TYPE and fills the swatch, so the shared .kgs-key
+   border (which inherits currentColor) would ring every chip in body text colour. */
+.kgs-live ~ .kgs-key i,.kg-legend .kgs-key i{border-color:transparent}
+
+/* Schema <-> Live switch. Class is kg-vtab, NOT kg-sw: .kg-sw is already the 9x9
+   legend swatch defined above, and reusing the name collapsed these buttons to 9px. */
+/* Sits on the title row, pushed right so it clears the title and stops short of the
+   close button. margin-left:auto claims the empty middle of .kg-modal-head. */
+.kg-head-tabs{margin-left:auto;align-self:center;display:flex}
+.kg-switch{display:inline-flex;gap:0;border:1px solid var(--bdr);border-radius:7px;overflow:hidden;background:var(--surf)}
+.kg-vtab{font:inherit;font-size:11px;font-weight:600;padding:4px 14px;border:0;
+  background:transparent;color:var(--t2);cursor:pointer;transition:all .12s;white-space:nowrap}
+.kg-vtab + .kg-vtab{border-left:1px solid var(--bdr)}
+.kg-vtab:hover{background:var(--surf2);color:var(--t1)}
+.kg-vtab.on{background:var(--blue);color:#fff}

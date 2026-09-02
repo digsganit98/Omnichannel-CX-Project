@@ -100,6 +100,23 @@ def graph_schema() -> dict:
         client.close()
 
 
+@router.get("/graph")
+def full_graph(limit: int = 3000) -> dict:
+    """Every node and relationship currently in the graph, for the live graph view.
+
+    /schema answers "what does this system know how to know" (one node per label).
+    This answers "what does it hold right now" — and it grows with traffic, because
+    each message writes an :Interaction, its :Ticket, a :ResolutionMemory and a
+    :HANDLED_BY edge to the answering :Agent.
+    """
+    client = _get_client()
+    try:
+        from services.neo4j_service.query_library import get_full_graph
+        return get_full_graph(client, limit=limit)
+    finally:
+        client.close()
+
+
 def _count_nodes(client) -> dict:
     labels = ["Customer", "Account", "CreditCard", "FixedDeposit", "Loan", "Claim",
               "Transaction", "ChargePenalty", "Product", "Policy", "KYC",

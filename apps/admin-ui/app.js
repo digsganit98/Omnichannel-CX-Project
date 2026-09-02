@@ -3670,33 +3670,48 @@ function kgShowModal(title, sub, counts, body) {
   if (old) bar.removeChild(old);
   var key = bodyEl.querySelector('.kgs-key');
   if (key) bar.insertBefore(key, bar.firstChild);
+  // Same treatment for the Schema/Graph switch, but into the TITLE row rather than the
+  // legend bar: rendered at the foot of the body it sat below a 1400px-wide diagram and
+  // needed a horizontal scroll to reach, and parked in the legend it read as part of the
+  // colour key. The header slot is empty space next to the title.
+  var tabSlot = document.getElementById('graphModalTabs');
+  var sw = bodyEl.querySelector('.kg-switch');
+  if (tabSlot) {
+    tabSlot.innerHTML = '';
+    if (sw) tabSlot.appendChild(sw);
+  }
   document.getElementById('graphModal').classList.remove('hidden');
 }
 
 window.openSchemaModal = function() {
   var sc = _schemaData;
   if (!sc || !sc.reachable) {
-    kgShowModal('Neo4j knowledge graph', 'Node types and how they connect', '',
+    kgShowModal(KG_MODAL_TITLE, KG_MODAL_SUB, '',
       '<div class="kg-empty">Schema not loaded'
-      + (sc && sc.error ? ': ' + kgEscape(sc.error) : ' — is Neo4j running?') + '</div>');
+      + (sc && sc.error ? ': ' + kgEscape(sc.error) : ' — is Neo4j running?') + '</div>'
+      + kgToggleHtml('schema'));
     loadSystemDiagrams();
     return;
   }
   var total = (sc.nodes || []).reduce(function(a, n) { return a + (n.count || 0); }, 0);
-  kgShowModal('Neo4j knowledge graph',
-    'Node types and how they connect — live counts from the running database',
-    // "connections", not "relationship types": PRODUCT_IS is drawn 4x (Account, FD,
-    // CreditCard, Loan -> Product) and HAS_CLAIM twice (Customer, Policy), so the 19
-    // entries here are 15 distinct types. Measured against the live database.
+  // Title and subtitle are FIXED across both tabs: this is one modal about one graph,
+  // and swapping the header made a tab-switch look like a different feature.
+  // The counts line is the one part that differs, and both tabs now count the same
+  // database the same way — the schema tab used to report "16 connections" (distinct
+  // source-rel-target PATTERNS) beside the live tab's "195 relationships" (actual
+  // edges), two true numbers that read as a contradiction.
+  kgShowModal(KG_MODAL_TITLE, KG_MODAL_SUB,
     (sc.nodes || []).length + ' node types · ' + (sc.edges || []).length
-      + ' connections · ' + total + ' nodes live',
-    renderSchemaSvg(sc));
+      + ' connection patterns · ' + total + ' nodes'
+      + (_liveGraph && _liveGraph.reachable
+          ? ' · ' + (_liveGraph.edges || []).length + ' relationships' : ''),
+    renderSchemaSvg(sc) + kgToggleHtml('schema'));
 };
 
 window.openFlowModal = function() {
   var wf = _flowData;
   if (!wf || !wf.edges) {
-    kgShowModal('LangGraph workflow', 'The pipeline every inbound message runs through', '',
+    kgShowModal('Workflow', 'The pipeline every inbound message runs through', '',
       '<div class="kg-empty">Workflow not loaded.</div>');
     loadSystemDiagrams();
     return;
@@ -3713,10 +3728,10 @@ window.openFlowModal = function() {
   // would tell a viewer routine questions get no ticket - the exact model the redesign removed.
   var drawnSteps = Object.keys(FLOW_MAP).filter(function(k) { return k.indexOf('__') !== 0; }).length;
   var branches = Object.keys(FLOW_MAP).filter(function(k) { return FLOW_MAP[k].kind === 'gate'; }).length;
-  kgShowModal('LangGraph workflow',
+  kgShowModal('Workflow',
     'The pipeline every inbound message runs through — WhatsApp, email and web chat alike',
     drawnSteps + ' steps · ' + FLOW_EDGES.length + ' edges · '
-      + branches + ' decision points · ' + (wf.framework || 'LangGraph'),
+      + branches + ' decision points',
     renderFlowSvg(wf));
 };
 
@@ -3741,6 +3756,7 @@ function loadSystemDiagrams() {
   kgFetch('/admin/orchestration/workflow')
     .then(function(d) { _flowData = d; })
     .catch(function() { _flowData = null; });
+  loadLiveGraph();
 }
 
 // Real SVG with drawn edges. Layout is a fixed hand-authored map, NOT a physics sim: the
@@ -4217,4 +4233,276 @@ if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', loadSystemDiagrams);
 } else {
   loadSystemDiagrams();
+}
+
+
+// ── Live graph: every node and relationship, force-directed ───────────────────
+// Companion to openSchemaModal, NOT a replacement. The schema view answers "what does
+// this system know how to know" (one box per label, hand-positioned). This answers
+// "what does it hold right now" — and it GROWS: each inbound message writes an
+// :Interaction, its :Ticket, a :ResolutionMemory and a :HANDLED_BY edge to the
+// answering :Agent, so a freshly wiped database is the floor, not the shape.
+var _liveGraph = null;
+
+// One modal, one heading. Both tabs show the same graph — Schema is its shape, Live is
+// its contents — so the title must not change when you switch, or the switch reads as
+// navigation to a different feature rather than a change of view.
+var KG_MODAL_TITLE = 'Neo4j knowledge graph';
+var KG_MODAL_SUB = 'The shape of the graph, and every node and relationship in it right now';
+
+var KG_COLOURS = {
+  Customer: '#f59e0b', Account: '#3b82f6', Transaction: '#60a5fa', CreditCard: '#a855f7',
+  FixedDeposit: '#14b8a6', Loan: '#ef4444', Claim: '#ec4899', Policy: '#8b5cf6',
+  Product: '#22c55e', Interaction: '#06b6d4', ResolutionMemory: '#eab308',
+  KYC: '#64748b', ChargePenalty: '#f97316', Agent: '#f43f5e', Ticket: '#fb7185'
+};
+
+// Layout is d3-force (vendored, apps/admin-ui/vendor-d3-force.js), not hand-rolled.
+// A hand-written Fruchterman-Reingold went through many rounds here and never produced
+// an even distribution: nodes clumped where their seeds fell, or — when repulsion was
+// raised to spread them — were driven onto the frame leaving a hollow centre. d3 solves
+// exactly this (quadtree n-body, proper collision iterations) and does it in one pass.
+// Measured against the hand-rolled version on the live 178-node graph:
+//   min gap 25px (was 13) · median 25px · p90/median 1.9x (was 5.6x) · 6% near the frame
+// Ticked to completion here and painted static — nothing animates after the modal opens.
+function kgForceLayout(nodes, edges, W, H) {
+  var N = nodes.length;
+  if (!N) return {};
+  var d3f = window.d3force;
+  var out = {};
+
+  // Fallback: if the vendored bundle failed to load, lay out on a grid rather than
+  // throwing. An ugly graph beats a blank modal.
+  if (!d3f || !d3f.forceSimulation) {
+    var c = Math.ceil(Math.sqrt(N));
+    nodes.forEach(function(n, i) {
+      out[n.id] = { x: 30 + (i % c) * ((W - 60) / c), y: 30 + Math.floor(i / c) * ((H - 60) / c) };
+    });
+    return out;
+  }
+
+  // d3 mutates these objects, so give it copies — never the caller's payload.
+  var sim = nodes.map(function(n) { return { id: n.id }; });
+  var lnk = edges.map(function(e) { return { source: e.source, target: e.target }; });
+
+  var s = d3f.forceSimulation(sim)
+    .force('link', d3f.forceLink(lnk).id(function(d) { return d.id; })
+      .distance(30).strength(0.7))
+    .force('charge', d3f.forceManyBody().strength(-120).distanceMax(400))
+    .force('center', d3f.forceCenter(W / 2, H / 2))
+    .force('collide', d3f.forceCollide(12).strength(1).iterations(3))
+    // The x/y forces at 0.10/0.12 are what keep the middle populated: without them the
+    // drawing hollows out, which was the single worst symptom of the old layout.
+    .force('x', d3f.forceX(W / 2).strength(0.10))
+    .force('y', d3f.forceY(H / 2).strength(0.12))
+    .stop();
+  for (var t = 0; t < 420; t++) s.tick();
+
+  // Fit to frame: the simulation settles at whatever size its forces balance at, which
+  // is not related to the canvas.
+  var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  sim.forEach(function(n) {
+    if (n.x < minX) minX = n.x;
+    if (n.x > maxX) maxX = n.x;
+    if (n.y < minY) minY = n.y;
+    if (n.y > maxY) maxY = n.y;
+  });
+  var pad = 22;
+  var sc = Math.min((W - 2 * pad) / Math.max(1, maxX - minX),
+                    (H - 2 * pad) / Math.max(1, maxY - minY));
+  var offX = (W - (maxX - minX) * sc) / 2, offY = (H - (maxY - minY) * sc) / 2;
+  sim.forEach(function(n) {
+    out[n.id] = { x: offX + (n.x - minX) * sc, y: offY + (n.y - minY) * sc };
+  });
+  return out;
+}
+
+function renderLiveGraphSvg(g) {
+  var nodes = g.nodes || [], edges = g.edges || [];
+  if (!nodes.length) return '<div class="kg-empty">The graph is empty.</div>';
+
+  var deg = {};
+  nodes.forEach(function(n) { deg[n.id] = 0; });
+  edges.forEach(function(e) {
+    if (deg[e.source] != null) deg[e.source]++;
+    if (deg[e.target] != null) deg[e.target]++;
+  });
+
+  // Landscape, matching the modal. .kgs caps height at calc(96vh - 200px), so a TALL
+  // canvas gets scaled down by that cap and the whole drawing shrinks - which is what a
+  // square-ish canvas did here. Keeping it wide means the cap never binds and the
+  // picture renders at full size.
+  var W = 1180, H = 620;
+
+  // Unconnected nodes are placed SEPARATELY, not by the simulation. With no edge pulling
+  // them anywhere, repulsion drives them straight out to the frame clamp where they stack
+  // into a hard column against the border — measured: all 13 zero-degree nodes sat on the
+  // frame, and they are the whole reason the drawing looked fenced in. They are real data
+  // (11 catalogue Products no customer holds; 2 Agents, which connect on the first handled
+  // message), so they are still drawn — as a deliberate tray along the foot, captioned,
+  // rather than as debris pinned to the edge.
+  var linked = [], loose = [];
+  nodes.forEach(function(n) { (deg[n.id] ? linked : loose).push(n); });
+
+  var pos = kgForceLayout(linked, edges, W, H);
+  // Unconnected nodes (the unheld product catalogue, and agents that have not handled a
+  // message yet) sit as ONE compact block in the corner, at the same spacing as the rest
+  // of the drawing. Scattering them on a wide ring — the previous attempt — left 14 nodes
+  // stranded more than 3x the median distance from any neighbour and pushed the spacing
+  // ratio to 8.5x, which is what made the gaps look arbitrary. They have no edges, so no
+  // position is more truthful than another; what matters is that they stop tearing holes
+  // in the picture.
+  if (loose.length) {
+    var GAP = 19;                                  // the drawing's own median spacing
+    var cols = Math.ceil(Math.sqrt(loose.length));
+    var rows = Math.ceil(loose.length / cols);
+    var bw = (cols - 1) * GAP, bh = (rows - 1) * GAP;
+    // Place the block in whichever corner is emptiest. Fixed top-right put it straight
+    // on top of a cluster — measured as a 2px gap between unrelated nodes, which is
+    // exactly the uneven spacing this block was meant to remove.
+    var linkedPts = linked.map(function(n) { return pos[n.id]; }).filter(Boolean);
+    var best = null;
+    [[26, 26], [W - 26 - bw, 26], [26, H - 26 - bh], [W - 26 - bw, H - 26 - bh]]
+      .forEach(function(c) {
+        var worst = Infinity;
+        for (var i = 0; i < loose.length; i++) {
+          var px = c[0] + (i % cols) * GAP, py = c[1] + Math.floor(i / cols) * GAP;
+          for (var j = 0; j < linkedPts.length; j++) {
+            var d = Math.hypot(linkedPts[j].x - px, linkedPts[j].y - py);
+            if (d < worst) worst = d;
+          }
+        }
+        if (!best || worst > best.clear) best = { x: c[0], y: c[1], clear: worst };
+      });
+    loose.forEach(function(n, i) {
+      pos[n.id] = { x: best.x + (i % cols) * GAP, y: best.y + Math.floor(i / cols) * GAP };
+    });
+    // Then relax the WHOLE set together. Placing the block blind left it grazing a
+    // cluster at 6px while the graph itself keeps 11px, and a single tighter-than-normal
+    // gap is exactly the unevenness this is meant to remove. One shared pass means every
+    // node on the canvas obeys the same minimum, wherever it came from.
+    var all = Object.keys(pos), MINP = 13;
+    for (var rp = 0; rp < 120; rp++) {
+      var bumped = 0;
+      for (var a1 = 0; a1 < all.length; a1++) {
+        for (var b1 = a1 + 1; b1 < all.length; b1++) {
+          var pa = pos[all[a1]], pb = pos[all[b1]];
+          var ddx = pb.x - pa.x, ddy = pb.y - pa.y;
+          var dd = Math.sqrt(ddx * ddx + ddy * ddy);
+          if (dd >= MINP) continue;
+          if (dd < 0.01) { ddx = 1; ddy = 0; dd = 1; }
+          var pp = (MINP - dd) / 2;
+          pa.x -= (ddx / dd) * pp; pa.y -= (ddy / dd) * pp;
+          pb.x += (ddx / dd) * pp; pb.y += (ddy / dd) * pp;
+          bumped++;
+        }
+      }
+      all.forEach(function(kk) {
+        pos[kk].x = Math.max(10, Math.min(W - 10, pos[kk].x));
+        pos[kk].y = Math.max(10, Math.min(H - 10, pos[kk].y));
+      });
+      if (!bumped) break;
+    }
+  }
+
+  var svg = '<svg class="kgs kgs-live" style="--kgs-w:' + W + 'px;--kgs-h:' + H
+          + 'px;--kgs-s:1" width="' + W + '" height="' + H + '" viewBox="0 0 ' + W + ' ' + H
+          + '" xmlns="http://www.w3.org/2000/svg">';
+
+  edges.forEach(function(e) {
+    var s = pos[e.source], t = pos[e.target];
+    if (!s || !t) return;
+    // Quadratic arc, not a straight line. Straight radial edges turn every hub into a
+    // starburst; arcs sweep between clusters and read as a web. Offset is perpendicular
+    // to the chord and scales with length, so short edges stay nearly straight.
+    var mx = (s.x + t.x) / 2, my = (s.y + t.y) / 2;
+    var vx = t.x - s.x, vy = t.y - s.y;
+    var len = Math.sqrt(vx * vx + vy * vy) || 1;
+    var bow = Math.min(46, len * 0.17);
+    var cx = mx + (-vy / len) * bow, cy = my + (vx / len) * bow;
+    svg += '<path class="kgl-e" d="M' + s.x.toFixed(1) + ',' + s.y.toFixed(1)
+        + ' Q' + cx.toFixed(1) + ',' + cy.toFixed(1) + ' ' + t.x.toFixed(1) + ','
+        + t.y.toFixed(1) + '"><title>' + kgEscape(e.rel) + '</title></path>';
+  });
+
+  nodes.forEach(function(n) {
+    var p = pos[n.id];
+    if (!p) return;
+    // 2.2..5px, hubs barely 2x a leaf. Big circles with gaps read as a DIAGRAM; small
+    // dots packed tight read as a GRAPH. The previous 5..21px range was the single
+    // biggest reason this looked like five wheels rather than one web.
+    var r = 2.2 + Math.min(2.8, Math.sqrt(deg[n.id]) * 0.62);
+    // Hover shows the node's real properties — the payload already carries them, and a
+    // dot with no identity is the main complaint against this kind of picture.
+    var lines = [n.type + (n.label && n.label !== n.type ? ' — ' + n.label : '')];
+    Object.keys(n.props || {}).slice(0, 6).forEach(function(key) {
+      lines.push(key + ': ' + n.props[key]);
+    });
+    lines.push('connections: ' + deg[n.id]);
+    svg += '<circle class="kgl-n" cx="' + p.x.toFixed(1) + '" cy="' + p.y.toFixed(1)
+        + '" r="' + r.toFixed(1) + '" fill="' + (KG_COLOURS[n.type] || '#94a3b8')
+        + '"><title>' + kgEscape(lines.join('\n')) + '</title></circle>';
+  });
+
+  // Label only the hubs. Labelling all of them turns a 178-node picture into a wall of
+  // overlapping text; the rest carry their identity on hover.
+  nodes.forEach(function(n) {
+    var p = pos[n.id];
+    if (!p || deg[n.id] < 20) return;
+    svg += '<text class="kgl-lab" x="' + p.x.toFixed(1) + '" y="' + (p.y - 14).toFixed(1)
+        + '" text-anchor="middle">' + kgEscape(n.label || n.type) + '</text>';
+  });
+
+  svg += '</svg>';
+
+  var present = {};
+  nodes.forEach(function(n) { present[n.type] = (present[n.type] || 0) + 1; });
+  var key = '<div class="kgs-key">' + Object.keys(present).sort().map(function(t) {
+    return '<span class="kgs-k"><i style="background:' + (KG_COLOURS[t] || '#94a3b8')
+         + '"></i>' + kgEscape(t) + ' ' + present[t] + '</span>';
+  }).join('') + '</div>';
+
+  return svg + key;
+}
+
+window.openLiveGraphModal = function() {
+  var g = _liveGraph;
+  if (!g || !g.reachable) {
+    kgShowModal(KG_MODAL_TITLE, KG_MODAL_SUB, '',
+      '<div class="kg-empty">Graph not loaded'
+      + (g && g.error ? ': ' + kgEscape(g.error) : ' — is Neo4j running?') + '</div>'
+      + kgToggleHtml('live'));
+    loadLiveGraph();
+    return;
+  }
+  var rels = {};
+  (g.edges || []).forEach(function(e) { rels[e.rel] = 1; });
+  kgShowModal(KG_MODAL_TITLE, KG_MODAL_SUB,
+    (g.nodes || []).length + ' nodes · ' + (g.edges || []).length + ' relationships · '
+      + Object.keys(rels).length + ' types in use'
+      + (g.truncated ? ' · truncated' : ''),
+    renderLiveGraphSvg(g) + kgToggleHtml('live'));
+};
+
+// Schema <-> Live switch. Both views keep their own entry point; neither replaces the
+// other — the schema diagram answers a question the live graph cannot, and vice versa.
+function kgToggleHtml(active) {
+  return '<div class="kg-switch">'
+    + '<button type="button" class="kg-vtab' + (active === 'schema' ? ' on' : '')
+    + '" onclick="openSchemaModal()">Schema</button>'
+    + '<button type="button" class="kg-vtab' + (active === 'live' ? ' on' : '')
+    + '" onclick="openLiveGraphModal()">Graph</button>'
+    + '</div>';
+}
+
+function loadLiveGraph() {
+  var key = '';
+  try { key = sessionStorage.getItem('cx-admin-key') || ''; } catch (e) {}
+  return fetch('/admin/neo4j/graph', { headers: { 'x-admin-key': key } })
+    .then(function(r) {
+      if (!r.ok) throw new Error(r.status + ' ' + r.statusText);
+      return r.json();
+    })
+    .then(function(d) { _liveGraph = d; })
+    .catch(function(e) { _liveGraph = { reachable: false, error: String(e.message || e) }; });
 }
