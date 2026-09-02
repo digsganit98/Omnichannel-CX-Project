@@ -17,3 +17,5 @@ artifacts/*
 !artifacts/.gitkeep
 logs/*
 .claude/
+Retail_Pivot_Checklist.xlsx
+*.docx
