@@ -5,6 +5,7 @@ import re
 from pydantic import BaseModel, Field
 
 from services.agent_service.cx_agent import CXAgent
+from services.agent_service.handoff import needs_human
 from services.channel_service.delivery import OutboundDeliveryService
 from services.pii_service.masker import mask_text
 from services.rag_service.groq_generator import GroqGenerator
@@ -521,7 +522,8 @@ class TicketCreationAgent:
         self.tickets = tickets
         self.generator = generator or GroqGenerator()
 
-    def decide(self, analysis: IntentResult, resolution: QueryResolution, context: dict | None = None) -> TicketDecision:
+    def decide(self, analysis: IntentResult, resolution: QueryResolution, context: dict | None = None,
+               message: InboundMessage | None = None) -> TicketDecision:
         """Two independent answers, from one escalation judgement.
 
         PHASE 4 of the ticket-model redesign. `required` used to be `reason is not None`,
@@ -534,7 +536,7 @@ class TicketCreationAgent:
         entirely unchanged - decide only the HOLD. The two questions were never the same
         question; Phase 1 split the field so this line could stop conflating them.
         """
-        reason = self._escalation_reason(analysis, resolution, context or {})
+        reason = self._escalation_reason(analysis, resolution, context or {}, message)
         return TicketDecision(
             required=True,                     # a ticket is a grouping id: always
             hold_required=reason is not None,  # a human is needed: unchanged rules
@@ -660,7 +662,8 @@ class TicketCreationAgent:
         )
 
     @staticmethod
-    def _escalation_reason(analysis: IntentResult, resolution: QueryResolution, context: dict) -> str | None:
+    def _escalation_reason(analysis: IntentResult, resolution: QueryResolution, context: dict,
+                           message: InboundMessage | None = None) -> str | None:
         # Rule 0: L1/L2/L3 resolution-level decision — DELIBERATELY CHECKED FIRST, before every
         # intent-based rule below (including ones that otherwise say "never escalate", such as
         # Rule 3 ticket_status or Rule 3b informational intents). The resolution engine looks at
@@ -712,6 +715,26 @@ class TicketCreationAgent:
 
         if _is_strong_l1_knowledge_answer(resolution):
             return None
+
+        # Rule 2c: READ THE MESSAGE. Every rule above and below keys off a label - an
+        # Intent value, a level, a score - and that is how a real complaint auto-sent on
+        # 2026-09-02: "I've uploaded those documents already and nothing has happened.
+        # This is unacceptable." classified as claim_status (0.95), which Rule 3b exempts,
+        # so no rule could see the words. Sentiment was detected as negative and read by
+        # nothing. See services/agent_service/handoff.py for the measurement.
+        #
+        # Placed HERE deliberately:
+        #  - after Rule 0, so credible risk still wins and this cannot downgrade an L3;
+        #  - after Rule 2, so an already-escalating intent keeps its own specific reason;
+        #  - BEFORE Rules 3/3b, because those return None on the label alone and are
+        #    exactly what suppressed the complaint. A content signal must outrank a
+        #    category exemption.
+        # Fails open (returns None) on any error, so a quota-exhausted or slow model
+        # leaves today's behaviour untouched rather than blocking every reply.
+        if message is not None and getattr(message, "text", ""):
+            handoff_reason, _detail = needs_human(message.text)
+            if handoff_reason:
+                return f"handoff_{handoff_reason}"
 
         # Rule 3: Ticket status is a lookup — never create a new ticket
         if analysis.intent == Intent.TICKET_STATUS:

@@ -41,8 +41,31 @@ def _level_of(resolution) -> str:
     return str(decision.get("resolution_level", "")).upper()
 
 
+# Rule 2c hold reasons (services/agent_service/handoff.py). Kept as a module constant
+# because they are consulted BEFORE the level early-returns as well as inside the
+# general mapping below.
+_HANDOFF_LABELS = {
+    "handoff_human_requested": "Customer asked for a human",
+    "handoff_service_failure_asserted": "Customer says we already failed them",
+    "handoff_emergency": "Emergency — time-critical",
+    "handoff_distress": "Customer in distress",
+    "handoff_approval_needed": "Approval needed — customer asked for a decision",
+}
+
+
 def _friendly_reason(level: str, ticket_reason: str) -> str:
     """Human-readable hold reason for the admin UI, derived from level + ticket reason."""
+    # A Rule 2c handoff code outranks the level label. The level says HOW HARD the query
+    # is; the handoff code says WHY A PERSON IS NEEDED, which is what the agent opening
+    # the queue actually has to act on. Checked before the level early-returns below,
+    # which otherwise swallow it: a real service-failure complaint displayed as the
+    # generic "Assisted resolution (L2)" and the agent could not see it had been flagged
+    # as "we already failed this customer".
+    if (ticket_reason or "").startswith("handoff_"):
+        handoff_label = _HANDOFF_LABELS.get(ticket_reason)
+        if handoff_label:
+            return handoff_label
+
     if level == "L3":
         return "Critical escalation (L3)"
     if level == "L2":

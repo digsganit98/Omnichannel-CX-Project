@@ -620,7 +620,11 @@ class OrchestrationGraph:
 
     def _decide_ticket(self, graph_state: GraphState) -> dict:
         state = graph_state["runtime"]
-        state.ticket_decision = self.ticket_agent.decide(state.analysis, state.resolution, state.context)
+        # message is passed so the escalation rules can READ IT — Rule 2c decides from the
+        # customer's own words, not from the intent label. See handoff.py.
+        state.ticket_decision = self.ticket_agent.decide(
+            state.analysis, state.resolution, state.context, state.message
+        )
         self._complete(state, WorkflowStep.DECIDE_RESOLUTION, self.ticket_agent.name,
                        ticket_required=state.ticket_decision.required,
                        reason=state.ticket_decision.reason)

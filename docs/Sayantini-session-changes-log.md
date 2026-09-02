@@ -185,6 +185,9 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 131 - a data block that gave the model ORDERS, not just facts:** an FD maturity answer and a credit-card dues answer each came back correct and then told the customer to *"check the mobile app for your current balance"* - a question neither had asked. The account block carried *"say so and point the customer to the mobile app"* and *"Never describe this figure as their current balance"*: **instructions living inside the data**, sent on every message, so the model obeyed them wherever that block went. The prompt already had the right rule (*"Do NOT volunteer info about unrelated products"*) but a directive beside the data outranks a general rule fifty lines earlier. The orders are gone and the FACT moved into the field name - `Average monthly balance (this system has no live/current balance figure)` - so it cannot be separated from the number, cannot attach to an FD or a card, and still gives the balance question the one thing its answer depends on. Both emitters share one constant. **Three earlier proposals were wrong and were caught before shipping** (filter retrieval - misses the always-on block; delete the note - breaks the balance answer; split the intents - 8 coupled sites including the RL memory key). 15/15 verified, zero Groq, and confirmed on real replies.
 - **Fix 132 - the workflow diagram moved to the nav rail, and "LangGraph" left the screen:** `LangGraph workflow` was a header button beside the Neo4j one; it is now the 5th left-rail item (`Workflow`), and every user-visible mention of the framework name is gone - the modal title, the fallback title, and the framework suffix the header read from `wf.framework`. The nav SVG is redrawn filled, not reused: `.nav-item svg` is `fill:currentColor`, so the header button's stroked icon would have rendered as a solid blob. `/orchestration` still sends the field; nothing displays it. Header text verified by computing it from the live constants - 15 steps, 20 edges, 4 decision points - matching Fix 128.
 - **Fix 133 - a live graph view beside the schema diagram, and the layout handed to d3-force:** new `GET /admin/neo4j/graph` + `get_full_graph()` return every node and relationship (178/195 on the seeded database, verified against Cypher; embeddings stripped, dangling edges dropped), drawn force-directed under a Schema/Graph toggle - **the existing schema diagram is untouched and still the default**. The layout was hand-written Fruchterman-Reingold for eight rounds and never produced an even distribution; raising repulsion to spread the nodes drove them onto the frame and hollowed the centre, while the metric said it had improved (301px to 143px) because border nodes keep every sample point near something. Replaced with vendored d3-force (15KB, tree-shaken, local not CDN): spacing uniformity p90/median **1.5x against the hand-rolled 5.6x**. Also fixed a `.kg-sw` collision with the existing 9px legend swatch, and a caption drawn inside the diagram to explain the 13 unheld-catalogue/idle-agent nodes. **The 5 pre-existing test failures are unchanged** (verified with the diff stashed); zero Groq tokens.
+- **Fix 134 - the hold decision now reads the message, not a 16-way label:** a real complaint auto-sent to a customer - *"I've uploaded those documents already and nothing has happened. This is unacceptable."* - because `_escalation_reason` receives an Intent label, a level and a score, and **never the message**. It classified `claim_status` (0.95), which Rule 3b exempts, so no rule could see the words; sentiment was detected as `negative` and read by nothing. New `handoff.py` asks one question of the text and returns a closed reason set, wired as **Rule 2c placed before Rule 3b** - the exemption that swallowed it - and after Rule 0/2 so risk and already-escalating intents keep their own reasons. A short regex floor holds "speak to a human" with no LLM at all. Probed before building: 14 cases x 3 runs, **identical answer every run**, including the two real messages (complaint holds, the polite document question does not - with no carve-out for "please help me", which was deliberately NOT written into the prompt).
+- **Fix 135 - `max_tokens=120` silently killed the whole feature:** Fix 134 shipped and never fired once. `gpt-oss-20b` bills **reasoning** tokens against the same budget, so a 120 cap returned HTTP 400 on every call; `needs_human` fell through to its fail-open path and no error surfaced anywhere - the hold simply never happened. Measured: 120 -> 400 error, 400 -> correct verdict, no cap -> correct verdict. **The 18/18 verification missed it because it used a fake generator** that never enforced a limit: the wiring was tested, the actual call was not.
+- **Fix 136 - the classifier was starved of its own conversation:** the same message classified `claim_status` on one turn and `kyc_update` on the next. The history window kept **3 INBOUND turns only** - and "claim"/`CLM001003` appear exclusively in OUR REPLIES, which the direction filter discarded. Measured on the live thread: the 3-turn window contains no "claim" anywhere, 4+ contains both. The model picked the one intent whose definition says "documents" and its stated reason was a fair reading of what it was shown. Now **5 turns, both directions, speaker-labelled** (~1420 -> ~1528 prompt tokens against an 8000/min tier cap), mirroring what answer generation has always done - the classifier was the only consumer stripping replies. Verified against the real classifier: `kyc_update` -> **`claim_status`** at 0.95.
 
 
 ---
@@ -6197,3 +6200,119 @@ mid-Round-2.
 **Also measured:** the 8-row cap on `transaction_dispute` hides 6 of Sayantini's 14
 transactions - real, but smaller than the "8 of 14" previously recorded, and not the cause
 here.
+
+---
+
+## Session 29 - 2026-09-02 (Round 2 testing)
+
+Three fixes, all from one message the user sent in the UI and watched auto-send when it should
+have reached a human.
+
+### Fix 134 - the hold decision reads the message
+
+**The defect is structural.** `_escalation_reason(analysis, resolution, context)` decides whether
+a human sees a message without ever receiving the message. Nine rules, every one keyed on a label:
+an Intent enum value, an L1/L2/L3 level, a confidence score. So this:
+
+> "I've uploaded those documents already and nothing has happened. This is unacceptable."
+
+arrived as the token `claim_status` (0.95, classifier reason: *"customer wants an update on an
+existing claim"*), and from that point the words were gone. `claim_status` is in
+INFORMATIONAL_INTENTS, so Rule 3b returned None. Sentiment was correctly detected as `negative`
+and is read by no rule at all. The reply auto-sent, opening "I understand your frustration" and
+then telling her to upload the documents she had just said she had uploaded.
+
+`services/agent_service/handoff.py` asks one question of the text and answers with a **closed**
+reason set - `human_requested`, `service_failure_asserted`, `emergency`, `distress`,
+`approval_needed` - so the result is a decision, not prose, and each value maps 1:1 to a hold
+label. `decide()` and `_escalation_reason()` now take `message`; the one call site already held
+it, and `detect_action` on the same class already took it, so this makes the class consistent
+rather than introducing a pattern.
+
+**Placement is the load-bearing detail.** Rule 2c sits after Rule 0 (credible risk still wins and
+cannot be downgraded), after Rule 2 (an already-escalating intent keeps its own specific reason),
+and **before Rules 3/3b**, which return None on the label alone and are exactly what suppressed
+the complaint. A content signal must outrank a category exemption.
+
+A short regex floor runs first, before any LLM: speak/talk to a human, connect me, real person,
+not a bot. It mirrors the high-risk net already in `resolution_service.classifier`, which
+establishes both the pattern and the principle that over-triggering is the safe direction. It is
+not the mechanism - it is what still works when the model is wrong, slow, or out of budget.
+"help me" is deliberately NOT in it.
+
+**Probed before building** (14 cases x 3 runs, temperature 0): 38/42, and **every case returned
+the same answer on all three runs**. Both real messages decide correctly and stably. The controls
+("can you help me check my balance?", "URGENT!! What are your FD rates??") do not hand off.
+
+**Four phrases were written into the prompt and then removed**, each wrong on inspection:
+*"needs a PERSON, not an answer"* (false dichotomy - she needs both); *"they reject the automated
+reply"* (unevaluable before a reply exists); *"an accurate answer will not resolve"* (circular -
+the model always believes its answer resolves things); and a *"NOT this: please help me"*
+carve-out, which is the redact-don't-instruct trap - naming the string makes the model match the
+string. The probe confirms the document question answers correctly with no carve-out at all.
+
+### Fix 135 - the feature shipped dead
+
+Fix 134 was deployed, verified 18/18, and **never fired once in production**. `max_tokens=120`
+looked obviously right - the answer is three short fields - but `gpt-oss-20b` is a reasoning model
+that bills its thinking against the same budget, so every call returned HTTP 400. `needs_human`
+took its fail-open path and returned None, silently, on every message.
+
+| max_tokens | result |
+|---|---|
+| 120 | HTTP 400, empty text |
+| 400 | correct verdict |
+| none | correct verdict |
+
+**Why the verification missed it:** it used a fake generator returning canned JSON, which cannot
+enforce a token limit. The wiring was proven; the actual call was never made. The fail-open design
+- correct for availability - meant nothing surfaced: no error, no failed message, just a hold that
+never happened. Re-verified afterwards against the real LLM, 3/3.
+
+### Fix 136 - the classifier could not see its own conversation
+
+The **same text** classified `claim_status` on turn 7 and `kyc_update` on turn 9. The history
+window kept 3 INBOUND turns only, and by turn 9 those were three document-related messages with
+the word "claim" nowhere in them - because "claim" and `CLM001003` appear **exclusively in our
+replies**, which the `direction == "inbound"` filter discarded. Measured on the live thread:
+
+| window | contains "claim"? | prompt |
+|---|---|---|
+| 3 turns | **no** | ~1420 tok |
+| 4 turns | yes | ~1493 tok |
+| **5 turns** | **yes** | **~1528 tok** |
+| 8 turns | yes | ~1647 tok |
+
+The model picked the one intent whose definition contains "documents" and gave as its reason
+*"User uploaded documents for KYC and is awaiting processing"* - a fair reading of what it was
+shown. **The LLM was not failing; it was starved.**
+
+Now 5 turns, both directions, speaker-labelled, 200-char excerpts. The turns were **already
+fetched** (`list_recent_turns` returns 8 including outbound) and thrown away in the formatter, so
+there is no new query. This mirrors `_format_conversation_history`, which answer generation has
+always used with both directions - the classifier was the sole consumer stripping replies.
+Verified against the real classifier: `kyc_update` -> `claim_status`, 0.95.
+
+**A window still slides.** On a long enough thread the anchor ages out again; at 5 turns the
+margin on the tested conversation was a single message. The durable fix is passing the active
+ticket's subject - a fact about the thread rather than a position in a list - and is NOT done.
+
+### Confirmed on screen
+
+Three messages sent through the UI on a cleared database: the two questions auto-send, the
+complaint holds with **"Customer says we already failed them"**, all three classify `claim_status`,
+and all three group under one open ticket carrying `escalation_reason`.
+
+### Open, unchanged
+
+- **`ChargePenalty` is read by nothing** - the Rs.1,284 late fee still answers "I'm not seeing a
+  transaction". Root cause is a missing intent (no `fee_enquiry`), not a missing query.
+- **Conflicting sources** - Rule 7 measures retrieval *weakness*, not contradiction between two
+  confidently-retrieved documents. Not solved by Rule 2c.
+- **Retrieval and answer generation still route on the intent label.** Rule 2c fixed the safety
+  half only: a wrong label no longer hides a message from a human, but it still selects which
+  records the model is told to answer from.
+
+### Test status
+
+**5 failed / 147 passed - the documented baseline, unchanged.**

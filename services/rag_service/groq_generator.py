@@ -237,15 +237,35 @@ class GroqGenerator:
         graph_ctx = ctx.get("graph_context")
         graph_text = _format_graph_context(graph_ctx) if graph_ctx else ""
 
-        # Last 3 inbound turns give the classifier conversation context so it can
-        # correctly handle follow-ups like "What about the other issue I mentioned?"
+        # Last 5 turns, BOTH directions, speaker-labelled.
+        #
+        # This used to keep 3 INBOUND turns only, which discarded the one thing that
+        # identifies what a thread is about. Measured on a real conversation: the customer
+        # wrote "I've uploaded these documents already and nothing has happened" and the
+        # 3-inbound window held three document-related messages with the word "claim"
+        # nowhere in it - because "claim" and the id CLM001003 appear exclusively in OUR
+        # REPLIES, which the direction filter threw away. The classifier picked the one
+        # intent whose definition contains "documents" (kyc_update, 0.92) and its stated
+        # reason - "User uploaded documents for KYC" - was a fair reading of what it was
+        # shown. One turn earlier the same text classified correctly, because the anchor
+        # message had not yet aged out of the window.
+        #
+        # 5 is where the anchor survives: measured on that conversation, 3 turns contains
+        # no "claim" at all; 4 and above contain both "claim" and CLM001003. Cost is
+        # ~1420 -> ~1528 prompt tokens (+108) against an 8000 tokens-per-minute tier cap.
+        # Excerpts are 200 chars rather than 400 for the same reason.
+        #
+        # Mirrors _format_conversation_history, which answer generation has always used
+        # with both directions - the classifier was the only consumer stripping replies.
+        #
+        # A window still SLIDES: on a long enough thread the anchor ages out again. The
+        # durable fix is passing the active ticket's subject, a fact about the thread
+        # rather than a position in a list. Not done here.
         recent = ctx.get("recent_turns", [])
         history_lines = []
-        for t in list(reversed(recent))[:6]:
-            if t.get("direction") == "inbound":
-                history_lines.append(f"  Prior message: {(t.get('text') or '')[:150]}")
-                if len(history_lines) >= 3:
-                    break
+        for t in list(reversed(recent))[-5:]:
+            who = "Customer" if t.get("direction") == "inbound" else "Support"
+            history_lines.append(f"  [{who}]: {(t.get('text') or '')[:200]}")
         history_text = "\n".join(history_lines)
 
         # Mask PII before it reaches the LLM — see generate_answer() for why fragments are
@@ -283,7 +303,7 @@ class GroqGenerator:
             '"language": "<ISO-639-1 code>", '
             '"reason": "<one short sentence>"}\n\n'
             + (f"Customer account context:\n{graph_text}\n\n" if graph_text else "")
-            + (f"Recent customer messages (for context):\n{history_text}\n\n" if history_text else "")
+            + (f"Recent conversation (for context):\n{history_text}\n\n" if history_text else "")
             + f"Customer message: {message}"
         )
 
