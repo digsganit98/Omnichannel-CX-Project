@@ -252,14 +252,20 @@ pitch for each. Rules:
    numbers from the candidate's basis (amounts, days, points).
 4. Never repeat or paraphrase an offer from the ALREADY SUGGESTED list.
 5. If nothing fits well, return an empty array. Fewer good offers beat more weak ones.
-6. Respond with ONLY a JSON array, no markdown, no commentary:
+6. Never promise or imply an outcome: no approval, no guaranteed rate, no eligibility.
+   Offer the product, never the decision.
+7. Never state a timeline or deadline that is not in the candidate's basis.
+8. Never repeat a full account, card or policy number. Last 4 digits only.
+9. Respond with ONLY a JSON array, no markdown, no commentary:
 [{"product": "<product id from candidates>", "kind": "cross_sell|up_sell",
   "pitch": "<=20 word sentence>", "reason": "<why now, <=15 words>", "confidence": 0.0-1.0}]
 
-GOOD pitch: "Your INR 5,00,000 FD matures in 40 days - renew now to lock today's rate."
+GOOD pitch: "Your INR 5,00,000 FD matures in 40 days - renewal options are available now."
 GOOD pitch: "With INR 1,80,000 average balance, a fixed deposit could earn you far more."
 BAD pitch (no numbers): "We have great fixed deposit options for valued customers like you."
 BAD pitch (not in candidates): "Consider our new personal loan at attractive rates."
+BAD pitch (promises an outcome): "You are pre-approved for this card at a guaranteed 8% rate."
+BAD pitch (invented deadline): "Apply within 7 days to secure this offer."
 BAD pitch (too long): any sentence over 20 words."""
 
 
