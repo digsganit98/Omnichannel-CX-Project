@@ -21,6 +21,8 @@ import json
 import logging
 from datetime import datetime, timezone
 
+from services.pii_service.masker import mask_text, unmask_text
+
 logger = logging.getLogger(__name__)
 
 MAX_OPPORTUNITIES = 2
@@ -397,6 +399,27 @@ def generate_opportunities(
         turns=turns,
         already_suggested=already_suggested,
     )
+    # Mask PII before the prompt leaves the boundary, as every other prose call does
+    # (answer_generation, intent_classification and case_summary all mask; handoff_check
+    # masks at its own call site). This one did not, and it carries the widest customer
+    # text of any of them: the customer's real name plus up to ten conversation turns,
+    # verbatim. An account or card number the customer typed into a message went to the
+    # provider unmasked - exactly what masker.py exists to catch.
+    #
+    # The whole assembled prompt is masked in one call rather than each input separately,
+    # so a field added to build_user_prompt later cannot quietly escape masking. The
+    # candidate block is masked too; candidate ids are code-generated product keys, so
+    # there is nothing there for the patterns to match.
+    # The customer's own identity values, so they are masked by exact match as well as by
+    # pattern. Built inline rather than imported: groq_generator._known_values is private,
+    # and every cross-service import of that module takes only the public GroqGenerator.
+    known_values = {
+        "name": graph_context.get("name") or "",
+        "phone": graph_context.get("phone") or "",
+        "email": graph_context.get("email") or "",
+    } if graph_context else {}
+    user_prompt, pii_mapping = mask_text(user_prompt, known_values)
+
     result = generator._generate(
         _SYSTEM_PROMPT,
         user_prompt,
@@ -406,4 +429,7 @@ def generate_opportunities(
     if not result.get("llm_used"):
         return {"opportunities": [], "llm_error": result.get("error")}
 
-    return {"opportunities": parse_and_validate(result.get("text") or "", candidates)}
+    # Unmask before parsing: a pitch may address the customer by name, and the placeholder
+    # must not reach the offer draft an agent approves and sends.
+    raw_text = unmask_text(result.get("text") or "", pii_mapping)
+    return {"opportunities": parse_and_validate(raw_text, candidates)}
