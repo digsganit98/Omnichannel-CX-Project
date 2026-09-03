@@ -92,12 +92,32 @@ class FakeGenerator:
         return {"text": "", "model": self.model, "llm_used": False}
 
 
+class _FakeStore:
+    """The retrieval half of RAGPipeline, without the generation half.
+
+    The graph branch of QueryResolutionAgent now reads `self.rag.store.similarity_search`
+    directly rather than calling `rag.answer()`, because answer() also runs
+    generate_answer internally and the branch then discards that reply and generates
+    again - a second LLM call on every message. A fake without a `store` makes that call
+    raise AttributeError into the branch's except, so the KB silently contributes nothing.
+    """
+
+    def similarity_search(self, query, k=None):
+        return [{
+            "text": "Loan applications require KYC documents, income proof and property papers.",
+            "score": 0.88,
+            "metadata": {"source": "InboxIQ_BFSI_KB.pdf:p7", "doc_type": "knowledge_base",
+                         "document_version": "test-v1"},
+        }]
+
+
 class FakeRAG:
     # QueryResolutionAgent's Neo4j and ticket-lookup branches call
     # `self.rag.generator.generate_answer(...)` directly, bypassing .answer().
     # Without this attribute those branches reach whatever generator the real
     # RAGPipeline built - i.e. a live Groq client.
     generator = FakeGenerator()
+    store = _FakeStore()
 
     def answer(self, query, context):
         if "unknown" in query.lower():
@@ -138,15 +158,28 @@ class FakeResolutionEngine:
 
 
 class FakeNeo4j:
-    """Stub Neo4j client that returns canned BFSI graph data."""
+    """Stub Neo4j client that returns canned BFSI graph data.
+
+    The record branch answers the single relationship walk in
+    `queries.get_all_customer_records`, which returns `label` + `props` per row. It used to
+    match on the literal node label appearing in the Cypher ("Loan" in cypher) and return
+    the seven columns `get_loan_status` named - a shape that only existed while there was a
+    query per record type naming its own columns. Those queries are gone, so a fake keyed on
+    them silently returned NOTHING and eight tests failed on empty graph context rather than
+    on anything they were written to check.
+    """
 
     def query(self, cypher, params=None):
-        if "customer_id" in cypher and "$cid" in cypher and "Loan" in cypher:
-            return [{"loan_id": "L001", "loan_type": "Personal Loan", "status": "Active",
-                     "amount_inr": 500000, "interest_rate": 10.5, "next_step": "Pay EMI by 5th",
-                     "last_updated": "2024-01-01"}]
-        if "customer_id" in cypher and "$cid" in cypher and "Claim" in cypher:
-            return []
+        if "properties(n)" in cypher:
+            return [
+                {"label": "Loan", "props": {
+                    "loan_id": "L001", "loan_type": "Personal Loan", "status": "Active",
+                    "amount_inr": 500000, "interest_rate": 10.5,
+                    "next_step": "Pay EMI by 5th", "last_updated": "2024-01-01",
+                    # Present so a test can assert the fields the old column list dropped.
+                    "emis_paid": 12, "emis_pending": 48, "total_emis": 60,
+                }, "parent_policy_type": None},
+            ]
         if "phone" in cypher or "email" in cypher:
             return [{"customer_id": "CUST-001", "email": "customer@example.com",
                      "phone": "+919999999999", "city": "Mumbai"}]
@@ -216,28 +249,48 @@ class WorkbookNeo4j:
             return []
 
         customer_id = str(params.get("cid", ""))
-        if "HAS_LOAN" in cypher:
-            return [{
-                "loan_id": str(row["LoanID"]),
-                "loan_type": str(row["LoanType"]),
-                "status": str(row["Status"]),
-                "amount_inr": row["BalanceDue"],
-                "interest_rate": row["InterestRate"],
-                "next_step": str(row["NextStep"]),
-                "last_updated": str(row["LastUpdatedDate"]),
-            } for row in self.loans if str(row["CRN"]) == customer_id]
-        if "HAS_CLAIM" in cypher:
-            policy_type_by_id = {str(p["PolicyID"]): str(p.get("PolicyType") or "") for p in self.policies}
-            return [{
-                "claim_id": str(row["ClaimID"]),
-                "policy_type": policy_type_by_id.get(str(row.get("PolicyID") or ""), ""),
-                "claim_type": str(row["ClaimType"]),
-                "status": str(row["ClaimStatus"]),
-                "amount_claimed": row["AmountClaimed"],
-                "amount_approved": row["AmountApproved"],
-                "reason": str(row["ReasonForStatus"]),
-                "last_updated": str(row["LastUpdatedDate"]),
-            } for row in self.claims if str(row["CRN"]) == customer_id]
+
+        # The single relationship walk in queries.get_all_customer_records, which returns
+        # `label` + `props` per row instead of a query per record type naming its columns.
+        # This double used to branch on HAS_LOAN / HAS_CLAIM appearing in the Cypher and
+        # return the old column shape; the new query names no relationship and no field, so
+        # those branches stopped matching and every caller saw an EMPTY graph - which reads
+        # downstream as "not a real BFSI customer" and rejected the sender before any ticket
+        # could be created.
+        if "properties(n)" in cypher:
+            policy_type_by_id = {
+                str(p["PolicyID"]): str(p.get("PolicyType") or "") for p in self.policies
+            }
+            rows = []
+            for row in self.loans:
+                if str(row["CRN"]) != customer_id:
+                    continue
+                rows.append({"label": "Loan", "parent_policy_type": None, "props": {
+                    "loan_id": str(row["LoanID"]),
+                    "loan_type": str(row["LoanType"]),
+                    "status": str(row["Status"]),
+                    "amount_inr": row["BalanceDue"],
+                    "interest_rate": row["InterestRate"],
+                    "next_step": str(row["NextStep"]),
+                    "last_updated": str(row["LastUpdatedDate"]),
+                }})
+            for row in self.claims:
+                if str(row["CRN"]) != customer_id:
+                    continue
+                rows.append({
+                    "label": "Claim",
+                    "parent_policy_type": policy_type_by_id.get(str(row.get("PolicyID") or ""), ""),
+                    "props": {
+                        "claim_id": str(row["ClaimID"]),
+                        "claim_type": str(row["ClaimType"]),
+                        "status": str(row["ClaimStatus"]),
+                        "amount_claimed_inr": row["AmountClaimed"],
+                        "amount_approved_inr": row["AmountApproved"],
+                        "reason": str(row["ReasonForStatus"]),
+                        "last_updated": str(row["LastUpdatedDate"]),
+                    },
+                })
+            return rows
         return []
 
     def write(self, cypher, params=None):
@@ -1063,8 +1116,23 @@ def test_process_intents_never_route_to_customer_graph():
         intent=Intent.LOAN_APPLICATION.value,
     )
 
-    assert claim.retrieval_backend != "neo4j_graph"
-    assert loan.retrieval_backend != "neo4j_graph"
+    # These used to assert `retrieval_backend != "neo4j_graph"`, i.e. that a PROCESS
+    # question must not reach the customer's records at all. That was the right guard while
+    # the graph branch RETURNED and the knowledge base below it never ran: routing a "how do
+    # I file a claim?" to the graph meant answering it from three claims already filed.
+    #
+    # The branch now passes the KB passages alongside the records in one prompt, so the
+    # model has the procedure AND the customer's context and picks what answers the
+    # question. Confirmed in the running app on 2026-09-04: "How do I apply for a home
+    # loan?" returned the application process - form, KYC documents, salary slips, property
+    # documents, eligibility assessment - and did not recite the customer's existing loan.
+    #
+    # What still matters is that the KB was actually consulted, so that is what is asserted.
+    for resolution in (claim, loan):
+        doc_types = {c.get("metadata", {}).get("doc_type") for c in resolution.contexts}
+        assert "knowledge_base" in doc_types, (
+            f"a process question must still see the KB; got {doc_types}"
+        )
 
 
 def test_five_question_kb_and_graph_e2e_matrix():

@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from enum import StrEnum
+import logging
 import re
 
 from pydantic import BaseModel, Field
@@ -8,12 +9,16 @@ from services.agent_service.cx_agent import CXAgent
 from services.agent_service.handoff import needs_human
 from services.channel_service.delivery import OutboundDeliveryService
 from services.pii_service.masker import mask_text
+from services.rag_service.config import rag_top_k
 from services.rag_service.groq_generator import GroqGenerator
 from services.rag_service.rag_pipeline import RAGPipeline
 from services.ticket_service.ticket_manager import TicketManager
 from shared.schemas.intents import Intent, IntentResult
 from shared.schemas.messages import InboundMessage
 from shared.schemas.tickets import SERVICEABLE_TICKET_STATUSES, Ticket, TicketStatus
+
+
+logger = logging.getLogger(__name__)
 
 
 MANUAL_REVIEW_INTENTS = {
@@ -370,46 +375,91 @@ class QueryResolutionAgent:
                 },
             )
 
-        # ── Priority 2: Neo4j transactional data (loans, claims, etc.) ───────
-        if intent and self.neo4j_client:
+        # ── Priority 2: the customer's own records ───────────────────────────
+        # The gate here used to be `intent in TRANSACTIONAL_INTENTS`, so 9 of 16 intents
+        # reached this branch and returned nothing - a KYC question, a complaint, a general
+        # enquiry got no customer data at all, however plainly the answer sat in the graph.
+        # A 2-3 word classification decided which of a customer's records existed.
+        #
+        # The gate is gone. What survives is a data check: if this customer has records, use
+        # them; if they have none, fall through to the knowledge base. That is a fact about
+        # the customer rather than a guess about their question, so a misclassified message
+        # can no longer hide a record from the answer.
+        if self.neo4j_client:
             try:
-                from services.neo4j_service.queries import neo4j_answer, TRANSACTIONAL_INTENTS
-                if intent in TRANSACTIONAL_INTENTS:
-                    graph_ctx = context.get("graph_context", {})
-                    customer_id = graph_ctx.get("customer_id", "")
-                    if customer_id:
-                        raw_data = neo4j_answer(self.neo4j_client, intent, customer_id)
-                        if raw_data:
-                            neo4j_ctx = [{
-                                "text": raw_data,
-                                "score": 0.95,
-                                "metadata": {
-                                    "source": "neo4j_customer_graph",
-                                    "doc_type": "customer_graph",
-                                    # Persisted verbatim by add_retrieval_evidence and read back
-                                    # by the provenance endpoint, which keys on "retrieval". The
-                                    # RAG paths set it (opensearch_vector / keyword_fallback);
-                                    # without it here the graph branch stored no backend at all,
-                                    # so the panel fell back to guessing from the intent label.
-                                    "retrieval": "neo4j_graph",
-                                },
-                            }]
-                            # Pass through Groq so the LLM produces a natural CS response
-                            # rather than returning raw field=value database output.
-                            generation = self.rag.generator.generate_answer(
-                                message.text, neo4j_ctx, context
-                            )
-                            return QueryResolution(
-                                answer=generation.get("text") or raw_data,
-                                confidence=0.95,
-                                contexts=neo4j_ctx,
-                                citations=[{"index": 1, "source": "neo4j_customer_graph", "score": 0.95}],
-                                retrieval_backend="neo4j_graph",
-                                llm={
-                                    "model": generation.get("model"),
-                                    "llm_used": generation.get("llm_used", False),
-                                },
-                            )
+                from services.neo4j_service.queries import neo4j_answer
+                graph_ctx = context.get("graph_context", {})
+                customer_id = graph_ctx.get("customer_id", "")
+                if customer_id:
+                    raw_data = neo4j_answer(self.neo4j_client, intent, customer_id)
+                    if raw_data:
+                        neo4j_ctx = [{
+                            "text": raw_data,
+                            "score": 0.95,
+                            "metadata": {
+                                "source": "neo4j_customer_graph",
+                                "doc_type": "customer_graph",
+                                # Persisted verbatim by add_retrieval_evidence and read back
+                                # by the provenance endpoint, which keys on "retrieval". The
+                                # RAG paths set it (opensearch_vector / keyword_fallback);
+                                # without it here the graph branch stored no backend at all,
+                                # so the panel fell back to guessing from the intent label.
+                                "retrieval": "neo4j_graph",
+                            },
+                        }]
+                        # The knowledge base as WELL as the records, not instead of them.
+                        # This branch used to return here, and Priority 3 below never ran -
+                        # fine while a TRANSACTIONAL_INTENTS gate meant only account
+                        # questions reached it. With the gate gone the branch fires for
+                        # every customer who HAS records, including on questions whose
+                        # answer is a procedure rather than a figure: "how do I file a
+                        # claim?" would be answered from her three existing claims, having
+                        # never seen the filing process the KB holds.
+                        #
+                        # Both sources go to the model and it uses what answers the
+                        # question. Records first, because a question about this customer
+                        # should be answered about THIS customer where both could apply.
+                        # RETRIEVAL only. rag.answer() would also call generate_answer
+                        # internally (rag_pipeline.py:49) and hand back a finished reply -
+                        # which this branch then discards and regenerates, costing a second
+                        # LLM call on every message. Against a 1000-request/day budget and
+                        # ~8 calls per message already, that is a wasted call per customer
+                        # message for nothing.
+                        kb_ctx = []
+                        try:
+                            kb_ctx = self.rag.store.similarity_search(message.text, k=rag_top_k()) or []
+                        except Exception:
+                            # Logged, not silent. A bare swallow here hid the KB going
+                            # missing entirely: a rag object without a `store` raises
+                            # AttributeError, the except caught it, and every reply was
+                            # generated from the customer's records alone with nothing on
+                            # screen or in the logs to say the knowledge base had dropped
+                            # out. Found when a test's fake had no store.
+                            logger.warning("kb_retrieval_failed_in_graph_branch", exc_info=True)
+                            kb_ctx = []
+                        combined_ctx = neo4j_ctx + kb_ctx
+                        # Pass through Groq so the LLM produces a natural CS response
+                        # rather than returning raw field=value database output.
+                        generation = self.rag.generator.generate_answer(
+                            message.text, combined_ctx, context
+                        )
+                        return QueryResolution(
+                            answer=generation.get("text") or raw_data,
+                            confidence=0.95,
+                            contexts=combined_ctx,
+                            citations=[{"index": 1, "source": "neo4j_customer_graph", "score": 0.95}],
+                            # Deliberately still neo4j_graph, not a new "hybrid" value: two
+                            # escalation rules key on this field (Rule 7's exemption and
+                            # _answered_from_customer_record's L2 gate, both via
+                            # CUSTOMER_RECORD_BACKENDS). A new value would silently change
+                            # when replies are held for a human, which is not what adding
+                            # KB passages is meant to do.
+                            retrieval_backend="neo4j_graph",
+                            llm={
+                                "model": generation.get("model"),
+                                "llm_used": generation.get("llm_used", False),
+                            },
+                        )
             except Exception:
                 pass
 

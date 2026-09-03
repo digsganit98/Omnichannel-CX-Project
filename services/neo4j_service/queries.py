@@ -277,18 +277,119 @@ def get_case_messages(client, ticket_id: str, limit: int = 4) -> list[dict]:
         return []
 
 
+# One query replaces the eight hand-written ones above, which each named the columns they
+# wanted. That column list was a whitelist, and it was silently lossy in three ways:
+#
+#   1. FIELDS. Fathima asked "how many EMIs have I paid, and how many remain?" and was told
+#      the system does not have her payment schedule. The Loan node holds emis_paid=53,
+#      emis_pending=1, total_emis=54 - none of them in get_loan_status's RETURN clause.
+#   2. NODE TYPES. Every customer has a :KYC node. No function fetched it, so "confirm my
+#      KYC status" could not be answered from the customer's own record at all.
+#   3. INTENTS. neo4j_answer gated on TRANSACTIONAL_INTENTS, so 9 of 16 intents received no
+#      customer data whatever, and no intent routed to ChargePenalty - which is why a
+#      Rs.1,284 late fee answered "I'm not seeing a transaction".
+#
+# Naming nothing is what fixes all three at once: a property added to a node, or a new node
+# type in the seed, appears without anyone remembering to edit a query.
+#
+# Measured before choosing this over a relevance ranker (2026-09-04, real records, 14 real
+# questions from the sample workbook):
+#
+#   today's hardcoded pair of filters   31-36 fields   ~256 tokens   fails EMI/KYC/charges
+#   rank per record, 15 each           108-135        ~999          14/14
+#   rank across all records, top 50     ~50           ~344          14/14
+#   THIS - everything                  139-165       ~1000          14/14
+#
+# Per-record ranking cost the same as sending everything and could still drop a needed
+# field, so it bought nothing. Customer-level ranking was a third of the cost - but a
+# dropped field is INVISIBLE to the model: it cannot distinguish "this customer has no
+# annual fee" from "the annual fee did not score high enough", so system.md's "if you do
+# not have the data, say so" cannot fire and a confidently wrong total becomes possible.
+# That trade is wrong in a financial context when the quota that actually binds is
+# REQUESTS (1000/day), not tokens - the extra ~750 tokens sit inside a ~10,100 token
+# message and change the request count not at all.
+_ALL_RECORDS_CYPHER = """
+MATCH (c:Customer {customer_id: $cid})-[r]->(n)
+WHERE NOT n:Interaction AND NOT n:Ticket
+OPTIONAL MATCH (p:Policy)-[:HAS_CLAIM]->(n)
+RETURN labels(n)[0] AS label, properties(n) AS props,
+       p.policy_type AS parent_policy_type
+"""
+
+# Rows, not fields. Eight is the cap neo4j_answer already applied to transactions: a dispute
+# is nearly always about a recent debit, and 72 rows would crowd out the customer's actual
+# question. This is the one bound that survives, and it limits HOW MANY RECORDS, never
+# which fields within one.
+_ROW_CAPS = {"Transaction": 8}
+
+# The graph label -> the key the context dict has always used. Callers of
+# get_customer_context_for_customer (the opportunity engine, next-best-action, the
+# agent-assist route, the ticket manager) read these keys, so they must not move.
+_LABEL_TO_KEY = {
+    "Loan": "loans",
+    "Claim": "claims",
+    "Policy": "policies",
+    "CreditCard": "credit_cards",
+    "Account": "accounts",
+    "FixedDeposit": "fixed_deposits",
+    "Transaction": "transactions",
+    "ChargePenalty": "charges",
+    "KYC": "kyc",
+}
+
+# Transactions carry no date-ordered guarantee from the walk above, so sort what we cap.
+_ROW_SORT_KEY = {"Transaction": "txn_date"}
+
+
+def get_all_customer_records(client, customer_id: str) -> dict[str, list[dict]]:
+    """Every record this customer is connected to, every field, grouped by context key.
+
+    Returns {} on any failure rather than raising: the caller falls back to the knowledge
+    base, which is the same behaviour the eight individual getters had.
+    """
+    if client is None or not customer_id:
+        return {}
+    try:
+        rows = client.query(_ALL_RECORDS_CYPHER, {"cid": customer_id})
+    except Exception:
+        return {}
+
+    grouped: dict[str, list[dict]] = {}
+    for row in rows or []:
+        label = row.get("label")
+        props = dict(row.get("props") or {})
+        if not label or not props:
+            continue
+        # get_claim_status joined the parent Policy for its type, and the reply text uses it
+        # ("Auto / Total Loss"), so the join is preserved rather than dropped with the
+        # column list.
+        if label == "Claim" and row.get("parent_policy_type"):
+            props.setdefault("policy_type", row["parent_policy_type"])
+        grouped.setdefault(_LABEL_TO_KEY.get(label, label.lower()), []).append(props)
+
+    for label, cap in _ROW_CAPS.items():
+        key = _LABEL_TO_KEY.get(label, label.lower())
+        records = grouped.get(key)
+        if records and len(records) > cap:
+            sort_field = _ROW_SORT_KEY.get(label)
+            if sort_field:
+                records.sort(key=lambda item: str(item.get(sort_field) or ""), reverse=True)
+            grouped[key] = records[:cap]
+    return grouped
+
+
 def get_customer_context_for_customer(client, customer: dict | None) -> dict:
-    """Return a rich context dict for an already resolved Neo4j customer."""
+    """Return a rich context dict for an already resolved Neo4j customer.
+
+    The KEYS are unchanged - five other surfaces read them - but each record now carries
+    every field it has rather than the handful its old query named. Extra keys are additive,
+    so nothing downstream breaks; `charges` and `kyc` are new and were previously
+    unreachable from this path entirely.
+    """
     if not customer:
         return {}
     cid = customer["customer_id"]
-    loans = get_loan_status(client, cid)
-    claims = get_claim_status(client, cid)
-    policies = get_policy_status(client, cid)
-    credit_cards = get_credit_cards(client, cid)
-    accounts = get_accounts(client, cid)
-    fixed_deposits = get_fixed_deposits(client, cid)
-    open_cases = get_open_cases(client, cid)
+    records = get_all_customer_records(client, cid)
     return {
         "customer_id": cid,
         "name": customer.get("name"),
@@ -296,13 +397,16 @@ def get_customer_context_for_customer(client, customer: dict | None) -> dict:
         "phone": customer.get("phone"),
         "city": customer.get("city"),
         "segment": customer.get("segment"),
-        "loans": loans,
-        "claims": claims,
-        "policies": policies,
-        "credit_cards": credit_cards,
-        "accounts": accounts,
-        "fixed_deposits": fixed_deposits,
-        "open_cases": open_cases,
+        "loans": records.get("loans", []),
+        "claims": records.get("claims", []),
+        "policies": records.get("policies", []),
+        "credit_cards": records.get("credit_cards", []),
+        "accounts": records.get("accounts", []),
+        "fixed_deposits": records.get("fixed_deposits", []),
+        "transactions": records.get("transactions", []),
+        "charges": records.get("charges", []),
+        "kyc": records.get("kyc", []),
+        "open_cases": get_open_cases(client, cid),
     }
 
 
@@ -314,156 +418,35 @@ def _fmt_amount(value) -> str:
         return str(value) if value else "N/A"
 
 
-def neo4j_answer(client, intent: str, customer_id: str) -> str | None:
-    """Return a formatted natural-language answer for transactional intents.
+def neo4j_answer(client, intent: str | None, customer_id: str) -> str | None:
+    """The customer's own records, rendered for the prompt. None when they have none.
 
-    Returns None for intents that should fall through to RAG.
+    This function used to branch on the intent label: seven `if intent == "..."` arms, each
+    building a hand-written line from a handful of fields, behind a TRANSACTIONAL_INTENTS
+    gate that returned None for the other nine intents. Three separate losses came out of
+    that shape - fields the arm did not name (emis_paid on a question asking for exactly
+    that), node types no arm covered (:KYC), and whole intents the gate excluded (no arm
+    ever reached ChargePenalty, so a Rs.1,284 late fee answered "I'm not seeing a
+    transaction").
+
+    It now renders every record the customer holds. `intent` is accepted and ignored, kept
+    only so the call sites need not change; the label no longer decides what a customer is
+    allowed to be told about their own account.
     """
-    if intent not in TRANSACTIONAL_INTENTS:
+    if client is None or not customer_id:
+        return None
+    records = get_all_customer_records(client, customer_id)
+    if not records:
         return None
 
-    if intent in {"loan_status", "loan_default_notice"}:
-        loans = get_loan_status(client, customer_id)
-        if not loans:
-            return None  # Fall through to RAG — PROMPT-5 handles the no-data response cleanly
-        lines = ["Loan records:"]
-        for loan in loans:
-            lines.append(
-                f"  - {loan['loan_type']} (ID: {loan['loan_id']}): "
-                f"Status: {loan['status']}, "
-                f"Amount: {_fmt_amount(loan['amount_inr'])}, "
-                f"Rate: {loan['interest_rate']}%, "
-                f"Next step: {loan['next_step']}"
-            )
-        return "\n".join(lines)
+    from services.rag_service.groq_generator import _RECORD_SECTIONS, _format_record
 
-    if intent == "claim_status":
-        claims = get_claim_status(client, customer_id)
-        if not claims:
-            return None  # Fall through to RAG
-        lines = ["Claim records:"]
-        for claim in claims:
-            approved = _fmt_amount(claim["amount_approved"]) if str(claim.get("amount_approved", "")).upper() not in ("N/A", "NONE", "") else "Pending"
-            lines.append(
-                f"  - Claim {claim['claim_id']} ({claim['policy_type']} / {claim['claim_type']}): "
-                f"Status: {claim['status']}, "
-                f"Claimed: {_fmt_amount(claim['amount_claimed'])}, "
-                f"Approved: {approved}. "
-                f"{claim.get('reason', '')}"
-            )
-        return "\n".join(lines)
-
-    if intent == "policy_status":
-        # Try dedicated Policy nodes first; fall back to claim records if none exist.
-        policies = get_policy_status(client, customer_id)
-        if policies:
-            lines = ["Policy records:"]
-            for p in policies:
-                maturity = f", Maturity: {p['maturity_date']}" if p.get("maturity_date") else ""
-                next_due = f", Next premium due: {p['next_premium_due']}" if p.get("next_premium_due") else ""
-                lines.append(
-                    f"  - {p.get('policy_type', 'Policy')} (ID: {p.get('policy_id', '')}): "
-                    f"Status: {p.get('status', 'Unknown')}, "
-                    f"Coverage: {_fmt_amount(p.get('coverage_inr', 0))}, "
-                    f"Premium: {_fmt_amount(p.get('premium_inr', 0))}"
-                    f"{maturity}{next_due}"
-                )
-            return "\n".join(lines)
-        # No Policy nodes — check if claim data gives partial context
-        claims = get_claim_status(client, customer_id)
-        if claims:
-            lines = ["Insurance records (claims on file):"]
-            for claim in claims:
-                lines.append(
-                    f"  - {claim['policy_type']} policy / {claim['claim_type']} "
-                    f"(Claim ID: {claim['claim_id']}): Status: {claim['status']}, "
-                    f"Claimed: {_fmt_amount(claim['amount_claimed'])}"
-                )
-            return "\n".join(lines)
-        return None  # Fall through to RAG
-
-    if intent == "card_management":
-        cards = get_credit_cards(client, customer_id)
-        if not cards:
-            return None  # Fall through to RAG
-        lines = ["Credit card records:"]
-        for cc in cards:
-            due = f", Total due: {_fmt_amount(cc['total_amount_due'])}" if cc.get("total_amount_due") not in (None, "") else ""
-            min_due = f", Min due: {_fmt_amount(cc['min_amount_due'])}" if cc.get("min_amount_due") not in (None, "") else ""
-            due_date = f", Payment due date: {cc['payment_due_date']}" if cc.get("payment_due_date") else ""
-            lines.append(
-                f"  - {cc.get('card_network', 'Card')} {cc.get('card_variant', '')} "
-                f"(ID: {cc.get('card_id', '')}): "
-                f"Credit limit: {_fmt_amount(cc.get('credit_limit'))}, "
-                f"Balance due: {_fmt_amount(cc.get('balance_due'))}"
-                f"{min_due}{due}{due_date}"
-            )
-        return "\n".join(lines)
-
-    if intent == "account_balance_inquiry":
-        # Surface both deposit accounts and fixed deposits — "balance" and
-        # "FD details" questions both land on this intent.
-        accounts = get_accounts(client, customer_id)
-        fds = get_fixed_deposits(client, customer_id)
-        if not accounts and not fds:
-            return None  # Fall through to RAG
-        lines = []
-        if accounts:
-            # The figure below is an AVERAGE MONTHLY balance and there is no current-balance
-            # field anywhere in this system (no core-banking feed). Sitting unqualified beside
-            # "what is my balance?", it was presented to the customer as THE balance — the
-            # reply read "your current account balance is Rs. 0", and later "your CURRENT
-            # AVERAGE balances are", a phrase that means nothing. The fact is real and worth
-            # sending; what was missing is what it is NOT. Stated here, next to the number, so
-            # the qualifier cannot be separated from the value it qualifies. The same line is
-            # emitted by the customer-context block in groq_generator.py and carries the same
-            # statement: fixing one and not the other left the model still holding an
-            # unqualified figure.
-            lines.append("Account records:")
-            for a in accounts:
-                lines.append(
-                    f"  - {a.get('account_type', 'Account')} {a.get('account_sub_type', '')} "
-                    f"(No: {a.get('account_number', '')}): "
-                    f"Status: {a.get('status', 'Unknown')}, "
-                    f"{_BALANCE_LABEL}: {_fmt_amount(a.get('avg_monthly_balance'))}, "
-                    f"Min balance required: {_fmt_amount(a.get('min_balance_required'))}"
-                )
-        if fds:
-            lines.append("Fixed deposit records:")
-            for fd in fds:
-                maturity = f", Maturity date: {fd['maturity_date']}" if fd.get("maturity_date") else ""
-                maturity_amt = f", Maturity amount: {_fmt_amount(fd['maturity_amount'])}" if fd.get("maturity_amount") not in (None, "") else ""
-                lines.append(
-                    f"  - FD {fd.get('fd_id', '')}: "
-                    f"Principal: {_fmt_amount(fd.get('principal_amount'))}, "
-                    f"Rate: {fd.get('interest_rate', 'N/A')}%, "
-                    f"Tenure: {fd.get('tenure_months', 'N/A')} months, "
-                    f"Status: {fd.get('status', 'Unknown')}"
-                    f"{maturity}{maturity_amt}"
-                )
-        return "\n".join(lines)
-
-    if intent == "transaction_dispute":
-        # Most recent transactions, newest first (get_transactions orders by date DESC).
-        # Capped at 8: a dispute is nearly always about a recent debit, and the whole block
-        # is pasted into the prompt — 20 rows would crowd out the customer's actual question.
-        # Failed/pending rows are surfaced explicitly because they are what a dispute is
-        # usually about, and the seed carries real ones ('Debited-Pending-Credit' with a
-        # reason), which a generic KB answer cannot mention.
-        transactions = get_transactions(client, customer_id, limit=8)
-        if not transactions:
-            return None  # Fall through to RAG
-        lines = ["Recent transaction records (newest first):"]
-        for txn in transactions:
-            failure = f", Issue: {txn['failure_reason']}" if txn.get("failure_reason") else ""
-            beneficiary = f", To: {txn['beneficiary_name']}" if txn.get("beneficiary_name") else ""
-            lines.append(
-                f"  - {txn.get('txn_date', '')} {txn.get('txn_type', '')} "
-                f"{_fmt_amount(txn.get('amount'))} via {txn.get('channel', 'N/A')} "
-                f"(ID: {txn.get('txn_id', '')}): "
-                f"Status: {txn.get('status', 'Unknown')}"
-                f"{beneficiary}{failure}"
-            )
-        return "\n".join(lines)
-
-    return None
+    lines: list[str] = []
+    for key, heading in _RECORD_SECTIONS:
+        rows = records.get(key) or []
+        if not rows:
+            continue
+        lines.append(f"{heading}:")
+        for row in rows:
+            lines.append("  - " + _format_record(row))
+    return "\n".join(lines) if lines else None

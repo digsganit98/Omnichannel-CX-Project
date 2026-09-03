@@ -110,13 +110,14 @@ class _FakeNeo4jForGraphContext:
             if params.get("id") == "919999900000" or params.get("stripped") == "9999900000":
                 return [{"customer_id": "CRN00099999", "email": None, "phone": "919999900000", "city": "Pune"}]
             return []
-        if "customer_id" in cypher and "HAS_LOAN" in cypher:
-            return [{"loan_id": "L1", "loan_type": "Personal Loan", "status": "Active",
-                     "amount_inr": 100000, "interest_rate": 10.0, "next_step": "", "last_updated": ""}]
-        if "HAS_POLICY" in cypher:
-            return []
-        if "HAS_CLAIM" in cypher:
-            return []
+        # queries.get_all_customer_records walks every relationship in ONE query and returns
+        # `label` + `props`, so the old per-relationship branches (HAS_LOAN / HAS_POLICY /
+        # HAS_CLAIM appearing in the Cypher) no longer match anything.
+        if "properties(n)" in cypher:
+            return [{"label": "Loan", "parent_policy_type": None, "props": {
+                "loan_id": "L1", "loan_type": "Personal Loan", "status": "Active",
+                "amount_inr": 100000, "interest_rate": 10.0,
+            }}]
         return []
 
     def write(self, cypher, params=None):

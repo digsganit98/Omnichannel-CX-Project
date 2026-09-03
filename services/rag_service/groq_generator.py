@@ -167,6 +167,23 @@ class GroqGenerator:
             active_ticket_id=_active.get("ticket_id") if isinstance(_active, dict) else None,
         )
         conv_history_text = _format_conversation_history(ctx.get("recent_turns", []))
+        # Our own earlier replies are turns in that history, and they quote the ticket id
+        # that was live when they were sent. History reaches the model verbatim, so a
+        # CLOSED reference gets read back out and repeated as current: observed on
+        # 2026-09-04, a reply carrying "logged under tkt_d1a7a0beccc8" (closed) alongside
+        # "logged under tkt_aacdbe15be5a" (the real, open one) - two references, one of
+        # them dead.
+        #
+        # The open-cases block was already correct - get_open_cases filters to open and
+        # in_progress - so the leak is entirely through history. _redact_closed_ticket_ids
+        # was written for exactly this and wired only to case_summary, which means the
+        # agent's summary was protected and the CUSTOMER'S reply was not.
+        #
+        # Placed before _mask_fragments below: masking first would leave the redaction
+        # marker to be masked as if it were content.
+        conv_history_text = _redact_closed_ticket_ids(
+            conv_history_text, (ctx.get("graph_context") or {}).get("open_cases") or []
+        )
         # Conversation summary is a raw pipe-delimited log — inject it only when there are
         # no recent_turns to avoid sending redundant and hard-to-parse content to the LLM.
         conv_summary = (ctx.get("conversation_summary") or "").strip() if not conv_history_text else ""
@@ -754,6 +771,110 @@ def _safe_amount(value) -> str:
         return str(value) if value else "N/A"
 
 
+# Section order and headings. Order is deliberate rather than alphabetical: holdings first,
+# then activity, then anything that is a problem, because a customer's own products are the
+# frame the rest is read against.
+_RECORD_SECTIONS = (
+    ("loans", "Loans"),
+    ("credit_cards", "Credit Cards"),
+    ("accounts", "Accounts"),
+    ("fixed_deposits", "Fixed Deposits"),
+    ("policies", "Policies"),
+    ("claims", "Claims"),
+    ("charges", "Charges and Penalties"),
+    ("transactions", "Recent Transactions"),
+    ("kyc", "KYC"),
+)
+
+# Never rendered. Account and card numbers are masked downstream anyway and add nothing to
+# an answer; customer_id already appears in the header; the rest is bookkeeping.
+_SKIP_RECORD_FIELDS = {
+    "account_number", "card_number", "customer_id",
+    # A transaction carries the COUNTERPARTY's account number. Rendering every record's
+    # fields surfaced 14-digit beneficiary accounts that the old hand-written transaction
+    # line never printed - someone else's account number, in a prompt, to answer a question
+    # about the customer's own money.
+    "beneficiary_account",
+    "embedding", "record_hash", "created_at", "updated_at",
+}
+
+# Identity first, then what the record IS, then its state. Neo4j returns properties in
+# storage order, which put "Total emis" first and the loan's own id last - readable enough
+# for a machine, poor for a model scanning for the record it was asked about. Anything not
+# listed keeps its natural order after these.
+_FIELD_PRIORITY = (
+    "loan_id", "card_id", "account_type", "fd_id", "policy_id", "claim_id",
+    "charge_id", "txn_id",
+    "loan_type", "policy_type", "claim_type", "charge_type", "txn_type",
+    "card_variant", "card_network", "account_sub_type",
+    "status", "kyc_status", "reversal_status",
+)
+
+# Fields whose bare number would mislead, and the label that must travel with them. The
+# average-monthly-balance figure is the whole reason this mapping exists: presented as
+# "Balance" it was read back to a customer as their current balance, which this system has
+# no feed for. Keeping the qualifier IN the label means the value cannot be emitted without
+# it - see _BALANCE_LABEL and the note above it.
+_FIELD_LABELS = {"avg_monthly_balance": _BALANCE_LABEL}
+
+# Field names whose values are money, so they read as rupees rather than bare floats.
+_AMOUNT_FIELD_RE = re.compile(
+    r"amount|balance|principal|premium|coverage|limit|fee|due_inr|_inr$|charge$",
+    re.IGNORECASE,
+)
+
+
+# Abbreviations that survive a naive title-case as noise. "Dpd" and "Inr" mean nothing on
+# screen; "DPD (days past due)" and dropping the redundant currency suffix do.
+_LABEL_WORDS = {
+    "dpd": "DPD (days past due)",
+    "ifsc": "IFSC",
+    "kyc": "KYC",
+    "emis": "EMIs",
+    "txn": "Transaction",
+    "upi": "UPI",
+    "id": "ID",
+    "avg": "Average",
+    "inr": "",
+}
+
+
+def _field_label(field: str) -> str:
+    """Human-readable label for a field name, with any mandatory qualifier attached."""
+    if field in _FIELD_LABELS:
+        return _FIELD_LABELS[field]
+    # Substitute per underscore-separated WORD. A first version ran \b-anchored regexes over
+    # the whole field name, which matched `dpd` but not `times_90_plus_dpd` - the boundary
+    # sits at the underscore, so the abbreviation was only ever fixed when it was the entire
+    # name.
+    label = field[: -len("_inr")] if field.endswith("_inr") else field
+    words = [_LABEL_WORDS.get(word, word) for word in label.split("_")]
+    text = " ".join(word for word in words if word).strip()
+    return text[:1].upper() + text[1:] if text else field
+
+
+def _format_record(record: dict) -> str:
+    """One record as `Label: value | Label: value`, every field it has.
+
+    Amount-shaped fields are formatted as rupees; everything else is printed as stored.
+    Empty values are dropped rather than shown as blanks, so a sparse record stays short.
+    """
+    def sort_key(field: str) -> tuple[int, int]:
+        try:
+            return (0, _FIELD_PRIORITY.index(field))
+        except ValueError:
+            return (1, 0)
+
+    parts = []
+    for field in sorted(record, key=sort_key):
+        value = record[field]
+        if field in _SKIP_RECORD_FIELDS or value in (None, "", "N/A"):
+            continue
+        text = _safe_amount(value) if _AMOUNT_FIELD_RE.search(field) else str(value)
+        parts.append(f"{_field_label(field)}: {text}")
+    return " | ".join(parts)
+
+
 def _format_graph_context(graph_ctx: dict | None, current_intent: str | None = None,
                           active_ticket_id: str | None = None) -> str:
     """Convert the Neo4j graph context dict into a clean human-readable string.
@@ -787,96 +908,21 @@ def _format_graph_context(graph_ctx: dict | None, current_intent: str | None = N
         lines.append(f"Customer Name: {graph_ctx['name']}")
     if graph_ctx.get("city"):
         lines.append(f"City: {graph_ctx['city']}")
-    loans = graph_ctx.get("loans") or []
-    if loans:
-        lines.append("Loans:")
-        for loan in loans:
-            lines.append(
-                f"  - {loan.get('loan_type', 'Loan')} (ID: {loan.get('loan_id', '')}) | "
-                f"Status: {loan.get('status', '')} | "
-                f"Amount: {_safe_amount(loan.get('amount_inr', 0))} | "
-                f"Next step: {loan.get('next_step', '')}"
-            )
-    claims = graph_ctx.get("claims") or []
-    if claims:
-        lines.append("Claims:")
-        for claim in claims:
-            lines.append(
-                f"  - {claim.get('policy_type', '')} / {claim.get('claim_type', '')} "
-                f"(ID: {claim.get('claim_id', '')}) | "
-                f"Status: {claim.get('status', '')} | "
-                f"Claimed: {_safe_amount(claim.get('amount_claimed', 0))}"
-            )
-    policies = graph_ctx.get("policies") or []
-    if policies:
-        lines.append("Policies:")
-        for p in policies:
-            maturity = f" | Maturity: {p['maturity_date']}" if p.get("maturity_date") else ""
-            next_due = f" | Next premium due: {p['next_premium_due']}" if p.get("next_premium_due") else ""
-            lines.append(
-                f"  - {p.get('policy_type', 'Policy')} (ID: {p.get('policy_id', '')}) | "
-                f"Status: {p.get('status', '')} | "
-                f"Coverage: {_safe_amount(p.get('coverage_inr', 0))} | "
-                f"Premium: {_safe_amount(p.get('premium_inr', 0))}"
-                f"{maturity}{next_due}"
-            )
-    credit_cards = graph_ctx.get("credit_cards") or []
-    if credit_cards:
-        lines.append("Credit Cards:")
-        for cc in credit_cards:
-            # Min due / due date / days-past-due are ALREADY fetched by get_credit_cards and
-            # were simply never printed here. This block runs on every message, so a customer
-            # asking "what do I owe and by when?" was answered from limit+balance alone and
-            # told to "check the exact due date in the mobile app" - while the record held
-            # the date AND said the payment was 45 days overdue. The card-intent block in
-            # neo4j_service/queries.py has always emitted these three; only this one did not,
-            # and which block runs depends on how the message was classified.
-            #
-            # Appended conditionally, the same way the Policies block above builds `maturity`
-            # and `next_due`: a card with nothing outstanding must not emit an empty label.
-            min_due = f" | Min due: {_safe_amount(cc['min_amount_due'])}" if cc.get("min_amount_due") else ""
-            due_date = f" | Payment due: {cc['payment_due_date']}" if cc.get("payment_due_date") else ""
-            dpd = f" | {cc['dpd']} days past due" if cc.get("dpd") else ""
-            lines.append(
-                f"  - {cc.get('card_network', 'Card')} {cc.get('card_variant', '')} "
-                f"(ID: {cc.get('card_id', '')}) | "
-                f"Credit limit: {_safe_amount(cc.get('credit_limit', 0))} | "
-                f"Balance due: {_safe_amount(cc.get('balance_due', 0))}"
-                f"{min_due}{due_date}{dpd}"
-            )
-    accounts = graph_ctx.get("accounts") or []
-    if accounts:
-        # The qualifier is the FIELD NAME, imported from the graph branch so both emitters
-        # say exactly the same thing - this block sends account figures on EVERY message
-        # regardless of intent, and a previous fix qualified only the other block and
-        # reported the problem solved while this one still handed the model a bare number.
-        #
-        # What was removed here is the ORDER that used to sit above these rows ("say so and
-        # point the customer to the mobile app", "Never describe this figure as their current
-        # balance"). Being inside the data, it applied to every question routed through this
-        # block, so an FD and a credit-card answer each ended with a balance disclaimer the
-        # customer had not asked for. The fact survives in the label; the instruction does not.
-        lines.append("Accounts:")
-        for a in accounts:
-            lines.append(
-                f"  - {a.get('account_type', 'Account')} {a.get('account_sub_type', '')} "
-                f"(No: {a.get('account_number', '')}) | "
-                f"Status: {a.get('status', '')} | "
-                f"{_BALANCE_LABEL}: {_safe_amount(a.get('avg_monthly_balance', 0))}"
-            )
-    fixed_deposits = graph_ctx.get("fixed_deposits") or []
-    if fixed_deposits:
-        lines.append("Fixed Deposits:")
-        for fd in fixed_deposits:
-            maturity = f" | Maturity: {fd['maturity_date']}" if fd.get("maturity_date") else ""
-            lines.append(
-                f"  - FD {fd.get('fd_id', '')} | "
-                f"Principal: {_safe_amount(fd.get('principal_amount', 0))} | "
-                f"Rate: {fd.get('interest_rate', 'N/A')}% | "
-                f"Tenure: {fd.get('tenure_months', 'N/A')} months | "
-                f"Status: {fd.get('status', '')}"
-                f"{maturity}"
-            )
+    # Every record the customer holds, every field. Six hand-written blocks used to sit
+    # here, each naming the 4-6 fields it printed - a SECOND whitelist stacked on top of
+    # the query's column list, and invisible from it. Between them, Fathima's emis_paid=53
+    # never reached the model on a question that asked for exactly that, her charges were
+    # absent entirely, and her :KYC node was not fetched at all.
+    #
+    # Rendering whatever is present means a property added to a node, or a new node type in
+    # the seed, appears with no code change here either.
+    for key, heading in _RECORD_SECTIONS:
+        records = graph_ctx.get(key) or []
+        if not records:
+            continue
+        lines.append(f"{heading}:")
+        for record in records:
+            lines.append("  - " + _format_record(record))
     # Open support cases. Conversation history is a fixed recent-turns window, so a case
     # raised earlier scrolls out of view and the model stops knowing it exists even while
     # the ticket is still open. Listing it here makes it a durable fact about the customer,
