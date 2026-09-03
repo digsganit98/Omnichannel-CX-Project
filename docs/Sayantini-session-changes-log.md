@@ -190,6 +190,9 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 136 - the classifier was starved of its own conversation:** the same message classified `claim_status` on one turn and `kyc_update` on the next. The history window kept **3 INBOUND turns only** - and "claim"/`CLM001003` appear exclusively in OUR REPLIES, which the direction filter discarded. Measured on the live thread: the 3-turn window contains no "claim" anywhere, 4+ contains both. The model picked the one intent whose definition says "documents" and its stated reason was a fair reading of what it was shown. Now **5 turns, both directions, speaker-labelled** (~1420 -> ~1528 prompt tokens against an 8000/min tier cap), mirroring what answer generation has always done - the classifier was the only consumer stripping replies. Verified against the real classifier: `kyc_update` -> **`claim_status`** at 0.95.
 - **Fix 137 - the graph diagrams showed the database as it was at page load:** `loadSystemDiagrams()`/`loadLiveGraph()` ran ONCE on load and every modal open rendered that cache, so after a conversation the knowledge graph still drew the pre-conversation snapshot - counts and picture both stale until a browser refresh. Worst possible case for a demo, where showing the graph grow IS the point. Both views now refetch on open: draw from cache instantly, then redraw when fresh data lands, guarded so nothing redraws into a closed modal or over the other tab. Verified live: 178 nodes/195 edges before Round 2, **191/221 after**, with `HAS_TICKET` 0 -> 2, `HAS_MESSAGE` 0 -> 6 and `HANDLED_BY` 0 -> 6 - the Customer->Ticket->Interaction->ResolutionMemory chain that was invisible before this fix. Also removed the last user-visible **"Neo4j"** strings (button, modal title, two error messages); endpoint paths and code comments keep the name.
 - **Fix 138 - the workflow diagram claimed holds come from the resolution level:** `decide_ticket` read *"L2/L3 -> a human reviews"*, which Rule 2c made false - a hold now fires on an **L1** message purely because of what the customer wrote, which is exactly what happens to the complaint in Fix 134. A viewer would see that hold and conclude the system was broken. The box now reads *"risk, the words themselves, or no answer good enough"* and is an `agent` with an LLM badge, because it genuinely makes a call now. `classify_intent` gains *"reads the last 5 turns, both sides"* (Fix 136) and the review gate gains *"the hold reason is shown, not the level"* (the label precedence fix). **Header counts unchanged at 15 steps / 20 edges / 4 decision points**, 0 box overlaps after the height changes, 0 dangling edges - the third time this diagram has drifted from the code it draws (see Fix 128).
+- **Fix 139 - Groq model switched 20b -> 120b:** `openai/gpt-oss-120b`'s daily quota had reset (verified by a `max_tokens:1` probe reading `x-ratelimit-remaining-requests`: 999/1000, HTTP 200). One line in `.env` plus `docker compose up -d api`; verified at the level that matters - `GroqGenerator().model` inside the running container, not just the env var. Same reasoning-model family, so the "never set a small `max_tokens`" constraint from Fix 135 carries over unchanged.
+- **Doc - client-facing BFSI production scope:** new `docs/omnichannel-cx-production-scope-bfsi.md` (+ generated .docx) setting out what a production BFSI deployment adds to the accelerator, in a three-column Capability / Accelerator demonstrates / Production scope format. Written against a real hospital-sector client requirement document, with every requirement **translated rather than copied**.
+- **Docs - removed `demo-scenarios.md`, trimmed `ticket-model-redesign.md`:** the first was superseded by `demo-question-set.md`; the second is shipped, so its phase plan was cut and it is retained as design rationale only (606 -> 349 lines).
 
 
 ---
@@ -6391,3 +6394,80 @@ message, against the ~600 estimated when it was proposed.
 The two classifiers remain the largest spend (~3,500 tokens, a third of every message), and
 `case_summary` + `opportunity_generation` (~2,300) are still agent-panel features sitting on the
 customer message path - the largest unclaimed saving.
+
+
+## Session 30 - 2026-09-02
+
+Model switch, a client-facing document, and docs cleanup. No behaviour changes to the pipeline.
+
+### Fix 139 - Groq model 20b -> 120b
+
+Session 27 recorded 120b as exhausted at 198,667/200,000. That was the same day, so the first
+question was whether the daily pool had reset - not whether to switch.
+
+**Probed rather than assumed:** a `max_tokens:1` call reading the rate-limit headers returned
+HTTP 200 with `x-ratelimit-remaining-requests: 999/1000`. One request spent to avoid switching
+onto a dead model.
+
+One caveat recorded honestly: `x-ratelimit-limit-tokens: 8000` is the **per-minute** bucket, not
+the daily 200K, which these headers do not expose. The probe proves 120b accepts requests now; it
+does not independently prove the daily token pool reset.
+
+`.env` line 30 + `docker compose up -d api` - no rebuild, since `GROQ_MODEL` is read at
+construction in `groq_generator.py:132` and is not baked into the image. Verified by constructing
+`GroqGenerator()` **inside the running container** and reading `.model`, rather than trusting the
+env var alone.
+
+120b is the same reasoning-model family as 20b, so Fix 135's constraint holds: never set a small
+`max_tokens`, because reasoning tokens bill against the same budget.
+
+### Production scope document
+
+A hospital-sector client (Omega Hospitals) issued a discovery-call requirement document for an AI
+patient journey platform. It was used as **evidence of how an enterprise client specifies an AI CX
+platform** - the depth of governance, evaluation and integration detail expected of a vendor - not
+as a template.
+
+Every requirement was assessed three ways: does the pattern exist in BFSI support; if so what is
+its BFSI form; if not, why not. The translations that mattered:
+
+| Hospital requirement | BFSI form |
+|---|---|
+| Appointment scheduling | Transactional service actions with **maker-checker** on value-bearing ones |
+| ECHS / civilian categorisation | Customer class (HNI, senior citizen, NRI) driving routing and entitlement |
+| ABHA national health ID | Account Aggregator framework and CKYC registry |
+| FHIR ETL | Per-vendor core banking integration; ISO 20022 for payments |
+| Marketing ROI / RCM linkage | Cross-sell conversion, retention saves, cost-to-serve |
+| Encounter ID with 24h expiry | Durable customer id plus expiring per-interaction id |
+| Clinical safety boundary | **Financial-advice** and privacy boundaries |
+
+**Dropped, with the reason stated in the document:** UTM capture, DNI/DNIS, DID pools, ROI/ROAS/CAC,
+FHIR, ABHA/UHID, TPA, ECHS billing, appointments. BFSI-only additions the source has no reason to
+carry: RBI grievance timelines, Nodal Officer, Ombudsman, DPDP consent/residency/erasure, data
+localisation, DNC and fair-practice contact rules.
+
+**Three claims I had asserted from memory were wrong, and were corrected by reading the code
+before writing:** `language` is wired end-to-end (`graph.py:594` -> `groq_generator.py:148`), not a
+stub; `segment` is used (opportunity rule 8); and there **is** a 30s LLM timeout - what is missing
+is retry, backoff and any fallback model.
+
+Cloud target is **AWS**. Output is Markdown plus a .docx generated by the existing
+`infra/scripts/md2docx.py`.
+
+### Docs cleanup
+
+`demo-scenarios.md` **deleted** - superseded by `demo-question-set.md`, which is the verified set
+and the one the ticket redesign's acceptance criteria reference. Only the session log referenced
+it, and that reference is historical record.
+
+`ticket-model-redesign.md` **trimmed 606 -> 349 lines** and retitled *"Ticket model - design
+rationale"*. Its two remaining "TO DO" items were **verified already done**: the Jira sync filter
+(`ticket_manager.py:164`) and the `get_agent_metrics` status filter (`aggregator.py:396-400`). The
+doc had drifted from the code.
+
+The phase plan is gone; the analysis is kept, because it records what the code cannot say: why a
+`logged` status exists, why serviceability is a status rather than a `metadata_json` flag, the
+measured **21x** analytics error that ruled out reusing `updated_at` for activity ordering, and
+the two-status-vocabulary conflict between SQL's `!= 'closed'` and JS's `=== 'open'`.
+
+Six references to now-deleted phases were rewritten as completed facts rather than left dangling.
