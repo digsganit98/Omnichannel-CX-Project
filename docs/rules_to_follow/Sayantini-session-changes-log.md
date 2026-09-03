@@ -196,6 +196,10 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 140 - "No open tickets" moved out of the conversation and into the right panel:** the answer to *is anything outstanding?* lived in two different places depending on the answer - a green banner across the middle of the conversation at zero, and the right panel's Open Tickets card above zero, because that card is skipped entirely when the list is empty. It now reads as one line, **"No open escalations."**, where the card would be. A line and not a card: there is no list to head, count or fold. Removing the banner exposed **two** live references to it - a second display toggle in the conversation-loading path, and `isDone`, which is also read for the reply placeholder - either of which would have thrown on every conversation open.
 - **Fix 141 - `handoff_check` was missing from the LLM operations panel:** Fix 134 added the operation to the pipeline and never registered it here, so it had no `?` tooltip and sorted last as an unlisted operation. Placed at **position 4** - where it actually runs, inside `_escalation_reason`, after the resolution level is known and BEFORE the reply is written, since what it decides is whether that reply reaches the customer at all. Two errors found while checking the rest of that list: **`ticket_refine_referee` does not exist** (listed with a full tooltip; no operation by that name is recorded anywhere in the codebase - 9 real operations, the panel listed 10), and the intent tooltip claimed **~20 intents where the enum has 16**.
 - **Fix 142 - the per-message sentiment badge showed URGENCY, not sentiment:** four calm factual questions ("what is my credit card limit?") badged green **Positive** while the sentiment panel beside them read **100% neutral**. Both were reporting faithfully and reading different fields: `EMOTION_MAP` mapped `low` urgency -> "Positive", `medium` -> "Concerned", `high` -> "Frustrated". Low urgency means *not time-critical*, not *happy* - and the classifier had labelled all four messages `neutral`, which the badge never looked at. Both surfaces now read one shared `turnSentiment()` (classifier label first, existing keyword pass as fallback), so they cannot disagree again. **No "Concerned" tier**: the classifier emits three values, and the panel's four-level scale is derived from percentages across five messages, which has no meaning for one. Verified against the four real turns plus two controls - a genuine complaint still badges Frustrated, genuine thanks still badges Positive.
+- **Fix 143 - the reply was built from a list of fields written in advance, not from the customer record:** *"How many EMIs have I paid so far, and how many remain?"* answered **"the system does not have the detailed EMI payment schedule"** while the Loan node held `emis_paid=53`, `emis_pending=1`, `total_emis=54`. **Three** whitelists stood in the way, each invisible from the others: 8 query functions naming 4-6 columns each (Loan has **18** properties, 7 returned), a formatter naming a subset of those again, and a `TRANSACTIONAL_INTENTS` gate that gave **9 of 16 intents no customer data at all** and routed nothing to `ChargePenalty`. A `:KYC` node exists for every customer and was fetched by no function whatsoever. **One relationship walk**, naming no field and no node type, replaces all eight - so a new property or a new node type in the seed appears with no code change - and the formatter renders whatever is present. Context grows ~256 -> ~1000 tokens inside a ~10,100 token message, against a quota bound by **requests**, not tokens. Confirmed live: **53 of 54 EMIs**, 994 reward points expiring 2027-11-30, FD maturity 2028-01-12 / Rs.183,712, auto-renewal N - four of those on fields the old queries never fetched.
+- **Fix 143b - the knowledge base now reaches the model ALONGSIDE the records, not instead of them:** the graph branch `return`ed, so Priority 3 never ran - correct while only account intents reached it, wrong once every intent does, since *"how do I file a claim?"* would be answered from three claims already filed and never see the filing process. It reads `rag.store.similarity_search` directly rather than `rag.answer()`, which generates a reply internally that this branch would discard and regenerate - **a second LLM call on every message**. `retrieval_backend` deliberately stays `neo4j_graph`: two escalation rules key on it via `CUSTOMER_RECORD_BACKENDS`, so a new value would silently change **when replies are held for a human**.
+- **Fix 144 - a CLOSED ticket id quoted back to the customer:** a reply carried `tkt_d1a7a0beccc8` (closed) beside the real open one. Our own earlier replies are turns in the history window and quote the id that was live when sent; history reaches the model verbatim, so it read a dead id out of an old message and repeated it as current. `_redact_closed_ticket_ids` **already existed and was wired only to `case_summary`** - the agent's summary was protected and the customer's reply was not.
+- **`field_ranker.py` built, measured, and deleted:** it scored each field against the question by word overlap plus local embedding similarity and passed **14/14** real questions from the sample workbook - but per-record ranking cost the same as sending everything (~999 vs ~1000 tokens) while still able to drop a needed field, and **a dropped field is invisible to the model**: it cannot tell "this customer has no annual fee" from "the annual fee did not score high enough", so *"if you do not have the data, say so"* cannot fire and a confidently wrong total becomes possible.
 - **Doc - inbound routing and assignment:** `docs/production_scope_discussion/inbound-routing-and-assignment.md` answers four questions about where customer messages land and who picks them up. Two of the answers are uncomfortable: tickets are assigned to a **team** by a static intent lookup and **never to an individual** (no assignee field, no queue, no way to claim work), and two developers running local copies are **two separate systems racing for the same mailbox** - whoever polls first marks the mail read and the other never sees it.
 
 
@@ -6586,3 +6590,156 @@ Four questions from a manager, answered in
   machine.
 - **Docs folder reorganised** into `crosssell_upsell_implementation/`,
   `production_scope_discussion/`, `rules_to_follow/` and `ticket_model_design/`.
+
+
+## Session 32 - 2026-09-04
+
+One change, and it took most of the session to arrive at the simple version of it.
+
+### Fix 143 - the customer's whole record, not a list written in advance
+
+**The reported symptom.** Fathima asked *"How many EMIs have I paid so far on my personal
+loan, and how many remain?"* and was told **"The system does not have the detailed EMI
+payment schedule available at this time."** The Loan node holds `emis_paid=53`,
+`emis_pending=1`, `total_emis=54`.
+
+**Three whitelists stood between the graph and the reply**, each invisible from the others:
+
+| Layer | What it hid |
+|---|---|
+| **Fields** | 8 query functions each named 4-6 columns; the formatter then named a subset of *those* again. `emis_paid` was in neither. |
+| **Node types** | Every customer has a `:KYC` node. **No function fetched it**, so "confirm my KYC status" could not be answered from the customer's own record at all. |
+| **Intents** | `neo4j_answer` gated on `TRANSACTIONAL_INTENTS`, so **9 of 16 intents got no customer data whatever**, and nothing routed to `ChargePenalty` - the reason a Rs.1,284 late fee answers "I'm not seeing a transaction". |
+
+Measured on a Loan node: **18 properties, 7 returned**. CreditCard: **19 properties, 8
+returned**.
+
+**One relationship walk replaces all eight queries** and names nothing:
+
+```
+MATCH (c:Customer {customer_id: $cid})-[r]->(n)
+WHERE NOT n:Interaction AND NOT n:Ticket
+RETURN labels(n)[0] AS label, properties(n) AS props
+```
+
+A property added to a node, or a new node type in the seed, now appears with no code change.
+`get_customer_context_for_customer` keeps its dict KEYS - five other surfaces read them - and
+gains `charges` and `kyc`, which were previously unreachable from this path.
+
+The formatter renders whatever is present, identity fields first, abbreviations expanded
+(`total_emis` -> "Total EMIs", `dpd` -> "DPD (days past due)"). `_BALANCE_LABEL` stays
+special-cased: the qualifier must not separate from the number it qualifies.
+
+**A leak the generic renderer introduced and the hand-written lines had not:**
+`beneficiary_account` - the COUNTERPARTY's 14-digit account number on every transaction row.
+Added to the skip list.
+
+### The KB now goes to the model ALONGSIDE the records
+
+The graph branch **returned**, so Priority 3 (the knowledge base) never ran. Correct while
+only account intents reached it; wrong the moment every intent does - *"how do I file a
+claim?"* would be answered from three claims already filed, having never seen the filing
+process.
+
+Both sources now go in one prompt. **It reads `rag.store.similarity_search` directly, not
+`rag.answer()`**, which generates a reply internally (`rag_pipeline.py:49`) that this branch
+would discard and regenerate - **a second LLM call on every message**, against a
+1000-request/day budget where a message already costs ~8.
+
+`retrieval_backend` deliberately stays `"neo4j_graph"`. Two escalation rules key on it
+through `CUSTOMER_RECORD_BACKENDS` - Rule 7's exemption and `_answered_from_customer_record`'s
+L2 gate - so a new "hybrid" value would silently change **when replies are held for a human**,
+which is not what adding KB passages is meant to do.
+
+### Fix 144 - closed ticket ids quoted back to the customer
+
+A reply carried **two** references: `tkt_d1a7a0beccc8` (**closed**) beside
+`tkt_aacdbe15be5a` (the real, open one).
+
+Our own earlier replies are turns in the history window, and they quote the id that was live
+when they were sent. History reaches the model verbatim, so it read a dead id out of an old
+message and repeated it as current. `get_open_cases` was already correct - the leak is
+entirely through history.
+
+**`_redact_closed_ticket_ids` already existed and was wired only to `case_summary`.** The
+agent's summary was protected; the customer's reply was not. One call added, placed before
+`_mask_fragments` so the redaction marker is not itself masked.
+
+### What was built, measured, and then deleted
+
+`field_ranker.py` - scored each field against the question by word overlap plus local
+embedding similarity, top-N per record, with abnormal states (rejected / failed / overdue /
+non-zero penalty) always included.
+
+**It worked: 14 of 14 real questions from `sample_customer_support_questions.xlsx`.** It was
+deleted anyway, because the measurements said it bought nothing:
+
+| approach | fields | tokens | 14 cases |
+|---|---|---|---|
+| today (two hand-written filters) | 31-36 | ~256 | **fails EMI / KYC / charges** |
+| rank per record, 15 each | 108-135 | ~999 | 14/14 |
+| rank across all records, top 50 | ~50 | ~344 | 14/14 |
+| **send everything** | 139-165 | **~1000** | 14/14 |
+
+Per-record ranking cost the same as sending everything **and** could still drop a needed
+field. Customer-level was a third of the cost - but **a dropped field is invisible to the
+model**: it cannot distinguish "this customer has no annual fee" from "the annual fee did not
+score high enough", so system.md's *"if you do not have the data, say so"* cannot fire and a
+confidently wrong total becomes possible. Wrong trade in a financial context when the binding
+quota is **requests, not tokens**.
+
+**The user said "why not one query" early and I argued for keeping the eight.** The
+justification - that `get_customer_context_for_customer` has five other callers - was wrong:
+those callers read the output DICT, never the query functions, so the queries underneath were
+always replaceable. Conflating "don't change the queries" with "don't change the dict shape"
+is what sent the session down the ranker path.
+
+### Confirmed in the running app, against real records
+
+| question | answer | graph |
+|---|---|---|
+| How many EMIs have I paid? | **53 of 54, one remains** | 53 / 54 / 1 |
+| Reward points and expiry? | **994, expire 30 Nov 2027** | 994, 2027-11-30 |
+| Card amount due and by when? | Rs.91,821, min Rs.4,591, by 2026-07-08 | exact |
+| FD maturity? | 2028-01-12, Rs.183,712 | exact |
+| Is auto-renewal active? | "auto-renewal N, will not renew" | `auto_renewal='N'` |
+| How do I apply for a home loan? | **the application process**, not her existing loan | KB |
+| What factors affect my premium? | KB answer | KB |
+
+**Four of those are on fields the old queries never fetched.**
+
+*Still raw:* the auto-renewal reply prints the database flag - "set with auto-renewal **N**"
+- where a hand-written line would have said "not active". A side effect of rendering fields
+generically.
+
+### Tests: three doubles encoded the old design
+
+`FakeNeo4j`, `WorkbookNeo4j` and `_FakeNeo4jForGraphContext` all branched on the literal node
+label appearing in the Cypher (`"HAS_LOAN" in cypher`) and returned the old column shape. The
+new query names no relationship, so they returned **nothing** - which reads downstream as "not
+a real BFSI customer" and rejected the sender before a ticket could exist. 7 tests failed on
+empty graph context rather than on anything they were written to check.
+
+**`test_process_intents_never_route_to_customer_graph` was a real design objection**, not a
+stale fake: it asserted a process question must never reach the graph. That guard was right
+while the branch returned early. It now asserts the KB was consulted instead - settled by the
+running app, where "how do I apply for a home loan?" returned the process.
+
+**A bug found through a failing test, not by reading:** `FakeRAG` had no `store`, so
+`similarity_search` raised `AttributeError` into a bare `except Exception` and the KB
+contributed nothing, silently. Same shape as Fix 135. Now logged with `exc_info`.
+
+**5 failed / 147 passed** - the documented baseline, and verified as the same five tests
+failing at `33e44fa` beforehand by running the suite in a worktree at that commit.
+
+### Two hours lost to a stale container
+
+Every test run for about an hour reported an identical 12 failures while I edited test files
+between runs. **Tests are baked into the image, not bind-mounted** - only `apps/admin-ui` is -
+so the container kept running the old copies. `docker compose exec api grep -c` on the test
+file returned 0 where the host had 1. The unchanging failure count was the signal and I did
+not read it.
+
+*Also:* a live UI message sent while the suite was running had its Groq calls blocked by the
+test guard and produced no reply at all. Same process, process-wide guard. Do not test in the
+UI while the suite runs.
