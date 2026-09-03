@@ -614,7 +614,6 @@ async function selectConv(convId) {
   msgsEl.className = 'msgs';
   msgsEl.innerHTML = '<div style="padding:20px;text-align:center;color:var(--t3);font-size:12px">Loading…</div>';
   document.getElementById('compwrap').style.display = 'none';
-  document.getElementById('resbanner').style.display = 'none';
   try {
     var cachedTickets = allTickets().length
       ? Promise.resolve(allTickets())
@@ -649,15 +648,13 @@ function renderCentre(conv) {
   var _metaEl = document.getElementById('convMeta');
   if (_metaEl) _metaEl.innerHTML = '';
 
-  // The banner reads "No open tickets", not "Conversation closed", because that is what
-  // urgencyToStatus actually reports: it returns 'closed' either when the conversation is
-  // closed OR when every ticket on it is closed while the conversation itself is still
-  // active (see line ~509). The second case is the common one - a customer whose cases are
-  // all settled but who is still in the queue - and calling that "conversation closed" told
-  // the agent something the record did not say. Nothing here notifies the customer, so the
-  // banner no longer claims that either.
+  // "No open tickets" used to be a banner across the middle of the conversation, which put
+  // the answer to "is anything outstanding?" in a different place depending on the answer:
+  // the banner when the count was zero, the right panel's Open Tickets card when it was not.
+  // It now reads as one line in the right panel beside that card (see renderRight), so the
+  // agent looks in one place either way. isDone is still read below, for the reply
+  // placeholder only.
   var isDone = urgencyToStatus(conv_meta) === 'closed';
-  document.getElementById('resbanner').style.display = isDone ? 'flex' : 'none';
   // The compose box stays on a closed conversation. Closing is not the end of contact:
   // a customer writes back after a case is closed, and an agent who has just closed one
   // may still owe them a word - closing notifies nobody, which is why the banner above no
@@ -1606,7 +1603,12 @@ function renderRight(conv, tickets) {
   var convTickets = _tickets.filter(function(t) {
     return t.conversation_id === conv.conversation_id && isServiceable(t);
   });
-  if (convTickets.length) {
+  if (!convTickets.length) {
+    // Nothing open: a plain line, not a card. There is no list to head, count or fold,
+    // so the card chrome would be a container for nothing. This is where the old
+    // centre-pane banner went (see renderCentre).
+    body.innerHTML += '<div class="rp-noesc">No open escalations.</div>';
+  } else {
     var tktHtml = convTickets.map(function(t) {
       var isOpen = isServiceable(t);
       var stBg = t.status === 'closed' ? 'background:var(--grn-bg);border-color:var(--grn-bd);color:var(--grn-t)' :
@@ -1912,15 +1914,19 @@ function renderIntentBars(data) {
   renderBars('intentBars', items, 'intent', 'count', null);
 }
 
-// Pipeline order: 1-3 fire on EVERY inbound message, 4-5 only when ticket matching is
-// ambiguous, 6-8 when an agent opens a conversation. Anything unlisted sorts last.
+// Pipeline order: 1-5 fire on EVERY inbound message, 6-7 only when ticket matching is
+// ambiguous, 7-9 when an agent opens a conversation. Anything unlisted sorts last.
+//
+// handoff_check sits at 4 because that is where it runs: inside _escalation_reason, after
+// the resolution level is known and BEFORE the reply is written, since what it decides is
+// whether that reply reaches the customer at all.
 var LLM_OP_ORDER = {
   ticket_action_detection: 1,
   intent_classification: 2,
   resolution_level_classification: 3,
-  answer_generation: 4,
-  ticket_referee: 5,
-  ticket_refine_referee: 6,
+  handoff_check: 4,
+  answer_generation: 5,
+  ticket_referee: 6,
   case_summary: 7,
   customer_context: 8,
   opportunity_generation: 9
@@ -1932,15 +1938,15 @@ var LLM_OP_PURPOSE = {
   ticket_action_detection:
     'Runs before intent, and only when keyword rules cannot decide: does this message mean the customer considers their issue resolved? A YES closes the open ticket.',
   intent_classification:
-    'EVERY message. Classifies the message into one of ~20 BFSI intents, which decides whether the answer comes from the knowledge graph or the knowledge base.',
+    'EVERY message. Classifies the message into one of 16 BFSI intents, which decides whether the answer comes from the knowledge graph or the knowledge base.',
   resolution_level_classification:
     'EVERY message. Decides L1 / L2 / L3 — whether the query can be answered directly or must escalate into a ticket.',
+  handoff_check:
+    'EVERY message. Reads the customer’s own words — not the intent label — and answers one question: must a person see this before a reply is sent? Holds the reply when they are asking for a human, saying we already failed them, in distress, or asking for a decision only a person can make.',
   answer_generation:
     'EVERY message. Writes the customer-facing reply from whatever the retrieval step returned (graph records, ticket record, or KB passages).',
   ticket_referee:
     'Only when ticket matching is ambiguous: the message matches no open ticket but same-intent tickets exist. Picks the right one or says NEW. Any doubt forks a new ticket.',
-  ticket_refine_referee:
-    'Only when a vague ticket may need narrowing — e.g. a general dispute becoming a specific card dispute. Refines the existing ticket instead of forking a duplicate.',
   case_summary:
     'When an agent opens a conversation. Writes the situation and open items for someone picking the case up cold. Cached against the newest turn, so re-opening costs nothing.',
   customer_context:

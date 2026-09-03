@@ -305,8 +305,6 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .mchbdg{display:flex;align-items:center;gap:3px;font-size:9px;font-weight:500;padding:1px 6px;border-radius:20px;border:1px solid}
 .escbanner{display:flex;align-items:flex-start;gap:8px;padding:9px 13px;background:var(--amb-bg);border:1px solid var(--amb-bd);border-radius:var(--r);font-size:11.5px;color:var(--amb-t);line-height:1.5}
 .escbanner svg{width:14px;height:14px;fill:var(--amb);flex-shrink:0;margin-top:1px}
-.resbanner{display:none;align-items:center;gap:8px;padding:8px 13px;background:var(--grn-bg);border:1px solid var(--grn-bd);border-radius:var(--r);font-size:12px;color:var(--grn-t);font-weight:500;flex-shrink:0;margin:0 18px}
-.resbanner svg{width:14px;height:14px;fill:var(--grn)}
 .empty-conv{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;color:var(--t3);font-size:13px;gap:8px}
 .empty-conv svg{width:32px;height:32px;fill:var(--bdr2)}
 
@@ -935,6 +933,15 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .cctx-refresh{background:none;border:none;padding:0;cursor:pointer;font-size:10px;color:var(--t3);text-decoration:underline}
 .cctx-refresh:hover{color:var(--t1)}
 .cctx-muted{font-size:11px;color:var(--t3)}
+
+/* "No open escalations." — a line, not a card: there is no list to head or fold. It stands
+   in the panel flow where the Open Tickets card would be, so it is styled as .rplbl is:
+   its visual siblings are the card LABELS either side of it, not body text inside a card.
+   Blue like the rest: it stands in for the Open Tickets card, whose label is blue, and it
+   sits on the panel background rather than inside a card, so it does not read as a heading
+   for the card below it. */
+.rp-noesc{font-size:10px;font-weight:600;color:var(--blue-t);text-transform:uppercase;
+  letter-spacing:.5px;padding:2px 0}
 
 /* Tabs wrap rather than scroll: in a ~260px panel a hidden tab is a lost tab. Empty
    categories are dropped upstream, so five is the practical maximum here. */
