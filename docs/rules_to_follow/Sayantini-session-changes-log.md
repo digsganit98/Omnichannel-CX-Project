@@ -193,6 +193,10 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 139 - Groq model switched 20b -> 120b:** `openai/gpt-oss-120b`'s daily quota had reset (verified by a `max_tokens:1` probe reading `x-ratelimit-remaining-requests`: 999/1000, HTTP 200). One line in `.env` plus `docker compose up -d api`; verified at the level that matters - `GroqGenerator().model` inside the running container, not just the env var. Same reasoning-model family, so the "never set a small `max_tokens`" constraint from Fix 135 carries over unchanged.
 - **Doc - client-facing BFSI production scope:** new `docs/omnichannel-cx-production-scope-bfsi.md` (+ generated .docx) setting out what a production BFSI deployment adds to the accelerator, in a three-column Capability / Accelerator demonstrates / Production scope format. Written against a real hospital-sector client requirement document, with every requirement **translated rather than copied**.
 - **Docs - removed `demo-scenarios.md`, trimmed `ticket-model-redesign.md`:** the first was superseded by `demo-question-set.md`; the second is shipped, so its phase plan was cut and it is retained as design rationale only (606 -> 349 lines).
+- **Fix 140 - "No open tickets" moved out of the conversation and into the right panel:** the answer to *is anything outstanding?* lived in two different places depending on the answer - a green banner across the middle of the conversation at zero, and the right panel's Open Tickets card above zero, because that card is skipped entirely when the list is empty. It now reads as one line, **"No open escalations."**, where the card would be. A line and not a card: there is no list to head, count or fold. Removing the banner exposed **two** live references to it - a second display toggle in the conversation-loading path, and `isDone`, which is also read for the reply placeholder - either of which would have thrown on every conversation open.
+- **Fix 141 - `handoff_check` was missing from the LLM operations panel:** Fix 134 added the operation to the pipeline and never registered it here, so it had no `?` tooltip and sorted last as an unlisted operation. Placed at **position 4** - where it actually runs, inside `_escalation_reason`, after the resolution level is known and BEFORE the reply is written, since what it decides is whether that reply reaches the customer at all. Two errors found while checking the rest of that list: **`ticket_refine_referee` does not exist** (listed with a full tooltip; no operation by that name is recorded anywhere in the codebase - 9 real operations, the panel listed 10), and the intent tooltip claimed **~20 intents where the enum has 16**.
+- **Fix 142 - the per-message sentiment badge showed URGENCY, not sentiment:** four calm factual questions ("what is my credit card limit?") badged green **Positive** while the sentiment panel beside them read **100% neutral**. Both were reporting faithfully and reading different fields: `EMOTION_MAP` mapped `low` urgency -> "Positive", `medium` -> "Concerned", `high` -> "Frustrated". Low urgency means *not time-critical*, not *happy* - and the classifier had labelled all four messages `neutral`, which the badge never looked at. Both surfaces now read one shared `turnSentiment()` (classifier label first, existing keyword pass as fallback), so they cannot disagree again. **No "Concerned" tier**: the classifier emits three values, and the panel's four-level scale is derived from percentages across five messages, which has no meaning for one. Verified against the four real turns plus two controls - a genuine complaint still badges Frustrated, genuine thanks still badges Positive.
+- **Doc - inbound routing and assignment:** `docs/production_scope_discussion/inbound-routing-and-assignment.md` answers four questions about where customer messages land and who picks them up. Two of the answers are uncomfortable: tickets are assigned to a **team** by a static intent lookup and **never to an individual** (no assignee field, no queue, no way to claim work), and two developers running local copies are **two separate systems racing for the same mailbox** - whoever polls first marks the mail read and the other never sees it.
 
 
 ---
@@ -6471,3 +6475,114 @@ measured **21x** analytics error that ruled out reusing `updated_at` for activit
 the two-status-vocabulary conflict between SQL's `!= 'closed'` and JS's `=== 'open'`.
 
 Six references to now-deleted phases were rewritten as completed facts rather than left dangling.
+
+
+## Session 31 - 2026-09-03
+
+Three UI fixes and a document, all from questions asked while looking at the running app.
+No backend changes.
+
+### Fix 140 - the banner that only appeared when there was nothing to say
+
+`urgencyToStatus()` returns `'closed'` in two cases: the conversation is closed, OR every
+ticket on it is settled while the conversation is still active. The second is the common one.
+On that, a green **"No open tickets."** banner was drawn across the middle of the conversation.
+
+The right panel already has an **Open Tickets** card - but it is wrapped in
+`if (convTickets.length)`, so at zero it is not rendered at all. The banner existed to cover
+that hole, which meant the same question was answered in two different places depending on
+the answer.
+
+Now one line in the panel where the card would be. **Not a card**: with nothing open there is
+no list to head, no count worth a header and nothing to fold, so card chrome would be a
+container for nothing.
+
+**Styling was wrong on the first attempt** and worth recording. I gave the line
+`.cctx-muted` - 11px, grey, sentence case - which is the style for placeholder text *inside*
+a card. Standing alone in the panel flow its visual siblings are the card LABELS either side
+of it (`CUSTOMER CONTEXT`, `SENTIMENT`, `CASE SUMMARY`), which are `.rplbl`: 10px, 600 weight,
+uppercase, letter-spaced, blue. It now matches them.
+
+**Two live references surfaced only by grepping after the edit**, either of which would have
+broken the page:
+
+| Reference | Would have caused |
+|---|---|
+| A second `getElementById('resbanner')` in the conversation-loading path | Null dereference on **every** conversation open |
+| `isDone`, which is also read for the reply placeholder | `ReferenceError` - I had deleted the variable along with the banner line |
+
+The variable was restored; only the banner line went.
+
+### Fix 141 - an operation missing from the panel, and one that does not exist
+
+`handoff_check` was in neither `LLM_OP_ORDER` nor `LLM_OP_PURPOSE`, so it drew no `?` tooltip
+and sorted last as "anything unlisted". Fix 134 shipped the operation and never registered it
+on the screen that lists operations.
+
+Placed at **4**, verified against the code rather than guessed: `needs_human` is called inside
+`_escalation_reason`, after the resolution level is known and before `answer_generation`,
+because what it decides is whether that reply reaches the customer at all.
+
+**Checking the rest of the list found two things wrong with it:**
+
+- **`ticket_refine_referee` does not exist.** It was listed with a full tooltip describing when
+  it fires. `grep` over every `operation="..."` in the codebase returns **nine** operations; the
+  panel listed ten. Removed.
+- The intent tooltip claimed **"~20 BFSI intents"**. The enum has **16**.
+
+### Fix 142 - a badge that reported a different measurement under sentiment's name
+
+Four messages showed a green **Positive** badge while the sentiment panel beside them read
+**100% neutral**. Neither was malfunctioning - they were reading different fields.
+
+```
+EMOTION_MAP = { critical:'Frustrated', high:'Frustrated', medium:'Concerned', low:'Positive' }
+```
+
+fed from `ex.inbound.urgency`. **Low urgency means the request is not time-critical, not that
+the customer is happy.** Measured on the live rows: all four turns are `urgency=low`,
+`sentiment=neutral`. The stored sentiment was right there and the badge never read it.
+
+Both surfaces now go through one `turnSentiment(turn)` - the classifier's label when it has
+one, the existing keyword pass when it does not - and the panel's inline duplicate of that
+logic calls the same helper, so they cannot drift apart again.
+
+**No "Concerned" tier.** The classifier emits three values; the panel's four-level scale comes
+from percentages across a five-message window, which has no meaning for a single message.
+Inventing a threshold to fill the gap would have re-created the original fault in a new place.
+
+Verified by replaying the badge logic over the four real turns plus two controls:
+
+| message | old | new |
+|---|---|---|
+| "What is my credit card limit?" | Positive | **Neutral** |
+| "This is unacceptable, nothing has happened" | Frustrated | Frustrated |
+| "Thank you, that resolved it" | Positive | Positive |
+
+### Doc - inbound routing and assignment
+
+Four questions from a manager, answered in
+`docs/production_scope_discussion/inbound-routing-and-assignment.md`.
+
+- **Customer email** arrives at one shared support mailbox, polled over IMAP every 30s. Not
+  any individual's inbox.
+- **Assignment is to a TEAM**, by a static intent lookup (`assign_team`), never to a person.
+  There is no assignee field, no queue, no claim mechanism - verified, not assumed.
+- **Two developers with the app open are two separate systems** racing for the same mailbox:
+  whoever polls first marks the message SEEN and the other never sees it. WhatsApp goes to
+  whichever machine owns the tunnel. This is a deployment problem, not an application defect.
+- **AWS fixes the split-brain, not the assignment gap.** One shared database and one inbound
+  path resolve the race - but the email poller must then be a single instance or move to push,
+  or the same race reappears at scale.
+
+### Also this session
+
+- **Full wipe** (Option B, `fresh-start-runbook.md`): 3 data volumes removed, 5 customers
+  reseeded, KB re-indexed 14/14, all dependencies verified. The WhatsApp token turned out to be
+  a **SYSTEM_USER token valid to 24 Sept**, so step 1 was already satisfied - the recurring 401
+  trap is closed for now. The real-WhatsApp end-to-end check was **deliberately skipped**: it
+  sends to a real customer channel.
+- **Branch pushed** - 8 commits, including the four from Session 29 that had never left the
+  machine.
+- **Docs folder reorganised** into `crosssell_upsell_implementation/`,
+  `production_scope_discussion/`, `rules_to_follow/` and `ticket_model_design/`.
