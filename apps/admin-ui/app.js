@@ -634,8 +634,37 @@ async function selectConv(convId) {
   }
 }
 
-var EMOTION_MAP = { critical:'Frustrated', high:'Frustrated', medium:'Concerned', low:'Positive' };
-var EMOTION_CLS  = { critical:'fe-frustrated', high:'fe-frustrated', medium:'fe-concerned', low:'fe-positive' };
+// Sentiment, read the same way by the per-message badge and the right panel's meter, so
+// the two can never disagree on screen. The badge used to derive its label from URGENCY
+// (low -> "Positive", medium -> "Concerned", high -> "Frustrated"), which is a different
+// measurement wearing sentiment's name: low urgency means the request is not time-critical,
+// not that the customer is happy. Four calm factual questions ("what is my credit card
+// limit?") badged Positive while the panel beside them read 100% neutral, because the
+// classifier had labelled every one of them neutral and the badge never looked.
+//
+// The classifier's own label wins; the keyword pass below is the fallback for a turn it
+// never labelled, and is the same one the panel has always used for that case.
+var NEG_KW = ['angry','bad','terrible','frustrated','late','failed','problem','damaged','not received','not credited','charged twice','cancel','fraud','stolen','unauthorized','incorrect charge','overdue','default','claim rejected','policy lapsed','blocked account','money gone','wrong transfer','human agent','human representative'];
+var POS_KW = ['thanks','thank you','great','good','helpful','resolved','approved','credited','disbursed','processed','excellent','perfect','awesome'];
+function clientSentiment(text) {
+  var t = (text || '').toLowerCase();
+  if (NEG_KW.some(function(w){ return t.indexOf(w) !== -1; })) return 'negative';
+  if (POS_KW.some(function(w){ return t.indexOf(w) !== -1; })) return 'positive';
+  return 'neutral';
+}
+
+// No "Concerned" tier: the classifier emits three values, and the panel's four-level scale
+// is derived from PERCENTAGES across five messages, which has no meaning for a single one.
+var SENTIMENT_LABEL = { positive:'Positive', negative:'Frustrated', neutral:'Neutral' };
+var SENTIMENT_CLS   = { positive:'fe-positive', negative:'fe-frustrated', neutral:'fe-neutral' };
+
+// The sentiment of one inbound turn: the classifier's label if it has one, else keywords.
+function turnSentiment(turn) {
+  if (!turn) return 'neutral';
+  var s = turn.metadata && turn.metadata.sentiment;
+  if (s) return String(s).toLowerCase();
+  return clientSentiment(turn.text);
+}
 
 function renderCentre(conv) {
   var turns = conv.turns || [];
@@ -1049,10 +1078,10 @@ function renderCentre(conv) {
       }
 
       var timeStr = fmtTime(ex.ref);
-      // Per-exchange sentiment from that inbound message's urgency.
-      var exUrg = ((ex.inbound && ex.inbound.urgency) || '').toLowerCase();
-      var exEmotion = EMOTION_MAP[exUrg] || 'Neutral';
-      var exEmotionCls = EMOTION_CLS[exUrg] || 'fe-neutral';
+      // Per-exchange sentiment, from the same source the right panel reads.
+      var exSent = turnSentiment(ex.inbound);
+      var exEmotion = SENTIMENT_LABEL[exSent] || 'Neutral';
+      var exEmotionCls = SENTIMENT_CLS[exSent] || 'fe-neutral';
       // Blank on a turn the classifier never labelled (an outbound-only exchange); the
       // pill is then not drawn at all, rather than showing a made-up 'General'.
       var exIntentRaw = (ex.inbound && ex.inbound.intent) || (ex.reply && ex.reply.intent) || '';
@@ -1473,14 +1502,6 @@ function renderRight(conv, tickets) {
 
   var turns = conv.turns || [];
 
-  var NEG_KW = ['angry','bad','terrible','frustrated','late','failed','problem','damaged','not received','not credited','charged twice','cancel','fraud','stolen','unauthorized','incorrect charge','overdue','default','claim rejected','policy lapsed','blocked account','money gone','wrong transfer','human agent','human representative'];
-  var POS_KW = ['thanks','thank you','great','good','helpful','resolved','approved','credited','disbursed','processed','excellent','perfect','awesome'];
-  function clientSentiment(text) {
-    var t = (text || '').toLowerCase();
-    if (NEG_KW.some(function(w){ return t.indexOf(w) !== -1; })) return 'negative';
-    if (POS_KW.some(function(w){ return t.indexOf(w) !== -1; })) return 'positive';
-    return 'neutral';
-  }
   var inbound = turns.filter(function(t) { return t.direction === 'inbound'; });
   // Sentiment window: the last N customer messages (newest), so the panel
   // reflects how the customer feels NOW, not a lifetime average. Counts,
@@ -1489,7 +1510,7 @@ function renderRight(conv, tickets) {
   var recent = inbound.slice(-SENT_WINDOW);
   var sentCounts = { positive: 0, neutral: 0, negative: 0 };
   recent.forEach(function(t) {
-    var s = (t.metadata && t.metadata.sentiment) ? t.metadata.sentiment.toLowerCase() : clientSentiment(t.text);
+    var s = turnSentiment(t);
     if (sentCounts[s] !== undefined) sentCounts[s]++;  else sentCounts.neutral++;
   });
   var total = recent.length || 1;
