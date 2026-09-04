@@ -201,6 +201,7 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 144 - a CLOSED ticket id quoted back to the customer:** a reply carried `tkt_d1a7a0beccc8` (closed) beside the real open one. Our own earlier replies are turns in the history window and quote the id that was live when sent; history reaches the model verbatim, so it read a dead id out of an old message and repeated it as current. `_redact_closed_ticket_ids` **already existed and was wired only to `case_summary`** - the agent's summary was protected and the customer's reply was not.
 - **`field_ranker.py` built, measured, and deleted:** it scored each field against the question by word overlap plus local embedding similarity and passed **14/14** real questions from the sample workbook - but per-record ranking cost the same as sending everything (~999 vs ~1000 tokens) while still able to drop a needed field, and **a dropped field is invisible to the model**: it cannot tell "this customer has no annual fee" from "the annual fee did not score high enough", so *"if you do not have the data, say so"* cannot fire and a confidently wrong total becomes possible.
 - **Doc - inbound routing and assignment:** `docs/production_scope_discussion/inbound-routing-and-assignment.md` answers four questions about where customer messages land and who picks them up. Two of the answers are uncomfortable: tickets are assigned to a **team** by a static intent lookup and **never to an individual** (no assignee field, no queue, no way to claim work), and two developers running local copies are **two separate systems racing for the same mailbox** - whoever polls first marks the mail read and the other never sees it.
+- **Doc - Omega Hospitals PoC scope:** `docs/Omega discussions/omega-halo-poc-scope.md` scopes a 6-8 week PoC for a NEW client (Omega Hospitals, ~42 sites, flagship Gachibowli) against their discovery-call requirements doc plus a hand-drawn solution sketch. **121 requirements extracted and individually marked** in the client's own structure - 74 in / 24 partial / 23 out, counted from the rendered table rather than estimated (my first three assertions of the count were wrong). Three channels: **real inbound phone number** (voice is the only wholly new build - no ASR/TTS exists anywhere in this repo), WhatsApp, email; **no web chat**. HIS/CRM/TPA become **synthetic-data services on AWS behind real FHIR contracts, not mocks** - so failure injection is genuine and the harness outlives the PoC.
 
 
 ---
@@ -6743,3 +6744,189 @@ not read it.
 *Also:* a live UI message sent while the suite was running had its Groq calls blocked by the
 test guard and produced no reply at all. Same process, process-wide guard. Do not test in the
 UI while the suite runs.
+
+---
+
+## Session 33 - 2026-09-04 (Omega Hospitals - new client scoping)
+
+No code. A scoping session for a **different client** than everything else in this log: Omega
+Hospitals, ~42 acquired hospitals pan-India, flagship at Gachibowli, Hyderabad. Sources were a
+discovery-call requirements document and a hand-drawn solution sketch.
+
+### The deliverable
+
+`docs/Omega discussions/omega-halo-poc-scope.md` - a 6-8 week PoC scope, structured for two
+readers: the client reads the summary and the coverage table, delivery reads the build summary,
+risks and timeline.
+
+**121 requirements extracted and marked individually** (in / partial / out), kept in the client's
+own sequence - his 8 journey stages, his 10 triage dimensions, his 10 handover fields, his 12
+shadow behaviours, his 8 guardrails, his 15 metrics - so he can verify we heard all of it,
+**including the exclusions**. A visible "out" with a reason builds more trust than a quiet omission.
+
+### What the PoC covers
+
+**Channels: voice (a real inbound number), WhatsApp, email. No web chat** - the client's own
+sketch shows three channels and never mentions web chat.
+
+**Voice is the only wholly new build.** Confirmed by search: there is no ASR, TTS, Whisper,
+Deepgram or Twilio reference anywhere in this repository. Everything else on the sketch already
+exists here - the Knowledge Brain is our RAG, next-best-action is our agent assist, and **Audit &
+FinOps is already built**: `services/observability_service/llm_usage.py` records per-call token
+usage and estimated USD cost per model, and `apps/api/routes/audit.py` serves correlation-scoped
+audit events. That last one changed a "new build" into an existing capability.
+
+### Three corrections the user made, all of which improved the scope
+
+1. **"Real phone numbers are fine - it's HIS/CRM/telephony we won't use."** I had conflated
+   *renting one number* (a day's work) with *telephony vendor integration* (NOCs/LOAs, 42 sites'
+   DIDs, PRI, pool management). Different problems. Separating them put real voice back in scope
+   and made DNIS genuinely real, which recovers a slice of the attribution story I had written off.
+2. **"Why mock HIS - can we not use synthetic data on AWS?"** Right, and better architecture.
+   A stub cannot fail convincingly, and the client explicitly asked that the AI *defer to a human
+   when a system link is broken*. Real services with real datastores behind FHIR contracts make
+   failure injection genuine, and the harness **survives into Phase 1** instead of being thrown away.
+3. **"For how many hospitals? Just the main one."** Correct, and the client's own doc says so.
+   Now explicit: **single site, but multi-tenant in the schema from day one** - tenancy is cheap
+   now and expensive to retrofit.
+
+Also caught mid-session: **we build on AWS, while their doc says data is expected on Azure**.
+Immaterial for the PoC (nothing of theirs is connected); a real Phase 1 decision. Written into the
+document rather than left to surface late.
+
+### A structural redundancy the user spotted
+
+I proposed sections for "what's in/out", "requirement coverage" AND "features we'll build". The
+user asked whether those were actually different. **Two of the three were the same content in two
+orderings** - every feature row was already a coverage row, and the only thing the features table
+added was effort sizing. Merged: effort became a column on the coverage table, and the build
+summary was rewritten as six workstreams in prose, which is the one thing the coverage table
+cannot express (a workstream cuts across several of the client's stages at once).
+
+### The count was asserted three times before it was measured
+
+I wrote "~104 requirements, 60/19/21%" in chat, twice, and then into the document. **Counting the
+rendered table gave 121: 74 / 24 / 23.** The percentages happened to survive (61/20/19), the counts
+did not. Same failure as [[measure-never-estimate]] - an intuited number stated confidently,
+carried forward, and wrong. Fixed in the document by parsing the file rather than re-counting by eye.
+
+### Two things worth carrying forward
+
+- **The client's phrase "pre-approved WhatsApp templates per complaint category" is technically
+  exact.** Business-initiated WhatsApp messages must use Meta-approved templates - fixed text,
+  variable slots - so the AI fills blanks and cannot write the sentence. Free-form generation works
+  only inside the 24-hour service window. Every proactive message in this PoC lives under that rule,
+  and **verification/approval are queue-driven (days to weeks), not effort-driven** - the schedule
+  risk, not a coding one.
+- **Feature Set 4 on the sketch is unlabelled.** Logged as an open question rather than guessed at.
+
+## Session 34 - 2026-09-04 (targeted data clear; Rule 2c false positive observed)
+
+**No code changed this session.** A data reset was performed and one live defect was
+observed and diagnosed but deliberately NOT fixed.
+
+### Targeted clear, not the runbook wipe
+
+Asked for "a fresh start of the UI". The full `fresh-start-runbook.md` wipe destroys the
+portal and admin logins and requires a manual KB re-index (~10 min); a targeted row-delete
+achieves the same clean UI in seconds and keeps both. Chose the targeted clear.
+
+**Cleared - SQLite (13 tables):** `retrieval_evidence` 42, `ticket_events` 49,
+`case_summaries` 2, `agent_assist_recommendations` 3, `reply_drafts` 7,
+`whatsapp_delivery_statuses` 9, `conversation_turns` 52, `tickets` 11,
+`opportunity_evaluations` 2, `customer_context` 2, `idempotency_keys` 23, `audit_events` 506,
+`conversations` 2.
+
+**Cleared - Neo4j:** 11 `Ticket`, 23 `Interaction` **with a `turn_id`** (live turns only),
+16 `ResolutionMemory`.
+
+**Kept:** `customer_users` (2), `admin_users` (1), `customers` (2), `channel_identities` (10),
+`schema_migrations` (18), `llm_usage_events` (308), the whole seeded BFSI graph (5 Customers
++ products), the **20 seeded `Interaction` nodes** (no `turn_id`), 2 `Agent`, and the KB
+index (65 chunks - no re-index needed).
+
+**Verified after:** `/admin/conversations` `[]`, `/admin/tickets` `[]`, `Ticket: 0`,
+`ResolutionMemory: 0`, `Interaction: 20`, `HAS_TICKET`/`CREATED_MEMORY`/`HANDLED_BY` all 0,
+`PRAGMA foreign_key_check` clean, `/health` ok. Backup taken first at
+`/app/data/cx_phase1.db.bak_20260904_140021`.
+
+### Three corrections to the remembered recipe
+
+The targeted-clear recipe carried from Session 29 was wrong in three ways, each found by
+reading the live schema instead of trusting the note:
+
+1. **It lists no delete ORDER, and the obvious order fails.** `PRAGMA foreign_keys=ON` with
+   `conversation_turns` deleted before its children raises `IntegrityError` -
+   `retrieval_evidence` -> `conversation_turns`, `ticket_events` -> `tickets`,
+   `case_summaries` -> `conversations`. SQLite rolled the whole transaction back, so nothing
+   was half-deleted, and the re-run went children-first.
+2. **`whatsapp_delivery_statuses` was missing from it** (9 rows), keyed on
+   `conversation_id`/`turn_id` - left behind it is orphaned rows pointing at deleted turns.
+3. **It never said `customers` and `channel_identities` must be KEPT.** `resolve_customer`
+   (`repository.py:228`) looks up `channel_identities` to find an existing customer; deleting
+   it makes the next inbound message mint a **new** `cust_*` id - the phantom-duplicate
+   failure Fix 1 exists to prevent.
+
+### ResolutionMemory: deleted all 16, against the initial instruction
+
+The user first said keep. Reading the rows changed the answer and the user agreed:
+
+- **All 16 are pre-Fix-91 rows.** Every one is keyed on `product_id` (`CLM001003`,
+  `LN001002`, `CC00100001`) or the literal `"general"`. **Not one has a `ticket_scope`
+  property** - Neo4j warned the key does not exist - which is the exact broken keying Fixes
+  91-93 replaced.
+- **`times_reused = 0` on all 16**, and none of them *can* ever be read:
+  `MEMORY_ELIGIBLE_INTENTS = {kyc_update}` and Priority 0 serves only `verified` memories, so
+  a `general`/`product_id` key is unreachable by construction.
+- They carry real figures (a card limit, a loan balance, a claim id) and are the documented
+  cross-customer leak risk if the intent gate were ever widened.
+
+Keeping them was also not free: `ResolutionMemory` has exactly one edge type
+(`CREATED_MEMORY` -> `Interaction`, 42 edges), and deleting the 23 live Interactions destroys
+22 of them - measured: **8 memories would keep an edge, 8 would be left floating** with zero
+edges on the live graph view.
+
+### Rule 2c held a plain factual question - observed, diagnosed, NOT fixed
+
+*"What is my credit card limit"* was **held for review** with "Approval needed - customer
+asked for a decision" (`handoff_approval_needed`), while the drafted answer beside it was
+correct and complete (Rs.1,065,000, retrieval 95%, intent 98%).
+
+**What is established:**
+
+- The regex floor in `handoff.py` does **not** match this text - the LLM alone decided to
+  hold, returning `approval_needed`. Confirmed from `llm_usage_events`: `handoff_check` at
+  08:35:14, `input_chars: 28`, the exact length of the message.
+- **`in_chars=28` appears exactly once in the entire `handoff_check` history - today.** This
+  question had never reached Rule 2c before, which is why it used to auto-send.
+- **The cause is a Fix 143 side effect.** `_is_strong_l1_knowledge_answer` sits directly above
+  Rule 2c and returns `None` (no hold) before it runs, but its fourth condition requires a
+  context with `metadata.doc_type == "knowledge_base"`. Fix 143 moved answers onto the
+  customer's graph record, so that condition stopped matching and the gate stopped
+  short-circuiting - Rule 2c now runs on questions it never used to see, which after Fix 143
+  is most of them.
+- Intent was **`general_inquiry`**, not a card intent, so "credit card wording triggers
+  approval_needed" was tested and dropped as an explanation.
+
+**What is NOT established:** four minutes later *"What is my credit card limit?"* - the same
+words plus a question mark - ran `handoff_check` (`in_chars=29`) and did **not** hold. Whether
+the `?` flips the decision or this is ordinary sampling variation is **unknown**, and cannot
+be settled without a probe. Deliberately not run: the user chose not to spend Groq requests.
+
+**A wrong theory recorded so it is not repeated:** I proposed that `handoff_check` running at
+`temperature 0.2` was a regression, because `handoff.py`'s docstring says the feature was
+measured at temperature 0. Checked: `temperature: 0.2` is hardcoded once in
+`groq_generator.py:563`, applies to every operation, and predates Rule 2c (`beb5fc9`). Nothing
+changed. The only real mismatch is that the offline probe was run at 0 and the feature ships on
+the shared 0.2 path - a documentation gap, not this defect.
+
+**The check is right on the messages that matter**, from the same run: *"Can you increase my
+credit limit?"* held (`approval_required:card_management`), the rejected-claim follow-up
+*"That doesn't make sense. I've been paying premiums for years..."* held
+(`approval_required:claim_status`), and *"Term insurance kya hota hai?"* auto-sent (`logged`).
+The defect is narrow, intermittent, and fails **safe** - it holds a correct answer rather than
+sending a wrong one.
+
+This is the revisit trigger named in the deferred `strong-l1-gate-suppresses-handoff` note,
+inverted: that note recorded the gate wrongly *silencing* Rule 2c, and Fix 143 turned it into
+the gate no longer silencing it for record-grounded answers.

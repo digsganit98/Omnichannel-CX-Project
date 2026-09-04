@@ -17,3 +17,5 @@ artifacts/*
 !artifacts/.gitkeep
 logs/*
 .claude/
+
+docs/Omega discussions/
