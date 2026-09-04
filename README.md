@@ -149,95 +149,153 @@ A held reply appears in the agent console as an editable draft with the hold rea
 
 ---
 
-## Quick start
+## Running it locally, start to finish
 
-### Prerequisites
+Nine steps from a clone to a working app. Run them in order.
 
-Docker Desktop, a Groq API key, and ~6 GB free disk.
+### 0. Prerequisites
 
-### 1. Create `.env`
+- **Docker Desktop**, running
+- A **Groq API key** (free tier) - https://console.groq.com
+- **~8 GB RAM free**, **~20 GB disk**
 
-```env
-APP_ENV=local
-LOG_LEVEL=INFO
-ADMIN_API_KEY=choose-a-long-random-string
-DATABASE_PATH=/app/data/cx_phase1.db
+Email and WhatsApp credentials are optional. Skip them and web chat still works end to end.
 
-# LLM — Groq (cloud, primary)
-GROQ_API_KEY=your-groq-key
-GROQ_MODEL=openai/gpt-oss-120b
-GROQ_TIMEOUT_SECONDS=60
+### 1. Clone and create `.env`
 
-# LLM — Ollama (local, fallback)
-OLLAMA_ENABLED=true
-OLLAMA_BASE_URL=http://ollama:11434
-OLLAMA_MODEL=qwen2.5:0.5b
-
-# Graph
-NEO4J_URI=bolt://neo4j:7687
-NEO4J_USER=neo4j
-NEO4J_PASSWORD=choose-a-password
-
-# Knowledge base
-OPENSEARCH_URL=http://opensearch:9200
-OPENSEARCH_INDEX=cx_knowledge_base
-EMBEDDING_BACKEND=sentence_transformers
-RAG_TOP_K=4
-
-# Email
-SMTP_HOST=smtp.gmail.com
-SMTP_PORT=587
-SMTP_USERNAME=your@gmail.com
-SMTP_PASSWORD=your-app-password
-SMTP_FROM_EMAIL=your@gmail.com
-IMAP_ENABLED=true
-IMAP_HOST=imap.gmail.com
-IMAP_USERNAME=your@gmail.com
-IMAP_PASSWORD=your-app-password
-
-# WhatsApp (Meta Cloud API)
-WHATSAPP_ACCESS_TOKEN=your-token
-WHATSAPP_PHONE_NUMBER_ID=your-id
-WHATSAPP_VERIFY_TOKEN=your-verify-token
-WHATSAPP_APP_SECRET=your-app-secret
-WHATSAPP_LOCAL_TEST_MODE=true
-
-OUTBOUND_DELIVERY_MODE=log
+```bash
+git clone <repo-url>
+cd Omnichannel-CX-Project
+cp .env.example .env
 ```
 
-`.env` is gitignored. `WHATSAPP_LOCAL_TEST_MODE=true` affects **inbound only** — outbound always
-calls Meta's real API.
+Edit `.env` and set these five:
 
-### 2. Start
+| Key | Value |
+|---|---|
+| `GROQ_API_KEY` | your Groq key - no key, no AI replies |
+| `GROQ_MODEL` | `openai/gpt-oss-120b` |
+| `ADMIN_API_KEY` | any long random string you invent |
+| `NEO4J_PASSWORD` | any password you invent |
+| `JWT_SECRET` | any random string, 32+ characters |
+
+Leave everything else at its default.
+
+### 2. Start the stack
 
 ```bash
 docker compose up -d
-docker compose ps          # all healthy
+docker compose ps
 ```
 
-The api container runs database migrations before starting uvicorn, and Neo4j reseeds the demo
-customers from `data/bfsi.xlsx` automatically **when the graph is empty** — so wiping the graph
-volume is what triggers a reseed.
+Wait until `api`, `neo4j` and `opensearch` say **healthy**. **First boot takes 10-20 minutes**
+- images download and the embedding model is fetched.
 
-### 3. Pull the local model (first run only)
+Migrations run automatically, and the 5 demo customers are seeded into an empty graph.
+
+### 3. Pull the local model
 
 ```bash
 docker compose --profile setup run --rm ollama-pull
 ```
 
-### 4. Index the knowledge base (not automatic)
+### 4. Check the customers seeded
 
 ```powershell
-$H = @{ "x-admin-key" = "<ADMIN_API_KEY>" }
+$H = @{ "x-admin-key" = "<your ADMIN_API_KEY>" }
+Invoke-RestMethod -Headers $H "http://localhost:8888/admin/neo4j/status"
+```
+
+**Expect `Customer: 5`.** If it is 0, stop here - everything downstream would answer from an
+empty database. `POST /admin/neo4j/load` seeds it by hand.
+
+### 5. Index the knowledge base
+
+```powershell
 Invoke-RestMethod -Method Post -Headers $H "http://localhost:8888/admin/rag/index?recreate=true"
 ```
 
-Expect `indexed > 0` and `errors: 0`.
+**Expect `indexed` above 0 and `errors: 0`.** This is not automatic, and without it questions
+about processes ("how do I file a claim?") come back empty.
 
-### 5. Open the UI
+### 6. Check Groq has quota
 
-http://localhost:8888/admin-ui — then sign up on the portal using an email or phone that
-**matches a seeded customer**, or identity resolution will reject the signup as unregistered.
+```bash
+docker exec omnichannel-cx-project-api-1 python -c "import os; from groq import Groq; print(Groq(api_key=os.getenv('GROQ_API_KEY')).chat.completions.create(model=os.getenv('GROQ_MODEL'),messages=[{'role':'user','content':'hi'}],max_tokens=1).choices[0].message.content is not None)"
+```
+
+**Expect `True`.** A 429 means the daily budget is spent - worth knowing now, because the app
+does not fail loudly when it runs out. Replies just come back empty.
+
+### 7. Create an admin account
+
+Open **http://localhost:8888/admin-ui** → **Admin** tab → **Sign Up**.
+
+No admin account is seeded, so the first sign-in has to be a sign-up.
+
+### 8. Create a customer account
+
+**Customer Login** tab → **Sign Up**, using an email or phone from this table:
+
+| Customer | Email | Phone |
+|---|---|---|
+| Sayantini Sarkar | sayantini.s.55@gmail.com | 917890864700 |
+| Sireesha | s.sireesha28092004@gmail.com | 9398314492 |
+| Digvijay Yadav | digvijayyadav48@gmail.com | 917700920746 |
+| Hirithi Nandha | hirithi.nandha@gmail.com | 9150697784 |
+| Fathima Devasahayam | fathimawork511@gmail.com | 7538870992 |
+
+Any other email or phone is rejected as an unregistered customer.
+
+### 9. Send a message
+
+In the portal, ask *"What is my credit card limit?"* The reply appears in the portal, and the
+whole exchange appears in the agent console.
+
+---
+
+## Starting and stopping
+
+```bash
+docker compose up -d      # start
+docker compose down       # stop - keeps all data
+```
+
+After `down`, the next `up -d` comes back with the same conversations, logins and knowledge
+index. Nothing to redo.
+
+```bash
+docker compose down -v    # stop and DELETE all data - irreversible
+```
+
+`-v` deletes conversations, tickets, **both logins**, the customer graph, the knowledge index
+and the downloaded models. After it, **redo steps 2 and 4-8**.
+
+---
+
+## Gotchas
+
+**A Python change needs a rebuild, not a restart.** Only `apps/admin-ui` is bind-mounted;
+everything else is baked into the image, so a restart runs the old code:
+
+```bash
+docker compose build api && docker compose up -d api
+```
+
+**UI changes need a hard refresh** (Ctrl+Shift+R). If a change still does not show, bump the
+`?v=` on the `style.css` / `app.js` tags in `index.html` - both are cache-busted by query
+string.
+
+**ngrok may fail with `ERR_NGROK_334`.** That means a teammate holds the shared free-tier
+domain. Ignore it - it only affects real WhatsApp inbound, and nothing else depends on it.
+
+**On Windows, check your shell is not shadowing `.env`.** `docker compose` ranks shell
+environment above the file:
+
+```powershell
+echo $env:WHATSAPP_ACCESS_TOKEN   # should print nothing
+echo $env:NGROK_DOMAIN            # should print nothing
+```
 
 ---
 
