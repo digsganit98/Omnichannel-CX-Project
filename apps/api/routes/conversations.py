@@ -4,7 +4,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException
 
 from apps.api.dependencies.runtime import get_repository
-from apps.api.dependencies.security import require_admin_key
+from apps.api.dependencies.security import require_admin_auth
 from services.neo4j_service.queries import TRANSACTIONAL_INTENTS
 from services.orchestration_service.graph import HOLDING_MESSAGE
 from services.rag_service.groq_generator import GroqGenerator
@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 # Matches the customer-facing holding text the review gate sends in place of the AI reply.
 HOLDING_PREFIX = HOLDING_MESSAGE.strip().lower()[:40]
 
-router = APIRouter(prefix="/admin/conversations", tags=["admin"], dependencies=[Depends(require_admin_key)])
+router = APIRouter(prefix="/admin/conversations", tags=["admin"], dependencies=[Depends(require_admin_auth)])
 
 # Which graph node types an intent reads. Mirrors the branches in
 # services/neo4j_service/queries.py::neo4j_answer — that function fetches EVERY record of

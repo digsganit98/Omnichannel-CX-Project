@@ -1,10 +1,10 @@
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
-from apps.api.dependencies.security import require_admin_key
+from apps.api.dependencies.security import require_admin_auth
 from services.channel_service.connectors.email_sender import SMTPEmailConnector
 
-router = APIRouter(prefix="/admin/email", tags=["admin"], dependencies=[Depends(require_admin_key)])
+router = APIRouter(prefix="/admin/email", tags=["admin"], dependencies=[Depends(require_admin_auth)])
 
 
 class EmailTestSend(BaseModel):

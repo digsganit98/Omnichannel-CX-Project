@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends
 
-from apps.api.dependencies.security import require_admin_key
+from apps.api.dependencies.security import require_admin_auth
 from services.rag_service.config import embedding_backend, embedding_dimension, embedding_model
 from services.rag_service.groq_generator import GroqGenerator
 from services.orchestration_service.graph import ORCHESTRATION_ENGINE, WORKFLOW_EDGES
@@ -9,7 +9,7 @@ from services.orchestration_service.state import WorkflowStep
 router = APIRouter(
     prefix="/admin/orchestration",
     tags=["admin"],
-    dependencies=[Depends(require_admin_key)],
+    dependencies=[Depends(require_admin_auth)],
 )
 
 

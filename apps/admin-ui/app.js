@@ -169,8 +169,12 @@ function isTokenExpired(token) {
 }
 
 function adminHeaders() {
-  var h = { 'x-admin-key': adminKey };
+  // The session token is the credential. x-admin-key is only still sent when someone set
+  // one by hand (it stays valid server-side for the runbook and scripted calls); sending
+  // an empty header made every request carry a value that could never authenticate.
+  var h = {};
   if (adminToken) h['Authorization'] = 'Bearer ' + adminToken;
+  if (adminKey) h['x-admin-key'] = adminKey;
   return h;
 }
 
@@ -193,8 +197,10 @@ function toast(msg) {
 
 // ── Stage management ──────────────────────────────────────────────────────────
 function showStage(stage) {
+  // Three stages now, not four: 'apikey' is the combined sign-in card (it kept its id),
+  // 'app' the console, 'user' the customer portal. The separate 'auth' page that sat
+  // behind the API-key prompt is gone, along with the prompt itself.
   document.getElementById('connectModal').classList.toggle('hidden', stage !== 'apikey');
-  document.getElementById('authPage').classList.toggle('hidden', stage !== 'auth');
   document.getElementById('mainShell').style.display = stage === 'app' ? 'flex' : 'none';
   document.getElementById('userPortal').style.display = stage === 'user' ? 'flex' : 'none';
 }
@@ -227,34 +233,90 @@ function onCustomerAuthSuccess(data) {
   bootUserPortal();
 }
 
-// ── STAGE 1: API Key ──────────────────────────────────────────────────────────
-document.getElementById('connectBtn').addEventListener('click', async function() {
-  var key = document.getElementById('adminKeyInput').value.trim();
-  if (!key) return;
+// ── ADMIN SIGN-IN ─────────────────────────────────────────────────────────────
+// This used to be a separate first stage that asked the operator to paste
+// ADMIN_API_KEY, which then unlocked the username/password page behind it. The key was
+// the real credential - every admin call sent it - so the account login on top of it
+// granted nothing, and creating the first account required already holding the key.
+// Signing in now issues the JWT the backend was already minting, and that token is what
+// authenticates. Mirrors the customer side, which has always worked this way.
+
+window.switchAdminAuth = function(tab) {
+  var isLogin = tab === 'login';
+  document.getElementById('adminLoginForm').style.display = isLogin ? 'flex' : 'none';
+  document.getElementById('adminSignupForm').style.display = isLogin ? 'none' : 'flex';
+  document.getElementById('adminLoginTab').classList.toggle('active', isLogin);
+  document.getElementById('adminSignupTab').classList.toggle('active', !isLogin);
+  document.getElementById('connectErr').classList.remove('show');
+};
+
+function adminAuthError(message) {
   var err = document.getElementById('connectErr');
-  err.classList.remove('show');
-  var btn = document.getElementById('connectBtn');
-  btn.disabled = true; btn.textContent = 'Verifying…';
+  err.textContent = message;
+  err.classList.add('show');
+}
+
+// The shared admin account for the hosted demo. Fills the form rather than signing in
+// directly, so the credentials stay visible and anyone can see what they are signing in as.
+// This account is created by signing up once on the deployed stack - it is not seeded, so
+// on a fresh database the Sign Up tab has to be used first.
+window.fillAdminDemo = function() {
+  document.getElementById('adminUsernameInput').value = 'Admin_1';
+  document.getElementById('adminPasswordInput').value = 'Admin_1_2026';
+  document.getElementById('connectErr').classList.remove('show');
+  document.getElementById('connectBtn').focus();
+};
+
+// Shared by both forms: the two endpoints return the same shape, and the only thing that
+// makes a session is storing the token before showing the app.
+async function submitAdminAuth(path, body, btn, busyLabel, idleLabel) {
+  document.getElementById('connectErr').classList.remove('show');
+  btn.disabled = true; btn.textContent = busyLabel;
   try {
-    var res = await fetch('/admin/auth/verify-key', {
+    var res = await fetch(path, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ api_key: key })
+      body: JSON.stringify(body)
     });
     var data = await res.json().catch(function(){ return {}; });
-    if (!res.ok) throw new Error(data.detail || 'Invalid key');
-    adminKey = key;
-    sessionStorage.setItem('cx-admin-key', key);
-    showStage('auth');
+    if (!res.ok) throw new Error(data.detail || 'Sign-in failed');
+    adminToken = data.token;
+    currentUser = data.user || null;
+    sessionStorage.setItem('cx-admin-jwt', adminToken);
+    if (currentUser) sessionStorage.setItem('cx-admin-user', JSON.stringify(currentUser));
+    showStage('app');
+    bootApp();
   } catch(e) {
-    adminKey = '';
-    err.classList.add('show');
+    adminToken = '';
+    adminAuthError(e.message || 'Sign-in failed');
   } finally {
-    btn.disabled = false; btn.textContent = 'Continue as Admin';
+    btn.disabled = false; btn.textContent = idleLabel;
   }
+}
+
+document.getElementById('connectBtn').addEventListener('click', function() {
+  var username = document.getElementById('adminUsernameInput').value.trim();
+  var password = document.getElementById('adminPasswordInput').value;
+  if (!username || !password) return adminAuthError('Please enter username and password.');
+  submitAdminAuth('/admin/auth/login', { username: username, password: password },
+    this, 'Signing in…', 'Sign in as Admin');
 });
-document.getElementById('adminKeyInput').addEventListener('keydown', function(e) {
-  if (e.key === 'Enter') document.getElementById('connectBtn').click();
+
+document.getElementById('adminSignupBtn').addEventListener('click', function() {
+  var username = document.getElementById('adminSignupUsername').value.trim();
+  var email = document.getElementById('adminSignupEmail').value.trim();
+  var password = document.getElementById('adminSignupPassword').value;
+  var confirm = document.getElementById('adminSignupConfirm').value;
+  if (!username || !email || !password) return adminAuthError('Please fill in every field.');
+  if (password !== confirm) return adminAuthError('Passwords do not match.');
+  submitAdminAuth('/admin/auth/signup', { username: username, email: email, password: password },
+    this, 'Creating account…', 'Create Admin Account');
+});
+
+['adminUsernameInput', 'adminPasswordInput'].forEach(function(id) {
+  document.getElementById(id).addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') document.getElementById('connectBtn').click();
+  });
 });
 
 // ── STAGE 2: Auth (Login / Signup) ────────────────────────────────────────────
@@ -330,79 +392,6 @@ document.getElementById('customerSignupBtn').addEventListener('click', async fun
   }
 });
 
-window.switchAuthTab = function(tab) {
-  document.getElementById('loginForm').style.display = tab === 'login' ? 'block' : 'none';
-  document.getElementById('signupForm').style.display = tab === 'signup' ? 'block' : 'none';
-  document.getElementById('authTabLogin').classList.toggle('active', tab === 'login');
-  document.getElementById('authTabSignup').classList.toggle('active', tab === 'signup');
-  document.getElementById('authErr').classList.remove('show');
-  document.getElementById('authErr').textContent = '';
-};
-
-function showAuthErr(msg) {
-  var el = document.getElementById('authErr');
-  el.textContent = msg;
-  el.classList.add('show');
-}
-
-function onAuthSuccess(data) {
-  adminToken = data.token;
-  currentUser = data.user;
-  sessionStorage.setItem('cx-admin-jwt', adminToken);
-  sessionStorage.setItem('cx-admin-user', JSON.stringify(currentUser));
-  updateRibbonUser();
-  showStage('app');
-  bootApp();
-}
-
-document.getElementById('loginBtn').addEventListener('click', async function() {
-  var username = document.getElementById('loginUsername').value.trim();
-  var password = document.getElementById('loginPassword').value;
-  if (!username || !password) { showAuthErr('Please enter username and password.'); return; }
-  var btn = document.getElementById('loginBtn');
-  btn.disabled = true; btn.textContent = 'Logging in…';
-  try {
-    var data = await fetch('/admin/auth/login', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-admin-key': adminKey },
-      body: JSON.stringify({ username: username, password: password })
-    }).then(function(r) { return r.json().then(function(d) { if (!r.ok) throw new Error(d.detail || 'Login failed'); return d; }); });
-    onAuthSuccess(data);
-  } catch(e) {
-    showAuthErr(e.message);
-  } finally {
-    btn.disabled = false; btn.textContent = 'Login';
-  }
-});
-document.getElementById('loginPassword').addEventListener('keydown', function(e) {
-  if (e.key === 'Enter') document.getElementById('loginBtn').click();
-});
-
-document.getElementById('signupBtn').addEventListener('click', async function() {
-  var username = document.getElementById('signupUsername').value.trim();
-  var email = document.getElementById('signupEmail').value.trim();
-  var password = document.getElementById('signupPassword').value;
-  var confirm = document.getElementById('signupConfirm').value;
-  if (!username || !email || !password) { showAuthErr('All fields are required.'); return; }
-  if (password !== confirm) { showAuthErr('Passwords do not match.'); return; }
-  if (password.length < 6) { showAuthErr('Password must be at least 6 characters.'); return; }
-  var btn = document.getElementById('signupBtn');
-  btn.disabled = true; btn.textContent = 'Creating account…';
-  try {
-    var data = await fetch('/admin/auth/signup', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-admin-key': adminKey },
-      body: JSON.stringify({ username: username, email: email, password: password })
-    }).then(function(r) { return r.json().then(function(d) { if (!r.ok) throw new Error(d.detail || 'Signup failed'); return d; }); });
-    onAuthSuccess(data);
-    toast('Account created — welcome, ' + data.user.username + '!');
-  } catch(e) {
-    showAuthErr(e.message);
-  } finally {
-    btn.disabled = false; btn.textContent = 'Create account';
-  }
-});
-
 // ── Logout ────────────────────────────────────────────────────────────────────
 window.doLogout = function() {
   stopRealtime();
@@ -411,14 +400,14 @@ window.doLogout = function() {
   currentUser = null;
   sessionStorage.removeItem('cx-admin-jwt');
   sessionStorage.removeItem('cx-admin-user');
-  document.getElementById('loginUsername').value = '';
-  document.getElementById('loginPassword').value = '';
-  document.getElementById('signupUsername').value = '';
-  document.getElementById('signupEmail').value = '';
-  document.getElementById('signupPassword').value = '';
-  document.getElementById('signupConfirm').value = '';
-  switchAuthTab('login');
-  showStage('auth');
+  // Back to the sign-in card, which is now the only way in. This used to send the operator
+  // to the separate auth page that sat behind the API-key prompt; with the key gone that
+  // page is unreachable, so logging out would have landed on an orphaned screen.
+  document.getElementById('adminUsernameInput').value = '';
+  document.getElementById('adminPasswordInput').value = '';
+  switchAdminAuth('login');
+  switchLoginMode('admin');
+  showStage('apikey');
 };
 
 window.backToPortalSelection = function() {
@@ -430,7 +419,7 @@ window.backToPortalSelection = function() {
   sessionStorage.removeItem('cx-admin-key');
   sessionStorage.removeItem('cx-admin-jwt');
   sessionStorage.removeItem('cx-admin-user');
-  document.getElementById('adminKeyInput').value = '';
+  document.getElementById('adminPasswordInput').value = '';
   switchLoginMode('admin');
   showStage('apikey');
 };
@@ -3553,7 +3542,7 @@ window.doChangePassword = async function() {
     // Verify current password via login, then update
     await fetch('/admin/auth/login', {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-admin-key': adminKey },
+      headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ username: currentUser.username, password: current })
     }).then(function(r) { return r.json().then(function(d) { if (!r.ok) throw new Error('Current password is incorrect'); return d; }); });
 
@@ -3620,12 +3609,11 @@ if (savedEmailSecret) document.getElementById('emailSecret').value = savedEmailS
 if (userToken && portalUser && !isTokenExpired(userToken)) {
   showStage('user');
   bootUserPortal();
-} else if (adminKey && adminToken && !isTokenExpired(adminToken)) {
+} else if (adminToken && !isTokenExpired(adminToken)) {
   showStage('app');
   bootApp();
-} else if (adminKey) {
-  showStage('auth');
 } else {
+  // 'apikey' is now the combined sign-in card (admin + customer), not a key prompt.
   showStage('apikey');
 }
 
@@ -3782,15 +3770,25 @@ window.openFlowModal = function() {
 
 // Fetch both payloads once, up front. Failures are silent: the click handler above
 // reports "not loaded" and retries, so a slow start never leaves a stuck modal.
+// Credentials for the code appended AFTER the main IIFE: api() and adminHeaders() are
+// declared inside it, so nothing here can see them — that scope boundary silently broke
+// the first version of the diagram loader. Reads the same sessionStorage keys api() does.
+// Must send the session token: since sign-in moved to username/password, the admin key is
+// normally absent and a key-only header authenticates nothing.
+function outerAdminHeaders() {
+  var h = {};
+  try {
+    var token = sessionStorage.getItem('cx-admin-jwt') || '';
+    if (token) h['Authorization'] = 'Bearer ' + token;
+    var key = sessionStorage.getItem('cx-admin-key') || '';
+    if (key) h['x-admin-key'] = key;
+  } catch (e) {}
+  return h;
+}
+
 function loadSystemDiagrams() {
-  // Uses fetch directly, NOT the api() helper: api() and adminKey are declared inside the
-  // main IIFE, so this code (appended after it) cannot see them — that scope boundary is
-  // what silently broke the first version. The key is read from sessionStorage, the same
-  // place api() gets it.
   function kgFetch(path) {
-    var key = '';
-    try { key = sessionStorage.getItem('cx-admin-key') || ''; } catch (e) {}
-    return fetch(path, { headers: { 'x-admin-key': key } }).then(function(r) {
+    return fetch(path, { headers: outerAdminHeaders() }).then(function(r) {
       if (!r.ok) throw new Error(r.status + ' ' + r.statusText);
       return r.json();
     });
@@ -4558,9 +4556,7 @@ function kgToggleHtml(active) {
 }
 
 function loadLiveGraph() {
-  var key = '';
-  try { key = sessionStorage.getItem('cx-admin-key') || ''; } catch (e) {}
-  return fetch('/admin/neo4j/graph', { headers: { 'x-admin-key': key } })
+  return fetch('/admin/neo4j/graph', { headers: outerAdminHeaders() })
     .then(function(r) {
       if (!r.ok) throw new Error(r.status + ' ' + r.statusText);
       return r.json();

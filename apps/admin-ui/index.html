@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Omnichannel CX Accelerator - Ticket Operations</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/admin-ui/assets/style.css?v=20260901-kg34">
+<link rel="stylesheet" href="/admin-ui/assets/style.css?v=20260904-auth3">
 </head>
 <body>
 
@@ -28,13 +28,51 @@
     </div>
 
     <div id="adminModeForm">
-      <div class="login-mode-note">Admin access continues through the existing API key and account login flow.</div>
-      <div class="modal-err" id="connectErr">Invalid admin key. Please check and try again.</div>
-      <div class="modal-field">
-        <label for="adminKeyInput">Admin API key</label>
-        <input id="adminKeyInput" type="password" placeholder="Enter ADMIN_API_KEY" autocomplete="off">
+      <div class="customer-auth-tabs">
+        <button class="customer-auth-tab active" id="adminLoginTab" onclick="switchAdminAuth('login')">Login</button>
+        <button class="customer-auth-tab" id="adminSignupTab" onclick="switchAdminAuth('signup')">Sign Up</button>
       </div>
-      <button class="modal-btn" id="connectBtn">Continue as Admin</button>
+      <div class="modal-err" id="connectErr"></div>
+      <div id="adminLoginForm">
+        <div class="modal-field">
+          <label for="adminUsernameInput">Username</label>
+          <input id="adminUsernameInput" type="text" placeholder="Your username" autocomplete="username">
+        </div>
+        <div class="modal-field">
+          <label for="adminPasswordInput">Password</label>
+          <input id="adminPasswordInput" type="password" placeholder="Your password" autocomplete="current-password">
+        </div>
+        <button class="modal-btn" id="connectBtn">Sign in as Admin</button>
+        <div class="demo-accounts">
+          <div class="demo-accounts-label">Demo account — click to fill</div>
+          <button type="button" class="demo-account" onclick="fillAdminDemo()">
+            <svg viewBox="0 0 24 24"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg>
+            <span class="demo-account-text">
+              <span class="demo-account-name">Admin</span>
+              <span class="demo-account-creds">Admin_1 / Admin_1_2026</span>
+            </span>
+          </button>
+        </div>
+      </div>
+      <div id="adminSignupForm" style="display:none">
+        <div class="modal-field">
+          <label for="adminSignupUsername">Username</label>
+          <input id="adminSignupUsername" type="text" placeholder="Choose a username" autocomplete="username">
+        </div>
+        <div class="modal-field">
+          <label for="adminSignupEmail">Email</label>
+          <input id="adminSignupEmail" type="email" placeholder="admin@example.com" autocomplete="email">
+        </div>
+        <div class="modal-field">
+          <label for="adminSignupPassword">Password</label>
+          <input id="adminSignupPassword" type="password" placeholder="Minimum 6 characters" autocomplete="new-password">
+        </div>
+        <div class="modal-field">
+          <label for="adminSignupConfirm">Confirm password</label>
+          <input id="adminSignupConfirm" type="password" placeholder="Repeat password" autocomplete="new-password">
+        </div>
+        <button class="modal-btn" id="adminSignupBtn">Create Admin Account</button>
+      </div>
     </div>
 
     <div id="userModeForm" style="display:none">
@@ -73,60 +111,6 @@
         </div>
         <button class="modal-btn" id="customerSignupBtn">Create Customer Account</button>
       </div>
-    </div>
-  </div>
-</div>
-
-<!-- STAGE 2: ADMIN LOGIN / SIGNUP PAGE -->
-<div class="auth-page hidden" id="authPage">
-  <div class="auth-card">
-    <div class="auth-logo">
-      <div class="modal-icon">
-        <svg viewBox="0 0 24 24"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-2 12H6v-2h12v2zm0-3H6V9h12v2zm0-3H6V6h12v2z"/></svg>
-      </div>
-      <span class="modal-brand">Omnichannel <span>CX Accelerator</span></span>
-    </div>
-    <button class="auth-back" type="button" onclick="backToPortalSelection()">Back to portal selection</button>
-    <div class="auth-tabs">
-      <button class="auth-tab active" id="authTabLogin" onclick="switchAuthTab('login')">Login</button>
-      <button class="auth-tab" id="authTabSignup" onclick="switchAuthTab('signup')">Sign Up</button>
-    </div>
-    <div class="modal-err" id="authErr"></div>
-
-    <!-- LOGIN FORM -->
-    <div id="loginForm">
-      <div class="modal-field">
-        <label for="loginUsername">Username</label>
-        <input id="loginUsername" type="text" placeholder="Your username" autocomplete="username">
-      </div>
-      <div class="modal-field">
-        <label for="loginPassword">Password</label>
-        <input id="loginPassword" type="password" placeholder="Your password" autocomplete="current-password">
-      </div>
-      <button class="modal-btn" id="loginBtn">Login</button>
-      <div class="auth-switch">No account? <a href="#" onclick="switchAuthTab('signup');return false;">Sign up here</a></div>
-    </div>
-
-    <!-- SIGNUP FORM -->
-    <div id="signupForm" style="display:none">
-      <div class="modal-field">
-        <label for="signupUsername">Username</label>
-        <input id="signupUsername" type="text" placeholder="Choose a username (min 3 chars)" autocomplete="username">
-      </div>
-      <div class="modal-field">
-        <label for="signupEmail">Email</label>
-        <input id="signupEmail" type="email" placeholder="your@email.com" autocomplete="email">
-      </div>
-      <div class="modal-field">
-        <label for="signupPassword">Password</label>
-        <input id="signupPassword" type="password" placeholder="Min 6 characters" autocomplete="new-password">
-      </div>
-      <div class="modal-field">
-        <label for="signupConfirm">Confirm password</label>
-        <input id="signupConfirm" type="password" placeholder="Repeat password" autocomplete="new-password">
-      </div>
-      <button class="modal-btn" id="signupBtn">Create account</button>
-      <div class="auth-switch">Have an account? <a href="#" onclick="switchAuthTab('login');return false;">Login here</a></div>
     </div>
   </div>
 </div>
@@ -634,6 +618,6 @@
 <!-- d3-force, vendored (15KB, tree-shaken to the 7 functions used). Local, not a CDN:
      the app has no other external JS and a demo must not depend on a network fetch. -->
 <script src="/admin-ui/assets/vendor-d3-force.js?v=20260902"></script>
-<script src="/admin-ui/assets/app.js?v=20260902-d3"></script>
+<script src="/admin-ui/assets/app.js?v=20260904-auth3"></script>
 </body>
 </html>

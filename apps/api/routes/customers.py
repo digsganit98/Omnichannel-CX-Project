@@ -6,7 +6,7 @@ from functools import lru_cache
 from fastapi import APIRouter, Depends
 
 from apps.api.dependencies.runtime import get_repository
-from apps.api.dependencies.security import require_admin_key
+from apps.api.dependencies.security import require_admin_auth
 from services.neo4j_service.client import Neo4jClient
 from services.neo4j_service.queries import (
     get_accounts,
@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(
     prefix="/admin/customers",
     tags=["admin"],
-    dependencies=[Depends(require_admin_key)],
+    dependencies=[Depends(require_admin_auth)],
 )
 
 

@@ -1,13 +1,13 @@
 from fastapi import APIRouter, Depends, Query
 
 from apps.api.dependencies.runtime import get_repository
-from apps.api.dependencies.security import require_admin_key
+from apps.api.dependencies.security import require_admin_auth
 from services.observability_service import langfuse_status
 
 router = APIRouter(
     prefix="/admin/llm-observability",
     tags=["admin-llm-observability"],
-    dependencies=[Depends(require_admin_key)],
+    dependencies=[Depends(require_admin_auth)],
 )
 
 

@@ -2,13 +2,13 @@
 
 from fastapi import APIRouter, HTTPException
 
-from apps.api.dependencies.security import require_admin_key
+from apps.api.dependencies.security import require_admin_auth
 from fastapi import Depends
 
 router = APIRouter(
     prefix="/admin/neo4j",
     tags=["admin"],
-    dependencies=[Depends(require_admin_key)],
+    dependencies=[Depends(require_admin_auth)],
 )
 
 

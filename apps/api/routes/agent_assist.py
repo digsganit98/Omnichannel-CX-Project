@@ -12,7 +12,7 @@ import os
 from fastapi import APIRouter, Depends, HTTPException
 
 from apps.api.dependencies.runtime import get_repository
-from apps.api.dependencies.security import require_admin_key
+from apps.api.dependencies.security import require_admin_auth
 from services.agent_assist_service.next_best_action import NextBestActionEngine
 from services.agent_assist_service import opportunity_engine
 from shared.schemas.agent_assist import NBADecisionUpdate
@@ -28,7 +28,7 @@ _OFFER_ACTION_TYPES = {"cross_sell", "up_sell"}
 # channels (whatsapp + email) the customer has on record.
 OFFER_DRAFT_CHANNEL = "offer"
 
-router = APIRouter(prefix="/admin/agent-assist", tags=["admin"], dependencies=[Depends(require_admin_key)])
+router = APIRouter(prefix="/admin/agent-assist", tags=["admin"], dependencies=[Depends(require_admin_auth)])
 
 
 def _try_neo4j():

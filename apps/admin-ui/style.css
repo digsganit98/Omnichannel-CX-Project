@@ -43,7 +43,18 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .customer-auth-tabs{display:flex;gap:4px}
 .customer-auth-tab{flex:1;border:1px solid var(--bdr);background:var(--surf2);color:var(--t3);border-radius:var(--rs);padding:7px;font:600 11px inherit;cursor:pointer}
 .customer-auth-tab.active{background:var(--blue);border-color:var(--blue);color:#fff}
-#customerLoginForm,#customerSignupForm{display:flex;flex-direction:column;gap:12px}
+#customerLoginForm,#customerSignupForm,#adminLoginForm,#adminSignupForm{display:flex;flex-direction:column;gap:12px}
+
+/* Shared demo credentials on the sign-in card. The stack is hosted for the whole team, so
+   the alternative is the password living in a chat thread someone has to scroll back to. */
+.demo-accounts{display:flex;flex-direction:column;gap:6px;padding-top:12px;border-top:1px solid var(--bdr)}
+.demo-accounts-label{font-size:11px;font-weight:600;color:var(--t3)}
+.demo-account{display:flex;align-items:center;gap:9px;width:100%;text-align:left;padding:8px 10px;border:1px solid var(--bdr);border-radius:var(--rs);background:var(--surf2);cursor:pointer;font-family:inherit;transition:border-color .15s,background .15s}
+.demo-account:hover{border-color:var(--blue);background:var(--surf)}
+.demo-account svg{width:15px;height:15px;flex:0 0 15px;fill:var(--t3)}
+.demo-account-text{display:flex;flex-direction:column;gap:1px;min-width:0}
+.demo-account-name{font-size:12px;font-weight:600;color:var(--t1)}
+.demo-account-creds{font-size:11px;color:var(--t3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
 /* ── AUTH PAGE (stage 2) ── */
 .auth-page{position:fixed;inset:0;background:linear-gradient(135deg,#0f172a 0%,#1e3a5f 100%);display:flex;align-items:center;justify-content:center;z-index:400}

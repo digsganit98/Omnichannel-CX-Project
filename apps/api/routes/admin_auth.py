@@ -4,10 +4,11 @@ import os
 import time
 
 import jwt
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 
 from apps.api.dependencies.runtime import get_repository
+from apps.api.dependencies.security import require_admin_auth
 
 router = APIRouter(tags=["admin-auth"])
 
@@ -42,12 +43,6 @@ def _make_admin_token(username: str, email: str) -> str:
     return jwt.encode(payload, secret, algorithm="HS256")
 
 
-def _require_admin_key(x_admin_key: str | None) -> None:
-    expected = os.getenv("ADMIN_API_KEY", "")
-    if not x_admin_key or not expected or not hmac.compare_digest(x_admin_key, expected):
-        raise HTTPException(status_code=401, detail="Invalid admin API key")
-
-
 class VerifyKeyRequest(BaseModel):
     api_key: str
 
@@ -72,11 +67,11 @@ def verify_key(req: VerifyKeyRequest):
 
 
 @router.post("/admin/auth/signup")
-def admin_signup(
-    req: SignupRequest,
-    x_admin_key: str | None = Header(default=None),
-):
-    _require_admin_key(x_admin_key)
+def admin_signup(req: SignupRequest):
+    # No admin key: it gated the ability to CREATE the first account behind already having
+    # the credential that account was meant to replace. Signup stays open - a deliberate
+    # demo choice, not an oversight; close it by seeding the first account and removing
+    # this route if this is ever exposed beyond a local stack.
     if not req.username or len(req.username) < 3:
         raise HTTPException(status_code=400, detail="Username must be at least 3 characters")
     if not req.password or len(req.password) < 6:
@@ -97,11 +92,7 @@ def admin_signup(
 
 
 @router.post("/admin/auth/login")
-def admin_login(
-    req: LoginRequest,
-    x_admin_key: str | None = Header(default=None),
-):
-    _require_admin_key(x_admin_key)
+def admin_login(req: LoginRequest):
     repo = get_repository()
     user = repo.get_admin_user_by_username(req.username)
     if not user or not _verify_password(req.password, user.get("password_hash", "")):
@@ -112,9 +103,8 @@ def admin_login(
     return {"token": token, "expires_in": _TOKEN_TTL_SECONDS, "user": user_public}
 
 
-@router.get("/admin/auth/users")
-def list_admin_users(x_admin_key: str | None = Header(default=None)):
-    _require_admin_key(x_admin_key)
+@router.get("/admin/auth/users", dependencies=[Depends(require_admin_auth)])
+def list_admin_users():
     repo = get_repository()
     return repo.list_admin_users()
 
@@ -124,13 +114,11 @@ class ChangePasswordRequest(BaseModel):
     new_password: str
 
 
-@router.post("/admin/auth/change-password")
+@router.post("/admin/auth/change-password", dependencies=[Depends(require_admin_auth)])
 def change_password(
     req: ChangePasswordRequest,
-    x_admin_key: str | None = Header(default=None),
     authorization: str | None = Header(default=None),
 ):
-    _require_admin_key(x_admin_key)
     if not req.new_password or len(req.new_password) < 6:
         raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
 

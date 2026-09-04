@@ -2,11 +2,11 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from apps.api.dependencies.runtime import get_repository
-from apps.api.dependencies.security import require_admin_key
+from apps.api.dependencies.security import require_admin_auth
 from services.ticket_service.ticket_manager import TicketManager
 from shared.schemas.tickets import TicketStatus
 
-router = APIRouter(prefix="/admin/tickets", tags=["admin"], dependencies=[Depends(require_admin_key)])
+router = APIRouter(prefix="/admin/tickets", tags=["admin"], dependencies=[Depends(require_admin_auth)])
 
 
 class TicketComment(BaseModel):

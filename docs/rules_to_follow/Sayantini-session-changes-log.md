@@ -201,6 +201,7 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 144 - a CLOSED ticket id quoted back to the customer:** a reply carried `tkt_d1a7a0beccc8` (closed) beside the real open one. Our own earlier replies are turns in the history window and quote the id that was live when sent; history reaches the model verbatim, so it read a dead id out of an old message and repeated it as current. `_redact_closed_ticket_ids` **already existed and was wired only to `case_summary`** - the agent's summary was protected and the customer's reply was not.
 - **`field_ranker.py` built, measured, and deleted:** it scored each field against the question by word overlap plus local embedding similarity and passed **14/14** real questions from the sample workbook - but per-record ranking cost the same as sending everything (~999 vs ~1000 tokens) while still able to drop a needed field, and **a dropped field is invisible to the model**: it cannot tell "this customer has no annual fee" from "the annual fee did not score high enough", so *"if you do not have the data, say so"* cannot fire and a confidently wrong total becomes possible.
 - **Doc - inbound routing and assignment:** `docs/production_scope_discussion/inbound-routing-and-assignment.md` answers four questions about where customer messages land and who picks them up. Two of the answers are uncomfortable: tickets are assigned to a **team** by a static intent lookup and **never to an individual** (no assignee field, no queue, no way to claim work), and two developers running local copies are **two separate systems racing for the same mailbox** - whoever polls first marks the mail read and the other never sees it.
+- **Fix 145 - signing in to the console needed the API key that WAS the credential:** the admin login asked the operator to paste `ADMIN_API_KEY`, which unlocked a second username/password page - but the key is what all 33 admin endpoints actually check, so the account on top of it granted nothing, and `/admin/auth/signup` sat behind the key too, meaning **the first account could not be created without already holding the credential it was meant to replace**. Sign-in now issues the JWT `_make_admin_token` was already minting; new `require_admin_auth` accepts that token **or** the key, mirroring the existing `require_analytics_access` rather than adding a second scheme. Only **14 router lines** changed, not 33 handlers, because each admin router declares its dependency once. `x-admin-key` stays valid deliberately - the runbook, the fresh-start checklist and every documented `Invoke-RestMethod` example use it; what changes is that no human types it. **Two live bugs found while wiring it:** `loadSystemDiagrams`/`loadLiveGraph` sit outside the main IIFE and read ONLY the key from sessionStorage, so the workflow diagram and live graph would have 401'd once the key went away; and `doLogout` routed to the now-unreachable stage-2 page, landing the operator on a blank screen. Verified with a negative control (no credential -> 401, garbage token -> 401) alongside the positives. Suite unchanged at 5 failed / 147 passed.
 - **Doc - Omega Hospitals PoC scope:** `docs/Omega discussions/omega-halo-poc-scope.md` scopes a 6-8 week PoC for a NEW client (Omega Hospitals, ~42 sites, flagship Gachibowli) against their discovery-call requirements doc plus a hand-drawn solution sketch. **121 requirements extracted and individually marked** in the client's own structure - 74 in / 24 partial / 23 out, counted from the rendered table rather than estimated (my first three assertions of the count were wrong). Three channels: **real inbound phone number** (voice is the only wholly new build - no ASR/TTS exists anywhere in this repo), WhatsApp, email; **no web chat**. HIS/CRM/TPA become **synthetic-data services on AWS behind real FHIR contracts, not mocks** - so failure injection is genuine and the harness outlives the PoC.
 
 
@@ -6930,3 +6931,82 @@ sending a wrong one.
 This is the revisit trigger named in the deferred `strong-l1-gate-suppresses-handoff` note,
 inverted: that note recorded the gate wrongly *silencing* Rule 2c, and Fix 143 turned it into
 the gate no longer silencing it for record-grounded answers.
+
+## Session 34b - 2026-09-04 (admin sign-in)
+
+### Fix 145 - the API key was both the login step and the credential
+
+The console opened on a prompt for `ADMIN_API_KEY`. Pasting it unlocked a username/password
+page behind it. That second page was theatre: **the key is what the API checks** - 33 admin
+endpoints via `require_admin_key` - so the account granted no additional access, and because
+`/admin/auth/signup` was itself gated on the key, an account could not be created by anyone
+who did not already hold the credential the account was supposed to replace.
+
+**What changed.** `require_admin_auth` (new, in `dependencies/security.py`) accepts a signed
+session token **or** the raw key. The JWT already existed - `_make_admin_token` was minting
+one on every login and nothing downstream ever checked it. This is the same either/or shape
+as the existing `jwt_auth.require_analytics_access`, so there is one way this app answers
+"is this caller an admin", not two.
+
+**The change was 14 lines, not 33.** Every admin router declares auth once at the router
+level (`APIRouter(..., dependencies=[Depends(...)])`), so swapping the function covered all
+33 endpoints. Worth stating because "33 endpoints" was the reason this looked expensive.
+
+**`x-admin-key` is still accepted, deliberately.** The fresh-start runbook, the dependency
+checklist and every `Invoke-RestMethod` example in the README authenticate with it. Dropping
+it would break documented automation in order to remove a header no human types. The goal was
+to take the key out of a **person's** path, not out of the system.
+
+### Two live bugs the wiring exposed
+
+1. **The graph and workflow diagrams would have 401'd.** `loadSystemDiagrams` and
+   `loadLiveGraph` are appended AFTER the main IIFE and cannot see `api()` or `adminHeaders()`
+   - a scope boundary already documented in a comment there - so each read
+   `cx-admin-key` straight from sessionStorage. With sign-in no longer storing a key, that
+   header authenticates nothing. Both now share `outerAdminHeaders()`, which sends the token.
+2. **Logout landed on a blank screen.** `doLogout` ended with `showStage('auth')`, the
+   stage-2 page that only existed behind the key prompt. It now returns to the sign-in card.
+
+### Removed
+
+The stage-2 auth page: 53 lines of markup, 72 lines of handlers (`switchAuthTab`,
+`showAuthErr`, `onAuthSuccess`, the `loginBtn`/`signupBtn` listeners), and the `authPage`
+toggle in `showStage`. Once sign-in moved onto the card, nothing routed to it - and its
+listeners ran `getElementById(...).addEventListener` against elements that no longer existed.
+
+### On screen
+
+The card now shows **Admin | Customer Login**, and the Admin tab has **Login / Sign Up** -
+the same shape the customer side has always had. A **demo account** row (`Admin_1 /
+Admin_1_2026`) fills the form on click for the hosted EC2 deployment; it fills rather than
+signs in, so it is visible what is being signed in as. **That account is not seeded** - it
+has to be created once via Sign Up on the deployed stack, deliberately, so that deploying
+this repo does not ship a publicly-known admin login.
+
+A one-line CSS gap made the first attempt render horizontally: `#customerLoginForm,
+#customerSignupForm` carried `flex-direction:column` and the new admin forms were not in that
+rule, so they inherited the card's row layout and overflowed. Both asset versions were bumped
+- `style.css` and `app.js` are cache-busted by query string, so an un-bumped change is
+invisible until a hard refresh.
+
+### Verified
+
+| check | result |
+|---|---|
+| no credential -> `/admin/tickets` | **401** (negative control) |
+| garbage bearer token | **401** "Invalid session token" |
+| legacy `x-admin-key` | **200** - runbook and scripts still work |
+| signup with no key | works, returns a token |
+| login with no key | works, returns a token |
+| token on tickets / conversations / graph / rag / analytics | **200** |
+| every auth `getElementById` resolves in the markup | yes |
+| suite | **5 failed / 147 passed** - baseline, same five tests |
+
+The probe account created during verification was deleted; the existing `Admin_SS` row was
+left untouched and its password still works.
+
+**Signup is open** - anyone who can reach the port can create an admin account. A deliberate
+choice for a hosted team demo, recorded here as a known exposure alongside the demo
+credentials being printed on the sign-in screen. If the instance outlives the ideathon, the
+two cheap mitigations are an EC2 security group restricted to the team's IPs and removing the
+signup route once the accounts exist.

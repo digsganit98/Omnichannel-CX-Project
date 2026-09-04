@@ -1,12 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from apps.api.dependencies.security import require_admin_key
+from apps.api.dependencies.security import require_admin_auth
 from services.rag_service.config import embedding_backend, embedding_model
 from services.rag_service.opensearch_store import OpenSearchVectorStore
 from services.rag_service.rag_pipeline import RAGPipeline
 
-router = APIRouter(prefix="/admin/rag", tags=["admin"], dependencies=[Depends(require_admin_key)])
+router = APIRouter(prefix="/admin/rag", tags=["admin"], dependencies=[Depends(require_admin_auth)])
 
 _DIAGNOSTIC_QUERY = "What is the loan application process?"
 

@@ -3,9 +3,9 @@ import os
 from fastapi import APIRouter, Depends, Query
 
 from apps.api.dependencies.runtime import get_repository
-from apps.api.dependencies.security import require_admin_key
+from apps.api.dependencies.security import require_admin_auth
 
-router = APIRouter(prefix="/admin/whatsapp", tags=["admin"], dependencies=[Depends(require_admin_key)])
+router = APIRouter(prefix="/admin/whatsapp", tags=["admin"], dependencies=[Depends(require_admin_auth)])
 
 
 @router.get("/status")
