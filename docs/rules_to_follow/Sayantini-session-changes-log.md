@@ -7,6 +7,48 @@ Running log of changes made to fix portal / BFSI-data / identity issues, startin
 
 ---
 
+---
+
+## EC2 - CURRENT STATE  (overwrite this block on every deploy; do not append)
+
+**Read this first for anything EC2.** The box has no git and no record of its own commit, so
+this block is the ONLY place its state exists. Procedure lives in the `ec2-deployment-rules`
+memory; do NOT follow `fresh-start-runbook.md` on EC2 - it is written for local and its
+`cx-data` wipe destroys the seed payload.
+
+**As of 2026-09-07, after the deploy + fresh start below.**
+
+| | |
+|---|---|
+| code level | **Fix 152** - matches local `4bc68a8` |
+| host | `ip-172-31-38-51`, public **13.233.212.194**, repo `/home/ec2-user/Omnichannel-CX-Project` |
+| API port | **8889** (local is 8888) |
+| git | **none** - `scp` is the only route in |
+| `GROQ_MODEL` | **`openai/gpt-oss-120b`** - DIVERGED from local's `20b`, deliberately: probed 2026-09-07 at 999/1000 requests, healthy |
+| Groq quota | **shared with local** - same `GROQ_API_KEY`; a probe from either machine answers for both |
+| `RAG_BACKEND` | `neo4j` - verified inside the container |
+| data | 0 conversations / 0 turns / 0 tickets; **5** seeded customers; KB **14/14**; `holdings_linked` 123 |
+| logins | **DESTROYED by the wipe** - portal + admin need re-signup (`sayantini.s.55@gmail.com` / `7890864700`) |
+| containers | api + neo4j fresh; **ngrok up (holds the shared tunnel)**; opensearch up but UNUSED (kept as rollback); mailpit up; Ollama commented out of compose |
+| disk | ~9.0 GB free, **95%** - shared with ~30 other projects |
+| backups on box | `~/seed_backup_bfsi.xlsx`, `~/seed_backup_kb`, `~/seed_backup_rkb` (the irreplaceable payload), `~/backup_pre149` (pre-deploy copies of 8 files) |
+
+**`/app/data` exists ONLY in the `cx-data` volume** - the api image has no such directory
+(measured). `bfsi.xlsx`, the KB PDF and the resolution examples were hand-copied in and exist
+nowhere else. **Any wipe must copy them off first.**
+
+### Known defects LIVE on this box
+
+- **Three escalation gates are constants** (measured 11/11 locally). `_is_strong_l1_knowledge_answer`
+  skips the handoff check, so a question the KB cannot answer can auto-send with invented
+  generality in it. Shipped with the Fix 152 deploy; unfixed.
+- **A 429 sends the raw record dump to the customer** - `generation.get("text") or raw_data`,
+  unguarded. The per-minute token ceiling (8,000) is what trips, and it tripped locally on
+  2026-09-06.
+- **Six Concepts have zero KB chunks**, Fixed Deposit among them, held by 4 customers.
+- **Three KB chunks link to nothing** - `demat_account`, `sip_investment`, `elss_tax_benefit`.
+  Expected: no seeded customer holds those.
+
 ## Summary (one line per change)
 
 Keep this list updated: add a one-sentence entry here for every fix/change made in any session.
