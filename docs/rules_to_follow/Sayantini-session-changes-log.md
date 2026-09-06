@@ -211,6 +211,7 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 150 - five of nine holding types reached no guidance (UNCOMMITTED):** Fix 149's holdings link was one query that rode on `PRODUCT_IS`, an edge only Account, CreditCard, FixedDeposit and Loan carry - so **Policy, Claim, ChargePenalty, Transaction and KYC reached no Concept at all** and their guidance arrived marked "general". A customer holding a health policy with three claims got the health-claim chunk as general bank knowledge. Wired on keys the seed already carried, every one verified to resolve for every row first (Claim->Policy 15/15, Charge->Account 7/7, Transaction->Account 72/72). **17 -> 123 holding->Concept edges**, all nine types; `is_hers` for Sayantini **3 -> 5**. `POLICY_TYPE_CONCEPTS` is kept separate from `CATEGORY_CONCEPTS` because a policy says "Auto" where the Concept is Motor Insurance. **OPEN:** six Concepts have zero KB chunks (Fixed Deposit among them, held by four customers) - wiring edges cannot create guidance nobody wrote.
 - **Fix 151 - the UI work after Fix 150, and three diagram errors in a row (UNCOMMITTED):** node hovers rewritten per label (name, then one plain-English line, then facts; ids last and shortened) - and the `"N/A"` string in unsettled claims would have printed **"null approved"** on screen. I replaced the native `<title>` with a custom panel that was never asked for, **broke hovering entirely**, and reverted it. The schema diagram was wrong three times, each error passing the check written for the last: missing edges, then lanes drawn outside the canvas, then nine identical `:INSTANCE_OF` labels where the codebase already de-duplicated `PRODUCT_IS` for that exact reason. **Data-correctness, in-bounds and legibility are three separate checks.** The live graph was rendering at ~half size (1.65 aspect in a 2.98 box, 46% dead margin); now 15%. "Why this answer?" hidden behind a flag: its copy describes the vector search Fix 149 removed. Fix 150 verified live (5 of 14 chunks marked hers). **A 429 sent a raw record dump to a customer** - generation failed, the fallback is `raw_data`, and nothing surfaced it; NOT FIXED. Model moved to 20b. **OPEN:** continuity is decided twice - the answer prompt guesses from a string compare at 17:53:02 while `ticket_referee` decides it properly at 17:53:04.
 - **Fix 152 - the reply prompt said the same thing twice, and asserted a case it had not decided:** **(A)** the customer's records were rendered into the prompt TWICE - `neo4j_answer` for "Retrieved context:", `_format_graph_context` for "Customer account context:", both from the same `get_all_customer_records`, four steps apart, neither aware of the other. **~1,089 duplicate tokens a message**, and Fix 150's claim that this was free was WRONG: the limit that bit is **tokens per minute**, a 429 refused `answer_generation` at 6,260 of 8,000, and the fallback `raw_data` sent a customer the unformatted record dump. One parameter (`include_records`, default **True** so `classify_message` - which has no other source of records - is untouched). The no-data warning had to move with them or it would tell the model it cannot see an account whose records sit lower in the same prompt; keyed on `source` not `doc_type`, because the memory cache also emits `doc_type: customer_graph` while carrying no records. **3,930 -> 2,839 tokens.** **(B)** the prompt asserted continuity three ways (`SAME SUBJECT`, `same topic, different matter`, `It continues tkt_x`) from one comparison - does the intent LABEL match, and is this the ticket the conversation was last on. Measured: `answer_generation` 17:53:02, `ticket_referee` **17:53:04** - the answer named a case two seconds before the mechanism built to decide it ran, and got it wrong. Moving the referee earlier was planned and **abandoned after reading the code**: it is the middle step of `create_or_get_ticket`, whose last step needs the answer. So the false claim was removed, not made true; the case LIST and the do-not-claim warning both stay. **Verified on 9 real UI messages**, every fact checked against her records, zero LLM failures, prompts ~4,200 tokens, `is_hers` 5 on all 14 turns. **OPEN:** two questions about one card still fork two tickets (the referee's dispute-written prompt), and the 429 fallback still sends the database to the customer.
+- **OPEN - Fix 149 turned three escalation gates into constants (NOT FIXED, measured):** moving the KB into the graph made retrieval EXHAUSTIVE - all 14 chunks, every message - and three gates that read `contexts` to judge relevance silently became no-ops. Measured on all 11 messages sent through the UI today, with contexts rebuilt from `retrieval_evidence`: **`_is_strong_l1_knowledge_answer` TRUE 11/11**, `knowledge_not_found` fired **0/11**, KB chunks per turn **min 14 max 14**. The third gate is the damaging one - returning True SKIPS the handoff check entirely, the rule that reads the customer's own words. Live consequence: the FD question, for which the KB has zero guidance, auto-sent as a confident L1 knowledge answer and volunteered a penalty rule from the model's own general knowledge. Today's real escalations (fraud, claim dispute) were caught earlier by intent-label rules, which MASKS this for the intents that have their own rules and exposes it for everything else. `confidence=0.95` is hardcoded in Priority 2, so `confidence < 0.3` cannot fire either. **Fix 149 verified the PROVENANCE consumers of contexts and never enumerated the DECISION consumers.** This gate has now broken twice in opposite directions (Fix 143 inverted it) because it reads a property of RETRIEVAL to answer a question about RELEVANCE - so the fix is not a patched condition. Fix 150 already supplies the raw material (`customer_holds`, each chunk's `concept`); probe it on real messages before designing the gate.
 - **Reference - local vs the hosted instance:** the two are NOT meant to match. Application code must; `docker-compose.yml` deliberately must not (Ollama commented out on EC2, and ngrok has **no** `profiles: ["tunnel"]` there - copying the local file over means the next `up` starts no tunnel and **WhatsApp goes silent with nothing to say why**). EC2 is the sole holder of the shared WhatsApp number, mailbox and ngrok domain, which is why local ships with those off. Three deploy traps, all already bitten: **no git on EC2** (scp only), `restart` runs **old code** (rebuild), and `restart` does **not re-read `.env`** (`up -d`). Plus what must never be done there - other teams' containers, the disk watermark, removing OpenSearch, `prune --volumes`.
 
 
@@ -8025,3 +8026,86 @@ Suite 5 failed / 62 passed at every step, the documented baseline.
   lying about it; it does not make the verdict available in time.
 - `get_open_cases` excludes `logged` tickets (Fix 119), so a conversation grouped only by a
   logging thread shows the answer generator no cases at all while the referee sees them.
+
+---
+
+## OPEN - Fix 149 turned three escalation gates into constants, and nobody checked
+
+**NOT FIXED. Measured, not theorised.** Recorded so the next session starts from the
+measurement rather than rediscovering it.
+
+### What was measured
+
+The gate functions were imported and run against all 11 messages sent through the UI
+today, with each turn's `contexts` rebuilt from what was actually persisted in
+`retrieval_evidence`:
+
+    _is_strong_l1_knowledge_answer TRUE : 11 / 11
+    'knowledge_not_found' fired         : 0 / 11
+    KB chunks per answered turn         : min 14, max 14
+
+That last line is the finding. The gate asks "are there any KB chunks in contexts?" and
+the answer is **always 14**. It is not a test any more; it is a constant.
+
+### The three dead gates
+
+| gate | condition | why it can never fire |
+|---|---|---|
+| `knowledge_not_found` (orchestration_agents.py:880) | `not resolution.contexts` | every message carries 15 contexts |
+| `low_retrieval_confidence` (:883) | `confidence < 0.3` | Priority 2 hardcodes `confidence=0.95` |
+| `_is_strong_l1_knowledge_answer` (:940) | any context with `doc_type == "knowledge_base"` | all 14 chunks arrive every time |
+
+The third is the damaging one. Returning True at `_escalation_reason` line 801 **skips
+the handoff check entirely** - Rule 2c, the rule that reads the customer's own words
+rather than a label.
+
+### Why they broke
+
+All three were written when retrieval was a **vector search**. Chunks present meant
+chunks *matched*, and the top score meant *how well*. Presence and confidence were real
+signals about relevance.
+
+Fix 149 replaced selection-by-similarity with return-everything, deliberately and for good
+reasons - a filtered-out chunk is invisible to the model, and it cannot tell "the bank has
+no guidance on this" from "the guidance did not rank". But the same change made presence
+constant and left confidence a literal. Every gate reading them silently became a no-op.
+
+**Fix 149 verified the PROVENANCE consumers of `contexts` - citations, retrieval evidence,
+the agent console - and did not enumerate the DECISION consumers.** It was reported as
+done with three safety gates dead.
+
+### The live consequence
+
+"What are the charges for breaking my fixed deposit early?" - the KB has **zero** FD
+guidance (verified: no KBChunk contains "early" or "break" in an FD sense) - was answered
+as a confident L1 knowledge answer, skipped the handoff check, and auto-sent. The reply
+was decent (it named her real FD, said the exact amount was not in the data, and referred
+her to the branch) but it also volunteered "typically, the penalty is a fixed percentage of
+the principal or a reduction in the interest rate", which is the model's own general
+knowledge, not this bank's policy.
+
+The escalations that DID happen today (fraud, claim dispute) were caught by Rule 0 / Rule 2
+on the intent label BEFORE reaching this gate. So the gate's failure is currently masked
+for the intents that carry their own escalation rules, and exposed for everything else.
+
+### Why the fix is not a patched condition
+
+This gate has now been broken **twice, in opposite directions**, by changes to retrieval -
+see [[strong-l1-gate-suppresses-handoff]], where Fix 143 inverted it so it stopped firing.
+The reason it keeps breaking is that it reads a property of RETRIEVAL to answer a question
+about RELEVANCE. Any condition of that shape breaks the next time retrieval changes.
+
+What is needed is a relevance signal that survives exhaustive retrieval. Fix 150 put the
+raw material in place - each chunk carries `customer_holds` and the `concept` it explains -
+so the question "did the knowledge base actually address THIS message?" is now answerable
+from data the walk already returns, rather than from the fact that a walk happened.
+
+Not designed here on purpose. [[probe-before-building]]: prove the signal separates the FD
+question from the credit-card question on real messages BEFORE writing the gate.
+
+### Related, same root
+
+- `confidence=0.95` is hardcoded in Priority 2. Under vector search that number came from a
+  similarity score and meant something; it is now a literal that two gates still read.
+- The two-tickets-for-one-card problem and the 429 raw-dump fallback are both still open,
+  and both are recorded in Fix 152.
