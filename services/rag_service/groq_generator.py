@@ -914,21 +914,13 @@ def _format_graph_context(graph_ctx: dict | None, current_intent: str | None = N
     neo4j_answer cannot supply them (its Cypher walks outward from the Customer node, so
     it never returns the customer, and it excludes :Ticket).
 
-    ``current_intent`` names what THIS message is about. Without it the open-cases block
-    is a list of what the customer has raised with nothing to say which one the message
-    in hand concerns, so a dispute arriving while a card case was open came back as
-    "your dispute has been logged under <the card ticket>". Defaults to None so the
-    classifier caller - the step that decides intent, and which must see every case -
-    is unchanged.
-
-    ``active_ticket_id`` is the ticket this CONVERSATION is on, already resolved by
-    TicketManager (scope-matched, Fix 102). Continuity is claimed from it rather than
-    from a shared intent label: two balance questions hours apart carry the same label
-    and are not one case, and a customer with any open ticket on the topic was told a
-    brand-new message was "already logged under" it while the ticket logic had created
-    no ticket at all. Defaults to None, which claims no continuity - the safe direction,
-    since the cost is a case listed without a continuity line rather than a false claim
-    that a customer's request is being tracked when nothing is tracking it.
+    ``current_intent`` and ``active_ticket_id`` were the two inputs to a continuity
+    claim this function no longer makes - see the open-cases block below for why. Both
+    are kept in the signature, accepted and unused, because three call sites pass them
+    positionally or by keyword and a signature change would be a wider edit than the
+    behaviour warrants. They are the natural inputs to a correct continuity claim, so
+    the day the referee's verdict is available before this prompt is built, the answer
+    arrives here rather than needing a new parameter.
     """
     if not graph_ctx:
         return ""
@@ -965,51 +957,44 @@ def _format_graph_context(graph_ctx: dict | None, current_intent: str | None = N
     # like a card limit. Summary only (id/subject/status) — the case's messages are not
     # replayed, so this stays a handful of tokens.
     open_cases = graph_ctx.get("open_cases") or []
-    active_id = str(active_ticket_id or "")
     if open_cases:
         lines.append("Open support cases (already raised - do NOT treat as new):")
-        matched = []
         for case in open_cases:
             subject = case.get("title") or (case.get("intent") or "").replace("_", " ").title()
             scope = case.get("scope") or ""
             # "transaction_dispute:imps" -> "imps": the specific matter, without repeating the intent.
             detail = f" about {scope.split(':', 1)[1]}" if ":" in scope and scope.split(":", 1)[1] else ""
-            # Sharing an INTENT LABEL is not being the same case. Two balance questions
-            # hours apart are both "account_balance_inquiry" and are not one matter, but a
-            # customer with any open ticket on the topic was told their new message was
-            # "already logged under" it — while the ticket logic, asked the same question,
-            # had created no ticket at all.
-            same_intent = bool(current_intent) and case.get("intent") == current_intent
-            # Continuity is claimed from the ticket the CONVERSATION is actually on, not
-            # from a shared label. active_ticket is what TicketManager already resolved for
-            # this thread (scope-matched, Fix 102) and is in context before the reply is
-            # written. If this message belongs to an open case, that IS the case.
-            same = same_intent and bool(active_id) and str(case.get("ticket_id", "")) == active_id
-            if same:
-                matched.append(str(case.get("ticket_id", "")))
             lines.append(
                 f"  - {case.get('ticket_id', '')} | {subject}{detail} | "
                 f"Status: {case.get('status', 'open')}"
-                + (" | SAME SUBJECT as this message" if same else "")
-                + (" | same topic, different matter" if same_intent and not same else "")
             )
         # Every case stays listed. The customer may reference any of them across channels,
         # and hiding one would cost exactly the continuity this block exists to give
-        # (Fix 75). What is added is the one fact the model was missing: what THIS message
-        # is about - so it can tell "continues that case" from "this is something new".
-        if current_intent:
-            readable = current_intent.replace("_", " ")
-            if matched:
-                lines.append(
-                    f"This message is about: {readable}. It continues {', '.join(matched)}."
-                )
-            else:
-                lines.append(
-                    f"This message is about: {readable}. None of the cases above is known to "
-                    "cover THIS matter. Do NOT tell the customer it has been logged, tracked or "
-                    "referenced under any ticket id listed above, even one on the same topic — "
-                    "a shared subject is not the same case. You may still answer their question "
-                    "using the account facts above. A reference number is appended "
-                    "automatically when one exists, so never write one yourself."
-                )
+        # (Fix 75).
+        #
+        # What is NOT stated is which case this message belongs to. That claim used to be
+        # made here three ways - "SAME SUBJECT as this message" and "same topic, different
+        # matter" on the case lines, and "It continues tkt_x" below - all from one
+        # comparison: does the intent LABEL match, and is this the ticket the conversation
+        # was last on. Neither supports the conclusion. A 2-3 word label cannot tell "the
+        # same card question" from "another card question", which is exactly why
+        # `ticket_referee` exists - and measured on a live message, the referee runs
+        # ~2 seconds AFTER this prompt is built (answer_generation 17:53:02,
+        # ticket_referee 17:53:04). So the answer asserted continuity from a guess while
+        # the mechanism built to decide it had not run yet, and got it wrong: two
+        # questions about the same credit card, both labelled general_inquiry.
+        #
+        # The warning below survives because it is the opposite kind of statement. Telling
+        # the model NOT to claim a case covers this matter is safe on weak evidence;
+        # telling it one DOES is what put a wrong ticket id in front of a customer. The
+        # intent label is dropped from it too - the model has the customer's actual message
+        # a few lines down and does not need a coarser restatement of it.
+        lines.append(
+            "None of the cases above is known to cover THIS matter. Do NOT tell the "
+            "customer it has been logged, tracked or referenced under any ticket id "
+            "listed above, even one on the same topic — a shared subject is not the same "
+            "case. You may still answer their question using the account facts above. A "
+            "reference number is appended automatically when one exists, so never write "
+            "one yourself."
+        )
     return "\n".join(lines)
