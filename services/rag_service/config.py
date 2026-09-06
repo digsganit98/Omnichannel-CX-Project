@@ -26,13 +26,25 @@ def rag_top_k() -> int:
 
 
 def rag_backend() -> str:
-    """Which vector store backs KB retrieval: "opensearch" (default) or "neo4j".
+    """Which vector store backs KB retrieval: "neo4j" (default) or "opensearch".
 
     Both implement the same six-method interface, so this switches the whole
-    retrieval path. Defaults to opensearch so an unset env var keeps the
-    behaviour every existing deployment already has.
+    retrieval path.
+
+    Neo4j is the default because it measured identical - 18/18 same rank on the
+    probe set with real embeddings - while removing a second datastore, and
+    because it is the only one of the two that can hold the
+    (:KBChunk)-[:ABOUT]->(:Product) edges that scope retrieval to what a
+    customer actually holds.
+
+    It also sidesteps a failure mode OpenSearch cannot avoid on a shared host:
+    OpenSearch blocks ALL index creation above a 90% disk watermark and
+    re-applies that block every ~90s, so the KB simply cannot be indexed on a
+    full box no matter how small the index is. Neo4j has no such gate.
+
+    Set RAG_BACKEND=opensearch to go back; nothing about that path changed.
     """
-    return os.getenv("RAG_BACKEND", "opensearch").strip().lower()
+    return os.getenv("RAG_BACKEND", "neo4j").strip().lower()
 
 
 def kb_vector_index() -> str:
