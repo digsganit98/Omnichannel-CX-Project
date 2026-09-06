@@ -8333,3 +8333,102 @@ variable NAMES, so anything named otherwise (`NEO4J_AUTH`, SMTP fields) printed 
 value being sought was `GROQ_MODEL`, and the question of whether `.env` needed changing was
 answerable from the code diff without opening the file at all. **Grep the single variable by
 name; never print the file.** Recorded in the `ec2-deployment-rules` memory.
+
+---
+
+## Cost model - 2026-09-07 - what one interaction actually costs, and what is still assumed
+
+Built for the sales/capability document. Full derivation, every rate and every assumption is
+in the `cost-model` memory; this records the result and the corrections.
+
+### Nine LLM calls, not one
+
+The predecessor cost table assumed **one** LLM call at 1,000 input + 500 output tokens. The
+system makes **nine** per fully-handled interaction, measured at **~11,500 input + ~3,000
+output**.
+
+Four run on every customer message (`intent_classification`,
+`resolution_level_classification`, `handoff_check`, `answer_generation`). Two run only when a
+case is already open (`ticket_referee`, `ticket_action_detection`). **Three are not on the
+customer message path at all** - `case_summary` and `opportunity_generation` live in
+`routes/conversations.py` and `routes/agent_assist.py`, and fire when an AGENT opens the
+conversation. So a self-served question costs **4** calls; nine is a fully-handled
+interaction and is the maximum.
+
+### The table, at 20,000 interactions/month
+
+| component | old | **new** |
+|---|---|---|
+| LLM | 0.029 | **0.34** |
+| Vector DB (RAG) | 1.450 | **0.00 - REMOVED** |
+| Knowledge Graph + Conversation Memory | 0.34 + 0.15 | **2.49** |
+| Agent Runtime | 0.33 | 0.83 |
+| WhatsApp / Email / Observability / Embedding / Storage | ~0.30 | 0.25 |
+| **TOTAL** | **Rs.2.46** | **Rs.3.91** |
+
+**LLM cost alone is Rs.0.34** - that is the figure for the document, quoted the way
+ClaimIntel quotes Rs.2.39 per claim (model cost, not TCO).
+
+Three structural corrections: OpenSearch is gone (KB lives in the graph, Fix 148), so the old
+table's largest line is now zero; **graph and conversation memory are ONE line**, because one
+Neo4j instance holds the customer 360, the KB chunks, `:Interaction` turn history, tickets and
+ResolutionMemory; and **storage is ~zero** - no attachments are stored anywhere, both email
+readers skip `Content-Disposition: attachment` and take `text/plain` only.
+
+### Rates verified 2026-09-07 against live pricing pages
+
+Bedrock `gpt-oss-120b` **$0.1545/$0.6180** per 1M; `gpt-oss-20b` $0.0721/$0.3090; Claude Haiku
+4.5 $1/$5, Sonnet 5 $2/$10, Opus 4.5 $5/$25; **Neo4j Aura Professional $65/GB/mo** (8GB =
+$525.60) and **Business Critical $146/GB/mo**; EC2 m6i.large ap-south-1 $0.1010/hr; ALB
+$0.0225/hr + $0.008/LCU; SES $0.10/1k; DynamoDB $0.625/$0.125 per M and $0.25/GB; Titan Embed
+v2 $0.02/1M; S3 $0.023/GB.
+
+**USD->INR is Rs.94.66**, not the Rs.88 used for most of the session.
+
+**`gpt-oss` is not offered in ap-south-1** - Bedrock lists it for Asia Pacific (Sydney) only.
+An Indian data-residency requirement therefore means Claude Haiku 4.5 at ~Rs.2.5/interaction,
+not gpt-oss at Rs.0.34. That is a real constraint for a BFSI pitch and belongs in any TCO
+conversation.
+
+### What is NOT verified - do not present these as measured
+
+- **The token count is n=1**: one message ("How do I apply for a home loan?") on the hosted
+  box. The local `llm_usage_events` table cannot be used - it is contaminated by test scripts
+  (`intent_classification` at 2.0 calls/message, impossible in one pipeline run).
+- **Neo4j is sized on the DEMO graph.** Measured: **55 nodes per customer** (276 nodes / 5
+  customers). A 1M-customer bank is ~55M nodes ~ 28GB, needing **32GB Business Critical at
+  ~$4,672/mo - nine times the 8GB Professional line in the table**, and 91% of fixed
+  infrastructure cost at that scale. Interaction history grows on top of that without bound
+  and there is no retention policy.
+- EC2 2x m6i.large is dev sizing. CloudWatch $18/mo invented. WhatsApp Rs.0.145 carried from
+  the old table unverified. 20,000 interactions/month inherited with no basis.
+- Excluded entirely: dev/staging, DR, backups, NAT, data transfer, WAF, support plan, Cognito.
+
+**Infrastructure is therefore not publishable.** Per-client TCO is a scoping exercise needing
+the client's customer base, volume, retention and availability requirements.
+
+### Scaling must be stated as fixed + variable
+
+Per-interaction cost appears to fall with volume (Rs.9.56 at 50k, Rs.0.94 at 1M) only because
+fixed cost is divided by more interactions - and the fixed side does not stay fixed, since 1M
+interactions/month cannot run on two EC2 instances. **True marginal cost is ~Rs.0.5** (LLM +
+WhatsApp + SES). Never quote a single per-interaction number that improves with scale.
+
+### Human comparison for the pitch
+
+India chat/email outsourcing is **$4-8 per agent-hour** (sourced), i.e. **Rs.35-120 per digital
+interaction** at 6-10 contacts/hour. Global benchmarks: agent-assisted $13.50, self-service
+$1.84. A fully-loaded Indian agent is Rs.4-7 lakh/year. **No published India cost-per-contact
+figure exists** - regulators do not publish one, so any single number must be labelled an
+estimate. An earlier draft of this analysis extrapolated a 4,200-seat contact centre to
+"Rs.122 Cr/year saved" on three invented assumptions; that was withdrawn and should not be
+repeated.
+
+### The document itself is NOT written
+
+Two drafts rejected. The brief - purpose, the ClaimIntel structure to follow, the three KPIs
+(first-contact resolution, repeat-contact rate, cost per contact), the four differentiator
+blocks, and the capabilities missed by not reading the repo (PII masking with Luhn-validated
+card detection, multilingual, L1/L2/L3 triage, post-handover monitoring) - is in the
+`capability-doc-brief` memory. The product is called **Omnichannel CX Accelerator**, from the
+UI's own title.
