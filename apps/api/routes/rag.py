@@ -59,10 +59,18 @@ def link_kb_graph() -> dict:
     try:
         from services.neo4j_service.client import Neo4jClient
         from services.rag_service.kb_graph_links import link_kb_chunks_to_graph
+        from services.neo4j_service.concepts import build_concept_layer
 
         client = Neo4jClient()
         try:
-            return link_kb_chunks_to_graph(client)
+            # Two layers, and the order matters. link_kb_chunks_to_graph draws
+            # (:KBChunk)-[:ABOUT]->(:Product), which is what the schema diagram
+            # renders. build_concept_layer then puts (:Concept) above both, which
+            # is what the ANSWER path walks - a chunk about something the bank
+            # explains but does not sell reaches a Concept and never a Product.
+            links = link_kb_chunks_to_graph(client)
+            concepts = build_concept_layer(client)
+            return {**links, "concept_layer": concepts}
         finally:
             client.close()
     except HTTPException:

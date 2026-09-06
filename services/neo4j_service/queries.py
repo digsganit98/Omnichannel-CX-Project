@@ -316,6 +316,30 @@ RETURN labels(n)[0] AS label, properties(n) AS props,
        p.policy_type AS parent_policy_type
 """
 
+# Every KB chunk, each marked with whether this customer holds the subject it explains.
+#
+# NOT a retrieval query - there is no scoring, no top-k and no similarity here. The KB is
+# 14 chunks (~1,124 tokens) inside a ~10,100 token message, against a quota bound by
+# REQUESTS (1000/day), so selecting a subset buys nothing and can drop the one chunk that
+# answers the question. The same reasoning that made _ALL_RECORDS_CYPHER return every
+# field applies to the KB: a chunk that was filtered out is invisible to the model, which
+# cannot tell "the bank has no guidance on this" from "the guidance did not rank".
+#
+# `is_hers` comes from the graph, not from the text: her holdings walk to a Concept, and a
+# chunk explaining that same Concept is about something she actually has. That mark is what
+# lets the model prefer her situation over general guidance when both could answer.
+#
+# Chunks whose Concept nobody sells (SIP, ELSS, Demat) arrive like any other - they are
+# Concepts with no Product child, which is a fact about the catalogue, not a gap.
+_GUIDANCE_CYPHER = """
+OPTIONAL MATCH (c:Customer {customer_id: $cid})-[]->(h)-[:INSTANCE_OF]->(held:Concept)
+WITH collect(DISTINCT held.name) AS held_names
+MATCH (k:KBChunk {doc_type: 'knowledge_base'})-[:EXPLAINS]->(con:Concept)
+RETURN k.text AS text, con.name AS concept,
+       (con.name IN held_names) AS is_hers
+ORDER BY is_hers DESC, con.name
+"""
+
 # Rows, not fields. Eight is the cap neo4j_answer already applied to transactions: a dispute
 # is nearly always about a recent debit, and 72 rows would crowd out the customer's actual
 # question. This is the one bound that survives, and it limits HOW MANY RECORDS, never
@@ -339,6 +363,30 @@ _LABEL_TO_KEY = {
 
 # Transactions carry no date-ordered guarantee from the walk above, so sort what we cap.
 _ROW_SORT_KEY = {"Transaction": "txn_date"}
+
+
+def get_guidance(client, customer_id: str) -> list[dict]:
+    """Every KB chunk, each flagged with whether it explains something this customer holds.
+
+    Returns [] on any failure. The caller then has the customer's records and no
+    guidance, which is exactly the behaviour before the Concept layer existed - the
+    KB simply does not reach the prompt, and the reply is built from records alone.
+    """
+    if client is None:
+        return []
+    try:
+        rows = client.query(_GUIDANCE_CYPHER, {"cid": customer_id or ""})
+    except Exception:
+        return []
+    return [
+        {
+            "text": row.get("text") or "",
+            "concept": row.get("concept") or "",
+            "is_hers": bool(row.get("is_hers")),
+        }
+        for row in rows or []
+        if row.get("text")
+    ]
 
 
 def get_all_customer_records(client, customer_id: str) -> dict[str, list[dict]]:
@@ -449,4 +497,12 @@ def neo4j_answer(client, intent: str | None, customer_id: str) -> str | None:
         lines.append(f"{heading}:")
         for row in rows:
             lines.append("  - " + _format_record(row))
+
+    # The KB is deliberately NOT appended here. The caller emits the same chunks as
+    # entries in `contexts` (orchestration_agents.py), and every context's text is
+    # concatenated into the prompt by GroqGenerator.generate_answer - so returning
+    # them here too would send all 14 chunks twice, ~1,124 tokens of exact duplicate
+    # per message. contexts is the right home: it carries the provenance metadata
+    # that citations, retrieval evidence and the agent console all read, which a
+    # block of text inside this string cannot.
     return "\n".join(lines) if lines else None

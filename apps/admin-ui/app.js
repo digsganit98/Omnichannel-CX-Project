@@ -1,6 +1,23 @@
 (function () {
 'use strict';
 
+// The "Why this answer?" provenance panel, hidden from the UI.
+//
+// Turned off rather than deleted: the retrieval evidence behind it is still
+// written on every reply (retrieval_evidence, one row per context), and the
+// panel is the only surface that reads it. What was wrong was its COPY - the
+// standing text described a vector search ("closest matches found", "always
+// returns a nearest match, even when nothing relevant exists"), which is the
+// mechanism Fix 149 removed. The answer path now walks the graph, returns
+// every chunk, and marks each as the customer's or general - so the panel
+// described a system that no longer runs, on a demo surface.
+//
+// Set back to true once the copy is rewritten for the concept walk and the
+// panel shows `customer_holds`, which is the fact worth surfacing and the one
+// it currently omits. Nothing else needs changing: openWhyModal, the route and
+// the styles are all untouched.
+var SHOW_WHY_THIS_ANSWER = false;
+
 // ── Channel metadata ─────────────────────────────────────────────────────────
 var CH = {
   whatsapp: { label:'WhatsApp', pill:'pwa', stripe:'cwa', bg:'#f0fdf4', bd:'#bbf7d0', clr:'#16a34a',
@@ -1105,7 +1122,7 @@ function renderCentre(conv) {
         +     // Only on a real answer. A holding message ("Support Agent will help you
               // shortly") explains nothing — the actual reply is still a pending draft, so
               // any retrieval shown against it would be unrelated to what the customer read.
-              (ex.reply && ex.reply.turn_id && !isHolding(ex.reply.text)
+              (SHOW_WHY_THIS_ANSWER && ex.reply && ex.reply.turn_id && !isHolding(ex.reply.text)
                 ? '<button class="det-why" type="button" data-turn="' + escH(ex.reply.turn_id) + '"'
                   + ' title="Show where this answer\'s information came from">Why this answer?</button>'
                 : '')
@@ -3854,7 +3871,21 @@ var KG_MAP = {
   // Placed in the 400px gap BETWEEN Product and Claim because it links to Product on
   // its left and KYC on its right - both edges stay short and cross nothing.
   KBChunk:         { x: 600, y: 370, w: 226, h: 82, tier: 'catalog', head: 'Knowledge base',
-                     props: ['chunk_id / topic', 'text + embedding (384d)', 'ABOUT -> the product'] },
+                     // The count on this box is every :KBChunk, and two different things
+                     // share the label: the KB proper (doc_type knowledge_base) and the
+                     // labelled L1/L2/L3 examples the resolution engine matches against
+                     // (doc_type resolution_example). Only the first is what a customer
+                     // gets read back to them, so the split is named rather than left as
+                     // one number nobody can decompose.
+                     props: ['chunk_id / doc_type', 'text + embedding (384d)',
+                             'KB + resolution examples'] },
+  // The hub the ANSWER path walks. A subject the bank deals with: sold ones have a
+  // Product, all of them have guidance, and a customer's holding points here too -
+  // so one walk goes holding -> Concept <- KBChunk without touching the catalogue.
+  // Placed on its own row because three different node types point AT it.
+  Concept:         { x: 380, y: 505, w: 300, h: 92, tier: 'catalog', head: 'What the bank deals with',
+                     props: ['name / sold', 'Home Loan, Credit Card, KYC…',
+                             'sold=false: SIP, ELSS, Demat'] },
 
   Ticket:          { x: kgCol(7), y:  26, w: KG_COLW, h: 82, tier: 'case', head: 'The case',
                      props: ['ticket_id / status', 'scope = continuity', 'intent / priority'] },
@@ -3908,7 +3939,34 @@ var KG_EDGES = [
   // box instead, like the other long edges - lane 492 is under Claim/ResolutionMemory
   // (both end at y=452) and above the 525 canvas edge.
   { from: 'KBChunk',  to: 'Product',          rel: 'ABOUT',           fs: 'l', ts: 'r' },
-  { from: 'KBChunk',  to: 'KYC',              rel: 'ABOUT_TOPIC',     lane: 492, gutter: 570 }
+  { from: 'KBChunk',  to: 'KYC',              rel: 'ABOUT_TOPIC',     lane: 492, gutter: 570 },
+
+  // The Concept layer - what the answer path actually walks. ABOUT above is the
+  // catalogue view (a chunk about a product the bank SELLS); these three are the
+  // walk: a customer's holding and a KB chunk both arrive at the same Concept, so
+  // guidance about something she owns is reachable by traversal rather than by
+  // matching her wording. A chunk whose Concept has no Product - SIP, ELSS, Demat -
+  // is reachable here and nowhere else.
+  { from: 'Product',  to: 'Concept',          rel: 'INSTANCE_OF',     fs: 'b', ts: 'l' },
+  { from: 'KBChunk',  to: 'Concept',          rel: 'EXPLAINS',        fs: 'b', ts: 't' },
+  // Every holding reaches the hub, not just the four that carry a :PRODUCT_IS
+  // edge. Fix 149 linked holdings by riding PRODUCT_IS, which exists only on
+  // Account, CreditCard, FixedDeposit and Loan - so Policy, Claim, Charge,
+  // Transaction and KYC reached no guidance at all, and this diagram drew the
+  // single Account edge as though that were the whole design. Fix 150 wired the
+  // other five (17 -> 123 edges); one line each here, or the picture keeps
+  // under-reporting the thing the walk depends on.
+  { from: 'Account',  to: 'Concept',          rel: 'INSTANCE_OF',     lane: 616, gutter: 102 },
+  { from: 'Policy',   to: 'Concept',          rel: 'INSTANCE_OF',     lane: 616, gutter: 22 },
+  { from: 'Claim',    to: 'Concept',          rel: 'INSTANCE_OF',     lane: 604, gutter: 32 },
+  { from: 'ChargePenalty', to: 'Concept',     rel: 'INSTANCE_OF',     lane: 616, gutter: 42 },
+  { from: 'Transaction',   to: 'Concept',     rel: 'INSTANCE_OF',     lane: 616, gutter: 52 },
+  { from: 'KYC',      to: 'Concept',          rel: 'INSTANCE_OF',     lane: 604, gutter: 62 },
+  // The remaining three holdings. All nine now reach the hub, which is what the
+  // walk depends on; drawing six of nine said the layer was partial when it is not.
+  { from: 'CreditCard',   to: 'Concept',      rel: 'INSTANCE_OF',     lane: 616, gutter: 72 },
+  { from: 'FixedDeposit', to: 'Concept',      rel: 'INSTANCE_OF',     lane: 604, gutter: 82 },
+  { from: 'Loan',         to: 'Concept',      rel: 'INSTANCE_OF',     lane: 616, gutter: 92 }
 ];
 
 var KG_TIER_FILL = {
@@ -3930,7 +3988,15 @@ function renderSchemaSvg(sc) {
   var counts = {};
   (sc.nodes || []).forEach(function(n) { counts[n.id] = n.count; });
 
-  var W = 1955, H = 525;
+  // H grew from 525 to 640 for the Concept row at y=505. Concept is the hub the
+  // ANSWER path walks - a holding and a KB chunk meet there - so it needs its own
+  // row rather than being squeezed into the gap between Product and KBChunk.
+  // H 700: the Concept box ends at y=597 and the six holding->Concept edges route
+  // through lanes below it. At H=640 four of those lanes (644-680) fell outside
+  // the canvas entirely and were clipped - the diagram appeared cut off along the
+  // bottom edge. The nine share two lanes (604/616) instead of nine of their own
+  // plus its label.
+  var W = 1955, H = 660;
   var svg = '<svg class="kgs" style="--kgs-w:' + W + 'px;--kgs-h:' + H + 'px;--kgs-s:0.76" width="' + W + '" height="' + H
           + '" viewBox="0 0 ' + W + ' ' + H + '" xmlns="http://www.w3.org/2000/svg">';
   svg += '<defs><marker id="kgar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" '
@@ -4006,7 +4072,10 @@ function renderSchemaSvg(sc) {
     // PRODUCT_IS is drawn from all four holdings that carry a product, and the count is
     // the TOTAL across them - so four identical ":PRODUCT_IS x17" in a row said the same
     // thing four times and overstated each edge. Label it once, on the first arrow.
-    if (seen[l.rel] && l.rel === 'PRODUCT_IS') return;
+    // Same for INSTANCE_OF: nine holdings plus Product all point at Concept, and
+    // nine identical ":INSTANCE_OF" labels stacked in a column said one thing nine
+    // times. The statement is "every holding reaches the hub" - it is made once.
+    if (seen[l.rel] && (l.rel === 'PRODUCT_IS' || l.rel === 'INSTANCE_OF')) return;
     seen[l.rel] = true;
     var w = l.text.length * KGL_CH;
     var lx, ly;
@@ -4406,150 +4475,427 @@ function kgForceLayout(nodes, edges, W, H) {
   return out;
 }
 
+// Identity first, then the one or two numbers that matter for that node type. Ordered,
+// not alphabetical: a hover is read top-down and stops early.
+var KG_TIP_FIELDS = [
+  'name', 'customer_id', 'product_id', 'concept', 'sold',
+  'account_number', 'card_id', 'loan_id', 'policy_id', 'claim_id', 'fd_id',
+  'txn_id', 'ticket_id', 'turn_id', 'agent_id', 'chunk_id',
+  'category', 'product_type', 'account_type', 'card_variant', 'loan_type',
+  'policy_type', 'claim_status', 'kyc_status', 'status', 'doc_type',
+  'balance_due', 'min_amount_due', 'amount_inr', 'amount', 'coverage_inr',
+  'premium_inr', 'principal_amount', 'maturity_amount', 'dpd',
+  'emis_paid', 'emis_pending', 'charge_type', 'reason', 'description'
+];
+
+// Never worth a line in a hover: an embedding is 384 floats, and the rest are internal
+// bookkeeping a reader cannot act on.
+var KG_TIP_SKIP = {
+  embedding: 1, document_version: 1, text: 1, message: 1, resolution_text: 1,
+  memory_key: 1, last_updated: 1, registered_at: 1, created_at: 1, updated_at: 1
+};
+
+function kgTipLabel(key) {
+  return key.replace(/_/g, ' ');
+}
+
+function kgTipValue(v) {
+  var s = String(v);
+  return s.length > 64 ? s.slice(0, 61) + '…' : s;
+}
+
+// ── Node hover: what a reader needs, in the order they need it ──────────────
+//
+// The previous hover was the generic field dump below - KG_TIP_FIELDS in
+// priority order, then whatever else the node carried, up to seven lines. It
+// opened on the LEAST readable thing a node has: "account_number:
+// 40900000100004" led a charge, and a guidance chunk's actual question was
+// truncated at 40 characters underneath "chunk_id: InboxIQ_BFSI_KB.pdf::7".
+// Nothing said what the node WAS - a reader assembled that from six key:value
+// pairs.
+//
+// Now: the node's name first, then one plain-English line, then supporting
+// facts. Raw ids never lead and are shortened to their last four characters;
+// money and dates are formatted; field names are not shown at all.
+
+var KG_TYPE_NAMES = {
+  ChargePenalty: 'Charge', KBChunk: 'Guidance', FixedDeposit: 'Fixed Deposit',
+  CreditCard: 'Credit Card', ResolutionMemory: 'Past Resolution'
+};
+
+// Returns null for anything not numeric. The seed carries the literal string
+// "N/A" in amount fields on unsettled claims, so every caller must test the
+// RESULT of this rather than the raw property: `p.amount_approved_inr` is
+// truthy for "N/A", and concatenating the null result printed "null approved".
+function kgMoney(v) {
+  if (v == null || v === '') return null;
+  var n = Number(v);
+  if (!isFinite(n)) return null;
+  return 'Rs.' + Math.round(n).toLocaleString('en-IN');
+}
+
+// `prefix + money + suffix`, or nothing at all when the value is not a number.
+function kgAmt(v, prefix, suffix) {
+  var m = kgMoney(v);
+  return m ? (prefix || '') + m + (suffix || '') : null;
+}
+
+function kgDate(v) {
+  if (!v) return null;
+  var d = new Date(String(v).slice(0, 10));
+  if (isNaN(d.getTime())) return null;
+  return d.getDate() + ' ' + ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul',
+    'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][d.getMonth()] + ' ' + d.getFullYear();
+}
+
+// Last four characters, so an id identifies a row without spending a line on it.
+function kgShortId(v) {
+  var s = String(v || '');
+  return s.length > 4 ? '···' + s.slice(-4) : s;
+}
+
+function kgWords(v) {
+  // "MinBalanceNonMaintenance" -> "Min balance non maintenance"
+  var s = String(v || '').replace(/_/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2');
+  return s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
+}
+
+// Each builder returns the lines BELOW the node name. Falsy entries are dropped,
+// so a node missing a field simply has a shorter tooltip rather than an empty
+// label. Capped at four lines plus the name and the connection count.
+var KG_TIP_BUILDERS = {
+  Customer: function(p) {
+    return [[p.name, p.segment].filter(Boolean).join(' · '),
+            [p.city, p.occupation].filter(Boolean).join(' · ')];
+  },
+  Concept: function(p) {
+    return [p.name, p.sold ? 'Sold by the bank' : 'Explained, not sold'];
+  },
+  KBChunk: function(p) {
+    var t = String(p.text || '');
+    // The KB is stored as "Q: ... A: ...", and the question is the one line that
+    // identifies a chunk at a glance.
+    var q = t.match(/Q:\s*([^\n]+?)(?:\s*A:|$)/);
+    var a = t.match(/A:\s*([\s\S]+)/);
+    return [q ? '"' + q[1].trim() + '"' : t.slice(0, 70),
+            a ? a[1].trim().slice(0, 90) + (a[1].length > 90 ? '…' : '') : null,
+            p.doc_type === 'resolution_example' ? 'Classifier example' : null];
+  },
+  Product: function(p) {
+    return [p.product_name || p.name, [p.category, p.product_type].filter(Boolean).join(' · ')];
+  },
+  Account: function(p) {
+    return [[kgWords(p.account_sub_type || p.account_type), 'account',
+             kgShortId(p.account_number)].filter(Boolean).join(' '),
+            [p.status, p.branch].filter(Boolean).join(' · '),
+            kgAmt(p.min_balance_required, 'Min balance ')];
+  },
+  CreditCard: function(p) {
+    return [[p.card_variant, p.card_network].filter(Boolean).join(' · '),
+            kgAmt(p.total_amount_due, '', ' due'),
+            [kgAmt(p.min_amount_due, 'Min '),
+             kgDate(p.payment_due_date) ? 'by ' + kgDate(p.payment_due_date) : null]
+              .filter(Boolean).join(' · ')];
+  },
+  Loan: function(p) {
+    return [[kgWords(p.loan_type), p.status].filter(Boolean).join(' · '),
+            kgAmt(p.outstanding_amount, '', ' outstanding'),
+            [p.emis_paid != null ? p.emis_paid + ' EMIs paid' : null,
+             p.emis_pending != null ? p.emis_pending + ' left' : null]
+              .filter(Boolean).join(' · ')];
+  },
+  FixedDeposit: function(p) {
+    return [kgAmt(p.maturity_amount, '', ' at maturity') || p.status,
+            [p.interest_rate ? p.interest_rate + '%' : null,
+             kgDate(p.maturity_date) ? 'matures ' + kgDate(p.maturity_date) : null]
+              .filter(Boolean).join(' · '),
+            kgShortId(p.fd_id)];
+  },
+  Policy: function(p) {
+    return [[kgWords(p.policy_type), p.status].filter(Boolean).join(' · '),
+            [kgAmt(p.premium_inr, '', '/yr'),
+             kgDate(p.next_premium_due) ? 'renews ' + kgDate(p.next_premium_due) : null]
+              .filter(Boolean).join(' · '),
+            p.nominee_name ? 'Nominee: ' + p.nominee_name : null];
+  },
+  Claim: function(p) {
+    return [[kgWords(p.claim_type), p.status].filter(Boolean).join(' · '),
+            [kgAmt(p.amount_approved_inr, '', ' approved'),
+             kgAmt(p.amount_claimed_inr, 'of ')]
+              .filter(Boolean).join(' '),
+            p.reason];
+  },
+  ChargePenalty: function(p) {
+    return [[kgWords(p.charge_type), kgMoney(p.amount)]
+              .filter(Boolean).join(' · '),
+            p.reason,
+            [p.account_number ? 'Account ' + kgShortId(p.account_number) : null,
+             kgDate(p.charge_date),
+             p.reversal_status === 'Charged' ? 'not reversed' : p.reversal_status]
+              .filter(Boolean).join(' · ')];
+  },
+  Transaction: function(p) {
+    return [[p.txn_type === 'Debit' && p.beneficiary_name ? 'Paid ' + p.beneficiary_name
+              : kgWords(p.txn_type), kgMoney(p.amount)]
+              .filter(Boolean).join(' · '),
+            [p.status, p.channel].filter(Boolean).join(' · '),
+            [kgDate(p.txn_date), p.account_number ? kgShortId(p.account_number) : null]
+              .filter(Boolean).join(' · ')];
+  },
+  KYC: function(p) {
+    return [p.kyc_status, kgDate(p.registered_at) ? 'Registered ' + kgDate(p.registered_at) : null];
+  },
+  Ticket: function(p) {
+    return [p.subject || kgWords(p.intent),
+            [p.status, p.ticket_scope].filter(Boolean).join(' · '),
+            kgShortId(p.ticket_id)];
+  },
+  Interaction: function(p) {
+    return [p.message ? '"' + String(p.message).slice(0, 70) + '"' : kgWords(p.intent),
+            [p.channel, p.status].filter(Boolean).join(' · '),
+            kgDate(p.updated_at || p.created_at)];
+  },
+  Agent: function(p) {
+    return [p.name, kgWords(p.agent_type)];
+  },
+  ResolutionMemory: function(p) {
+    return [p.intent_type ? kgWords(p.intent_type) : p.memory_key,
+            p.verified ? 'Verified by an agent' : 'Not yet verified',
+            'Reused ' + (p.times_reused || 0) + ' times'];
+  }
+};
+
+function kgNodeTip(n, degree) {
+  var props = n.props || {};
+  var lines = [KG_TYPE_NAMES[n.type] || kgWords(n.type)];
+  var build = KG_TIP_BUILDERS[n.type];
+  if (build) {
+    try {
+      build(props).forEach(function(l) {
+        if (l && String(l).trim() && lines.length < 5) lines.push(String(l).trim());
+      });
+    } catch (e) { /* a malformed node falls back to the name alone */ }
+  }
+  // No builder, or one that produced nothing: the label is better than an
+  // otherwise empty tooltip.
+  if (lines.length === 1 && n.label && n.label !== n.type) lines.push(n.label);
+  lines.push('── ' + degree + ' connection' + (degree === 1 ? '' : 's'));
+  return lines;
+}
+
 function renderLiveGraphSvg(g) {
   var nodes = g.nodes || [], edges = g.edges || [];
   if (!nodes.length) return '<div class="kg-empty">The graph is empty.</div>';
 
-  var deg = {};
-  nodes.forEach(function(n) { deg[n.id] = 0; });
+  var byId = {};
+  nodes.forEach(function(n) { byId[n.id] = n; });
+
+  var deg = {}, nbr = {};
+  nodes.forEach(function(n) { deg[n.id] = 0; nbr[n.id] = []; });
   edges.forEach(function(e) {
-    if (deg[e.source] != null) deg[e.source]++;
-    if (deg[e.target] != null) deg[e.target]++;
+    if (deg[e.source] == null || deg[e.target] == null) return;
+    deg[e.source]++; deg[e.target]++;
+    nbr[e.source].push(e.target); nbr[e.target].push(e.source);
   });
 
-  // Landscape, matching the modal. .kgs caps height at calc(96vh - 200px), so a TALL
-  // canvas gets scaled down by that cap and the whole drawing shrinks - which is what a
-  // square-ish canvas did here. Keeping it wide means the cap never binds and the
-  // picture renders at full size.
-  var W = 1180, H = 620;
+  // A force layout drew this before, and it could not answer the question the view
+  // exists for: WHICH nodes are the centres and what hangs off them. Everything came
+  // out the same size in one mesh, a node with a single edge was flung to the rim, and
+  // 1px arcs at 278 nodes are invisible - so correctly connected leaves looked
+  // disconnected. The graph has two kinds of hub and it should simply be drawn that way:
+  //
+  //   Customer (5)  - one per person, their records hang off them
+  //   Concept  (19) - the shared spine; holdings AND knowledge chunks both point here,
+  //                   which is what makes this ONE graph rather than five separate trees
+  //
+  // So: customers on an outer ring with their records in a fan, concepts on an inner
+  // ring, and the customer->concept edges drawn across the middle where they are the
+  // whole point. Deterministic, not simulated - the same data draws the same picture.
+  var customers = nodes.filter(function(n) { return n.type === 'Customer'; });
+  var concepts  = nodes.filter(function(n) { return n.type === 'Concept'; });
+  var hubIds = {};
+  customers.concat(concepts).forEach(function(n) { hubIds[n.id] = 1; });
 
-  // Unconnected nodes are placed SEPARATELY, not by the simulation. With no edge pulling
-  // them anywhere, repulsion drives them straight out to the frame clamp where they stack
-  // into a hard column against the border — measured: all 13 zero-degree nodes sat on the
-  // frame, and they are the whole reason the drawing looked fenced in. They are real data
-  // (11 catalogue Products no customer holds; 2 Agents, which connect on the first handled
-  // message), so they are still drawn — as a deliberate tray along the foot, captioned,
-  // rather than as debris pinned to the edge.
-  var linked = [], loose = [];
-  nodes.forEach(function(n) { (deg[n.id] ? linked : loose).push(n); });
+  // H 780: the customer ring reaches CY +/- 830*0.33 = 274, plus a 96px record fan
+  // and a 30px second arc, so the outermost dot sits ~400 from centre and clears it.
+  // The canvas is proportioned like the box it is drawn into. It was 1320x800
+  // (aspect 1.65) inside a modal body nearer 3:1, so preserveAspectRatio scaled
+  // the picture to fit the HEIGHT and left ~45% of the width as dead margin on
+  // either side - the drawing rendered at roughly half the size it had room for,
+  // with every node crushed toward the centre. Widening the coordinate space and
+  // the ring ellipses below spends that margin on the graph instead.
+  var W = 2200, H = 780, CX = W / 2, CY = H / 2 - 10;
+  var pos = {}, ring = {};
 
-  var pos = kgForceLayout(linked, edges, W, H);
-  // Unconnected nodes (the unheld product catalogue, and agents that have not handled a
-  // message yet) sit as ONE compact block in the corner, at the same spacing as the rest
-  // of the drawing. Scattering them on a wide ring — the previous attempt — left 14 nodes
-  // stranded more than 3x the median distance from any neighbour and pushed the spacing
-  // ratio to 8.5x, which is what made the gaps look arbitrary. They have no edges, so no
-  // position is more truthful than another; what matters is that they stop tearing holes
-  // in the picture.
-  if (loose.length) {
-    var GAP = 19;                                  // the drawing's own median spacing
-    var cols = Math.ceil(Math.sqrt(loose.length));
-    var rows = Math.ceil(loose.length / cols);
-    var bw = (cols - 1) * GAP, bh = (rows - 1) * GAP;
-    // Place the block in whichever corner is emptiest. Fixed top-right put it straight
-    // on top of a cluster — measured as a 2px gap between unrelated nodes, which is
-    // exactly the uneven spacing this block was meant to remove.
-    var linkedPts = linked.map(function(n) { return pos[n.id]; }).filter(Boolean);
-    var best = null;
-    [[26, 26], [W - 26 - bw, 26], [26, H - 26 - bh], [W - 26 - bw, H - 26 - bh]]
-      .forEach(function(c) {
-        var worst = Infinity;
-        for (var i = 0; i < loose.length; i++) {
-          var px = c[0] + (i % cols) * GAP, py = c[1] + Math.floor(i / cols) * GAP;
-          for (var j = 0; j < linkedPts.length; j++) {
-            var d = Math.hypot(linkedPts[j].x - px, linkedPts[j].y - py);
-            if (d < worst) worst = d;
-          }
-        }
-        if (!best || worst > best.clear) best = { x: c[0], y: c[1], clear: worst };
-      });
-    loose.forEach(function(n, i) {
-      pos[n.id] = { x: best.x + (i % cols) * GAP, y: best.y + Math.floor(i / cols) * GAP };
+  // Concepts: inner ring. Ordered by degree so the busiest sit apart rather than
+  // adjacent, which keeps their fans from overlapping.
+  concepts.sort(function(a, b) { return deg[b.id] - deg[a.id]; });
+  var CR = 300;
+  concepts.forEach(function(n, i) {
+    var a = (i / concepts.length) * Math.PI * 2 - Math.PI / 2;
+    pos[n.id] = { x: CX + Math.cos(a) * CR, y: CY + Math.sin(a) * CR * 0.40 };
+    ring[n.id] = 'concept';
+  });
+
+  // Customers: outer ring, offset half a step so they sit between concept spokes.
+  var UR = 830;
+  customers.forEach(function(n, i) {
+    var a = (i / customers.length) * Math.PI * 2 - Math.PI / 2 + Math.PI / customers.length;
+    pos[n.id] = { x: CX + Math.cos(a) * UR, y: CY + Math.sin(a) * UR * 0.33 };
+    ring[n.id] = 'customer';
+  });
+
+  // Everything else fans off the hub it is attached to, on the far side of that hub
+  // from the centre - so a customer's records sit OUTSIDE them and a concept's chunks
+  // sit around it, and neither crosses the middle where the spine edges run.
+  var placed = {};
+  Object.keys(pos).forEach(function(id) { placed[id] = 1; });
+
+  // A FULL circle. Fanning over ~190 degrees away from centre made every customer
+  // read as a half-moon rather than as a hub with its records around it - my own
+  // addition, and the wrong shape for what this is meant to show.
+  function fanAround(hub, kids, r0) {
+    if (!kids.length) return;
+    var hp = pos[hub.id];
+    var step = (Math.PI * 2) / kids.length;
+    kids.forEach(function(kid, i) {
+      var a = step * i - Math.PI / 2;
+      // Two arcs when there are many, so a 20-child fan does not stretch into a line.
+      var r = r0 + (kids.length > 9 && i % 2 ? 30 : 0);
+      pos[kid.id] = { x: hp.x + Math.cos(a) * r, y: hp.y + Math.sin(a) * r };
+      placed[kid.id] = 1;
     });
-    // Then relax the WHOLE set together. Placing the block blind left it grazing a
-    // cluster at 6px while the graph itself keeps 11px, and a single tighter-than-normal
-    // gap is exactly the unevenness this is meant to remove. One shared pass means every
-    // node on the canvas obeys the same minimum, wherever it came from.
-    var all = Object.keys(pos), MINP = 13;
-    for (var rp = 0; rp < 120; rp++) {
-      var bumped = 0;
-      for (var a1 = 0; a1 < all.length; a1++) {
-        for (var b1 = a1 + 1; b1 < all.length; b1++) {
-          var pa = pos[all[a1]], pb = pos[all[b1]];
-          var ddx = pb.x - pa.x, ddy = pb.y - pa.y;
-          var dd = Math.sqrt(ddx * ddx + ddy * ddy);
-          if (dd >= MINP) continue;
-          if (dd < 0.01) { ddx = 1; ddy = 0; dd = 1; }
-          var pp = (MINP - dd) / 2;
-          pa.x -= (ddx / dd) * pp; pa.y -= (ddy / dd) * pp;
-          pb.x += (ddx / dd) * pp; pb.y += (ddy / dd) * pp;
-          bumped++;
-        }
-      }
-      all.forEach(function(kk) {
-        pos[kk].x = Math.max(10, Math.min(W - 10, pos[kk].x));
-        pos[kk].y = Math.max(10, Math.min(H - 10, pos[kk].y));
-      });
-      if (!bumped) break;
-    }
   }
 
-  var svg = '<svg class="kgs kgs-live" style="--kgs-w:' + W + 'px;--kgs-h:' + H
-          + 'px;--kgs-s:1" width="' + W + '" height="' + H + '" viewBox="0 0 ' + W + ' ' + H
-          + '" xmlns="http://www.w3.org/2000/svg">';
+  // Customers first: a record belongs to its owner, not to a concept it also touches.
+  customers.forEach(function(c) {
+    var kids = (nbr[c.id] || []).map(function(id) { return byId[id]; })
+      .filter(function(k) { return k && !hubIds[k.id] && !placed[k.id]; });
+    fanAround(c, kids, 96);
+  });
+  concepts.forEach(function(c) {
+    var kids = (nbr[c.id] || []).map(function(id) { return byId[id]; })
+      .filter(function(k) { return k && !hubIds[k.id] && !placed[k.id]; });
+    fanAround(c, kids, 74);
+  });
 
+  // Whatever the two passes above did not reach. This is NOT the same as having no
+  // edges: a node two hops from any hub (a Claim under a Policy, a chunk under a
+  // Concept already full) is fully connected and simply had no pass claim it. Calling
+  // these 'disconnected' put a caption on screen that contradicted the database - 14
+  // against a real count of 1. So place them next to a neighbour that IS placed, and
+  // only call a node unconnected when it truly has degree 0.
+  var leftover = nodes.filter(function(n) { return !placed[n.id]; });
+  leftover.forEach(function(n) {
+    var anchor = null;
+    (nbr[n.id] || []).some(function(id) {
+      if (pos[id]) { anchor = pos[id]; return true; }
+      return false;
+    });
+    if (anchor) {
+      var a = Math.random() * Math.PI * 2;
+      pos[n.id] = { x: anchor.x + Math.cos(a) * 34, y: anchor.y + Math.sin(a) * 34 };
+      placed[n.id] = 1;
+    }
+  });
+  var orphans = nodes.filter(function(n) { return deg[n.id] === 0; });
+  orphans.forEach(function(n, i) {
+    pos[n.id] = { x: 40 + i * 22, y: H - 26 };
+    placed[n.id] = 1;
+  });
+
+  // The viewBox is the drawing's own bounding box, not the nominal canvas.
+  //
+  // W/H above are the coordinate space the ring layout computes in; the nodes
+  // only ever occupy part of it. Publishing "0 0 W H" and letting
+  // preserveAspectRatio letterbox it meant the picture was scaled to fit
+  // whichever axis was tighter - height, on a wide modal - and the spare width
+  // became two dead margins, with every node crushed into the middle. Fitting
+  // the box to the content lets the same drawing fill the container.
+  //
+  // Padding covers what is drawn beyond a node's centre: the 13px hub radius,
+  // its label sitting ~19px above it, and the orphan caption on the bottom row.
+  var bx0 = Infinity, by0 = Infinity, bx1 = -Infinity, by1 = -Infinity;
+  nodes.forEach(function(n) {
+    var q = pos[n.id];
+    if (!q) return;
+    if (q.x < bx0) bx0 = q.x;
+    if (q.x > bx1) bx1 = q.x;
+    if (q.y < by0) by0 = q.y;
+    if (q.y > by1) by1 = q.y;
+  });
+  var padX = 26, padT = 30, padB = orphans.length ? 40 : 26;
+  if (!isFinite(bx0)) { bx0 = 0; by0 = 0; bx1 = W; by1 = H; }
+  var vx = bx0 - padX, vy = by0 - padT;
+  var vw = Math.max(1, (bx1 - bx0) + padX * 2);
+  var vh = Math.max(1, (by1 - by0) + padT + padB);
+
+  var svg = '<svg class="kgs kgs-live" style="--kgs-w:' + Math.round(vw)
+          + 'px;--kgs-h:' + Math.round(vh)
+          + 'px;--kgs-s:1" viewBox="' + vx.toFixed(1) + ' ' + vy.toFixed(1) + ' '
+          + vw.toFixed(1) + ' ' + vh.toFixed(1)
+          + '" preserveAspectRatio="xMidYMid meet" xmlns="http://www.w3.org/2000/svg">';
+
+  // Spine edges (hub to hub) drawn first and heavier: these carry the design - a
+  // customer's holding reaching the same Concept a knowledge chunk explains.
+  // ONE edge colour. Splitting edges into an amber 'spine' and faint leaves was my own
+  // emphasis, not something the graph has: there is one kind of relationship here, and
+  // the amber tangle became the loudest thing in a picture where it should not be.
   edges.forEach(function(e) {
-    var s = pos[e.source], t = pos[e.target];
-    if (!s || !t) return;
-    // Quadratic arc, not a straight line. Straight radial edges turn every hub into a
-    // starburst; arcs sweep between clusters and read as a web. Offset is perpendicular
-    // to the chord and scales with length, so short edges stay nearly straight.
-    var mx = (s.x + t.x) / 2, my = (s.y + t.y) / 2;
-    var vx = t.x - s.x, vy = t.y - s.y;
-    var len = Math.sqrt(vx * vx + vy * vy) || 1;
-    var bow = Math.min(46, len * 0.17);
-    var cx = mx + (-vy / len) * bow, cy = my + (vx / len) * bow;
-    svg += '<path class="kgl-e" d="M' + s.x.toFixed(1) + ',' + s.y.toFixed(1)
-        + ' Q' + cx.toFixed(1) + ',' + cy.toFixed(1) + ' ' + t.x.toFixed(1) + ','
-        + t.y.toFixed(1) + '"><title>' + kgEscape(e.rel) + '</title></path>';
+    var a = pos[e.source], b = pos[e.target];
+    if (!a || !b) return;
+    svg += '<line class="kgl-e" x1="' + a.x.toFixed(1) + '" y1="' + a.y.toFixed(1)
+        + '" x2="' + b.x.toFixed(1) + '" y2="' + b.y.toFixed(1) + '">'
+        + '<title>' + kgEscape(e.rel) + '</title></line>';
   });
 
   nodes.forEach(function(n) {
     var p = pos[n.id];
     if (!p) return;
-    // 2.2..5px, hubs barely 2x a leaf. Big circles with gaps read as a DIAGRAM; small
-    // dots packed tight read as a GRAPH. The previous 5..21px range was the single
-    // biggest reason this looked like five wheels rather than one web.
-    var r = 2.2 + Math.min(2.8, Math.sqrt(deg[n.id]) * 0.62);
-    // Hover shows the node's real properties — the payload already carries them, and a
-    // dot with no identity is the main complaint against this kind of picture.
-    var lines = [n.type + (n.label && n.label !== n.type ? ' — ' + n.label : '')];
-    Object.keys(n.props || {}).slice(0, 6).forEach(function(key) {
-      lines.push(key + ': ' + n.props[key]);
-    });
-    lines.push('connections: ' + deg[n.id]);
-    svg += '<circle class="kgl-n" cx="' + p.x.toFixed(1) + '" cy="' + p.y.toFixed(1)
-        + '" r="' + r.toFixed(1) + '" fill="' + (KG_COLOURS[n.type] || '#94a3b8')
+    // Hubs are drawn as hubs. The old range was 2.2-5px, so a 40-edge customer was
+    // barely twice a 1-edge transaction and no centre was visible at all.
+    var r = ring[n.id] === 'customer' ? 13 : ring[n.id] === 'concept' ? 9 : 3.4;
+    var cls = 'kgl-n' + (ring[n.id] ? ' kgl-hub' : '');
+    // Native <title>. A custom hover panel was tried here and reverted: the
+    // browser's own tooltip already works on an SVG child, survives every
+    // redraw of this view, and needs no listener to keep in step with it.
+    // Only the CONTENT of these lines changed - see kgNodeTip.
+    var lines = kgNodeTip(n, deg[n.id]);
+    svg += '<circle class="' + cls + '" cx="' + p.x.toFixed(1) + '" cy="' + p.y.toFixed(1)
+        + '" r="' + r + '" fill="' + (KG_COLOURS[n.type] || '#94a3b8')
         + '"><title>' + kgEscape(lines.join('\n')) + '</title></circle>';
   });
 
-  // Label only the hubs. Labelling all of them turns a 178-node picture into a wall of
-  // overlapping text; the rest carry their identity on hover.
-  nodes.forEach(function(n) {
+  // Every hub is labelled - all 24 of them. That is the point of the view: a reader
+  // should be able to name each centre without hovering.
+  customers.concat(concepts).forEach(function(n) {
     var p = pos[n.id];
-    if (!p || deg[n.id] < 20) return;
-    svg += '<text class="kgl-lab" x="' + p.x.toFixed(1) + '" y="' + (p.y - 14).toFixed(1)
-        + '" text-anchor="middle">' + kgEscape(n.label || n.type) + '</text>';
+    if (!p) return;
+    var isCust = ring[n.id] === 'customer';
+    svg += '<text class="kgl-lab' + (isCust ? '' : ' kgl-lab-con') + '" x="' + p.x.toFixed(1)
+        + '" y="' + (p.y - (isCust ? 19 : 15)).toFixed(1) + '" text-anchor="middle">'
+        + kgEscape(n.label || n.type) + '</text>';
   });
+
+  if (orphans.length) {
+    // Anchored to the orphan row itself, not to H: the viewBox is now the
+    // content's bounding box, and a caption positioned from the nominal canvas
+    // height would fall outside it and be clipped.
+    svg += '<text class="kgl-note" x="40" y="' + (H - 26 - 18) + '">'
+        + orphans.map(function(n) { return kgEscape(n.label || n.type); }).join(', ')
+        + ' — no relationships yet</text>';
+  }
 
   svg += '</svg>';
 
   var present = {};
   nodes.forEach(function(n) { present[n.type] = (present[n.type] || 0) + 1; });
-  var key = '<div class="kgs-key">' + Object.keys(present).sort().map(function(t) {
-    return '<span class="kgs-k"><i style="background:' + (KG_COLOURS[t] || '#94a3b8')
-         + '"></i>' + kgEscape(t) + ' ' + present[t] + '</span>';
-  }).join('') + '</div>';
+  var key = '<div class="kgs-key kgs-key-live">' + Object.keys(present)
+    .sort(function(a, b) { return present[b] - present[a] || a.localeCompare(b); })
+    .map(function(t) {
+      return '<span class="kgs-k"><i style="background:' + (KG_COLOURS[t] || '#94a3b8')
+           + '"></i>' + kgEscape(t) + ' ' + present[t] + '</span>';
+    }).join('') + '</div>';
 
   return svg + key;
 }
@@ -4586,12 +4932,15 @@ window.openLiveGraphModal = function(_isRedraw) {
 
 // Schema <-> Live switch. Both views keep their own entry point; neither replaces the
 // other — the schema diagram answers a question the live graph cannot, and vice versa.
+// Graph first, then Schema. The live graph is what the button opens and what a
+// reader wants to see - the database as it stands. The schema is the reference
+// view behind it, so it reads second rather than leading.
 function kgToggleHtml(active) {
   return '<div class="kg-switch">'
-    + '<button type="button" class="kg-vtab' + (active === 'schema' ? ' on' : '')
-    + '" onclick="openSchemaModal()">Schema</button>'
     + '<button type="button" class="kg-vtab' + (active === 'live' ? ' on' : '')
     + '" onclick="openLiveGraphModal()">Graph</button>'
+    + '<button type="button" class="kg-vtab' + (active === 'schema' ? ' on' : '')
+    + '" onclick="openSchemaModal()">Schema</button>'
     + '</div>';
 }
 

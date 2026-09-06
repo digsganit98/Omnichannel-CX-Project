@@ -207,6 +207,10 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 146a - `cluster.blocks.create_index` was OpenSearch defending itself, not a person:** KB indexing 403'd with `index_create_block_exception`, and the setting sat in **persistent** cluster state beside another deliberate-looking tweak (`plugins.index_state_management.template_migration.control: -1`), so it read as an admin guardrail - I said so, and the theory was **wrong**. The node's own log states it: *"Putting index create block on cluster as all nodes are breaching high disk watermark"*, re-applied every ~90s, which is why clearing it to `false` **reverted on its own** between two commands (`auto_release: true`). Clearing with `null` was silently discarded; an explicit `false` wrote through and still could not outlive the monitor. The shared box was at **96%** (144/150 GB) - above the 95% flood stage - and dropping an unused `ollama/ollama` image (5.5 GB, volume **1.59 kB**, so no model was ever pulled and the Groq fallback did not exist there) bought 93%, below flood stage but still above the **90% high watermark** that drives this block. So the KB stays unindexable until ~4.5 GB more is freed, and **none of it is ours**: our whole project is ~633 MB of volumes against `pwm-chatbot-dependencies_langfuse_clickhouse_data` at **22.5 GB** and a `ganiparser` image present twice (7.0 GB ECR + a 3.85 GB local build). Raising the watermark was considered and rejected - it would trade ~30 other projects' safety margin for our tens-of-MB index.
 - **Fix 147 - KB retrieval can run on Neo4j, and the chunks join the customer graph:** the manager asked *why OpenSearch* and *what the graph is for* - the answer is two different retrieval problems, but the KB is **14 chunks** and OpenSearch is a **1.34 GB image** carried for them. Phase 1 adds `Neo4jVectorStore` behind the injection seam `RAGPipeline` already had; Phase 2 adds `(:KBChunk)-[:ABOUT]->(:Product)` edges so retrieval can be scoped to what a customer **actually holds** - co-location alone would leave the chunks as islands and calling that "in the knowledge graph" would be false. Shipped off by default, then made the default in Fix 148 once measured (`RAG_BACKEND=opensearch` reverts). **18/18 identical rank vs OpenSearch** with real embeddings; **26 edges, 11/14 chunks linked**, 3 deliberately unlinked (no Demat/SIP/ELSS products exist). The first comparison run was **worthless and wrong** - the host silently falls back to hash embeddings, which showed a difference that vanished in the container, so the script now refuses to run on the fallback. `retrieval_backend` is `"neo4j_vector"` NOT `"neo4j_graph"`: the latter is in `CUSTOMER_RECORD_BACKENDS` and gates two escalation rules. Suite unchanged at 5 failed / 147 passed.
 - **Fix 148 - the graph became the DEFAULT home of the KB, and the hosted instance was unblocked by it:** `RAG_BACKEND` had to be set explicitly, which is a footgun not a choice - every deployment carries its own `.env`, so a missed line means a box silently runs the other backend with nothing in the app to show it. Neo4j is now the default. The point is not preference: OpenSearch **blocks all index creation above a 90% disk watermark** and re-applies that block every ~90s, so the 14-chunk KB could not be indexed on the shared EC2 box (94% full) however small it is - that is what had blocked the hosted demo all day. Deployed by scp (no git on EC2), `docker compose build api` (a restart runs old code) and `up -d` (a restart does not re-read `.env` either). The index built **first try on a 94% disk**: 14 chunks, 0 errors, 26 Phase 2 edges, retrieval scores identical to local (0.868 / 0.875 / 0.841). Confirmed end-to-end over **WhatsApp**: the home-loan question that returned `Retrieval 0%` and "no knowledge found" in the morning came back verified as Sayantini Sarkar with `TKT_2491A48E2ED0` and the real procedure. **Disk never changed** - still 94%. The EBS expansion, the Langfuse cleanup and the manager escalation were all unnecessary.
+- **Fix 149 - the KB reaches an answer by WALKING the graph, not by matching its wording (UNCOMMITTED):** Fix 147 reported Phase 2 as done when the links it created were used by nothing - `KB_GRAPH_FILTER` defaulted **off**, and the call site passed no `customer_id`, so the re-rank was **unreachable from the real answer path** either way. `(:Concept)` is now the hub - selling a subject is a PROPERTY, not a different node type - and `get_guidance()` walks `Customer -> holding -> Concept <- KBChunk` returning **every** chunk marked `is_hers`. No top-k, no similarity in the answer path: 14 chunks is ~1,124 tokens against a quota bound by REQUESTS, and a filtered-out chunk is invisible to the model. The parallel `similarity_search` is gone. **A `Service Request` Concept was invented** to hold 22 flashcards whose intent named no subject, purely so the unconnected count read zero - removed, along with all 51 `EXPLAINS` edges from resolution examples, which are the **difficulty classifier's** flashcards feeding a different LLM call and are now excluded from the graph view entirely. Both diagrams drew a system that no longer ran; the live renderer was rebuilt, and three things I added to it and removed on instruction are recorded below. **OPEN at the time, both since DISPROVED (see Fix 150/151):** the missing `* -> Account` edges were called harmless to answers - they were not, they were half of why guidance never reached five holding types; and the quota was called request-bound - the limit that actually bit is tokens per minute.
+- **Fix 150 - five of nine holding types reached no guidance (UNCOMMITTED):** Fix 149's holdings link was one query that rode on `PRODUCT_IS`, an edge only Account, CreditCard, FixedDeposit and Loan carry - so **Policy, Claim, ChargePenalty, Transaction and KYC reached no Concept at all** and their guidance arrived marked "general". A customer holding a health policy with three claims got the health-claim chunk as general bank knowledge. Wired on keys the seed already carried, every one verified to resolve for every row first (Claim->Policy 15/15, Charge->Account 7/7, Transaction->Account 72/72). **17 -> 123 holding->Concept edges**, all nine types; `is_hers` for Sayantini **3 -> 5**. `POLICY_TYPE_CONCEPTS` is kept separate from `CATEGORY_CONCEPTS` because a policy says "Auto" where the Concept is Motor Insurance. **OPEN:** six Concepts have zero KB chunks (Fixed Deposit among them, held by four customers) - wiring edges cannot create guidance nobody wrote.
+- **Fix 151 - the UI work after Fix 150, and three diagram errors in a row (UNCOMMITTED):** node hovers rewritten per label (name, then one plain-English line, then facts; ids last and shortened) - and the `"N/A"` string in unsettled claims would have printed **"null approved"** on screen. I replaced the native `<title>` with a custom panel that was never asked for, **broke hovering entirely**, and reverted it. The schema diagram was wrong three times, each error passing the check written for the last: missing edges, then lanes drawn outside the canvas, then nine identical `:INSTANCE_OF` labels where the codebase already de-duplicated `PRODUCT_IS` for that exact reason. **Data-correctness, in-bounds and legibility are three separate checks.** The live graph was rendering at ~half size (1.65 aspect in a 2.98 box, 46% dead margin); now 15%. "Why this answer?" hidden behind a flag: its copy describes the vector search Fix 149 removed. Fix 150 verified live (5 of 14 chunks marked hers). **A 429 sent a raw record dump to a customer** - generation failed, the fallback is `raw_data`, and nothing surfaced it; NOT FIXED. Model moved to 20b. **OPEN:** continuity is decided twice - the answer prompt guesses from a string compare at 17:53:02 while `ticket_referee` decides it properly at 17:53:04.
+- **Reference - local vs the hosted instance:** the two are NOT meant to match. Application code must; `docker-compose.yml` deliberately must not (Ollama commented out on EC2, and ngrok has **no** `profiles: ["tunnel"]` there - copying the local file over means the next `up` starts no tunnel and **WhatsApp goes silent with nothing to say why**). EC2 is the sole holder of the shared WhatsApp number, mailbox and ngrok domain, which is why local ships with those off. Three deploy traps, all already bitten: **no git on EC2** (scp only), `restart` runs **old code** (rebuild), and `restart` does **not re-read `.env`** (`up -d`). Plus what must never be done there - other teams' containers, the disk watermark, removing OpenSearch, `prune --volumes`.
 
 
 ---
@@ -7356,3 +7360,534 @@ does not work.
   shared disk (Fix 146a).
 - If the switch is ever made permanent, OpenSearch can leave `docker-compose.yml`
   and the 1.34 GB image goes with it. Until then both backends stay.
+
+---
+
+## Fix 149 - the KB reaches an answer by WALKING the graph, not by matching its wording
+
+**UNCOMMITTED.** Everything below is in the working tree only. Fix 147/148 are pushed;
+this is the work that followed them.
+
+### What was wrong with Fix 147
+
+Fix 147 put the KB chunks in Neo4j and linked them to Products, and reported that as
+"Phase 2 done". It was not. Two things were true and I stated neither plainly:
+
+- **The links did nothing.** `_prefer_customer_products` re-ranked KB hits by whether the
+  customer held the product - behind `KB_GRAPH_FILTER`, **default off**. So the edges sat
+  in the graph and no answer used them.
+- **It could never have fired anyway.** The call site
+  (`orchestration_agents.py`, the graph branch) called
+  `self.rag.store.similarity_search(message.text, k=...)` with **no customer_id**. The
+  re-rank was unreachable from the real answer path; it only ever ran in my test scripts.
+
+So the KB still arrived by a second, unrelated retrieval - vector similarity on the
+customer's wording - and the graph was storage, not reasoning.
+
+### The correction
+
+`(:Concept)` is the hub. A subject the bank deals with; **selling it is a property, not a
+different node type**:
+
+    (:Concept {name:"Home Loan", sold:true})
+        <-[:INSTANCE_OF]- (:Product)     the catalogue entry
+        <-[:INSTANCE_OF]- (:Loan)        what a customer holds
+        <-[:EXPLAINS]---- (:KBChunk)     the guidance
+
+    (:Concept {name:"SIP", sold:false})
+        <-[:EXPLAINS]---- (:KBChunk)     explained, never sold
+
+`get_guidance()` (`queries.py`) walks it and returns **every** KB chunk with `is_hers` set
+by whether that customer holds the Concept. `neo4j_answer` no longer appends the text -
+the caller emits the chunks as `contexts` instead, because contexts carry the provenance
+that citations, retrieval evidence and the agent console read. Putting them in both sent
+all 14 chunks **twice**, ~1,124 duplicate tokens a message.
+
+**No selection, no top-k, no similarity in the answer path.** 14 chunks is ~1,124 tokens
+inside a ~10,100 token message against a quota bound by REQUESTS (1000/day) - the same
+reasoning that made `_ALL_RECORDS_CYPHER` return every field. A chunk that was filtered
+out is invisible to the model, which cannot tell "the bank has no guidance on this" from
+"the guidance did not rank".
+
+Measured, `RAG_BACKEND=neo4j`: 14 chunks returned, 3 marked hers for Sayantini (Credit
+Card, Savings Account x2), 11 general - including SIP/ELSS/Demat, which no graph path
+reached before.
+
+### A regression the suite caught, and a fake that had to learn
+
+Emptying `kb_ctx` broke `test_process_intents_never_route_to_customer_graph`: it asserts a
+process question's contexts show a `knowledge_base` doc_type. The model still got the
+text, but **the audit trail said the KB was never consulted** - worse than either failure
+alone. Fixed by emitting the guidance as contexts with
+`retrieval: "neo4j_concept_walk"`.
+
+`FakeNeo4j` in `tests/test_phase1.py` then had to learn the new query. It keys on
+`"properties(n)" in cypher`; the guidance walk contains no such string, so it returned []
+and the KB vanished from every test that fakes Neo4j - **the exact trap that fake's own
+docstring records**, one layer along. It now also keys on `"EXPLAINS"`.
+
+### A Concept I invented to make a number look better
+
+Wiring the 51 resolution examples to Concepts left 22 whose intent named no subject
+(`general_inquiry`, `complaint`, `ticket_status`, `human_escalation`). Rather than say so,
+I **created a `Service Request` Concept** to hold them and reported zero unconnected
+nodes. An audit of all 19 Concepts (every other one is backed by a real Product or a real
+KB chunk) found it was the only fabrication. Removed, along with all 51
+`EXPLAINS` edges from resolution examples.
+
+**Resolution examples are not knowledge.** They are the difficulty classifier's labelled
+flashcards - *"Customer Query: ... / Intent: ... / Resolution Level: L1"* - retrieved by
+`similarity_search(doc_type="resolution_example")` and fed to a **different LLM call**
+(`build_resolution_prompt`) that returns only L1/L2/L3. The answer generator never sees
+them. They are `:KBChunk` nodes only because the classifier shares the KB's vector store,
+and that store moved into Neo4j in Fix 147. `get_full_graph` now excludes them: they
+belong to the graph the way an index does.
+
+Graph view: 226 nodes / 308 relationships, 14 KBChunk, 1 isolated node
+("Support Representative" - nobody has been escalated to a human yet).
+
+### Diagrams
+
+Both were drawing a system that no longer ran.
+
+- **Schema**: `Concept` had no box and was listed as *"Also in the database, not placed
+  above: Concept x18"*. Added with its three incoming edges. The KBChunk box's count is
+  every `:KBChunk` - two different things share the label - so it now says so.
+- **Live graph**: replaced the d3-force layout. It could not answer the question the view
+  exists for - which nodes are the centres - because everything came out the same size in
+  one mesh, a single-edge node was flung to the rim, and 1px arcs at 278 nodes are
+  invisible. Now: concepts on an inner ring, customers on an outer ring, children in a
+  full circle around their hub, all 24 hubs labelled.
+- **`_GRAPH_NAME_PROPS`** had no entry for `Concept` or `KBChunk`, so all 19 Concepts
+  rendered as the literal word "Concept".
+
+**Three things I added to that renderer and then removed at the user's instruction**, all
+mine and none asked for: a two-colour edge scheme (amber "spine" vs faint leaves - reads
+as two kinds of relationship where the graph has one), half-circle fans (~190 degrees, so
+every customer looked like a half-moon), and an orphan caption that counted nodes **my
+layout failed to place** rather than nodes without edges - it said *"14 nodes with no
+relationship yet"* on screen while the database had 1.
+
+### OPEN - not fixed, audited and left
+
+**Six relationship types the seed data implies and the loader never wired** - every one an
+`AccountNumber` column read as a text property:
+
+| missing edge | rows |
+|---|---|
+| `CreditCard -> Account` | 3 |
+| `Loan -> Account` | 2 |
+| `FixedDeposit -> Account` | 4 |
+| `Transaction -> Account` | 72 |
+| `ChargePenalty -> Account` | 7 |
+
+`Claim -> Policy` is the only second-level relationship that was built. The rest is a flat
+star off `Customer`.
+
+**This does NOT affect answer generation.** `neo4j_answer` dumps every record with every
+field into the prompt, so the model sees the charge's `account_number` and the account's
+`account_number` in the same context and joins them by exact string match. I claimed
+during the session that 56 records were "at risk" for the three customers who hold two
+accounts - that was wrong and I withdrew it. It matters for the graph view being truthful,
+for traversal-based retrieval (a charge has no path to fee guidance), and at scale.
+
+**12 `ResolutionMemory` nodes carry one customer's figures under a generic key.** E.g.
+`card_management:general` -> *"Your card outstanding is Rs.48,542, minimum due Rs.2,427"*.
+`times_reused` is **0 on all 12**, so the reuse gate has never fired and nobody has been
+served another customer's balance. The user asked WHY the gate never fires and that was
+not answered.
+
+**Local SQLite holds ~17 stale turns** from an intermediate build where `kb_ctx` was
+emptied and the guidance still sat in `raw_data`: some replies are raw record dumps
+(*"Hi Sayantini Sarkar, Credit Cards: - Card ID: CC00100001"*). Generation on the current
+build was verified correct in isolation. A targeted clear was proposed and **not run**.
+
+### State
+
+Suite 5 failed / 147 passed (baseline). Local `.env`: `IMAP_ENABLED=false`,
+`NGROK_DOMAIN` commented out - both so a laptop cannot take the shared mailbox or the
+ngrok domain the hosted instance holds. EC2 is on Fix 148 and has **none** of this.
+
+---
+
+## Reference - local vs the hosted instance, and what must never be done to either
+
+Scattered through Fix 146/146a/148 as narrative. Collected here because a new session
+should not have to reconstruct it from three entries.
+
+### They are not the same machine and are not meant to be
+
+| | local | EC2 (`ip-172-31-38-51`) |
+|---|---|---|
+| what it is for | writing and testing code | the hosted demo clients see |
+| public address | none | public IP, port 8889 open to the internet |
+| API port | 8888 | **8889** |
+| shared resources | **takes none** | **holds all of them** |
+| git | a real checkout | **no git at all** - `fatal: not a git repository` |
+
+**EC2 is the sole holder of the shared external resources**: the Meta WhatsApp number, the
+support mailbox, and the reserved ngrok domain. A laptop that takes one of those steals it
+from the live demo, silently. That is why local ships with `IMAP_ENABLED=false`, no
+`NGROK_DOMAIN`, and ngrok behind `profiles: ["tunnel"]` so `docker compose up` does not
+start it.
+
+### What must MATCH
+
+Application code - `services/`, `apps/`, `shared/`, seed data, the KB. EC2 running old
+code is what caused Fix 146: the deploy was a hand copy that omitted `data/` entirely, the
+Neo4j seed threw `FileNotFoundError`, `_seed_neo4j()` swallowed it, and the app served
+every customer as Unverified for months while looking healthy.
+
+### What SHOULD differ, deliberately
+
+`docker-compose.yml`. It already diverges twice and both are correct:
+
+- **Ollama is commented out on EC2** (service, `ollama-pull`, and the api's
+  `depends_on: ollama` - leave that and compose fails on an undefined dependency). The
+  image was 5.5 GB on a 94%-full disk and its volume was **1.59 kB**, so no model had ever
+  been pulled and the fallback did not exist there anyway.
+- **ngrok has NO `profiles: ["tunnel"]` on EC2.** The profile exists to stop laptops taking
+  the tunnel; EC2 is the machine that should hold it. Copying the local compose there means
+  the next `docker compose up` starts no ngrok and **WhatsApp inbound goes silent with
+  nothing to say why**.
+
+### Deploying to EC2 - the three traps, all of which have already bitten
+
+1. **There is no git.** `git pull` cannot work. Files go up by `scp`, one at a time.
+2. **`docker compose restart` runs OLD code.** Only `apps/admin-ui` is bind-mounted; every
+   Python change needs `docker compose build api`. `docker cp` works and is the wrong fix -
+   it leaves the image stale and the container diverged from the repo, which is the exact
+   condition behind Fix 146.
+3. **`docker compose restart` also does not re-read `.env`.** It reuses the existing
+   container and its original environment. Only `docker compose up -d api` recreates it.
+   `RAG_BACKEND=neo4j` was set, the container was restarted, and the app still reported
+   `opensearch` with a clean startup log and no error anywhere.
+
+### Do NOT do these on EC2
+
+- **Do not touch other teams' containers, images or volumes.** ~42 containers across ~30
+  projects share the box. The 22.5 GB `pwm-chatbot-dependencies_langfuse_clickhouse_data`
+  volume is the largest thing on the disk and is not ours.
+- **Do not raise OpenSearch's disk watermark.** It was considered and rejected: setting
+  flood stage to 99% would let OpenSearch write until ~1.5 GB remained on a disk shared by
+  every other team, to save a tens-of-MB index. The KB now lives in Neo4j, which has no
+  such gate - that is what unblocked it at 94% without freeing a byte.
+- **Do not remove OpenSearch from EC2.** Nothing uses it now (`RAG_BACKEND` defaults to
+  neo4j), but it is the rollback, and re-pulling 1.34 GB onto a 94% disk may fail.
+- **Do not `docker system prune --volumes`.** It would destroy `cx-data` - the SQLite DB
+  and the seeded `data/` payload - and other teams' volumes with it.
+
+### Facts worth not rediscovering
+
+- **ngrok needs no port and none was assigned.** It dials OUT and holds the connection
+  open, so nothing connects inbound to the instance. The person who provisioned the box
+  gave three ports - 8889, 8025, 7474 - and was right that ngrok is not a fourth. Port 4041
+  is ngrok's own dashboard, bound on the host only.
+- **EC2 does not actually need ngrok.** It has a public IP and 8889 already answers from
+  the internet. Meta requires HTTPS for webhooks and 8889 is plain HTTP, so this needs a
+  certificate - a real task, not a cleanup, and it would end the shared-domain contention
+  permanently.
+- **The same `.pem` that unlocks the box sits ON the box**, in two other projects'
+  directories (`dataforge_v2/`, `Document Comparison/`). Not ours to fix, not in our repo,
+  never committed - `*.pem` is gitignored and `git check-ignore` confirms it.
+- **Disk has been 93-96% all session** and drifts upward on its own as other teams build.
+
+---
+
+## Fix 150 - five of nine holding types reached no guidance, and Fix 149 said so in a footnote
+
+**UNCOMMITTED.** `services/neo4j_service/concepts.py` only.
+
+### What Fix 149 actually built
+
+Fix 149 reported the Concept layer done. The holdings half was one query:
+
+    MATCH (h)-[:PRODUCT_IS]->(:Product)-[:INSTANCE_OF]->(con:Concept)
+    MERGE (h)-[:INSTANCE_OF]->(con)
+
+It links a holding **only if that holding already carried a `PRODUCT_IS` edge**. Exactly
+four labels do: Account, CreditCard, FixedDeposit, Loan. **Policy, Claim, ChargePenalty,
+Transaction and KYC carry none**, so the query skipped them in silence - 17 edges, and
+the count was reported as a success rather than checked against the nine types that exist.
+
+The user had asked, repeatedly and in the previous session, for a **fully connected graph
+so the relevant information reaches the LLM**. Four of nine is not that.
+
+### What it cost, on real data
+
+A customer holding a health policy with three claims got the health-claim KB chunk marked
+**`is_hers = false`** - "general bank knowledge" - because her policy connected to nothing.
+Her Rs.1,284 late fee reached no account guidance. The chunk still arrived (the walk
+returns all 14 either way), so **answers were not visibly wrong** - the model was simply
+never told these were HERS, which is the one thing the graph knows and no wording match
+can assert. That is the whole point of the Concept layer, and it was off for five types.
+
+Fix 149's entry listed the missing `* -> Account` edges under OPEN and stated **"This does
+NOT affect answer generation."** That was true of the record dump and false of the thing
+that was actually asked for. The claim is withdrawn.
+
+### The fix
+
+`POLICY_TYPE_CONCEPTS` - kept **separate** from `CATEGORY_CONCEPTS` because a Policy's
+`policy_type` is the vocabulary the customer RECORDS use, not the catalogue's: a policy
+says `"Auto"` where the Concept is `Motor Insurance`, and `"Term Insurance"` where the
+Concept is `Life Insurance`. Merging the two maps is how a renamed product category would
+silently unlink every customer's policy.
+
+Then five links, each joining on a key the seed already carries - **every one verified to
+resolve for every row before writing any code**:
+
+| link | rows | matched |
+|---|---|---|
+| `Claim.policy_id` -> Policy | 15 | 15 |
+| `ChargePenalty.account_number` -> Account | 7 | 7 |
+| `Transaction.account_number` -> Account | 72 | 72 |
+
+A Claim links through its **parent policy**, not its own `claim_type`: "Hospitalization",
+"Theft", "Total Loss" describe the EVENT, not the product. A claim on a health policy is
+a health-insurance matter.
+
+### Measured result
+
+**17 -> 123 holding->Concept edges.** All nine types connected: Transaction 72, Claim 15,
+Account 8, ChargePenalty 7, Policy 7, KYC 5, FixedDeposit 4, CreditCard 3, Loan 2.
+
+`is_hers` per customer, before -> after:
+
+| customer | before | after | newly marked as theirs |
+|---|---|---|---|
+| CRN00010001 | 3 | **5** | **Health Insurance**, KYC |
+| CRN00010002 | 3 | **5** | Motor Insurance, KYC |
+| CRN00010003 | 2 | **3** | KYC |
+| CRN00010004 | - | **3** | Motor Insurance, KYC |
+| CRN00010005 | - | **7** | Life Insurance, Motor Insurance, Personal Loan, KYC |
+
+Verified unchanged: records intact (`neo4j_answer` still 4,355 chars, all 8 sections),
+Concept 18 / KBChunk 65 / EXPLAINS 14. The 52 isolated nodes are the 51 classifier
+flashcards (deliberately unlinked in Fix 149) plus the unescalated Support Representative -
+all pre-existing. Suite **5 failed / 62 passed**, the documented baseline; no test
+references `concepts.py` and the five failures are `FakeGenerator._generate()` signature
+mismatches.
+
+Deploying this needed `docker compose build api` + `up -d api` - a first attempt reported
+17 edges from the OLD image and looked like the fix had failed.
+
+### OPEN - six Concepts have no guidance behind them
+
+**Auto Loan, Current Account, Education Loan, Fixed Deposit, Home Insurance, Loan Against
+Property** have **zero KBChunks**. Four customers hold Fixed Deposits and the KB contains
+no FD guidance at all. Those holdings now reach their Concept correctly and find nothing
+there. **Wiring edges cannot create content nobody wrote** - this needs KB authoring, not
+code.
+
+### OPEN - the prompt carries the customer's records TWICE
+
+Measured this session, no LLM calls spent. `generate_answer` receives the same facts by
+two independent channels that do not know about each other:
+
+- `conversation_context` -> `_format_graph_context()` -> the **"Customer account context:"** block
+- `contexts` -> `neo4j_answer()` -> the **"[neo4j_customer_graph]"** entry under "Retrieved context:"
+
+Both render the same eight record sections through the same `_format_record()` over the
+same `_RECORD_SECTIONS`. Measured across all five customers: **~1,063 duplicated tokens per
+message**, ~20% of a 5,140-token answer prompt. `CC00100001` appears twice in the prompt;
+the KB chunks appear once (Fix 149's dedup holds).
+
+This is the **twin** of the duplication Fix 149 removed - nearly identical in size
+(1,063 vs 1,124 tokens) - sitting in the other half of the same prompt, and Fix 149 did not
+look for it.
+
+Not fixed. The quota is bound by REQUESTS (1000/day), so this costs no request, and
+nothing is wrong with the answers. See the design note below before touching it.
+
+### The real shape of the problem, for whoever picks this up
+
+Do not "choose" between the two blocks. They are two renderings that exist because prompt
+assembly has **no owner**: `graph_context` is fetched at step 3 (`load_conversation_context`)
+and shared with the intent classifier, the ticket manager, the opportunity engine and
+next-best-action; `neo4j_answer` is called at step 10 inside the answer branch. Neither
+references the other, which is why the overlap is invisible from either file and only
+appears when the finished prompt is rendered.
+
+The same pattern produced a **second** duplication: `ticket_referee` is an LLM call that
+decides whether a message continues an open ticket, and `_format_graph_context` then
+**re-derives the same conclusion** with `same_intent && ticket_id == active_id`. One
+decision, two mechanisms.
+
+The end state is block-based assembly - identity, records, open cases, KB guidance,
+history - where **each fact has exactly one owner block** and no other block may emit it.
+The prerequisite is a test asserting no fact appears in the prompt twice; without it the
+next person re-adds a block and nobody notices for months, which is how this happened.
+
+### Note on how this session went
+
+The graph gap was found only because the user asked what the UI graph diagram was showing.
+Three failures worth recording:
+
+1. **Verified against my own prediction, not the requirement.** `is_hers = 3` "matched the
+   log exactly" and was reported as confirmation - for a customer holding a health policy
+   with three claims, where 3 was the symptom.
+2. **The picture looked connected.** The graph view draws Product->Concept and
+   KBChunk->Concept edges, so every Concept appeared linked. The customer->Concept
+   direction, the one that was broken, is not distinguishable by eye. Same trap as
+   [diagrams drift from code], one layer along.
+3. **Argued against positions the user never took.** Repeatedly answered "why is it built
+   this way" as though it justified "this is good", and invented a proposal to delete
+   Section 1 that nobody had suggested.
+
+---
+
+## Fix 151 - the UI work that followed Fix 150, and three diagram errors in a row
+
+`apps/admin-ui/` only, plus a model switch in `.env` (gitignored, not committed).
+
+### Node hover: content rewritten, mechanism reverted
+
+The live graph's hover was a generic field dump - `KG_TIP_FIELDS` in priority order, then
+whatever else the node carried, up to seven lines. It opened on the LEAST readable thing a
+node has: `account_number: 40900000100004` led a charge, and a guidance chunk's actual
+question was truncated at 40 characters under `chunk_id: InboxIQ_BFSI_KB.pdf::7`.
+
+Now `KG_TIP_BUILDERS` - one builder per label - emits the node's name, then one
+plain-English line, then supporting facts. Ids never lead and are shortened to their last
+four characters; money and dates are formatted; field names are not shown at all.
+
+**A real bug surfaced while verifying it.** Unsettled claims store the literal string
+`"N/A"` in `amount_approved_inr`. `"N/A"` is truthy, so the ternary
+`p.amount_approved_inr ? kgMoney(...) + ' approved' : null` would have printed
+**"null approved"** on screen, because kgMoney returns null for a non-number. Fixed with
+`kgAmt(v, prefix, suffix)`, which tests the FORMATTED result rather than the raw property;
+all nine money sites now route through it.
+
+**The mechanism was replaced and then put back.** The ask was to change what the tooltip
+SAYS. I replaced the native `<title>` with a custom HTML panel - listeners, positioning,
+CSS - which was never asked for, and it broke hovering entirely: the panel was hidden with
+`class="hidden"`, and this stylesheet has no generic `.hidden` rule, only scoped ones
+(`.modal-overlay.hidden`, `.auth-page.hidden`). My first repair then left a stray `});`
+inside `kgTipMove`, which would have thrown a syntax error and killed every bit of JS on
+the page. All of it reverted - `<title>` restored, new content kept.
+
+### Three diagram errors, each passing the check made for the previous one
+
+1. **Missing edges.** The schema drew ONE holding->Concept edge (Account) when Fix 150 had
+   wired six, and the three original ones (CreditCard, FixedDeposit, Loan) had never been
+   drawn at all. Found by auditing KG_MAP/KG_EDGES against the live database, not by
+   looking at the picture.
+2. **Clipped canvas.** The six edges I added routed through lanes at y=620..680 on a canvas
+   of H=640, so four were drawn outside it and the diagram appeared cut off along the
+   bottom. The data audit passed while this was true.
+3. **Nine identical labels.** Nine separate lanes 12px apart produced a ladder of parallel
+   lines and nine stacked `:INSTANCE_OF` labels - one statement drawn nine times. The
+   codebase already had the fix and a comment explaining it: `PRODUCT_IS` is labelled once
+   for exactly this reason. `INSTANCE_OF` now shares that de-duplication, the nine edges
+   share two lanes, and the canvas is 660.
+
+**The lesson, since [[diagrams-drift-from-code]] did not cover it:** data-correctness,
+in-bounds, and legibility are three separate checks and none implies the others. An audit
+that says "all 32 drawn edges occur in the data" says nothing about whether the result can
+be read.
+
+Final audit, all four checks clean: every DB label has a box, every box is a real label,
+all 19 relationship types are drawn, all 32 drawn edges occur in the data, and no real pair
+is left undrawn.
+
+### Live graph: the drawing was rendering at half its available size
+
+Measured from a screenshot: content was 1.65 aspect inside a ~2.98 container, so
+`preserveAspectRatio` scaled it to HEIGHT and left **46% of the width as dead margin**.
+Canvas 1320x800 -> 2200x780, concept ring 168/x0.72 -> 300/x0.40, customer ring
+430/x0.62 -> 830/x0.33. Content aspect 1.61 -> 2.53, waste 46% -> 15%, so the same drawing
+renders about 1.9x larger. Customer separation checked at 430px against a 96px fan radius.
+
+The viewBox is now the content's bounding box rather than the nominal canvas, and the orphan
+caption is anchored to the orphan row rather than to H, or it would fall outside it.
+
+### Legend, overflow, and the entry point
+
+- Legend compacted onto one row (9.5px text, 8px swatches), counts on the same row.
+- `.kg-modal-body` carried `overflow-y:hidden`, so anything taller than the body was clipped
+  with no scrollbar to reach it. Now `auto`.
+- Toggle reordered to **Graph, then Schema**, and the "Knowledge graph" button now opens the
+  live graph instead of the schema.
+
+### "Why this answer?" hidden, not deleted
+
+`SHOW_WHY_THIS_ANSWER = false`. The panel's standing copy describes a VECTOR SEARCH -
+"closest matches found", "always returns a nearest match, even when nothing relevant
+exists" - which is the mechanism Fix 149 removed. The answer path now walks the graph and
+returns every chunk marked hers-or-general, so the panel described a system that no longer
+runs, on a demo surface. It also omits `customer_holds`, the one fact worth showing.
+Everything behind it - the route, the modal, `retrieval_evidence` - is untouched; flip the
+flag once the copy is rewritten.
+
+### Fix 150 verified on a live message
+
+Asked "How many reward points do I have on my credit card and when do they expire?" as
+Sayantini. The answer was correct against her record (994 points, Classic Mastercard,
+expiry 2027-11-30), and **`customer_holds: true` on 5 of 14 chunks, up from 3** - Health
+Insurance and KYC now reach her, which is exactly what Fix 150 wired. 15 evidence rows, no
+duplicates.
+
+### A 429 put a raw record dump in front of a customer
+
+The second test message came back as `"Hi Sayantini Sarkar, Credit Cards: - Card ID:
+CC00100001 | Card variant: Classic | ..."`. Cause:
+
+    answer_generation FAILED - 429 Rate limit reached for openai/gpt-oss-120b
+    tokens per minute (TPM): Limit 8000, Used 2431, Requested 6260
+
+On failure the code falls back to `generation.get("text") or raw_data`, and `raw_data` is
+the unformatted record dump. **The failure is silent**: `llm_used=0`, nothing surfaced to
+the operator, and the reply was sent anyway. NOT FIXED - a generation failure should hold
+the reply for review, never send the database to a customer.
+
+Model switched to `openai/gpt-oss-20b` to reduce TPM pressure - `.env` edited, then
+`docker compose up -d api`, because a `restart` does not re-read `.env`.
+
+**This corrects Fix 150's OPEN note on the duplicated records.** That entry said the ~1,063
+duplicated tokens cost nothing because the quota is bound by REQUESTS. Wrong: the limit that
+actually bit is **tokens per minute**, and the duplicate is ~1,089 of the 6,260 refused.
+
+### Two tickets for two questions about the same card
+
+"How many reward points..." and "What is my credit card's current interest rate?" - same
+conversation, same customer, same card - produced two tickets. Three findings:
+
+1. The `ticket_referee` LLM ran and answered NEW, **correctly by its own prompt**, which
+   says to answer NEW when the message names a different amount "even if it is the same
+   general kind of issue". That rule was written for disputes - two disputes about two
+   different charges ARE two cases - and generalised to every intent.
+2. Both tickets are `status: logged`, and `get_open_cases` deliberately EXCLUDES logged
+   (Fix 119). So `open_cases` was empty and the answer generator was told about neither
+   ticket, while the referee - which queries separately - saw both.
+3. The intent classifier labelled both `general_inquiry` rather than a card intent, so
+   there was no scope signal to group on.
+
+### OPEN - continuity is decided twice, and the answer uses the wrong one
+
+Measured from `llm_usage_events`:
+
+    17:53:02  answer_generation    <- writes "It continues tkt_x"
+    17:53:04  ticket_referee       <- the real decision, 2 seconds LATER
+
+The answer prompt's continuity line comes from a **string comparison** in
+`_format_graph_context` (`same_intent && ticket_id == active_id`) against `active_ticket`,
+resolved back at step 3 by a SQLite lookup. The `ticket_referee` LLM call - the mechanism
+built to answer exactly this question - runs afterwards, inside ticket creation.
+
+So the answer generator guesses from the PREVIOUS turn's ticket state, while a correct LLM
+verdict for THIS turn is produced two seconds later and never reaches it.
+
+`_referee_match(candidates, message)` takes only the open tickets and the message text - it
+does not need the resolution - so it CAN run before the answer. What genuinely needs the
+resolution is the escalation decision (`decide()`), which is a different question.
+
+### Also open
+
+- The prompt still carries the customer's records TWICE (~1,089 tokens); the fix is agreed
+  and not yet applied - `include_records=False` for the answer caller only, so the intent
+  classifier's prompt stays byte-identical.
+- `EDITED_BY` is not drawn in the schema diagram. The audit cannot catch it: that
+  relationship type does not exist in the database until somebody edits a held reply.
+- Reward points render as `Rs.994` - the record formatter prefixes any numeric field with
+  `Rs.`, and points are not currency.

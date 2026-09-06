@@ -425,17 +425,52 @@ class QueryResolutionAgent:
                         # LLM call on every message. Against a 1000-request/day budget and
                         # ~8 calls per message already, that is a wasted call per customer
                         # message for nothing.
+                        # The KB used to be fetched here by a SECOND retrieval - a vector
+                        # similarity search, ranked on the customer's wording, top 4. It is
+                        # now inside raw_data above: neo4j_answer walks
+                        # Customer -> holding -> Concept <- KBChunk and appends every chunk,
+                        # each marked as guidance for something she HOLDS or as general.
+                        #
+                        # Two things the old shape could not do. A chunk about a product she
+                        # holds could rank 5th on wording and never arrive - the graph knows
+                        # it is hers regardless of phrasing. And a chunk about a product she
+                        # does NOT hold ("how do I apply for a home loan?") was reachable
+                        # only by similarity; it now always arrives, marked general.
+                        #
+                        # The similarity path is still there behind Priority 3 below, for
+                        # customers with no records at all - nothing to walk from.
+                        #
+                        # The chunks are ALSO emitted as contexts, not only folded into
+                        # raw_data. contexts is the audit trail - citations, retrieval
+                        # evidence and the provenance panel all read it, and
+                        # test_process_intents_never_route_to_customer_graph asserts a
+                        # process question shows a knowledge_base doc_type. Passing the
+                        # text to the model while leaving contexts empty answers the
+                        # customer correctly and tells the operator the KB was never
+                        # consulted, which is worse than either.
                         kb_ctx = []
                         try:
-                            kb_ctx = self.rag.store.similarity_search(message.text, k=rag_top_k()) or []
+                            from services.neo4j_service.queries import get_guidance
+
+                            for item in get_guidance(self.neo4j_client, customer_id):
+                                kb_ctx.append({
+                                    "text": item["text"],
+                                    # Held guidance outranks general: the graph knows she
+                                    # owns the product, which no wording match can assert.
+                                    "score": 0.9 if item["is_hers"] else 0.6,
+                                    "metadata": {
+                                        "source": f"kb_graph:{item['concept']}",
+                                        "doc_type": "knowledge_base",
+                                        "concept": item["concept"],
+                                        "customer_holds": item["is_hers"],
+                                        "retrieval": "neo4j_concept_walk",
+                                    },
+                                })
                         except Exception:
-                            # Logged, not silent. A bare swallow here hid the KB going
-                            # missing entirely: a rag object without a `store` raises
-                            # AttributeError, the except caught it, and every reply was
-                            # generated from the customer's records alone with nothing on
-                            # screen or in the logs to say the knowledge base had dropped
-                            # out. Found when a test's fake had no store.
-                            logger.warning("kb_retrieval_failed_in_graph_branch", exc_info=True)
+                            # Same reasoning as the similarity call this replaced: logged,
+                            # never silent. A graph that stops returning guidance must be
+                            # visible, not degrade quietly to records-only replies.
+                            logger.warning("kb_guidance_walk_failed", exc_info=True)
                             kb_ctx = []
                         combined_ctx = neo4j_ctx + kb_ctx
                         # Pass through Groq so the LLM produces a natural CS response

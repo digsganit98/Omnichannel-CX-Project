@@ -183,6 +183,26 @@ class FakeNeo4j:
         if "phone" in cypher or "email" in cypher:
             return [{"customer_id": "CUST-001", "email": "customer@example.com",
                      "phone": "+919999999999", "city": "Mumbai"}]
+        # The Concept walk that replaced the KB's similarity search. Keyed on the
+        # relationship type rather than on a column name: the query returns `text` /
+        # `concept` / `is_hers`, and `text` is far too common a word to key a fake on.
+        #
+        # Without this branch the guidance walk returns [], the KB never reaches
+        # `contexts`, and every test asserting a process question saw the knowledge
+        # base fails - the exact trap the docstring above records, one layer along.
+        # One chunk is marked is_hers to exercise both headings.
+        if "EXPLAINS" in cypher:
+            return [
+                {"text": "Q: How do I apply for a home loan? A: Submit the application "
+                         "form with KYC documents, income proofs and property papers.",
+                 "concept": "Home Loan", "is_hers": False},
+                {"text": "Q: How do I file a health insurance claim? A: Inform the "
+                         "insurer within 24-48 hours of hospitalisation.",
+                 "concept": "Health Insurance", "is_hers": False},
+                {"text": "Q: What are the requirements for a personal loan? A: A stable "
+                         "income, a good credit score and minimal existing debt.",
+                 "concept": "Personal Loan", "is_hers": True},
+            ]
         return []
 
     def write(self, cypher, params=None):

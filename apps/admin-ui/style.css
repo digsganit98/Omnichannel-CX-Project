@@ -1024,6 +1024,16 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 /* Knowledge-graph schema: real SVG, fixed layout, drawn edges. */
 .kgs-wrap{width:max-content;min-width:100%}
 .kgs{display:block;width:auto;max-width:none;height:calc(var(--kgs-h,600px) * var(--kgs-s,1));max-height:calc(96vh - 200px)}
+/* The live view carries a 19-chip key that wraps to two rows, so its header is
+   taller than the 200px the shared cap assumes and the drawing was clipped at
+   the foot. Give that view its own budget rather than truncating the key. */
+.kgs-live{max-height:calc(96vh - 250px);width:100%;height:auto}
+/* The live view's key is 19 chips, which wrapped to two rows and pushed the drawing
+   past the 200px header the cap above assumes - so the picture was clipped at the
+   bottom. Tighter chips keep it to one row, and the cap then holds. */
+.kgs-key-live{gap:4px 9px;font-size:9.5px;line-height:1.45}
+.kgs-key-live .kgs-k{white-space:nowrap}
+.kgs-key-live i{width:8px;height:8px}
 .kgs-e{fill:none;stroke:#cbd5e1;stroke-width:1.4}
 .kgs-el{font-size:11.5px;font-weight:700;fill:var(--t2);font-family:ui-monospace,Menlo,Consolas,monospace}
 .kgs-h{font-size:9.5px;font-weight:700;letter-spacing:.5px;text-transform:uppercase}
@@ -1063,11 +1073,22 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 /* Edges are the DOMINANT element, not faint threads behind the nodes: in a graph
    drawing you should see the web first and the dots second. fill:none matters now
    that these are <path> arcs rather than <line>. */
-.kgl-e{fill:none;stroke:#6b7fb5;stroke-width:.7;stroke-opacity:.75}
+/* Leaf edges: a record to the customer or concept it belongs to. Was .7px at 75%
+   opacity, which at 278 nodes is invisible - so connected leaves read as loose
+   dots and the graph looked disconnected when it never was. */
+.kgl-e{fill:none;stroke:#7c8fc9;stroke-width:1;stroke-opacity:.5}
+.kgl-note{font-size:10px;fill:#94a3b8;pointer-events:none}
 .kgl-n{stroke:none;cursor:pointer;transition:stroke .12s}
+/* Hubs get a ring so a centre reads as a centre. Sizing alone was not enough:
+   the old scale made a 40-edge customer barely twice a 1-edge transaction. */
+.kgl-hub{stroke:#0f1420;stroke-width:2}
 .kgl-n:hover{stroke:#fff;stroke-width:1.4}
 /* Small, dim: a label must not out-weigh the node it names. */
 .kgl-lab{font-size:9px;fill-opacity:.85;font-weight:600;fill:#e2e8f0;pointer-events:none}
+/* Concepts read differently from customers on purpose: a customer name is one
+   person's corner of the graph, a Concept is the shared spine several corners
+   meet on. Same size, lighter weight, warmer hue - present without competing. */
+.kgl-lab-con{font-weight:500;fill:#fcd34d;fill-opacity:.95}
 /* The live view colours by node TYPE and fills the swatch, so the shared .kgs-key
    border (which inherits currentColor) would ring every chip in body text colour. */
 .kgs-live ~ .kgs-key i,.kg-legend .kgs-key i{border-color:transparent}
@@ -1083,3 +1104,30 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .kg-vtab + .kg-vtab{border-left:1px solid var(--bdr)}
 .kg-vtab:hover{background:var(--surf2);color:var(--t1)}
 .kg-vtab.on{background:var(--blue);color:#fff}
+
+/* Graph modal: give the diagram the vertical space back.
+   The legend bar was its own band under the header - 14 chips wrapping to two
+   rows plus a counts line, ~80px of a ~570px card, while the diagram below it
+   was letterboxed into what remained. The chips are reference material, not a
+   heading: they belong on one dense row, and the counts belong on that row too
+   rather than owning a line of their own. */
+.kg-legend{padding:5px 16px 6px;gap:5px 10px;line-height:1.3}
+.kg-legend .kgs-key{gap:4px 10px;font-size:9.5px;flex:1 1 auto}
+.kg-legend .kgs-key span{gap:4px}
+.kg-legend .kgs-key i{width:8px;height:8px;border-radius:2px;border-width:1px}
+/* On the same row as the chips, hard right, instead of below them. */
+.kg-legend .kg-counts{margin-left:auto;white-space:nowrap;align-self:center;font-size:9.5px}
+/* The body's own padding added a third band of dead space above the drawing. */
+.kg-modal-body{padding:4px 10px 8px}
+
+/* Both diagrams were cut off along the bottom edge.
+   .kg-modal-body carries overflow-y:hidden, so anything taller than the body is
+   clipped with no scrollbar to reach it - and the schema view stacks an
+   explanatory note ABOVE its svg, which pushes the diagram down by however tall
+   that note wraps to. Combined with the taller .kgs-live cap this change added,
+   the last row of both pictures fell outside the box.
+   Scroll instead of clip: a diagram that does not fit should still be reachable. */
+.kg-modal-body{overflow-y:auto}
+/* Leave the svg room for the note above it and the key below, rather than
+   letting it claim the body's whole height and push them out of view. */
+.kgs-live{max-height:calc(96vh - 190px)}

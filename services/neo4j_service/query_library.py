@@ -345,6 +345,11 @@ _GRAPH_NAME_PROPS = {
     "ResolutionMemory": ("intent", "memory_key"),
     "Agent": ("name", "agent_id"),
     "KYC": ("status", "customer_id"),
+    # Without these two the live graph fell back to the LABEL, so every Concept on
+    # screen read "Concept" - nineteen identical words on the one node type whose
+    # whole job is to say which subject a cluster is about.
+    "Concept": ("name",),
+    "KBChunk": ("topic", "concept", "chunk_id"),
 }
 
 
@@ -365,12 +370,22 @@ def get_full_graph(client, limit: int = 3000) -> dict:
     if client is None:
         return {"nodes": [], "edges": [], "reachable": False}
     try:
+        # Resolution examples are excluded. They are :KBChunk nodes only because the
+        # difficulty classifier shares the KB's vector store, and that store moved into
+        # Neo4j - they are its labelled flashcards ("a question like this is L1"), read
+        # by a different LLM call than the one that writes a customer's reply, and they
+        # carry no knowledge about any customer or product. Drawing them put 51 nodes
+        # in a customer knowledge graph that belong to it the way an index does.
         rows = client.query(
-            "MATCH (n) RETURN id(n) AS nid, labels(n)[0] AS label, properties(n) AS props "
+            "MATCH (n) WHERE coalesce(n.doc_type, '') <> 'resolution_example' "
+            "RETURN id(n) AS nid, labels(n)[0] AS label, properties(n) AS props "
             f"LIMIT {int(limit)}"
         )
         rels = client.query(
-            "MATCH (a)-[r]->(b) RETURN id(a) AS source, id(b) AS target, type(r) AS rel "
+            "MATCH (a)-[r]->(b) "
+            "WHERE coalesce(a.doc_type, '') <> 'resolution_example' "
+            "  AND coalesce(b.doc_type, '') <> 'resolution_example' "
+            "RETURN id(a) AS source, id(b) AS target, type(r) AS rel "
             f"LIMIT {int(limit)}"
         )
     except Exception as exc:
