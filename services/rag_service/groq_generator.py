@@ -162,9 +162,14 @@ class GroqGenerator:
             for item in contexts
         )
         _active = ctx.get("active_ticket") or {}
+        # Records are NOT rendered here. They arrive in `contexts` from neo4j_answer()
+        # and are concatenated into "Retrieved context:" below, so rendering them again
+        # sent every card, account, policy, claim, charge, transaction and KYC row twice
+        # in one prompt. See _format_graph_context for the measurement.
         graph_ctx_text = _format_graph_context(
             ctx.get("graph_context"), ctx.get("intent"),
             active_ticket_id=_active.get("ticket_id") if isinstance(_active, dict) else None,
+            include_records=False,
         )
         conv_history_text = _format_conversation_history(ctx.get("recent_turns", []))
         # Our own earlier replies are turns in that history, and they quote the ticket id
@@ -197,11 +202,25 @@ class GroqGenerator:
             [query, graph_ctx_text, conv_history_text, conv_summary], known_values
         )
 
+        # Keyed on whether the model actually RECEIVED account data, not on whether this
+        # one block is non-empty. Since records moved out of graph_ctx_text and into
+        # `contexts`, an empty block no longer means "no account data" - the records can
+        # be sitting in Retrieved context while this note tells the model to say it
+        # cannot see the account, which would be a lie to the customer.
+        #
+        # On `source` rather than doc_type: the ResolutionMemory cache also emits
+        # doc_type "customer_graph" while carrying a cached ANSWER and none of this
+        # customer's records, so doc_type would suppress the note on a branch that
+        # genuinely has no account data.
+        _has_records = any(
+            (item.get("metadata") or {}).get("source") == "neo4j_customer_graph"
+            for item in contexts
+        )
         no_data_note = (
             "- IMPORTANT: No customer account context is provided. Do NOT say 'I checked your account' or "
             "imply you have access to account data. Say: 'I am currently unable to access your account "
             "details — let me connect you with our support team.'\n"
-            if not graph_ctx_text else ""
+            if not graph_ctx_text and not _has_records else ""
         )
         user_prompt = (
             f"{channel_rule}{lang_rule}\n\n"
@@ -876,8 +895,24 @@ def _format_record(record: dict) -> str:
 
 
 def _format_graph_context(graph_ctx: dict | None, current_intent: str | None = None,
-                          active_ticket_id: str | None = None) -> str:
+                          active_ticket_id: str | None = None,
+                          include_records: bool = True) -> str:
     """Convert the Neo4j graph context dict into a clean human-readable string.
+
+    ``include_records`` controls only the holdings blocks (cards, accounts, policies,
+    claims, charges, transactions, KYC, FDs). It exists because the ANSWER prompt
+    receives those same records a second time through ``contexts`` - neo4j_answer()
+    renders them from get_all_customer_records(), and this function renders them from
+    get_customer_context_for_customer(), which calls that same function. Two renderers,
+    four pipeline steps apart, neither aware of the other: measured at ~1,089 duplicate
+    tokens a message, and the answer prompt was refused with a 429 for exceeding a
+    tokens-per-minute ceiling by less than that.
+
+    Defaults to True so the OTHER caller - classify_message, a different LLM call whose
+    only source of records is this function - is unchanged. Only the answer prompt opts
+    out. Identity and open cases are always emitted: they are this function's alone, and
+    neo4j_answer cannot supply them (its Cypher walks outward from the Customer node, so
+    it never returns the customer, and it excludes :Ticket).
 
     ``current_intent`` names what THIS message is about. Without it the open-cases block
     is a list of what the customer has raised with nothing to say which one the message
@@ -916,13 +951,14 @@ def _format_graph_context(graph_ctx: dict | None, current_intent: str | None = N
     #
     # Rendering whatever is present means a property added to a node, or a new node type in
     # the seed, appears with no code change here either.
-    for key, heading in _RECORD_SECTIONS:
-        records = graph_ctx.get(key) or []
-        if not records:
-            continue
-        lines.append(f"{heading}:")
-        for record in records:
-            lines.append("  - " + _format_record(record))
+    if include_records:
+        for key, heading in _RECORD_SECTIONS:
+            records = graph_ctx.get(key) or []
+            if not records:
+                continue
+            lines.append(f"{heading}:")
+            for record in records:
+                lines.append("  - " + _format_record(record))
     # Open support cases. Conversation history is a fixed recent-turns window, so a case
     # raised earlier scrolls out of view and the model stops knowing it exists even while
     # the ticket is still open. Listing it here makes it a durable fact about the customer,
