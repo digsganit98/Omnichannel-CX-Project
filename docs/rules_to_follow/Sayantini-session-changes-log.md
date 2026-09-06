@@ -210,6 +210,7 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 149 - the KB reaches an answer by WALKING the graph, not by matching its wording (UNCOMMITTED):** Fix 147 reported Phase 2 as done when the links it created were used by nothing - `KB_GRAPH_FILTER` defaulted **off**, and the call site passed no `customer_id`, so the re-rank was **unreachable from the real answer path** either way. `(:Concept)` is now the hub - selling a subject is a PROPERTY, not a different node type - and `get_guidance()` walks `Customer -> holding -> Concept <- KBChunk` returning **every** chunk marked `is_hers`. No top-k, no similarity in the answer path: 14 chunks is ~1,124 tokens against a quota bound by REQUESTS, and a filtered-out chunk is invisible to the model. The parallel `similarity_search` is gone. **A `Service Request` Concept was invented** to hold 22 flashcards whose intent named no subject, purely so the unconnected count read zero - removed, along with all 51 `EXPLAINS` edges from resolution examples, which are the **difficulty classifier's** flashcards feeding a different LLM call and are now excluded from the graph view entirely. Both diagrams drew a system that no longer ran; the live renderer was rebuilt, and three things I added to it and removed on instruction are recorded below. **OPEN at the time, both since DISPROVED (see Fix 150/151):** the missing `* -> Account` edges were called harmless to answers - they were not, they were half of why guidance never reached five holding types; and the quota was called request-bound - the limit that actually bit is tokens per minute.
 - **Fix 150 - five of nine holding types reached no guidance (UNCOMMITTED):** Fix 149's holdings link was one query that rode on `PRODUCT_IS`, an edge only Account, CreditCard, FixedDeposit and Loan carry - so **Policy, Claim, ChargePenalty, Transaction and KYC reached no Concept at all** and their guidance arrived marked "general". A customer holding a health policy with three claims got the health-claim chunk as general bank knowledge. Wired on keys the seed already carried, every one verified to resolve for every row first (Claim->Policy 15/15, Charge->Account 7/7, Transaction->Account 72/72). **17 -> 123 holding->Concept edges**, all nine types; `is_hers` for Sayantini **3 -> 5**. `POLICY_TYPE_CONCEPTS` is kept separate from `CATEGORY_CONCEPTS` because a policy says "Auto" where the Concept is Motor Insurance. **OPEN:** six Concepts have zero KB chunks (Fixed Deposit among them, held by four customers) - wiring edges cannot create guidance nobody wrote.
 - **Fix 151 - the UI work after Fix 150, and three diagram errors in a row (UNCOMMITTED):** node hovers rewritten per label (name, then one plain-English line, then facts; ids last and shortened) - and the `"N/A"` string in unsettled claims would have printed **"null approved"** on screen. I replaced the native `<title>` with a custom panel that was never asked for, **broke hovering entirely**, and reverted it. The schema diagram was wrong three times, each error passing the check written for the last: missing edges, then lanes drawn outside the canvas, then nine identical `:INSTANCE_OF` labels where the codebase already de-duplicated `PRODUCT_IS` for that exact reason. **Data-correctness, in-bounds and legibility are three separate checks.** The live graph was rendering at ~half size (1.65 aspect in a 2.98 box, 46% dead margin); now 15%. "Why this answer?" hidden behind a flag: its copy describes the vector search Fix 149 removed. Fix 150 verified live (5 of 14 chunks marked hers). **A 429 sent a raw record dump to a customer** - generation failed, the fallback is `raw_data`, and nothing surfaced it; NOT FIXED. Model moved to 20b. **OPEN:** continuity is decided twice - the answer prompt guesses from a string compare at 17:53:02 while `ticket_referee` decides it properly at 17:53:04.
+- **Fix 152 - the reply prompt said the same thing twice, and asserted a case it had not decided:** **(A)** the customer's records were rendered into the prompt TWICE - `neo4j_answer` for "Retrieved context:", `_format_graph_context` for "Customer account context:", both from the same `get_all_customer_records`, four steps apart, neither aware of the other. **~1,089 duplicate tokens a message**, and Fix 150's claim that this was free was WRONG: the limit that bit is **tokens per minute**, a 429 refused `answer_generation` at 6,260 of 8,000, and the fallback `raw_data` sent a customer the unformatted record dump. One parameter (`include_records`, default **True** so `classify_message` - which has no other source of records - is untouched). The no-data warning had to move with them or it would tell the model it cannot see an account whose records sit lower in the same prompt; keyed on `source` not `doc_type`, because the memory cache also emits `doc_type: customer_graph` while carrying no records. **3,930 -> 2,839 tokens.** **(B)** the prompt asserted continuity three ways (`SAME SUBJECT`, `same topic, different matter`, `It continues tkt_x`) from one comparison - does the intent LABEL match, and is this the ticket the conversation was last on. Measured: `answer_generation` 17:53:02, `ticket_referee` **17:53:04** - the answer named a case two seconds before the mechanism built to decide it ran, and got it wrong. Moving the referee earlier was planned and **abandoned after reading the code**: it is the middle step of `create_or_get_ticket`, whose last step needs the answer. So the false claim was removed, not made true; the case LIST and the do-not-claim warning both stay. **Verified on 9 real UI messages**, every fact checked against her records, zero LLM failures, prompts ~4,200 tokens, `is_hers` 5 on all 14 turns. **OPEN:** two questions about one card still fork two tickets (the referee's dispute-written prompt), and the 429 fallback still sends the database to the customer.
 - **Reference - local vs the hosted instance:** the two are NOT meant to match. Application code must; `docker-compose.yml` deliberately must not (Ollama commented out on EC2, and ngrok has **no** `profiles: ["tunnel"]` there - copying the local file over means the next `up` starts no tunnel and **WhatsApp goes silent with nothing to say why**). EC2 is the sole holder of the shared WhatsApp number, mailbox and ngrok domain, which is why local ships with those off. Three deploy traps, all already bitten: **no git on EC2** (scp only), `restart` runs **old code** (rebuild), and `restart` does **not re-read `.env`** (`up -d`). Plus what must never be done there - other teams' containers, the disk watermark, removing OpenSearch, `prune --volumes`.
 
 
@@ -7891,3 +7892,136 @@ resolution is the escalation decision (`decide()`), which is a different questio
   relationship type does not exist in the database until somebody edits a held reply.
 - Reward points render as `Rs.994` - the record formatter prefixes any numeric field with
   `Rs.`, and points are not currency.
+
+---
+
+## Fix 152 - the reply prompt said the same thing twice, and asserted a case it had not decided
+
+Two changes to `groq_generator.py`, committed separately (`0189e67`, `44066af`) so a
+regression is attributable to one of them.
+
+### A - the customer's records were rendered into the prompt twice
+
+`neo4j_answer()` builds the records from `get_all_customer_records()` for the
+"Retrieved context:" block. `_format_graph_context()` builds them from
+`get_customer_context_for_customer()` - which calls that **same function** - for the
+"Customer account context:" block, four pipeline steps earlier. Neither references the
+other, so the overlap is invisible from either file and only appears when the finished
+prompt is rendered.
+
+Measured across all five customers: **~1,089 duplicate tokens a message**, ~28% of the
+answer prompt. `CC00100001`, `CLM001002`, `TXN0001000005`, `KYC status` and every other
+record line appeared exactly twice.
+
+**This was not free, and Fix 150's entry was wrong to say it was.** That entry called the
+duplication harmless because the quota is bound by REQUESTS. The limit that actually bit is
+**tokens per minute**: `answer_generation` was refused with a 429 (`Limit 8000, Used 2431,
+Requested 6260`), the code fell back to `generation.get("text") or raw_data`, and a customer
+received the unformatted record dump as their reply.
+
+The fix is one parameter - `include_records`, defaulting to **True** - and one caller
+opting out. The default matters: `classify_message` shares this renderer and has **no other
+source of records**, so its prompt is unchanged. Only the answer prompt turns them off,
+because it already receives them through `contexts`.
+
+**The no-data warning had to move with them.** It fired on `if not graph_ctx_text`, which
+used to mean "this customer has no account data" and now means only "the records travel
+elsewhere in this prompt" - so it would have instructed the model to say it cannot access an
+account whose records were sitting further down the same prompt. It now keys on `contexts`
+carrying the customer-graph entry. Keyed on `source`, NOT `doc_type`: the ResolutionMemory
+cache also emits `doc_type: "customer_graph"` while carrying a cached ANSWER and none of
+this customer's records, so doc_type would have suppressed the warning on a branch that
+genuinely has nothing.
+
+Verified without a Groq call, by rendering both prompts through the real generator with
+`_generate` replaced: classifier prompt keeps every record section; answer prompt has each
+record id exactly once; all 9 record sections present when she holds them and absent when
+she does not (she has no loans); 14 KB chunks; `customer_holds` still 5; the warning does
+not fire with records in contexts and DOES fire with genuinely nothing.
+**3,930 -> 2,839 tokens.**
+
+### B - the prompt named the case a message continued, two seconds before that was decided
+
+The block asserted continuity **three ways**: `| SAME SUBJECT as this message` and
+`| same topic, different matter` on the case lines, and `This message is about: X. It
+continues tkt_y.` beneath them. All three came from one comparison:
+
+    same_intent = case["intent"] == current_intent
+    same = same_intent and ticket_id == active_id
+
+Does the intent LABEL match, and is this the ticket the conversation was last on. Neither
+input supports the conclusion. A 2-3 word label cannot separate "the same card question"
+from "another card question" - which is exactly why `ticket_referee` exists.
+
+Measured from `llm_usage_events` on a live message:
+
+    17:53:02  answer_generation    <- writes "It continues tkt_x"
+    17:53:04  ticket_referee       <- the real decision, 2 seconds LATER
+
+So the answer stated a case as settled while the mechanism built to decide it had not run,
+and got it wrong: two questions about one credit card, both labelled `general_inquiry`.
+
+**The original plan was to move the referee earlier and it was abandoned after reading the
+code.** `_referee_match(candidates, message)` does take only the open tickets and the
+message, but it is the middle step of `create_or_get_ticket`, which runs: compute scope ->
+exact-text dedup -> referee -> scope refinement (re-triggered BY the referee's verdict) ->
+`logged -> open` promotion, which needs `hold_required`, which needs the escalation
+decision, which needs the answer. The ordering is not accidental. Splitting it is real
+surgery on the function that decides whether a customer's messages become one ticket or
+two, where a mistake merges two complaints or splits one.
+
+So the false claim was removed rather than made true. The case list stays - that is real
+data, and hiding it would cost the cross-channel continuity the block exists to give
+(Fix 75). **The warning stays because it is the opposite kind of statement**: telling the
+model NOT to claim a case covers this matter is safe on weak evidence, while telling it one
+DOES is what put a wrong ticket id in front of a customer. The intent label is dropped from
+it too - the model has the customer's actual message a few lines below.
+
+`current_intent` and `active_ticket_id` are kept in the signature, accepted and unused:
+three call sites pass them, they are the right inputs to a CORRECT continuity claim, and
+the day the referee's verdict is available before the reply is written it arrives here
+without a new parameter. Checked first that `active_ticket_id` had no other dependents -
+the `graph.py:432` hit is an unrelated telemetry kwarg on `_complete` - and that no test
+asserts any of the removed strings.
+
+### Verified on 9 real UI messages
+
+Every factual claim checked against her graph records:
+
+| question | answer | |
+|---|---|---|
+| reward points + expiry | 994, 30 Nov 2027 | correct |
+| interest rate | 38.75% | correct |
+| amount due + when | Rs.91,821 by 8 Jul 2026 | correct |
+| insurance premium factors | KB guidance | correct |
+| unauthorised UPI debit 48037 | TXN0001000001, 2026-06-07, Kavya Lalla | correct |
+| when do I get the money back | under investigation, no invented SLA | correct |
+| why was my claim rejected | CLM001001, filed after coverage lapse | correct |
+| appeals process | rejection reason + steps | correct |
+
+**Zero LLM failures across all 9.** Answer prompts ~4,200 tokens against the 8,000 TPM
+ceiling that refused 6,260 before the fix. `is_hers = 5` on all 14 turns.
+
+No invented ticket references anywhere - including a repeat of the same question on the
+same open ticket, which under the old code was the shape that produced the false claim.
+
+Escalation behaved: four informational threads stayed `logged`; the fraud report opened with
+`critical_escalation:fraud_report` and the claim dispute with `approval_required:claim_status`,
+both held for a human. The fraud and claim threads grouped correctly across follow-ups -
+three claim messages on one ticket.
+
+Suite 5 failed / 62 passed at every step, the documented baseline.
+
+### Still open
+
+- **Two questions about one credit card still make two tickets.** The referee answered NEW
+  correctly by its own prompt, which says to answer NEW when the message names a different
+  amount "even if it is the same general kind of issue" - a rule written for disputes and
+  generalised to every intent. Unchanged today.
+- **The 429 fallback still sends the database to the customer.** A generation failure
+  should hold the reply for review. Unchanged today; the token fix makes it much less
+  likely, not impossible.
+- **Continuity is still decided after the answer is written.** Fix B stops the prompt
+  lying about it; it does not make the verdict available in time.
+- `get_open_cases` excludes `logged` tickets (Fix 119), so a conversation grouped only by a
+  logging thread shows the answer generator no cases at all while the referee sees them.
