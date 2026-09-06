@@ -138,7 +138,7 @@ A held reply appears in the agent console as an editable draft with the hold rea
 | `opensearch` | 9200 | KB index only when `RAG_BACKEND=opensearch` (not the default) |
 | `ollama` | 11434 | Local LLM (classification fallback) |
 | `mailpit` | 8025 / 1025 | Local mail catcher for email testing |
-| `ngrok` | 4040 | Public tunnel for the WhatsApp webhook |
+| `ngrok` | 4040 | WhatsApp webhook tunnel — **not started by default**, see below |
 
 **Groq** is the cloud LLM used for generation and classification and runs outside Docker.
 
@@ -298,8 +298,17 @@ docker compose build api && docker compose up -d api
 `?v=` on the `style.css` / `app.js` tags in `index.html` - both are cache-busted by query
 string.
 
-**ngrok may fail with `ERR_NGROK_334`.** That means a teammate holds the shared free-tier
-domain. Ignore it - it only affects real WhatsApp inbound, and nothing else depends on it.
+**ngrok does not start with `docker compose up`.** It sits behind a profile:
+
+```bash
+docker compose --profile tunnel up -d
+```
+
+It is only needed for real WhatsApp inbound, and a reserved free-tier domain allows **one**
+online session. The hosted instance holds the team domain, so a second stack starting
+ngrok either dies with `ERR_NGROK_334` or **steals the tunnel and receives real customers'
+messages**. Set `NGROK_DOMAIN` to your own reserved domain, or leave it blank for a random
+ephemeral URL that takes nothing from anyone.
 
 **On Windows, check your shell is not shadowing `.env`.** `docker compose` ranks shell
 environment above the file:
@@ -385,7 +394,7 @@ it accumulates.
 | Replies dump raw records at the customer | Groq quota exhausted — check for 429s |
 | A Python fix appears not to work | Stale image — rebuild, don't restart |
 | WhatsApp outbound 401 | Expired Meta token; a System User token does not expire |
-| ngrok `ERR_NGROK_334` | The shared free-tier domain is held by someone else |
+| ngrok `ERR_NGROK_334` | Someone else holds that reserved domain — the hosted instance usually does. Use your own `NGROK_DOMAIN`, or leave it blank. |
 | Empty customer data for a real customer | Identity resolution found no match on email/phone |
 | Knowledge base returns nothing | Store wiped without re-indexing — `POST /admin/rag/index?recreate=true`, then `/admin/rag/link-kb-graph` on Neo4j |
 | `index_create_block_exception` on the OpenSearch backend | The host disk is over 90% full. OpenSearch blocks **all** index creation above that watermark and re-applies the block every ~90s, so clearing the setting does not hold. Free disk, or use the default Neo4j backend, which has no such gate. |
