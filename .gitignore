@@ -26,3 +26,7 @@ backups/
 *.ppk
 *.key
 id_rsa*
+
+# .env backups - same secrets as .env itself
+.env.bak*
+.env.*.bak
