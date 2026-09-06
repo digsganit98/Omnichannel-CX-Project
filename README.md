@@ -32,8 +32,13 @@ customer's subgraph in Neo4j and hands the model whatever is actually there — 
 loans, fixed deposits, claims, policies, transactions, KYC, charges. There is no hand-written
 list of fields, so a new property in the seed data shows up in answers with no code change.
 
-**A knowledge base sits alongside it.** Process questions ("how do I file a claim?") are answered
-from indexed documents in OpenSearch, and both sources can reach the model on the same message.
+**The knowledge base lives in the same graph.** Process questions ("how do I file a claim?") are
+answered from the KB document, chunked and embedded as `(:KBChunk)` nodes, and both sources can
+reach the model on the same message. The chunks are not merely stored beside the customer records —
+each is linked by `[:ABOUT]` to the `(:Product)` it describes, so retrieval can follow a customer's
+own holdings to the text about them. Set `RAG_BACKEND=opensearch` to put the KB back in OpenSearch;
+retrieval measured identical either way, and Neo4j is the default because it drops a second
+datastore and can hold those links.
 
 **The system decides when a human is needed.** Several rules run before a reply is sent — credible
 risk, escalating intents, weak retrieval, and a check that reads the customer's actual words
@@ -129,8 +134,8 @@ A held reply appears in the agent console as an editable draft with the hold rea
 | Service | Port | Purpose |
 |---|---|---|
 | `api` | 8888 → 8000 | FastAPI backend + both UIs |
-| `neo4j` | 7474 / 7687 | Customer records, tickets, resolution memory |
-| `opensearch` | 9200 | Knowledge base vector + lexical index |
+| `neo4j` | 7474 / 7687 | Customer records, tickets, resolution memory, KB chunks |
+| `opensearch` | 9200 | KB index only when `RAG_BACKEND=opensearch` (not the default) |
 | `ollama` | 11434 | Local LLM (classification fallback) |
 | `mailpit` | 8025 / 1025 | Local mail catcher for email testing |
 | `ngrok` | 4040 | Public tunnel for the WhatsApp webhook |
@@ -142,8 +147,8 @@ A held reply appears in the agent console as an editable draft with the hold rea
 | Volume | Holds | Safe to wipe? |
 |---|---|---|
 | `cx-data` | SQLite: conversations, tickets, drafts, audit, logins | Yes — destroys logins |
-| `neo4j-data` | Customer graph | Yes — triggers reseed on boot |
-| `opensearch-data` | Knowledge base index | Yes — needs manual re-index |
+| `neo4j-data` | Customer graph + KB chunks | Yes — reseeds on boot, but the KB needs a manual re-index |
+| `opensearch-data` | KB index, only on the OpenSearch backend | Yes — needs manual re-index |
 | `ollama-data` | Pulled model (GBs) | **Keep** |
 | `huggingface-cache` | Embedding model | **Keep** |
 
@@ -213,10 +218,17 @@ empty database. `POST /admin/neo4j/load` seeds it by hand.
 
 ```powershell
 Invoke-RestMethod -Method Post -Headers $H "http://localhost:8888/admin/rag/index?recreate=true"
+Invoke-RestMethod -Method Post -Headers $H "http://localhost:8888/admin/rag/link-kb-graph"
 ```
 
-**Expect `indexed` above 0 and `errors: 0`.** This is not automatic, and without it questions
+**Expect `indexed` above 0 and `errors: 0`** from the first call, and `linked_chunks: 11` /
+`unlinked_chunks: 3` from the second. Neither is automatic, and without the first, questions
 about processes ("how do I file a claim?") come back empty.
+
+The second call is the Phase 2 step: it links each chunk to the `(:Product)` it describes, so
+retrieval can follow a customer's own holdings. It only applies on the Neo4j backend and returns
+400 on OpenSearch. **Three chunks stay unlinked on purpose** — Demat, SIP and ELSS describe
+investment products this catalogue does not sell; they are still retrievable by vector search.
 
 ### 6. Check Groq has quota
 
@@ -375,7 +387,10 @@ it accumulates.
 | WhatsApp outbound 401 | Expired Meta token; a System User token does not expire |
 | ngrok `ERR_NGROK_334` | The shared free-tier domain is held by someone else |
 | Empty customer data for a real customer | Identity resolution found no match on email/phone |
-| Knowledge base returns nothing | OpenSearch wiped without re-indexing |
+| Knowledge base returns nothing | Store wiped without re-indexing — `POST /admin/rag/index?recreate=true`, then `/admin/rag/link-kb-graph` on Neo4j |
+| `index_create_block_exception` on the OpenSearch backend | The host disk is over 90% full. OpenSearch blocks **all** index creation above that watermark and re-applies the block every ~90s, so clearing the setting does not hold. Free disk, or use the default Neo4j backend, which has no such gate. |
+| Python change did nothing | Only `apps/admin-ui` is bind-mounted. `docker compose build api`, not `restart`. |
+| `.env` change did nothing | `docker compose restart` reuses the old environment. `docker compose up -d api` recreates and re-reads it. |
 
 ---
 
@@ -390,8 +405,15 @@ shared/         Schemas, prompts, utilities
 data/           Seed workbook, knowledge base, SQLite
 docs/           Design notes, runbooks, the session changes log
 tests/          Pytest suite
+scripts/        Operational checks that need a live stack (not pytest)
 infra/          Migrations and infrastructure files
 ```
+
+`scripts/compare_rag_backends.py` probes both KB backends over the same questions and prints
+which chunk each returned, at what rank. Run it inside the container — it refuses to run where
+sentence-transformers has fallen back to hashing embeddings, because a comparison on those
+vectors says nothing about either backend. `scripts/verify_kb_graph_links.py` checks the Phase 2
+edges and that every customer can reach the KB through their own holdings. Neither calls an LLM.
 
 ## Documentation
 
