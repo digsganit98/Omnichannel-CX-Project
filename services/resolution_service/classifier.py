@@ -249,9 +249,12 @@ class ResolutionDecisionEngine:
 
     @staticmethod
     def _create_vector_store() -> Any:
-        from services.rag_service.opensearch_store import OpenSearchVectorStore
+        # Same RAG_BACKEND switch the KB uses. The resolution examples are a
+        # second doc_type in the SAME store, so they follow the KB backend
+        # rather than needing a switch of their own.
+        from services.rag_service.rag_pipeline import build_vector_store
 
-        return OpenSearchVectorStore()
+        return build_vector_store()
 
     def _parse_llm_json(self, text: str, intent: str, sentiment: str) -> dict[str, Any] | None:
         try:

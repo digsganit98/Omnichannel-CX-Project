@@ -203,6 +203,9 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Doc - inbound routing and assignment:** `docs/production_scope_discussion/inbound-routing-and-assignment.md` answers four questions about where customer messages land and who picks them up. Two of the answers are uncomfortable: tickets are assigned to a **team** by a static intent lookup and **never to an individual** (no assignee field, no queue, no way to claim work), and two developers running local copies are **two separate systems racing for the same mailbox** - whoever polls first marks the mail read and the other never sees it.
 - **Fix 145 - signing in to the console needed the API key that WAS the credential:** the admin login asked the operator to paste `ADMIN_API_KEY`, which unlocked a second username/password page - but the key is what all 33 admin endpoints actually check, so the account on top of it granted nothing, and `/admin/auth/signup` sat behind the key too, meaning **the first account could not be created without already holding the credential it was meant to replace**. Sign-in now issues the JWT `_make_admin_token` was already minting; new `require_admin_auth` accepts that token **or** the key, mirroring the existing `require_analytics_access` rather than adding a second scheme. Only **14 router lines** changed, not 33 handlers, because each admin router declares its dependency once. `x-admin-key` stays valid deliberately - the runbook, the fresh-start checklist and every documented `Invoke-RestMethod` example use it; what changes is that no human types it. **Two live bugs found while wiring it:** `loadSystemDiagrams`/`loadLiveGraph` sit outside the main IIFE and read ONLY the key from sessionStorage, so the workflow diagram and live graph would have 401'd once the key went away; and `doLogout` routed to the now-unreachable stage-2 page, landing the operator on a blank screen. Verified with a negative control (no credential -> 401, garbage token -> 401) alongside the positives. Suite unchanged at 5 failed / 147 passed.
 - **Doc - Omega Hospitals PoC scope:** `docs/Omega discussions/omega-halo-poc-scope.md` scopes a 6-8 week PoC for a NEW client (Omega Hospitals, ~42 sites, flagship Gachibowli) against their discovery-call requirements doc plus a hand-drawn solution sketch. **121 requirements extracted and individually marked** in the client's own structure - 74 in / 24 partial / 23 out, counted from the rendered table rather than estimated (my first three assertions of the count were wrong). Three channels: **real inbound phone number** (voice is the only wholly new build - no ASR/TTS exists anywhere in this repo), WhatsApp, email; **no web chat**. HIS/CRM/TPA become **synthetic-data services on AWS behind real FHIR contracts, not mocks** - so failure injection is genuine and the harness outlives the PoC.
+- **Fix 146 - the EC2 deployment shipped code without `data/`, and three separate silences hid it:** the hosted portal showed **every** customer as Unverified with a 0-node knowledge graph while the app itself looked healthy - intent classified at 99%, tickets created, replies written. `data/bfsi.xlsx` was never copied to the box, so `_seed_neo4j()` threw `FileNotFoundError` and its own `except Exception: logger.exception(...)` let startup continue normally; **the seed is wired correctly and fails invisibly**, which is why the symptom read as an app bug rather than a missing file. EC2 is **not a git checkout at all** (`fatal: not a git repository`) - the tree was hand-copied, so `git pull` cannot repair it, and `/app/data` is the named volume `cx-data`, not a bind mount, so neither a host-side copy nor an image rebuild reaches it; `docker cp` into the running container is what works. The KB was missing the same way (`data/knowledge_base/*.pdf`), leaving OpenSearch with only its two internal indices and every knowledge answer escalating at **Retrieval 0%**. Reseeding restored all 5 BFSI customers; WhatsApp then verified `917890864700` against the stored `7890864700` and answered from real records (Rs.91,821 due, Rs.4,591 minimum, due 2026-07-08), so **country-code matching was never broken** - the graph was simply empty. The stale pre-fix conversations were cleared with the targeted recipe, keeping logins, `channel_identities` and the seeded graph.
+- **Fix 146a - `cluster.blocks.create_index` was OpenSearch defending itself, not a person:** KB indexing 403'd with `index_create_block_exception`, and the setting sat in **persistent** cluster state beside another deliberate-looking tweak (`plugins.index_state_management.template_migration.control: -1`), so it read as an admin guardrail - I said so, and the theory was **wrong**. The node's own log states it: *"Putting index create block on cluster as all nodes are breaching high disk watermark"*, re-applied every ~90s, which is why clearing it to `false` **reverted on its own** between two commands (`auto_release: true`). Clearing with `null` was silently discarded; an explicit `false` wrote through and still could not outlive the monitor. The shared box was at **96%** (144/150 GB) - above the 95% flood stage - and dropping an unused `ollama/ollama` image (5.5 GB, volume **1.59 kB**, so no model was ever pulled and the Groq fallback did not exist there) bought 93%, below flood stage but still above the **90% high watermark** that drives this block. So the KB stays unindexable until ~4.5 GB more is freed, and **none of it is ours**: our whole project is ~633 MB of volumes against `pwm-chatbot-dependencies_langfuse_clickhouse_data` at **22.5 GB** and a `ganiparser` image present twice (7.0 GB ECR + a 3.85 GB local build). Raising the watermark was considered and rejected - it would trade ~30 other projects' safety margin for our tens-of-MB index.
+- **Fix 147 - KB retrieval can run on Neo4j, and the chunks join the customer graph:** the manager asked *why OpenSearch* and *what the graph is for* - the answer is two different retrieval problems, but the KB is **14 chunks** and OpenSearch is a **1.34 GB image** carried for them. Phase 1 adds `Neo4jVectorStore` behind the injection seam `RAGPipeline` already had; Phase 2 adds `(:KBChunk)-[:ABOUT]->(:Product)` edges so retrieval can be scoped to what a customer **actually holds** - co-location alone would leave the chunks as islands and calling that "in the knowledge graph" would be false. Both are **off by default** (`RAG_BACKEND` unset = OpenSearch, unchanged). **18/18 identical rank vs OpenSearch** with real embeddings; **26 edges, 11/14 chunks linked**, 3 deliberately unlinked (no Demat/SIP/ELSS products exist). The first comparison run was **worthless and wrong** - the host silently falls back to hash embeddings, which showed a difference that vanished in the container, so the script now refuses to run on the fallback. `retrieval_backend` is `"neo4j_vector"` NOT `"neo4j_graph"`: the latter is in `CUSTOMER_RECORD_BACKENDS` and gates two escalation rules. Suite unchanged at 5 failed / 147 passed.
 
 
 ---
@@ -7010,3 +7013,345 @@ choice for a hosted team demo, recorded here as a known exposure alongside the d
 credentials being printed on the sign-in screen. If the instance outlives the ideathon, the
 two cheap mitigations are an EC2 security group restricted to the team's IPs and removing the
 signup route once the accounts exist.
+
+---
+
+## Fix 146 - the EC2 deployment shipped code without `data/`
+
+### The symptom, and why it pointed the wrong way
+
+The hosted portal showed the seeded customer `sayantini.s.55@gmail.com` as **Unverified**,
+"No records on file for this customer", and a knowledge graph reading
+`0 node types - 0 connection patterns - 0 nodes - 0 relationships`. Meanwhile the same page
+proved the app was **working**: intent classified at 99%, `TKT_07222EFD6CDB` created, a reply
+drafted and held for review. A healthy app with an empty database is not the shape of a code
+bug, and that mismatch is what pointed at data rather than logic.
+
+Three symptoms, one cause. Customer identity, the graph panel and Customer Context all read
+Neo4j; when it holds nothing, all three go blank independently.
+
+### Root cause
+
+`data/bfsi.xlsx` did not exist on the instance:
+
+    FileNotFoundError: [Errno 2] No such file or directory: '/app/data/bfsi.xlsx'
+
+`_seed_neo4j()` (`apps/api/main.py:63`) is registered with `@app.on_event("startup")` and is
+wired correctly - it even skips itself when customers already exist. What it also does is
+swallow its own failure:
+
+    except Exception:
+        logger.exception("neo4j_seed_failed")
+
+so the API starts, serves, classifies and replies with an empty graph and **no visible
+signal**. The traceback sat in `docker compose logs api` from the first boot. This is the
+same class as the fail-open in [[handoff-rule-2c]]: a guard that logs and continues turns a
+hard failure into a silent one.
+
+### Two deployment facts that invalidate the obvious fixes
+
+1. **EC2 is not a git checkout.** `git log` there returns
+   `fatal: not a git repository (or any of the parent directories): .git`. The tree was
+   hand-copied, so `git pull` cannot repair a missing file, and nothing on the box records
+   which commit it corresponds to. `data/bfsi.xlsx` **is** tracked and **is not** gitignored -
+   verified locally with `git ls-files data/` and `git check-ignore` - so this was a copy
+   omission, not a repo problem.
+2. **`/app/data` is a named volume, not a bind mount.** `docker-compose.yml` mounts
+   `cx-data:/app/data`. The host directory `~/Omnichannel-CX-Project/data/` is therefore
+   irrelevant to the container, and a rebuilt image cannot help either - the volume mount
+   shadows whatever the image carries at that path. `docker cp` into the running container is
+   the operation that actually lands the file. (`./apps/admin-ui` **is** a bind mount, which
+   is why UI edits appear on restart and Python changes do not - see
+   [[rebuild-image-to-deploy-python]].)
+
+### Fix
+
+    # local PowerShell - the key lives one directory ABOVE the project
+    scp -i "..\ganit-genai-solutions.pem" "data\bfsi.xlsx" ec2-user@<host>:~/bfsi.xlsx
+
+    # on EC2
+    docker cp ~/bfsi.xlsx omnichannel-cx-project-api-1:/app/data/bfsi.xlsx
+    docker compose restart api
+
+Seeding then ran on startup as designed.
+
+### Verified
+
+| check | result |
+|---|---|
+| `MATCH (n) RETURN labels(n)[0], count(*)` before | **0 rows** |
+| `MATCH (c:Customer) RETURN c.name, c.email, c.phone` after | **5 rows** - all BFSI customers |
+| portal header | "Sayantini Sarkar", email + phone shown |
+| Customer Context | Risk 7, DPD 45 days, late fee Rs.1284.14, IMPS Rs.5776.55, UPI Rs.5220.47 |
+| Suggested Offers | up-sell generated from 2 real charges totalling INR 3,791 |
+| WhatsApp answer | Rs.91,821 due / Rs.4,591 minimum / due 2026-07-08, from the graph |
+
+**The WhatsApp country-code worry was unfounded.** The graph stores `7890864700` and the
+thread is `917890864700`; I flagged this as a likely exact-match failure. It verified on the
+first live message - identity resolution already handles the prefix, and the only thing that
+had ever been wrong was the empty graph.
+
+### Stale conversations after the fix
+
+Conversations created while the graph was empty keep their wrong content, and the **case
+summary is regenerated from those turns**, so the panel confidently narrated a verification
+failure that no longer existed. Cleared with the targeted recipe in
+[[targeted-clear-recipe]] - children before parents, `PRAGMA foreign_key_check` empty
+afterwards. Kept, as that recipe requires: `customers`, `channel_identities` (5),
+`admin_users` (2 - `Admin_1` and the pre-existing `Admin_SS`; signup is deliberately open,
+recorded under Fix 145), `customer_users` (1), and the seeded graph (5 Customer nodes).
+`conversations` went to 0.
+
+---
+
+## Fix 146a - `cluster.blocks.create_index` was OpenSearch defending itself
+
+### What I asserted, and why it was wrong
+
+KB indexing failed with:
+
+    AuthorizationException(403, 'index_create_block_exception',
+      'blocked by: [FORBIDDEN/10/cluster create-index blocked (api)];')
+
+`GET /_cluster/settings` showed `cluster.blocks.create_index: "true"` in **persistent**
+scope, next to `plugins.index_state_management.template_migration.control: "-1"`. Two
+persistent settings, one of them plainly hand-tuned, on a box provisioned hours earlier by
+another person - I concluded a human had set it as a guardrail and advised asking before
+clearing. That question was asked and answered ("Ok"), on a premise that was **false**.
+
+The node's own log settles it:
+
+    [DiskThresholdMonitor] Putting index create block on cluster as all nodes are
+    breaching high disk watermark. Number of nodes above high watermark: 1.
+
+Logged at 16:47 and again at 16:52 - OpenSearch re-applies it about every 90 seconds while
+disk is over the 90% high watermark. `include_defaults=true` also shows
+`cluster.blocks.create_index.auto_release: "true"`: it lifts the block itself once disk
+recovers. Nobody set it and nobody needs to unset it.
+
+Two details worth keeping:
+
+- **Clearing with `null` was silently discarded** - `{"acknowledged":true,"persistent":{}}`
+  and the value still `"true"` on the next read. An explicit `false` wrote through
+  (`"persistent":{"cluster":{"blocks":{"create_index":"false"}}}`) and was then **reverted by
+  the monitor** before the next command. An acknowledgement is not a write, and a write is
+  not a durable state.
+- The error is `AuthorizationException`, which reads like credentials. A direct
+  `PUT localhost:9200/test_index_delete_me`, bypassing the app entirely, returned the same
+  403 - that is what ruled out the app's OpenSearch user and pointed back at the cluster.
+
+### The disk, and what was and was not ours to touch
+
+The shared instance was at **96%** - 144 GB of 150 GB, above the 95% flood stage. Docker
+accounted for ~74 GB (~48 GB images, ~26 GB volumes).
+
+The only multi-GB reclaim that belonged to this project: `ollama/ollama` at **5.5 GB**. Its
+volume `omnichannel-cx-project_ollama-data` was **1.59 kB**, so no model had ever been pulled
+and the Ollama fallback in `services/resolution_service/classifier.py:79` was **already dead
+on that box** - removing it cost nothing that existed. `docker rmi` first refused
+(`must force - container ... is using its referenced image`), correctly; stopping and
+removing the container via compose, from the project directory, was the working order.
+
+Result: 96% -> **93%**, 6.3 GB -> 12 GB free. Below flood stage, still above the 90% high
+watermark, so the create-index block continues to re-apply and **the KB remains unindexable
+on EC2**.
+
+Reaching 90% needs ~4.5 GB more and none of it is ours - the whole project is ~633 MB of
+volumes:
+
+| item | size | owner |
+|---|---|---|
+| `pwm-chatbot-dependencies_langfuse_clickhouse_data` | **22.5 GB** | another project |
+| `..._langfuse_clickhouse_logs` | 1.57 GB | another project |
+| `ganiparser` (ECR) + `ganiparser:latest` (local, 2 months old) | 7.0 + 3.85 GB | another project |
+| `swar` (ECR) | 5.5 GB | another project |
+| orphaned images (`<none>` x3, `idbi-prospect-assist`) | ~0.3 GB | other projects |
+
+**Raising the watermark was considered and rejected.** Setting flood stage to 99% would have
+unblocked indexing in one command, and would have let OpenSearch write until ~1.5 GB
+remained on a disk shared by ~42 containers across ~30 projects - trading the safety margin
+of every team on the box for a tens-of-MB index. Escalated instead, with the numbers above.
+
+Ollama is commented out of `docker-compose.yml` **on EC2 only** (service, the `ollama-pull`
+job, and the api's `depends_on: ollama`, which otherwise makes compose fail on an undefined
+dependency). Local compose is unchanged. Without that edit the next `docker compose up`
+re-pulls 5.5 GB and returns the box to 96%.
+
+### Still open
+
+- KB index cannot be built on EC2 until the shared disk drops below 90%. Retrieval returns
+  nothing there, so knowledge questions escalate at `Retrieval 0%`; identity, context,
+  sentiment, ticketing, offers and reply drafting all work.
+- EC2 has no git remote and no record of its commit. Every non-repo payload (`.env`, and the
+  `data/` files that must go **into the `cx-data` volume**) has to be copied by hand, which
+  is the mechanism that caused Fix 146 in the first place.
+
+---
+
+## Fix 147 - KB retrieval can run on Neo4j, and the chunks join the customer graph
+
+Built after the manager asked two questions the architecture had no written answer
+to: *why are we using OpenSearch* and *what are we using the knowledge graph for*.
+The honest answer is that they solve different retrieval problems - the graph
+answers "what is true about THIS customer" by walking relationships, the vector
+index answers "what does our documentation say about this topic" over prose with
+no entities in it. But the KB is **14 chunks over one PDF**, and OpenSearch is a
+whole second datastore carried for them (**1.34 GB image**, measured from
+`docker system df -v`, against a 394 KB data volume).
+
+Both phases are **additive and off by default**: `RAG_BACKEND` unset selects
+OpenSearch and the path is byte-for-byte what it was. Nothing was removed.
+
+### Phase 1 - `services/rag_service/neo4j_store.py`
+
+Same six-method interface as `OpenSearchVectorStore`, so `RAGPipeline` and the
+resolution classifier take either without knowing which. `RAGPipeline` already
+accepted an injected store (`store or ...`), so that seam existed before this.
+
+Chunks are `(:KBChunk)` nodes with a `cosine` vector index; search is
+`db.index.vector.queryNodes`. Two details that are not obvious:
+
+- **It over-fetches `max(k*5, 20)` and filters `doc_type` in Cypher.** The vector
+  index has no pre-filter, so asking for exactly `k` and discarding non-matching
+  rows returns fewer than `k`.
+- **`recreate=True` deletes the `(:KBChunk)` nodes, not just the index.** The
+  MERGE key is the chunk id, and a changed chunking produces *different* ids
+  rather than overwriting - so re-indexing without the delete silently leaves the
+  previous run's chunks alongside the new ones.
+
+### Phase 2 - `services/rag_service/kb_graph_links.py`
+
+Phase 1 alone only **co-locates**: the chunks would sit in Neo4j as islands with
+no relationships, and retrieval would still be pure vector similarity. Calling
+that "the KB is in the knowledge graph" would be false, and visibly so the first
+time anyone opened the graph view. Phase 2 creates the edges:
+
+    (:KBChunk)-[:ABOUT]->(:Product)        # 10 rules, matched on category/type
+    (:KBChunk)-[:ABOUT_TOPIC]->(:KYC)      # KYC is not a product
+
+Matching is by product **category and type**, never product id, so one chunk about
+home loans links to every home-loan product and survives a catalogue change. The
+rules are hand-written: 14 chunks is a table that fits on a screen, and an
+extraction model would add a dependency and a failure mode to save it.
+
+**Three chunks link to nothing on purpose** - Demat, SIP and ELSS describe
+investment products this bank's catalogue does not carry. They stay retrievable
+by vector search and unlinked in the graph. Inventing a `(:Product)` for them
+would put products in the graph that the business does not sell.
+
+The capability this buys, which a separate search engine structurally cannot
+provide: walk `(:Customer)->(holding)-[:PRODUCT_IS]->(:Product)<-[:ABOUT]-(:KBChunk)`
+and the KB is scoped to what the customer actually holds. `KB_GRAPH_FILTER`
+(default **off**) turns it on as a **re-rank, not a filter** - a hard filter would
+answer *"how do I report a lost card?"* with nothing for a customer who holds no
+card, when the honest answer is the general procedure.
+
+### The naming trap this walked into
+
+`retrieval_backend` is set to `"neo4j_vector"`, deliberately **not**
+`"neo4j_graph"`. The latter is in `CUSTOMER_RECORD_BACKENDS`
+(`orchestration_agents.py:856`), which gates two escalation rules - a KB answer is
+not a customer-record answer, and a substring match on `"neo4j"` there would
+silently change **when replies are held for a human**. Same trap Fix 143b
+recorded; the comment now sits at the assignment.
+
+A second, smaller one caught in review: the first version formatted the "no
+contexts" error with `retrieval_backend` *after* it had already been reassigned to
+`"keyword_fallback"`, so the message would have named the wrong backend. The
+vector backend's name is now captured before the fallback can overwrite it.
+
+### Measured, not assumed
+
+Every number below is from a run, and the first attempt at each was wrong:
+
+| check | result |
+|---|---|
+| Neo4j version (image label AND running server) | **5.26.26** - vector indexes GA since 5.15 |
+| retrieval parity, real embeddings, 18 probes | **18/18 identical rank, both top-1 on all 18** |
+| Phase 2 links | **26 edges, 11/14 chunks linked, exactly 3 unlinked** |
+| customers reachable from KB via holdings | **5/5**, 13 distinct paths |
+| graph filter | returns same result count, tags holdings |
+| `RAG_BACKEND` unset | still `OpenSearchVectorStore`, 14 chunks, retrieval works |
+| suite | **5 failed / 147 passed** - baseline, and the same 5 fail on stashed code |
+
+**The first comparison run was worthless and said so.** On the host,
+sentence-transformers fails to import (`CodeCarbonCallback`) and
+`SemanticEmbeddings` silently falls back to `HashingEmbeddings` - which has no
+semantic meaning at all. On those vectors Neo4j appeared to *differ* from
+OpenSearch on 2 of 18 questions. Re-run inside the container with
+`all-MiniLM-L6-v2`, the two agree on **all 18**. The apparent difference was an
+artifact of the wrong embeddings, and a comparison of two backends over
+meaningless vectors would have been read as a verdict. `compare_rag_backends.py`
+therefore **refuses to run** on the fallback (exit 2) unless `--allow-fallback` is
+passed explicitly.
+
+`verify_kb_graph_links.py` **failed on its first run and the failure was the
+test's**: it picked the first customer with any linked product, then asked a
+card-loss question - and that customer (Fathima) holds no card, so nothing tagged.
+It now selects the customer *by the topic being probed*.
+
+Neither script makes an LLM call: they hit `store.similarity_search` directly, so
+a full run costs zero Groq tokens. `/admin/rag/diagnostics` does call the model -
+do not loop it.
+
+### Deploying this needs an image rebuild
+
+The container ran the OLD code twice during testing: first `scripts/` did not
+exist in the image at all, then `rag_pipeline.py` had no `build_vector_store`.
+Only `./apps/admin-ui` is bind-mounted - every Python change needs
+`docker compose build api`, not `restart`. `docker cp` was tried and rejected as
+the fix: it works, and it leaves the image stale and the container diverged from
+the repo, which is the exact condition behind Fix 146.
+
+### To run it
+
+    RAG_BACKEND=neo4j                       # .env
+    POST /admin/rag/index?recreate=true     # index chunks into Neo4j
+    POST /admin/rag/link-kb-graph           # Phase 2 edges (400s unless backend is neo4j)
+    KB_GRAPH_FILTER=true                    # optional: holdings-aware re-rank
+
+### Reply-level check (3 Groq calls, run on the Neo4j backend)
+
+Retrieval parity does not prove the customer gets a usable **answer**, so three
+questions went through the real `RAGPipeline.answer()` - one ordinary KB
+question, one whose chunk is deliberately **unlinked** (SIP), and one whose
+chunk is linked. All three returned the correct chunk and a correct, complete
+reply: no escalation, no "unable to find", no leaked internals.
+
+Two observations that matter more than the pass:
+
+- **`hybrid_keyword_rerank` took over on 2 of the 3.** The pre-existing keyword
+  layer in `rag_pipeline.py` selected the same chunk and outranked the vector
+  hit, so those two answers are identical on either backend *by construction* -
+  the vector store never decided them. Only the lost-card question ran purely on
+  `neo4j_vector`, at 0.875 against OpenSearch's 0.876 on the same question. So
+  the reply-level evidence for the Neo4j path is really **one** question deep,
+  not three.
+- **The unlinked chunk still answers.** SIP has no `(:Product)` to link to and
+  retrieved correctly anyway, confirming Phase 2's edges are additive and a
+  chunk without them is not disadvantaged.
+
+Reverting `.env` and recreating the container restored OpenSearch (14 chunks),
+so the switch is reversible in both directions.
+
+### `docker compose restart` does NOT re-read `.env`
+
+Setting `RAG_BACKEND=neo4j` and running `docker compose restart api` left the
+variable **absent from the container's environment** - `rag_backend()` still
+returned `opensearch` while `.env` plainly said otherwise, and the log showed a
+clean startup with no error at all. `restart` reuses the existing container and
+its original environment; only `docker compose up -d api` recreates it and
+re-reads `env_file`. The same trap as [[rebuild-image-to-deploy-python]] one
+layer out: there, `restart` runs old **code**; here it runs old **config**.
+Anyone flipping this switch on EC2 with `restart` will conclude the feature
+does not work.
+
+### Not yet done
+
+- **No run through the portal UI.** The orchestration path (intent, escalation,
+  ticketing, case summary) is unchanged by backend choice - it receives the same
+  chunk list either way - but that is an argument, not a measurement.
+- Nothing is deployed to EC2 - the KB there is still unindexed and blocked on the
+  shared disk (Fix 146a).
+- If the switch is ever made permanent, OpenSearch can leave `docker-compose.yml`
+  and the 1.34 GB image goes with it. Until then both backends stay.

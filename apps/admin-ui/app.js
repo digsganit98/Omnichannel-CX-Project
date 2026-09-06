@@ -3645,17 +3645,10 @@ var KG_INTENT_READS = {
   ResolutionMemory: ['(Priority 0 — verified memories only)']
 };
 
-// Tiers give the schema its shape. Order matters: identity, then what the customer
-// HOLDS, then what they are DEALING WITH, then the catalog everything hangs off.
-var KG_TIERS = [
-  { key: 'identity', label: 'Identity', types: ['Customer'] },
-  { key: 'holdings', label: 'Holdings — what the customer has',
-    types: ['Account', 'CreditCard', 'FixedDeposit', 'Loan', 'Policy', 'Claim',
-            'Transaction', 'ChargePenalty', 'KYC'] },
-  { key: 'case', label: 'Case layer — what they are dealing with',
-    types: ['Ticket', 'Interaction', 'ResolutionMemory', 'Agent'] },
-  { key: 'catalog', label: 'Catalog', types: ['Product'] }
-];
+// KG_TIERS lived here: a second list of node types, referenced by nothing. It was one
+// `KBChunk` short of correct and would have been "fixed" instead of KG_MAP, which is
+// what actually draws the diagram. The tier of each node is a property on its KG_MAP
+// entry, and the colours are KG_TIER_FILL - there is no third place to update.
 
 // Prefetched at load and rendered synchronously on click — the same shape the customer-360
 // button used (fetch first, then `onclick` only renders). A fetch inside the click handler
@@ -3855,6 +3848,13 @@ var KG_MAP = {
                      props: ['kyc_status', 'registered_at'] },
   Product:         { x: kgCol(1), y: 370, w: 230, h: 78, tier: 'catalog', head: 'Shared catalogue',
                      props: ['product_id / name', 'Account, FD, Card, Loan'] },
+  // Only exists when RAG_BACKEND=neo4j - the KB chunks live in OpenSearch otherwise.
+  // No conditional needed: the renderer skips any label with no live count, so this
+  // box appears exactly on the deployments where the nodes are real.
+  // Placed in the 400px gap BETWEEN Product and Claim because it links to Product on
+  // its left and KYC on its right - both edges stay short and cross nothing.
+  KBChunk:         { x: 600, y: 370, w: 226, h: 82, tier: 'catalog', head: 'Knowledge base',
+                     props: ['chunk_id / topic', 'text + embedding (384d)', 'ABOUT -> the product'] },
 
   Ticket:          { x: kgCol(7), y:  26, w: KG_COLW, h: 82, tier: 'case', head: 'The case',
                      props: ['ticket_id / status', 'scope = continuity', 'intent / priority'] },
@@ -3895,7 +3895,20 @@ var KG_EDGES = [
   { from: 'Customer', to: 'Interaction',      rel: 'HAS_INTERACTION', top: 14, gutter: 1912, enter: 'b' },
   { from: 'Ticket',   to: 'Interaction',      rel: 'HAS_MESSAGE',     fs: 'b', ts: 't' },
   { from: 'Interaction', to: 'Agent',         rel: 'HANDLED_BY',      fs: 'r', ts: 'l' },
-  { from: 'Interaction', to: 'ResolutionMemory', rel: 'CREATED_MEMORY', fs: 'b', ts: 't' }
+  { from: 'Interaction', to: 'ResolutionMemory', rel: 'CREATED_MEMORY', fs: 'b', ts: 't' },
+
+  // Phase 2 - what makes the KB part of the graph rather than a search box beside it.
+  // KBChunk sits in the gap between Product and Claim on the same row, so both edges
+  // are short side-to-side hops that cross nothing. Both are skipped automatically
+  // when RAG_BACKEND is not neo4j: no :KBChunk nodes exist, and the count guard in
+  // renderSchemaSvg drops any edge whose endpoint has no live count.
+  // ABOUT is a straight hop left into Product (clear gap at x=464-600).
+  // ABOUT_TOPIC cannot go straight right: Claim occupies x=864-1060 on this same row
+  // and a horizontal line at y~410 would cut through it. It takes a lane below every
+  // box instead, like the other long edges - lane 492 is under Claim/ResolutionMemory
+  // (both end at y=452) and above the 525 canvas edge.
+  { from: 'KBChunk',  to: 'Product',          rel: 'ABOUT',           fs: 'l', ts: 'r' },
+  { from: 'KBChunk',  to: 'KYC',              rel: 'ABOUT_TOPIC',     lane: 492, gutter: 570 }
 ];
 
 var KG_TIER_FILL = {
@@ -4117,7 +4130,7 @@ var FLOW_MAP = {
   'reject_unregistered_customer':{ x: 2600, y: 650, w: FL_W, h: 108, kind: 'step', owner: 'Customer Validation',
                                    note: 'ask them to write from|a registered address' },
   'resolve_query':               { x: 3090, y: 470, w: FL_W, h: 164, kind: 'agent', owner: 'Query Resolution', llm: 'grade+answer',
-                                   note: 'answers from the RL memory, their|tickets or records (graph),|or the KB (kb)|- then grades it L1 / L2 / L3' },
+                                   note: 'answers from the RL memory, their|tickets or records (graph),|or the KB ({kbstore})|- then grades it L1 / L2 / L3' },
   'decide_ticket':               { x: 3580, y: 470, w: FL_W, h: 150, kind: 'agent', owner: 'Ticket Creation', llm: 'needs a person?',
                                    note: 'a ticket is created either way -|this decides the HOLD only|risk, the words themselves,|or no answer good enough' },
   'create_ticket':               { x: 4070, y: 446, w: FL_W, h: 145, kind: 'agent', owner: 'Ticket Creation', llm: 'same matter?',
@@ -4171,8 +4184,32 @@ function flAnchor(n, side) {
   return [n.x + n.w, n.y + n.h / 2];
 }
 
+// Which store backs the KB, read from the live payload rather than written into the
+// note. RAG_BACKEND selects it at runtime, so a hardcoded word is wrong on one of the
+// two deployments - and when it is neo4j the KB is IN the graph, which is the whole
+// point of the (:KBChunk)-[:ABOUT]->(:Product) links and cannot be said by a fixed
+// string. Falls back to 'kb' when the payload is missing or shaped unexpectedly:
+// a vague word beats a confidently wrong one.
+function flowKbStore(wf) {
+  try {
+    var agents = (wf && wf.agents) || [];
+    for (var i = 0; i < agents.length; i++) {
+      if (agents[i].name !== 'query_resolution_agent') continue;
+      var ex = String(agents[i].execution || '');
+      // execution reads "<graph>_traversal_for_records_or_<store>_vector_search_for_kb_..."
+      var m = ex.match(/_or_([a-z0-9]+)_vector_search_for_kb/);
+      if (!m) return 'kb';
+      // On Neo4j the chunks are nodes in the same graph, so say so in the vocabulary
+      // the other boxes already use; anything else names the store it actually is.
+      return m[1] === 'neo4j' ? 'graph' : m[1];
+    }
+  } catch (e) {}
+  return 'kb';
+}
+
 function renderFlowSvg(wf) {
   var W = 5300, H = 850;
+  var kbStore = flowKbStore(wf);
   var svg = '<svg class="kgs" style="--kgs-w:' + W + 'px;--kgs-h:' + H + 'px;--kgs-s:0.44" width="' + W + '" height="' + H
           + '" viewBox="0 0 ' + W + ' ' + H + '" xmlns="http://www.w3.org/2000/svg">';
   svg += '<defs><marker id="flar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" '
@@ -4237,12 +4274,15 @@ function renderFlowSvg(wf) {
       }
       svg += '<text class="fl-name" x="' + (n.x + 11) + '" y="' + ty + '" fill="' + c[2] + '">'
            + kgEscape(key) + '</text>';
-      (n.note || '').split('|').forEach(function(line, i) {
+      // {kbstore} resolves BEFORE escaping, so the substituted word is escaped with
+      // the rest of the line, and before the colouring below so it is highlighted
+      // like any other store name.
+      (n.note || '').replace(/\{kbstore\}/g, kbStore).split('|').forEach(function(line, i) {
         if (!line) return;
         // sql / graph / kb name the STORE a fact came from. They sit inside the sentence
         // rather than on a line of their own - a separate line just restated the note in
         // different words - so they are coloured to read as sources, not as prose.
-        var html = kgEscape(line).replace(/(sql|graph|kb)/g, function(w) {
+        var html = kgEscape(line).replace(/\b(sql|graph|kb|opensearch)\b/g, function(w) {
           return '<tspan class="fl-store">' + w + '</tspan>';
         });
         svg += '<text class="fl-note" x="' + (n.x + 11) + '" y="' + (ty + 32 + i * 25) + '">'

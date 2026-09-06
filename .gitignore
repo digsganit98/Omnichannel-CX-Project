@@ -20,3 +20,9 @@ logs/*
 
 docs/Omega discussions/
 backups/
+
+# Private keys - never commit. SSH/EC2 credentials.
+*.pem
+*.ppk
+*.key
+id_rsa*

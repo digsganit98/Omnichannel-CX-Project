@@ -1,6 +1,6 @@
 import logging
 
-from services.rag_service.config import rag_top_k
+from services.rag_service.config import rag_backend, rag_top_k
 from services.rag_service.documents import load_knowledge_documents
 from services.rag_service.groq_generator import GroqGenerator
 from services.rag_service.opensearch_store import OpenSearchVectorStore
@@ -9,9 +9,22 @@ from services.retrieval_service.hybrid_search import HybridSearch
 logger = logging.getLogger(__name__)
 
 
+def build_vector_store():
+    """Return the KB vector store named by RAG_BACKEND.
+
+    Imported lazily so a deployment running one backend never imports the
+    other's driver - opensearchpy is not installed everywhere Neo4j is.
+    """
+    if rag_backend() == "neo4j":
+        from services.rag_service.neo4j_store import Neo4jVectorStore
+
+        return Neo4jVectorStore()
+    return OpenSearchVectorStore()
+
+
 class RAGPipeline:
     def __init__(self, store=None, generator=None) -> None:
-        self.store = store or OpenSearchVectorStore()
+        self.store = store or build_vector_store()
         self.generator = generator or GroqGenerator()
 
     def index(self, recreate: bool = False) -> dict:
@@ -23,7 +36,16 @@ class RAGPipeline:
         return self.store.health()
 
     def answer(self, query: str, conversation_context: dict | None = None, top_k: int | None = None) -> dict:
-        retrieval_backend = "opensearch_vector"
+        # Names the store that actually answered, so a trace shows which backend
+        # ran. "neo4j_vector" is deliberately NOT "neo4j_graph": the latter is in
+        # CUSTOMER_RECORD_BACKENDS (orchestration_agents.py:856), which gates two
+        # escalation rules. A KB answer is not a customer-record answer, and a
+        # substring match on "neo4j" here would silently change when replies are
+        # held for a human.
+        vector_backend = (
+            "neo4j_vector" if rag_backend() == "neo4j" else "opensearch_vector"
+        )
+        retrieval_backend = vector_backend
         retrieval_error = None
         try:
             contexts = self.store.similarity_search(query, k=top_k or rag_top_k())
@@ -37,7 +59,7 @@ class RAGPipeline:
         if local_contexts:
             if not contexts:
                 retrieval_backend = "keyword_fallback"
-                retrieval_error = retrieval_error or "opensearch returned no knowledge_base contexts"
+                retrieval_error = retrieval_error or f"{vector_backend} returned no knowledge_base contexts"
                 contexts = local_contexts
             elif self._should_prefer_local_context(query, contexts[0], local_contexts[0]):
                 retrieval_backend = "hybrid_keyword_rerank"

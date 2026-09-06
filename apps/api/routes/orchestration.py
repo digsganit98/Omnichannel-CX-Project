@@ -1,7 +1,12 @@
 from fastapi import APIRouter, Depends
 
 from apps.api.dependencies.security import require_admin_auth
-from services.rag_service.config import embedding_backend, embedding_dimension, embedding_model
+from services.rag_service.config import (
+    embedding_backend,
+    embedding_dimension,
+    embedding_model,
+    rag_backend,
+)
 from services.rag_service.groq_generator import GroqGenerator
 from services.orchestration_service.graph import ORCHESTRATION_ENGINE, WORKFLOW_EDGES
 from services.orchestration_service.state import WorkflowStep
@@ -32,7 +37,16 @@ def workflow_definition() -> dict:
             {
                 "name": "query_resolution_agent",
                 "responsibility": "Route to Neo4j (transactional intents) or RAG/KB (policy and general). Return cited answers.",
-                "execution": "neo4j_graph_or_opensearch_rag_with_groq_generation",
+                # Two DIFFERENT mechanisms, named separately: a relationship walk over
+                # the customer graph, and vector search over the KB. Both are Neo4j when
+                # RAG_BACKEND=neo4j, which is exactly why they must stay distinguishable -
+                # the first substitution here produced "neo4j_graph_or_neo4j_rag", which
+                # reads as one thing. Hardcoding "opensearch" was the older bug: it named
+                # a store that is not running when the KB is backed by Neo4j.
+                "execution": (
+                    "neo4j_graph_traversal_for_records_or_"
+                    f"{rag_backend()}_vector_search_for_kb_with_groq_generation"
+                ),
             },
             {
                 "name": "ticket_creation_agent",
