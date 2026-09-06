@@ -207,9 +207,9 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 146a - `cluster.blocks.create_index` was OpenSearch defending itself, not a person:** KB indexing 403'd with `index_create_block_exception`, and the setting sat in **persistent** cluster state beside another deliberate-looking tweak (`plugins.index_state_management.template_migration.control: -1`), so it read as an admin guardrail - I said so, and the theory was **wrong**. The node's own log states it: *"Putting index create block on cluster as all nodes are breaching high disk watermark"*, re-applied every ~90s, which is why clearing it to `false` **reverted on its own** between two commands (`auto_release: true`). Clearing with `null` was silently discarded; an explicit `false` wrote through and still could not outlive the monitor. The shared box was at **96%** (144/150 GB) - above the 95% flood stage - and dropping an unused `ollama/ollama` image (5.5 GB, volume **1.59 kB**, so no model was ever pulled and the Groq fallback did not exist there) bought 93%, below flood stage but still above the **90% high watermark** that drives this block. So the KB stays unindexable until ~4.5 GB more is freed, and **none of it is ours**: our whole project is ~633 MB of volumes against `pwm-chatbot-dependencies_langfuse_clickhouse_data` at **22.5 GB** and a `ganiparser` image present twice (7.0 GB ECR + a 3.85 GB local build). Raising the watermark was considered and rejected - it would trade ~30 other projects' safety margin for our tens-of-MB index.
 - **Fix 147 - KB retrieval can run on Neo4j, and the chunks join the customer graph:** the manager asked *why OpenSearch* and *what the graph is for* - the answer is two different retrieval problems, but the KB is **14 chunks** and OpenSearch is a **1.34 GB image** carried for them. Phase 1 adds `Neo4jVectorStore` behind the injection seam `RAGPipeline` already had; Phase 2 adds `(:KBChunk)-[:ABOUT]->(:Product)` edges so retrieval can be scoped to what a customer **actually holds** - co-location alone would leave the chunks as islands and calling that "in the knowledge graph" would be false. Shipped off by default, then made the default in Fix 148 once measured (`RAG_BACKEND=opensearch` reverts). **18/18 identical rank vs OpenSearch** with real embeddings; **26 edges, 11/14 chunks linked**, 3 deliberately unlinked (no Demat/SIP/ELSS products exist). The first comparison run was **worthless and wrong** - the host silently falls back to hash embeddings, which showed a difference that vanished in the container, so the script now refuses to run on the fallback. `retrieval_backend` is `"neo4j_vector"` NOT `"neo4j_graph"`: the latter is in `CUSTOMER_RECORD_BACKENDS` and gates two escalation rules. Suite unchanged at 5 failed / 147 passed.
 - **Fix 148 - the graph became the DEFAULT home of the KB, and the hosted instance was unblocked by it:** `RAG_BACKEND` had to be set explicitly, which is a footgun not a choice - every deployment carries its own `.env`, so a missed line means a box silently runs the other backend with nothing in the app to show it. Neo4j is now the default. The point is not preference: OpenSearch **blocks all index creation above a 90% disk watermark** and re-applies that block every ~90s, so the 14-chunk KB could not be indexed on the shared EC2 box (94% full) however small it is - that is what had blocked the hosted demo all day. Deployed by scp (no git on EC2), `docker compose build api` (a restart runs old code) and `up -d` (a restart does not re-read `.env` either). The index built **first try on a 94% disk**: 14 chunks, 0 errors, 26 Phase 2 edges, retrieval scores identical to local (0.868 / 0.875 / 0.841). Confirmed end-to-end over **WhatsApp**: the home-loan question that returned `Retrieval 0%` and "no knowledge found" in the morning came back verified as Sayantini Sarkar with `TKT_2491A48E2ED0` and the real procedure. **Disk never changed** - still 94%. The EBS expansion, the Langfuse cleanup and the manager escalation were all unnecessary.
-- **Fix 149 - the KB reaches an answer by WALKING the graph, not by matching its wording (UNCOMMITTED):** Fix 147 reported Phase 2 as done when the links it created were used by nothing - `KB_GRAPH_FILTER` defaulted **off**, and the call site passed no `customer_id`, so the re-rank was **unreachable from the real answer path** either way. `(:Concept)` is now the hub - selling a subject is a PROPERTY, not a different node type - and `get_guidance()` walks `Customer -> holding -> Concept <- KBChunk` returning **every** chunk marked `is_hers`. No top-k, no similarity in the answer path: 14 chunks is ~1,124 tokens against a quota bound by REQUESTS, and a filtered-out chunk is invisible to the model. The parallel `similarity_search` is gone. **A `Service Request` Concept was invented** to hold 22 flashcards whose intent named no subject, purely so the unconnected count read zero - removed, along with all 51 `EXPLAINS` edges from resolution examples, which are the **difficulty classifier's** flashcards feeding a different LLM call and are now excluded from the graph view entirely. Both diagrams drew a system that no longer ran; the live renderer was rebuilt, and three things I added to it and removed on instruction are recorded below. **OPEN at the time, both since DISPROVED (see Fix 150/151):** the missing `* -> Account` edges were called harmless to answers - they were not, they were half of why guidance never reached five holding types; and the quota was called request-bound - the limit that actually bit is tokens per minute.
-- **Fix 150 - five of nine holding types reached no guidance (UNCOMMITTED):** Fix 149's holdings link was one query that rode on `PRODUCT_IS`, an edge only Account, CreditCard, FixedDeposit and Loan carry - so **Policy, Claim, ChargePenalty, Transaction and KYC reached no Concept at all** and their guidance arrived marked "general". A customer holding a health policy with three claims got the health-claim chunk as general bank knowledge. Wired on keys the seed already carried, every one verified to resolve for every row first (Claim->Policy 15/15, Charge->Account 7/7, Transaction->Account 72/72). **17 -> 123 holding->Concept edges**, all nine types; `is_hers` for Sayantini **3 -> 5**. `POLICY_TYPE_CONCEPTS` is kept separate from `CATEGORY_CONCEPTS` because a policy says "Auto" where the Concept is Motor Insurance. **OPEN:** six Concepts have zero KB chunks (Fixed Deposit among them, held by four customers) - wiring edges cannot create guidance nobody wrote.
-- **Fix 151 - the UI work after Fix 150, and three diagram errors in a row (UNCOMMITTED):** node hovers rewritten per label (name, then one plain-English line, then facts; ids last and shortened) - and the `"N/A"` string in unsettled claims would have printed **"null approved"** on screen. I replaced the native `<title>` with a custom panel that was never asked for, **broke hovering entirely**, and reverted it. The schema diagram was wrong three times, each error passing the check written for the last: missing edges, then lanes drawn outside the canvas, then nine identical `:INSTANCE_OF` labels where the codebase already de-duplicated `PRODUCT_IS` for that exact reason. **Data-correctness, in-bounds and legibility are three separate checks.** The live graph was rendering at ~half size (1.65 aspect in a 2.98 box, 46% dead margin); now 15%. "Why this answer?" hidden behind a flag: its copy describes the vector search Fix 149 removed. Fix 150 verified live (5 of 14 chunks marked hers). **A 429 sent a raw record dump to a customer** - generation failed, the fallback is `raw_data`, and nothing surfaced it; NOT FIXED. Model moved to 20b. **OPEN:** continuity is decided twice - the answer prompt guesses from a string compare at 17:53:02 while `ticket_referee` decides it properly at 17:53:04.
+- **Fix 149 - the KB reaches an answer by WALKING the graph, not by matching its wording (committed `7d2f388`):** Fix 147 reported Phase 2 as done when the links it created were used by nothing - `KB_GRAPH_FILTER` defaulted **off**, and the call site passed no `customer_id`, so the re-rank was **unreachable from the real answer path** either way. `(:Concept)` is now the hub - selling a subject is a PROPERTY, not a different node type - and `get_guidance()` walks `Customer -> holding -> Concept <- KBChunk` returning **every** chunk marked `is_hers`. No top-k, no similarity in the answer path: 14 chunks is ~1,124 tokens against a quota bound by REQUESTS, and a filtered-out chunk is invisible to the model. The parallel `similarity_search` is gone. **A `Service Request` Concept was invented** to hold 22 flashcards whose intent named no subject, purely so the unconnected count read zero - removed, along with all 51 `EXPLAINS` edges from resolution examples, which are the **difficulty classifier's** flashcards feeding a different LLM call and are now excluded from the graph view entirely. Both diagrams drew a system that no longer ran; the live renderer was rebuilt, and three things I added to it and removed on instruction are recorded below. **OPEN at the time, both since DISPROVED (see Fix 150/151):** the missing `* -> Account` edges were called harmless to answers - they were not, they were half of why guidance never reached five holding types; and the quota was called request-bound - the limit that actually bit is tokens per minute.
+- **Fix 150 - five of nine holding types reached no guidance (committed `7d2f388`):** Fix 149's holdings link was one query that rode on `PRODUCT_IS`, an edge only Account, CreditCard, FixedDeposit and Loan carry - so **Policy, Claim, ChargePenalty, Transaction and KYC reached no Concept at all** and their guidance arrived marked "general". A customer holding a health policy with three claims got the health-claim chunk as general bank knowledge. Wired on keys the seed already carried, every one verified to resolve for every row first (Claim->Policy 15/15, Charge->Account 7/7, Transaction->Account 72/72). **17 -> 123 holding->Concept edges**, all nine types; `is_hers` for Sayantini **3 -> 5**. `POLICY_TYPE_CONCEPTS` is kept separate from `CATEGORY_CONCEPTS` because a policy says "Auto" where the Concept is Motor Insurance. **OPEN:** six Concepts have zero KB chunks (Fixed Deposit among them, held by four customers) - wiring edges cannot create guidance nobody wrote.
+- **Fix 151 - the UI work after Fix 150, and three diagram errors in a row (committed `7d2f388`):** node hovers rewritten per label (name, then one plain-English line, then facts; ids last and shortened) - and the `"N/A"` string in unsettled claims would have printed **"null approved"** on screen. I replaced the native `<title>` with a custom panel that was never asked for, **broke hovering entirely**, and reverted it. The schema diagram was wrong three times, each error passing the check written for the last: missing edges, then lanes drawn outside the canvas, then nine identical `:INSTANCE_OF` labels where the codebase already de-duplicated `PRODUCT_IS` for that exact reason. **Data-correctness, in-bounds and legibility are three separate checks.** The live graph was rendering at ~half size (1.65 aspect in a 2.98 box, 46% dead margin); now 15%. "Why this answer?" hidden behind a flag: its copy describes the vector search Fix 149 removed. Fix 150 verified live (5 of 14 chunks marked hers). **A 429 sent a raw record dump to a customer** - generation failed, the fallback is `raw_data`, and nothing surfaced it; NOT FIXED. Model moved to 20b. **OPEN:** continuity is decided twice - the answer prompt guesses from a string compare at 17:53:02 while `ticket_referee` decides it properly at 17:53:04.
 - **Fix 152 - the reply prompt said the same thing twice, and asserted a case it had not decided:** **(A)** the customer's records were rendered into the prompt TWICE - `neo4j_answer` for "Retrieved context:", `_format_graph_context` for "Customer account context:", both from the same `get_all_customer_records`, four steps apart, neither aware of the other. **~1,089 duplicate tokens a message**, and Fix 150's claim that this was free was WRONG: the limit that bit is **tokens per minute**, a 429 refused `answer_generation` at 6,260 of 8,000, and the fallback `raw_data` sent a customer the unformatted record dump. One parameter (`include_records`, default **True** so `classify_message` - which has no other source of records - is untouched). The no-data warning had to move with them or it would tell the model it cannot see an account whose records sit lower in the same prompt; keyed on `source` not `doc_type`, because the memory cache also emits `doc_type: customer_graph` while carrying no records. **3,930 -> 2,839 tokens.** **(B)** the prompt asserted continuity three ways (`SAME SUBJECT`, `same topic, different matter`, `It continues tkt_x`) from one comparison - does the intent LABEL match, and is this the ticket the conversation was last on. Measured: `answer_generation` 17:53:02, `ticket_referee` **17:53:04** - the answer named a case two seconds before the mechanism built to decide it ran, and got it wrong. Moving the referee earlier was planned and **abandoned after reading the code**: it is the middle step of `create_or_get_ticket`, whose last step needs the answer. So the false claim was removed, not made true; the case LIST and the do-not-claim warning both stay. **Verified on 9 real UI messages**, every fact checked against her records, zero LLM failures, prompts ~4,200 tokens, `is_hers` 5 on all 14 turns. **OPEN:** two questions about one card still fork two tickets (the referee's dispute-written prompt), and the 429 fallback still sends the database to the customer.
 - **OPEN - Fix 149 turned three escalation gates into constants (NOT FIXED, measured):** moving the KB into the graph made retrieval EXHAUSTIVE - all 14 chunks, every message - and three gates that read `contexts` to judge relevance silently became no-ops. Measured on all 11 messages sent through the UI today, with contexts rebuilt from `retrieval_evidence`: **`_is_strong_l1_knowledge_answer` TRUE 11/11**, `knowledge_not_found` fired **0/11**, KB chunks per turn **min 14 max 14**. The third gate is the damaging one - returning True SKIPS the handoff check entirely, the rule that reads the customer's own words. Live consequence: the FD question, for which the KB has zero guidance, auto-sent as a confident L1 knowledge answer and volunteered a penalty rule from the model's own general knowledge. Today's real escalations (fraud, claim dispute) were caught earlier by intent-label rules, which MASKS this for the intents that have their own rules and exposes it for everything else. `confidence=0.95` is hardcoded in Priority 2, so `confidence < 0.3` cannot fire either. **Fix 149 verified the PROVENANCE consumers of contexts and never enumerated the DECISION consumers.** This gate has now broken twice in opposite directions (Fix 143 inverted it) because it reads a property of RETRIEVAL to answer a question about RELEVANCE - so the fix is not a patched condition. Fix 150 already supplies the raw material (`customer_holds`, each chunk's `concept`); probe it on real messages before designing the gate.
 - **Reference - local vs the hosted instance:** the two are NOT meant to match. Application code must; `docker-compose.yml` deliberately must not (Ollama commented out on EC2, and ngrok has **no** `profiles: ["tunnel"]` there - copying the local file over means the next `up` starts no tunnel and **WhatsApp goes silent with nothing to say why**). EC2 is the sole holder of the shared WhatsApp number, mailbox and ngrok domain, which is why local ships with those off. Three deploy traps, all already bitten: **no git on EC2** (scp only), `restart` runs **old code** (rebuild), and `restart` does **not re-read `.env`** (`up -d`). Plus what must never be done there - other teams' containers, the disk watermark, removing OpenSearch, `prune --volumes`.
@@ -424,6 +424,8 @@ returns ALL pending rows, and nothing retires that row when the ticket resolves.
 rule's guard was also narrow — it only excluded `resolved`, not `closed`.)
 
 **Fix (A + B, no migration):**
+- **EC2 deploy 2026-09-07 - the box went from Fix 148 to Fix 152, and the KB index exists there for the first time:** nine files `scp`'d to their final paths and the image rebuilt; `/admin/rag/index` returned 14/14 indexed at 95% disk, which OpenSearch had blocked for weeks and Neo4j does not gate, and `link-kb-graph` returned `holdings_linked: 123`, matching local exactly. `docker-compose.yml` deliberately not copied.
+- **EC2 fresh start 2026-09-07 - full wipe and reseed, and the seed payload that exists in only one place:** `/app/data` is absent from the api image (measured - `data/` is gitignored so `COPY . .` never carried it), so `bfsi.xlsx`, the KB PDF and the resolution examples live ONLY in the `cx-data` volume and must be copied off before any wipe; `stop` is not enough to release a volume (`rm -f` the container), and `down` would take the shared ngrok tunnel with it. Box left with 0 conversations, 5 customers, KB 14/14, `holdings_linked: 123`; logins destroyed and needing re-signup.
 - **A (read filter)** `apps/api/routes/agent_assist.py` — before returning, drop any pending
   recommendation whose `ticket_id` maps to a `resolved`/`closed` ticket (looked up via
   `get_ticket`, memoized). Conversation-level rows (no ticket_id) are unaffected.
@@ -7367,7 +7369,9 @@ does not work.
 
 ## Fix 149 - the KB reaches an answer by WALKING the graph, not by matching its wording
 
-**UNCOMMITTED.** Everything below is in the working tree only. Fix 147/148 are pushed;
+**Committed `7d2f388`, pushed 2026-09-07.** (This line read "UNCOMMITTED" for a day after
+the commit landed and misled a later session - status words rot; record the hash.)
+Fix 147/148 are pushed;
 this is the work that followed them.
 
 ### What was wrong with Fix 147
@@ -7598,7 +7602,7 @@ every customer as Unverified for months while looking healthy.
 
 ## Fix 150 - five of nine holding types reached no guidance, and Fix 149 said so in a footnote
 
-**UNCOMMITTED.** `services/neo4j_service/concepts.py` only.
+**Committed `7d2f388`, pushed 2026-09-07.** `services/neo4j_service/concepts.py` only.
 
 ### What Fix 149 actually built
 
@@ -8109,3 +8113,181 @@ question from the credit-card question on real messages BEFORE writing the gate.
   similarity score and meant something; it is now a literal that two gates still read.
 - The two-tickets-for-one-card problem and the 429 raw-dump fallback are both still open,
   and both are recorded in Fix 152.
+
+---
+
+## EC2 deploy - 2026-09-07 - the box went from Fix 148 to Fix 152, and the KB index exists there for the first time
+
+**The hosted instance is now at commit `4bc68a8`** (local `HEAD`, pushed the same day). It had
+been at Fix 148 (`7e58dc8`) since 2026-09-06.
+
+### What was copied
+
+Nine files, each `scp`'d directly to its final path - no staging directory. Backup of the
+eight being overwritten at `~/backup_pre149` on the box (`concepts.py` is new, so nothing to
+back up). That backup plus `docker compose build api && up -d api` is the rollback.
+
+| file | carries |
+|---|---|
+| `services/neo4j_service/concepts.py` (**new**, 12,349 bytes) | the Concept hub - Fixes 149/150 |
+| `services/neo4j_service/queries.py` | holdings -> Concept for all nine holding types |
+| `services/neo4j_service/query_library.py` | " |
+| `services/rag_service/groq_generator.py` | Fix 152A de-duplication, 152B continuity claim removed |
+| `services/agent_service/orchestration_agents.py` | Fix 149 answer path |
+| `apps/api/routes/rag.py` | `/link-kb-graph` |
+| `apps/admin-ui/{app.js,index.html,style.css}` | Fix 151 - tooltips, schema diagram, graph sizing |
+
+**`docker-compose.yml` was NOT copied**, deliberately. The local file now carries
+`profiles: ["tunnel"]` on ngrok; copying it means the next `up` starts no tunnel and WhatsApp
+inbound goes silent with nothing to say why. Verified on the box: `ngrok` container up 2 days,
+untouched by this deploy.
+
+### Verified at each step, not assumed
+
+| check | result |
+|---|---|
+| `grep -c include_records groq_generator.py` (before rebuild) | **4** - absent in the old version |
+| `docker compose build api` | 2.8s, pip layers CACHED, only `COPY . .` re-ran |
+| `docker compose up -d api` | **Recreated** - not "Started", which would mean the old container was reused |
+| startup log | clean; `neo4j_seed_skipped: data already present` |
+| `import services.neo4j_service.concepts` **inside the container** | OK |
+| `rag_backend()` **inside the container** | `neo4j` |
+
+### The KB index now exists on EC2 - it never did before
+
+    POST /admin/rag/index?recreate=true
+    -> {"documents_loaded":14,"indexed":14,"errors":0}
+
+This had been blocked for weeks: OpenSearch refuses index creation above its flood-stage disk
+watermark and the box has sat at 93-96%. **Moving the KB into Neo4j (Fix 148) is what
+unblocked it** - Neo4j has no such gate - and it succeeded at **95% with 9.0 GB free**, without
+touching the watermark or freeing anyone else's space. Before today, knowledge questions on the
+hosted box returned `Retrieval 0%`.
+
+    POST /admin/rag/link-kb-graph
+    -> chunks 14, links 26, linked_chunks 11, unlinked_chunks 3
+       concept_layer: concepts 18, products_linked 20, chunks_linked 14, holdings_linked 123
+
+**`holdings_linked: 123` matches the local Fix 150 figure exactly** (17 -> 123), so the
+deployment is functionally verified, not merely started.
+
+### Known gaps now live on the hosted box
+
+- **Three unlinked chunks** - `demat_account`, `sip_investment`, `elss_tax_benefit`. Expected;
+  the endpoint names them itself. No seeded customer holds those products.
+- **Six Concepts have zero KB chunks**, Fixed Deposit among them, held by 4 customers. Session
+  33 open item 4 - an authoring gap, not code, and it now applies to EC2 too.
+- **The three dead escalation gates** (see the OPEN section above) shipped with this deploy.
+  `_is_strong_l1_knowledge_answer` still skips the handoff check. Unchanged by this work,
+  now live for demo clients.
+
+### Nothing else moved
+
+Disk `9.0 GB free / 95%` before and after. Only `omnichannel-cx-project-api-1` restarted
+(~20s downtime, and the log shows a real user on `49.37.43.15` was browsing the console at the
+time). `neo4j`, `opensearch`, `ngrok` and `mailpit` all still "Up 2 days". No other team's
+containers, images or volumes touched.
+
+### Two process corrections this deploy forced
+
+1. **Five `UNCOMMITTED` markers in this log were false** - Fixes 149, 150 and 151 all landed in
+   `7d2f388` and the log still called them uncommitted a day later. A later session read its own
+   stale words and rebuilt the picture from `git log` to recover. **Record commit hashes, never
+   volatile status words.** Corrected in this pass.
+2. **The EC2 procedure now lives in memory** (`ec2-deployment-rules`), approved by the user:
+   who runs what (Claude prepares, the user executes - Claude has no SSH access), which prompt
+   runs which command, one `scp` per file to its final path, verify content before rebuilding,
+   `build` not `restart`, `up -d` not `restart`, and the nevers.
+
+---
+
+## EC2 fresh start - 2026-09-07 - full wipe and reseed, and the seed payload that exists in only one place
+
+Done immediately after the Fix 152 deploy above, on the same box. **The console is now empty:
+0 conversations, 0 turns, 0 tickets, 5 seeded customers, KB indexed.**
+
+### Why a wipe and not the targeted clear
+
+The box held 1 conversation / 4 turns, both predating today's work. The second exchange -
+*"How do I apply for a home loan?"*, 2026-09-06 - was answered with **no knowledge base on the
+box at all** (the index did not exist until an hour earlier), so the reply was the model's own
+general knowledge rather than this bank's guidance. Leaving that in a demo inbox is worse than
+an empty one. The user asked for a fresh start; a targeted clear was proposed twice and was the
+wrong answer to the question asked.
+
+### The finding that changes the runbook: `/app/data` exists ONLY in the volume
+
+`docs/rules_to_follow/fresh-start-runbook.md` says to wipe `cx-data`, and on EC2 that is
+**destructive in a way the runbook does not warn about**. Measured before wiping, not assumed:
+
+    docker compose exec -T api ls -la /app/data/        -> bfsi.xlsx, knowledge_base/, resolution_kb/
+    docker run --rm --entrypoint sh <api image> -c "ls -la /app/data/"
+                                                       -> ls: cannot access '/app/data/': No such file or directory
+
+**The image has no `/app/data` at all.** `data/` is gitignored, so `COPY . .` never carried it;
+every file under it was hand-copied into the volume during Fix 146 and exists nowhere else on
+the box. A theory that the image's copy would be exposed once the volume was removed was
+**tested and disproved** - had it been believed, the wipe would have destroyed `bfsi.xlsx`,
+`knowledge_base/InboxIQ_BFSI_KB.pdf` and `resolution_kb/resolution_examples.json` with no way
+back, recreating Fix 146 plus the KB source documents.
+
+**So step 1 of any EC2 wipe is to copy that payload off the volume first.**
+
+### The sequence that worked
+
+| # | step | why |
+|---|---|---|
+| 1 | `docker cp` `bfsi.xlsx`, `knowledge_base`, `resolution_kb` to `~/seed_backup_*` | irreplaceable; verified 26,418 / 48,094 / 12,109 bytes before continuing |
+| 2 | `docker compose stop api neo4j` | **NOT `down`** - that stops ngrok, up 2 days holding the shared tunnel, and OpenSearch which is unused |
+| 3 | `docker compose rm -f api neo4j` | **a stopped container still holds its volumes** - `volume rm` failed with "volume is in use" until the containers were removed. The two holder IDs were `docker inspect`ed first to confirm they were ours and not another team's |
+| 4 | `docker volume rm ..._cx-data ..._neo4j-data` | only these two; `opensearch-data` and the model caches left alone |
+| 5 | `docker compose up -d neo4j`, wait for `(healthy)` | a fresh empty store took ~90s; seeding against a not-yet-ready database would fail |
+| 6 | `docker compose up -d api` (recreates the empty `cx-data`), then `docker cp` the three payloads back in | there is nothing to copy into until the volume exists |
+| 7 | `docker compose restart api` | `_seed_neo4j()` runs at startup only, and the first boot had no `bfsi.xlsx` yet. `restart` is correct here - no code or `.env` change |
+| 8 | `POST /admin/rag/index?recreate=true`, then `/link-kb-graph` | the graph was wiped, so the index built earlier today went with it |
+
+### Verified after
+
+    neo4j_seed_complete
+    Customer 5, KBChunk 14, Concept 18, INSTANCE_OF 143
+    indexed 14/14 errors 0, holdings_linked 123      (identical to pre-wipe and to local)
+    conversations 0, conversation_turns 0, tickets 0
+    ngrok / mailpit / opensearch still "Up 2 days"; disk 9.0 GB free, unchanged
+
+Two log lines that look like failures and are not: `label Customer does not exist` is the seed
+*checking* an empty graph, and a 404 on `conv_1c81f531e660` is a still-open browser asking for
+the deleted conversation.
+
+**Logins were destroyed with `cx-data`** (`customer_users` 0, `admin_users` 0) and must be
+recreated by signing up - the portal one as `sayantini.s.55@gmail.com` / `7890864700`, matching
+the seeded record exactly or identity resolution treats it as an unknown customer.
+
+### `.env` - measured, not guessed
+
+The user asked whether anything in `.env` needed changing. It did not, and this is how that is
+answerable **without opening the file**:
+
+- No deployed code reads a new variable - `git diff 7e58dc8..HEAD -- services/ apps/` with every
+  added line grepped for `getenv`/`environ`: **zero hits**.
+- `RAG_BACKEND=neo4j` verified from *inside* the container after the rebuild.
+- `.env.example` changed, but only comments and placeholders - no new variable.
+
+**A divergence was found: EC2 runs `openai/gpt-oss-120b`, local runs `20b`.** Local was moved
+off 120b after a 429 the previous day. A `max_tokens:1` probe returned **HTTP 200 with 999/1000
+requests remaining**, so 120b is healthy and EC2 was **left unchanged**. The 429 that caused the
+local switch was the **tokens-per-minute** ceiling (8,000), not the daily request cap - two
+different limits, and Fix 152A's ~1,089-token saving reduces pressure on exactly the one that
+tripped.
+
+`.env` was copied from local originally and both have been edited since, so **the `GROQ_API_KEY`
+and therefore the daily quota are shared across the two machines** - a probe from either answers
+for both.
+
+### A mistake worth recording
+
+To read one value I told the user to run `grep -vE "KEY|TOKEN|PASSWORD|SECRET" .env` on the
+hosted box and described it as hiding the credentials. **It does not** - the filter matches
+variable NAMES, so anything named otherwise (`NEO4J_AUTH`, SMTP fields) printed in full. The
+value being sought was `GROQ_MODEL`, and the question of whether `.env` needed changing was
+answerable from the code diff without opening the file at all. **Grep the single variable by
+name; never print the file.** Recorded in the `ec2-deployment-rules` memory.
