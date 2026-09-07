@@ -69,18 +69,16 @@ var TEAM_LABEL = {
 };
 // A stable colour per theme so dividers are visually distinct. Uses the same
 // token vocabulary as the rest of the flow view (border/bg/text triples).
+// One colour for every topic chip. These used to vary by the routing TEAM behind the
+// intent (retail_banking green, claims blue, fraud amber...), which meant the SAME intent
+// rendered blue in Detailed and green in Lineage, and the hue encoded a team name shown
+// nowhere on screen. The chip's text is the label; the colour was decoration.
+var THEME_TONE = { t:'var(--blue-t)', bg:'var(--blue-bg)', bd:'var(--blue-bd)' };
 var THEME_COLOR = {
-  card_services:        { t:'var(--wc)',    bg:'var(--wc-bg)',   bd:'var(--wc-bd)' },
-  loans:                { t:'#db2777',      bg:'#fdf2f8',        bd:'#fbcfe8' },
-  collections:          { t:'#db2777',      bg:'#fdf2f8',        bd:'#fbcfe8' },
-  fraud_and_disputes:   { t:'var(--amb-t)', bg:'var(--amb-bg)',  bd:'var(--amb-bd)' },
-  retail_banking:       { t:'var(--grn-t)', bg:'var(--grn-bg)',  bd:'var(--grn-bd)' },
-  payments:             { t:'var(--grn-t)', bg:'var(--grn-bg)',  bd:'var(--grn-bd)' },
-  claims:               { t:'var(--blue-t)',bg:'var(--blue-bg)', bd:'var(--blue-bd)' },
-  insurance_operations: { t:'var(--blue-t)',bg:'var(--blue-bg)', bd:'var(--blue-bd)' },
-  compliance:           { t:'var(--t2)',    bg:'var(--surf2)',   bd:'var(--bdr)' },
-  customer_care:        { t:'var(--t2)',    bg:'var(--surf2)',   bd:'var(--bdr)' },
-  general:              { t:'var(--t3)',    bg:'var(--surf2)',   bd:'var(--bdr)' }
+  card_services: THEME_TONE, loans: THEME_TONE, collections: THEME_TONE,
+  fraud_and_disputes: THEME_TONE, retail_banking: THEME_TONE, payments: THEME_TONE,
+  claims: THEME_TONE, insurance_operations: THEME_TONE, compliance: THEME_TONE,
+  customer_care: THEME_TONE, general: THEME_TONE
 };
 // System-event "intents" that aren't real customer topics — excluded from
 // grouping and from node/row titles so they never surface as a theme.
@@ -160,11 +158,6 @@ var state = { convs: [], selectedConvId: null, convDetail: null, simTimer: null,
   // signal; the rows are for acting on. Held here so the choice survives the poll
   // re-render, and shared across conversations (it is a display preference, not data).
   tktOpen: false,
-  // Theme-group fold state. Keyed "<conversation_id>:<groupIndex>"; presence in
-  // the Set = collapsed. Persists across the inbox poll re-render. `themeSeeded`
-  // tracks which conversations have had their default (all-but-latest collapsed)
-  // applied, so re-renders don't re-collapse groups the agent opened.
-  collapsedThemes: {}, themeSeeded: {},
   // Conversation view mode per conversation_id: 'detailed' (spine, default) or
   // 'lineage' (compact 3-column history overview). Clicking a lineage row drills
   // back into 'detailed', focused on that request.
@@ -214,13 +207,47 @@ function toast(msg) {
 
 // ── Stage management ──────────────────────────────────────────────────────────
 function showStage(stage) {
-  // Three stages now, not four: 'apikey' is the combined sign-in card (it kept its id),
-  // 'app' the console, 'user' the customer portal. The separate 'auth' page that sat
-  // behind the API-key prompt is gone, along with the prompt itself.
+  // Four stages: 'home' the unauthenticated landing page, 'apikey' the combined sign-in
+  // card (it kept its id), 'app' the console, 'user' the customer portal. The separate
+  // 'auth' page that sat behind the API-key prompt is gone, along with the prompt itself.
+  document.getElementById('homePage').style.display = stage === 'home' ? 'flex' : 'none';
   document.getElementById('connectModal').classList.toggle('hidden', stage !== 'apikey');
   document.getElementById('mainShell').style.display = stage === 'app' ? 'flex' : 'none';
   document.getElementById('userPortal').style.display = stage === 'user' ? 'flex' : 'none';
 }
+
+// ── Home page entry points ────────────────────────────────────────────────────
+// Both buttons open the existing sign-in card unchanged — the only difference is
+// which tab it lands on. Admin mode is the default for both, matching the card's
+// own default; a customer switches with the tabs inside it, as before.
+window.openLogin = function() {
+  switchLoginMode('admin');
+  switchAdminAuth('login');
+  showStage('apikey');
+};
+
+window.openSignup = function() {
+  switchLoginMode('admin');
+  switchAdminAuth('signup');
+  showStage('apikey');
+};
+
+window.goHome = function() {
+  showStage('home');
+};
+
+// Analytics view switch. Every section stays in the DOM and keeps its ids - only
+// visibility changes - so the render functions need no knowledge of which tab is open,
+// and data loaded for a hidden section is still there when you switch to it.
+window.switchAnalyticsTab = function(name, btn) {
+  var secs = document.querySelectorAll('.analytics-section[data-an]');
+  for (var i = 0; i < secs.length; i++) {
+    secs[i].hidden = secs[i].getAttribute('data-an') !== name;
+  }
+  var tabs = document.querySelectorAll('#anTabs .an-tab');
+  for (var j = 0; j < tabs.length; j++) tabs[j].classList.remove('on');
+  if (btn) btn.classList.add('on');
+};
 
 window.switchLoginMode = function(mode) {
   var isAdmin = mode === 'admin';
@@ -417,14 +444,16 @@ window.doLogout = function() {
   currentUser = null;
   sessionStorage.removeItem('cx-admin-jwt');
   sessionStorage.removeItem('cx-admin-user');
-  // Back to the sign-in card, which is now the only way in. This used to send the operator
-  // to the separate auth page that sat behind the API-key prompt; with the key gone that
-  // page is unreachable, so logging out would have landed on an orphaned screen.
+  // Back to the home page, not the sign-in card. Landing on the card left the home page
+  // unreachable for the rest of the session — nothing links back to it and a reload just
+  // re-shows the card. Signing out returns you to the front door; signing in again is one
+  // click from there. (An EXPIRED token still lands on the card — see the boot block at
+  // the bottom of this file — because that user was working, not leaving.)
   document.getElementById('adminUsernameInput').value = '';
   document.getElementById('adminPasswordInput').value = '';
   switchAdminAuth('login');
   switchLoginMode('admin');
-  showStage('apikey');
+  showStage('home');
 };
 
 window.backToPortalSelection = function() {
@@ -438,7 +467,7 @@ window.backToPortalSelection = function() {
   sessionStorage.removeItem('cx-admin-user');
   document.getElementById('adminPasswordInput').value = '';
   switchLoginMode('admin');
-  showStage('apikey');
+  showStage('home');
 };
 
 function updateRibbonUser() {
@@ -907,16 +936,7 @@ function renderCentre(conv) {
     prevTicket = tkt;
   });
 
-  // Seed default fold state ONCE per conversation: latest group (index 0)
-  // expanded, all older groups collapsed. Done only if not seeded yet, so a
-  // poll re-render never re-collapses a group the agent manually opened.
   var convKey = conv.conversation_id;
-  if (!state.themeSeeded[convKey]) {
-    groups.forEach(function(g, gi) {
-      if (gi > 0) state.collapsedThemes[convKey + ':' + gi] = true;
-    });
-    state.themeSeeded[convKey] = true;
-  }
 
   // The AI holding message injected when a reply is held for human review
   // (mirrors HOLDING_MESSAGE in services/orchestration_service/graph.py). When a
@@ -1108,7 +1128,7 @@ function renderCentre(conv) {
         +     '<span class="cp ' + chn.pill + '" style="font-size:10px">' + chn.svg + chn.label + '</span>'
         +     '<span class="flow-emotion ' + exEmotionCls + '">' + escH(exEmotion) + '</span>'
         +     (exIntent ? '<span class="det-intent">' + escH(exIntent) + '</span>' : '')
-        +     (u.ticket ? '<span class="lin-tkt">' + escH(u.ticket) + '</span>' : '<span class="lin-tkt lin-tkt--none">no ticket</span>')
+        +     (u.ticket ? '<span class="lin-tkt ' + statusCls + '">' + escH(u.ticket) + '</span>' : '<span class="lin-tkt lin-tkt--none">no ticket</span>')
         +     '<span class="flow-node-status ' + statusCls + '">' + escH(statusLabel(nodeStatus)) + '</span>'
         +     (timeStr ? '<span class="lin-time">' + escH(timeStr) + '</span>' : '')
         +   '</div>'
@@ -1149,7 +1169,7 @@ function renderCentre(conv) {
   // left border follows the THEME colour (dots follow channel). Click drills into
   // the Detailed view for this request. Same `unit` shape as renderUnit, so the
   // two views never diverge on grouping.
-  function renderLineageRow(u, themeColor) {
+  function renderLineageRow(u, themeColor, themeLabel) {
     var tktStatus = u.ticket ? tktStatusMap[u.ticket] : null;
     var isLatestUnit = u.idx === 0;
     var nodeStatus;
@@ -1211,8 +1231,9 @@ function renderCentre(conv) {
     var metaHtml = offerReply
       ? '<span class="nba-badge nba-badge-upsell">Offer</span>'
         + '<span class="flow-node-status fns-done">Sent</span>'
-      : (u.ticket ? '<span class="lin-tkt">' + escH(u.ticket) + '</span>' : '<span class="lin-tkt lin-tkt--none">no ticket</span>')
-        + '<span class="flow-node-status ' + statusCls + '">' + escH(statusLabel(nodeStatus)) + '</span>';
+      : (u.ticket ? '<span class="lin-tkt ' + statusCls + '">' + escH(u.ticket) + '</span>' : '<span class="lin-tkt lin-tkt--none">no ticket</span>')
+        + '<span class="flow-node-status ' + statusCls + '">' + escH(statusLabel(nodeStatus)) + '</span>'
+        + (themeLabel ? '<span class="det-intent">' + escH(themeLabel) + '</span>' : '');
     var snipHtml = offerReply
       ? '<div class="lin-snip"><span class="lin-snip-lbl">Offer sent</span>' + escH(offerReply.text || '') + '</div>'
       : '<div class="lin-snip"><span class="lin-snip-lbl">Opened with</span>' + escH(query || '—') + '</div>';
@@ -1266,16 +1287,6 @@ function renderCentre(conv) {
 
   // ── Render theme groups with foldable headers ───────────────────────────
   groups.forEach(function(g, gi) {
-    var groupKey = convKey + ':' + gi;
-    // If we're navigating to a specific ticket, force-open the group that holds
-    // it so the highlighted turn isn't hidden inside a collapsed group.
-    if (state.highlightTicketId) {
-      var hasHighlight = g.items.some(function(it) {
-        var tid = (it.step.inbound && it.step.inbound.ticket_id) || (it.step.outbound && it.step.outbound.ticket_id) || null;
-        return tid === state.highlightTicketId;
-      });
-      if (hasHighlight) delete state.collapsedThemes[groupKey];
-    }
     var units = buildUnits(g.items);        // merged request units for this group
 
     // In Detailed mode, render ONLY the single focused request. Skip any group
@@ -1293,44 +1304,13 @@ function renderCentre(conv) {
       });
     }
 
-    var collapsed = !detailSingle && !!state.collapsedThemes[groupKey];
-
     var groupEl = document.createElement('div');
-    groupEl.className = 'flow-theme-group' + (collapsed ? ' collapsed' : '');
+    groupEl.className = 'flow-theme-group';
 
-    // Theme header (divider). In Lineage it's foldable (toggles the group); in
-    // single-request Detailed it's a static label (nothing to fold to).
-    var header = document.createElement('div');
-    header.className = 'flow-theme-divider' + (detailSingle ? ' static' : '');
-    if (!detailSingle) {
-      header.setAttribute('role', 'button');
-      header.setAttribute('tabindex', '0');
-      header.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
-    }
-    header.style.cssText = '--th-t:' + g.color.t + ';--th-bg:' + g.color.bg + ';--th-bd:' + g.color.bd;
-    header.innerHTML =
-        '<span class="ftd-line"></span>'
-      + '<span class="ftd-label">'
-      +   (detailSingle ? '' : '<svg class="ftd-chev" viewBox="0 0 24 24" width="11" height="11"><path d="M8 5l8 7-8 7z"/></svg>')
-      +   '<span class="ftd-dot"></span>'
-      +   escH(g.themeLabel)
-      + '</span>'
-      + '<span class="ftd-line r"></span>';
-    if (!detailSingle) {
-      var toggle = function() {
-        if (state.collapsedThemes[groupKey]) delete state.collapsedThemes[groupKey];
-        else state.collapsedThemes[groupKey] = true;
-        renderCentre(conv);
-      };
-      header.addEventListener('click', toggle);
-      header.addEventListener('keydown', function(e) {
-        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
-      });
-    }
-    // Detailed shows ONE request at a time (Fix 31), so this divider divides nothing -
-    // and now that every row carries its own intent pill it just repeats the row beneath
-    // it. Kept in Lineage, where it genuinely separates one request from the next.
-    if (!detailSingle) groupEl.appendChild(header);
+    // Dropped in BOTH views now. Detailed lost it at Fix 31 (one request on screen, so it
+    // divided nothing); Lineage loses it here for the same reason - each row carries its
+    // own ticket chip, status and intent, so a banner above one card repeated the card.
+    // Nothing appends `header`; the fold handlers below are dead with it and are removed.
 
     // Group body — stacked exchange rows (detailed) or compact summary rows (lineage).
     var bodyEl = document.createElement('div');
@@ -1339,34 +1319,13 @@ function renderCentre(conv) {
     // Each unit is a request; render it per the active view mode.
     units.forEach(function(u) {
       bodyEl.appendChild(viewMode === 'lineage'
-        ? renderLineageRow(u, g.color)
+        ? renderLineageRow(u, g.color, g.themeLabel)
         : renderUnit(u, g.color));
     });
 
     groupEl.appendChild(bodyEl);
     box.appendChild(groupEl);
   });
-
-  // "Collapse/Expand all" toggle at the end of the channel-filter bar. Only
-  // meaningful in Lineage (multiple foldable theme sections); Detailed shows a
-  // single request. Collapses every THEME section and flips to "Expand all".
-  if (groups.length && viewMode === 'lineage') {
-    var allThemeKeys = groups.map(function(_, gi) { return convKey + ':' + gi; });
-    var everyCollapsed = allThemeKeys.every(function(k) { return state.collapsedThemes[k]; });
-    var caBtn = document.createElement('button');
-    caBtn.className = 'chfilt chfilt-collapse';
-    caBtn.innerHTML = (everyCollapsed
-      ? '<svg viewBox="0 0 24 24" width="12" height="12"><path d="M7 10l5 5 5-5z"/></svg>Expand all'
-      : '<svg viewBox="0 0 24 24" width="12" height="12"><path d="M7 14l5-5 5 5z"/></svg>Collapse all');
-    caBtn.addEventListener('click', function() {
-      allThemeKeys.forEach(function(k) {
-        if (everyCollapsed) delete state.collapsedThemes[k];
-        else state.collapsedThemes[k] = true;
-      });
-      renderCentre(conv);
-    });
-    bar.appendChild(caBtn);
-  }
 
   // Scroll the highlighted turn into view and clear the pending highlight
   if (state.highlightTicketId) {
@@ -1920,7 +1879,7 @@ function renderBars(containerId, items, lk, vk, colorFn) {
   var el = document.getElementById(containerId);
   if (!items || !items.length) { el.innerHTML = '<div class="empty-state">No data yet</div>'; return; }
   var max = Math.max.apply(null, items.map(function(i){return i[vk];}));
-  var COLORS = ['#2563eb','#16a34a','#d97706','#dc2626','#7c3aed','#0ea5e9','#ec4899','#f59e0b','#10b981','#6366f1'];
+  var COLORS = ['var(--blue)'];
   el.innerHTML = items.map(function(item, idx) {
     var pct = max > 0 ? Math.round((item[vk]/max)*100) : 0;
     var clr = colorFn ? colorFn(item[lk], idx) : COLORS[idx % COLORS.length];
@@ -1983,7 +1942,10 @@ var LLM_OP_PURPOSE = {
 };
 
 // Stable colour per operation so the same op keeps its colour across the table + meters.
-var LLM_OP_COLORS = ['--blue', '--pur', '--grn', '--amb', '--pnk', '--red'];
+// One colour, not a scale: every row here is already labelled by name, so colour was
+// never the key and cycling hues only added noise. The line charts below DO keep a
+// multi-hue scale - there the colour is the only thing telling two series apart.
+var LLM_OP_COLORS = ['--blue'];
 function llmOpColor(name, idx) {
   // deterministic by index so ordering (cost-desc) reads as a gentle palette walk
   return 'var(' + LLM_OP_COLORS[idx % LLM_OP_COLORS.length] + ')';
@@ -1993,6 +1955,13 @@ function llmOpColor(name, idx) {
 // frac = 0..1 (share of the column max), color = css colour, valueLabel = printed text.
 // The <td> stays a real table cell; the flex row lives on an inner wrapper so the
 // four metric cells keep their own table columns.
+// A plain right-aligned figure. Six meters per row put ~54 bars on one screen, none
+// saying anything the number did not: a meter compares WITHIN one dimension, so one
+// column earns it and the rest were decoration.
+function llmNumCell(valueLabel, muted) {
+  return '<td class="llm-num' + (muted ? ' llm-num--muted' : '') + '">' + valueLabel + '</td>';
+}
+
 function llmMeterCell(frac, color, valueLabel) {
   var pct = Math.max(2, Math.round((frac || 0) * 100));
   return '<td class="llm-meter-cell"><div class="llm-meter-wrap">'
@@ -2015,6 +1984,7 @@ function renderLlmUsagePanel(data) {
     { val: Number(calls).toLocaleString(), lbl: 'LLM calls', tone: 'blue', icon: '&#9673;' },
     { val: (totals.total_tokens || 0).toLocaleString(), lbl: 'Tokens', tone: 'pur', icon: '&#9632;' },
     { val: '$' + cost.toFixed(6), lbl: 'Estimated cost', tone: 'grn', icon: '&#36;' },
+    { val: '$' + (calls ? cost / calls : 0).toFixed(6), lbl: 'Avg cost', tone: 'blue', icon: '&#8721;' },
     { val: avg.toFixed(0) + ' ms', lbl: 'Avg latency', tone: 'amb', icon: '&#9201;' },
   ];
 
@@ -2055,17 +2025,19 @@ function renderLlmUsagePanel(data) {
         + escH((row.operation || 'unknown').replace(/_/g, ' '))
         + (purpose ? '<span class="llm-op-q">?</span>' : '') + '</td>'
       + llmMeterCell(cl / maxCalls, clr, cl.toLocaleString())
-      + llmMeterCell(tok / maxTok, clr, tok.toLocaleString())
-      + llmMeterCell(co / maxCost, clr, '$' + co.toFixed(6))
-      + llmMeterCell(avgCostOf(row) / maxAvgC, clr, '$' + avgCostOf(row).toFixed(6))
-      + llmMeterCell(lat / maxLat, clr, lat.toFixed(0) + ' ms')
+      + llmNumCell(tok.toLocaleString())
+      + llmNumCell('$' + co.toFixed(6))
+      + llmNumCell('$' + avgCostOf(row).toFixed(6), true)
+      + llmNumCell(lat.toFixed(0) + ' ms', true)
       + '</tr>';
   }).join('');
 
   el.innerHTML =
     '<div class="kpi-grid">'
     + cards.map(function(c) {
-      return '<div class="kpi-tile kpi-' + c.tone + '">'
+      return '<div class="kpi-tile kpi-' + c.tone + (c.tip ? ' kpi-has-tip' : '') + '"'
+        + (c.tip ? ' title="' + escH(c.tip) + '"' : '') + '>'
+        + (c.tip ? '<span class="kpi-help" title="' + escH(c.tip) + '">?</span>' : '')
         + '<div class="kpi-icon">' + c.icon + '</div>'
         + '<div class="kpi-val">' + c.val + '</div>'
         + '<div class="kpi-lbl">' + c.lbl + '</div>'
@@ -2142,10 +2114,10 @@ function renderModelVersionTable(data) {
         + '<span class="llm-op-dot" style="background:' + clr + '"></span>'
         + llmVerCellLabel(row) + '</td>'
       + llmMeterCell(cl / maxCalls, clr, cl.toLocaleString())
-      + llmMeterCell(tok / maxTok, clr, tok.toLocaleString())
-      + llmMeterCell(co / maxCost, clr, '$' + co.toFixed(6))
-      + llmMeterCell(avgCostOf(row) / maxAvgC, clr, '$' + avgCostOf(row).toFixed(6))
-      + llmMeterCell(lat / maxLat, clr, lat.toFixed(0) + ' ms')
+      + llmNumCell(tok.toLocaleString())
+      + llmNumCell('$' + co.toFixed(6))
+      + llmNumCell('$' + avgCostOf(row).toFixed(6), true)
+      + llmNumCell(lat.toFixed(0) + ' ms', true)
       + '</tr>';
   }).join('');
 
@@ -2570,18 +2542,25 @@ window.loadConnectors = async function() {
   var mailboxTxt = (inboxRes && inboxRes.configured) ? escH(inboxRes.mailbox || 'INBOX') : '—';
   var errorHtml = (inboxRes && inboxRes.last_error)
     ? '<div style="font-size:10px;color:#dc2626;margin-top:6px;word-break:break-all">'+escH(inboxRes.last_error)+'</div>' : '';
-  var pipeOk  = '<span style="color:var(--grn-t);font-weight:600">Active</span>';
-  var pipeBad = '<span style="color:var(--red-t);font-weight:600">Down</span>';
+  // The two pipes are only worth showing when one has FAILED. With both up the badge
+  // already says Connected and the rows just repeated it in every screenshot; with one
+  // down the badge says Partial and these rows are the only thing saying WHICH half.
+  var inPipeUp  = !!inboxConfigured;
+  var outPipeUp = emStatus === 'connected';
+  var pipesHtml = (inPipeUp && outPipeUp) ? '' :
+      '<div class="conn-pipes">'
+    +   '<span class="cp-k">Inbound (IMAP)</span>'
+    +   '<span class="' + (inPipeUp ? '' : 'cp-down') + '">' + (inPipeUp ? 'Active' : 'Down') + '</span>'
+    +   '<span class="cp-k">Outbound (SMTP)</span>'
+    +   '<span class="' + (outPipeUp ? '' : 'cp-down') + '">' + (outPipeUp ? 'Active' : 'Down') + '</span>'
+    + '</div>';
   inboxCard.innerHTML =
     '<div class="conn-hdr">'
     + '<div class="conn-icon" style="background:#db4437"><svg viewBox="0 0 24 24" fill="#fff"><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/></svg></div>'
     + '<div><div class="conn-nm">Email</div><div class="conn-desc">Gmail · inbound IMAP auto-poll + outbound SMTP delivery</div></div>'
     + '</div>'
-    + '<div class="conn-status"><span class="conn-badge ' + emailBadgeCls + '">' + emailBadgeTxt + '</span></div>'
-    + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;font-size:11px;color:var(--t2);margin-top:10px">'
-    + '<span style="color:var(--t3)">Inbound (IMAP)</span><span>' + (inboxConfigured ? pipeOk : pipeBad) + '</span>'
-    + '<span style="color:var(--t3)">Outbound (SMTP)</span><span>' + (emStatus === 'connected' ? pipeOk : pipeBad) + '</span>'
-    + '</div>';
+    + pipesHtml
+    + '<div class="conn-status"><span class="conn-badge ' + emailBadgeCls + '">' + emailBadgeTxt + '</span></div>';
   // Insert after WhatsApp so the card order is: WhatsApp · Email · Call · Jira.
   grid.insertBefore(inboxCard, grid.children[1] || null);
 
@@ -2593,7 +2572,7 @@ window.loadConnectors = async function() {
   webCard.className = 'conn-card';
   webCard.innerHTML =
     '<div class="conn-hdr">'
-    + '<div class="conn-icon" style="background:#2563eb"><svg viewBox="0 0 24 24" fill="#fff"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-2 12H6v-2h12v2zm0-3H6V9h12v2zm0-3H6V6h12v2z"/></svg></div>'
+    + '<div class="conn-icon" style="background:var(--blue)"><svg viewBox="0 0 24 24" fill="#fff"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-2 12H6v-2h12v2zm0-3H6V9h12v2zm0-3H6V6h12v2z"/></svg></div>'
     + '<div><div class="conn-nm">Web Chat</div><div class="conn-desc">Customer portal · in-app chat (synchronous inbound + reply)</div></div>'
     + '</div>'
     + '<div class="conn-status"><span class="conn-badge connected">Connected</span></div>';
@@ -3483,7 +3462,7 @@ window.doUserLogout = function() {
   document.getElementById('userIdInput').value = '';
   document.getElementById('userPasswordInput').value = '';
   switchLoginMode('user');
-  showStage('apikey');
+  showStage('home');
 };
 
 var portalChatTimer = null;
@@ -3630,8 +3609,10 @@ if (userToken && portalUser && !isTokenExpired(userToken)) {
   showStage('app');
   bootApp();
 } else {
-  // 'apikey' is now the combined sign-in card (admin + customer), not a key prompt.
-  showStage('apikey');
+  // First arrival with no session: the home page. The sign-in card ('apikey') is one
+  // click away via openLogin/openSignup, and every logout path still returns straight
+  // to it — someone logging out means to sign in again, not to read the landing page.
+  showStage('home');
 }
 
 })();

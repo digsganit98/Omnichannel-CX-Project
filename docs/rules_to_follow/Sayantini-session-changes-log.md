@@ -253,6 +253,16 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 150 - five of nine holding types reached no guidance (committed `7d2f388`):** Fix 149's holdings link was one query that rode on `PRODUCT_IS`, an edge only Account, CreditCard, FixedDeposit and Loan carry - so **Policy, Claim, ChargePenalty, Transaction and KYC reached no Concept at all** and their guidance arrived marked "general". A customer holding a health policy with three claims got the health-claim chunk as general bank knowledge. Wired on keys the seed already carried, every one verified to resolve for every row first (Claim->Policy 15/15, Charge->Account 7/7, Transaction->Account 72/72). **17 -> 123 holding->Concept edges**, all nine types; `is_hers` for Sayantini **3 -> 5**. `POLICY_TYPE_CONCEPTS` is kept separate from `CATEGORY_CONCEPTS` because a policy says "Auto" where the Concept is Motor Insurance. **OPEN:** six Concepts have zero KB chunks (Fixed Deposit among them, held by four customers) - wiring edges cannot create guidance nobody wrote.
 - **Fix 151 - the UI work after Fix 150, and three diagram errors in a row (committed `7d2f388`):** node hovers rewritten per label (name, then one plain-English line, then facts; ids last and shortened) - and the `"N/A"` string in unsettled claims would have printed **"null approved"** on screen. I replaced the native `<title>` with a custom panel that was never asked for, **broke hovering entirely**, and reverted it. The schema diagram was wrong three times, each error passing the check written for the last: missing edges, then lanes drawn outside the canvas, then nine identical `:INSTANCE_OF` labels where the codebase already de-duplicated `PRODUCT_IS` for that exact reason. **Data-correctness, in-bounds and legibility are three separate checks.** The live graph was rendering at ~half size (1.65 aspect in a 2.98 box, 46% dead margin); now 15%. "Why this answer?" hidden behind a flag: its copy describes the vector search Fix 149 removed. Fix 150 verified live (5 of 14 chunks marked hers). **A 429 sent a raw record dump to a customer** - generation failed, the fallback is `raw_data`, and nothing surfaced it; NOT FIXED. Model moved to 20b. **OPEN:** continuity is decided twice - the answer prompt guesses from a string compare at 17:53:02 while `ticket_referee` decides it properly at 17:53:04.
 - **Fix 152 - the reply prompt said the same thing twice, and asserted a case it had not decided:** **(A)** the customer's records were rendered into the prompt TWICE - `neo4j_answer` for "Retrieved context:", `_format_graph_context` for "Customer account context:", both from the same `get_all_customer_records`, four steps apart, neither aware of the other. **~1,089 duplicate tokens a message**, and Fix 150's claim that this was free was WRONG: the limit that bit is **tokens per minute**, a 429 refused `answer_generation` at 6,260 of 8,000, and the fallback `raw_data` sent a customer the unformatted record dump. One parameter (`include_records`, default **True** so `classify_message` - which has no other source of records - is untouched). The no-data warning had to move with them or it would tell the model it cannot see an account whose records sit lower in the same prompt; keyed on `source` not `doc_type`, because the memory cache also emits `doc_type: customer_graph` while carrying no records. **3,930 -> 2,839 tokens.** **(B)** the prompt asserted continuity three ways (`SAME SUBJECT`, `same topic, different matter`, `It continues tkt_x`) from one comparison - does the intent LABEL match, and is this the ticket the conversation was last on. Measured: `answer_generation` 17:53:02, `ticket_referee` **17:53:04** - the answer named a case two seconds before the mechanism built to decide it ran, and got it wrong. Moving the referee earlier was planned and **abandoned after reading the code**: it is the middle step of `create_or_get_ticket`, whose last step needs the answer. So the false claim was removed, not made true; the case LIST and the do-not-claim warning both stay. **Verified on 9 real UI messages**, every fact checked against her records, zero LLM failures, prompts ~4,200 tokens, `is_hers` 5 on all 14 turns. **OPEN:** two questions about one card still fork two tickets (the referee's dispute-written prompt), and the 429 fallback still sends the database to the customer.
+- **Fix 153 - the app opened on a password box, so a first-time visitor met a login before a product:** added a home page as a fourth stage in front of the sign-in card; the card, both auth flows and every logout path are unchanged.
+- **Fix 154 - the product had the wrong name in every user-facing surface:** renamed "Omnichannel CX Accelerator" to **OmnichannelCX** in 10 places across 4 files; the Python half needs an image rebuild to take effect.
+- **Fix 155 - logging out made the home page unreachable:** all three logout paths now return to the home page instead of the sign-in card, and the dead `setBackHome` toggle was removed.
+- **Fix 156 - the UI was not Ganit-branded:** applied the four Ganit colours across both surfaces, put the logo in all four places, and left every colour that encodes meaning alone.
+- **Fix 157 — the Analytics dashboard looked like a stock template:** KPI tiles rebuilt label-first on plain white, the operation tables cut from six meters a row to one, and the three stacked sections became tabs.
+- **Fix 158 — an Avg cost tile, and the note above it:** cost/calls added between Estimated cost and Avg latency, using the same formula as the table column below it.
+- **Fix 159 — the conversation chips were five filled pills competing:** identifiers keep a faint pill, states become a coloured dot, and the ticket id now takes its status colour in BOTH views.
+- **Fix 160 — Lineage was grouped by ticket but headed by intent:** the banner divider removed, the topic moved into the card, and all fold machinery deleted with it.
+- **Fix 161 — the Connectors cards were unequal and one was styled inline:** equal-height cards with the status pinned to a footer rule, and Email's two pipes shown only when one is down.
+- **Fix 162 — Channel Testing hidden from the nav, and a favicon added:** the page described an IMAP poller that is switched off and named a mailbox the system is not configured for.
 - **OPEN - Fix 149 turned three escalation gates into constants (NOT FIXED, measured):** moving the KB into the graph made retrieval EXHAUSTIVE - all 14 chunks, every message - and three gates that read `contexts` to judge relevance silently became no-ops. Measured on all 11 messages sent through the UI today, with contexts rebuilt from `retrieval_evidence`: **`_is_strong_l1_knowledge_answer` TRUE 11/11**, `knowledge_not_found` fired **0/11**, KB chunks per turn **min 14 max 14**. The third gate is the damaging one - returning True SKIPS the handoff check entirely, the rule that reads the customer's own words. Live consequence: the FD question, for which the KB has zero guidance, auto-sent as a confident L1 knowledge answer and volunteered a penalty rule from the model's own general knowledge. Today's real escalations (fraud, claim dispute) were caught earlier by intent-label rules, which MASKS this for the intents that have their own rules and exposes it for everything else. `confidence=0.95` is hardcoded in Priority 2, so `confidence < 0.3` cannot fire either. **Fix 149 verified the PROVENANCE consumers of contexts and never enumerated the DECISION consumers.** This gate has now broken twice in opposite directions (Fix 143 inverted it) because it reads a property of RETRIEVAL to answer a question about RELEVANCE - so the fix is not a patched condition. Fix 150 already supplies the raw material (`customer_holds`, each chunk's `concept`); probe it on real messages before designing the gate.
 - **Reference - local vs the hosted instance:** the two are NOT meant to match. Application code must; `docker-compose.yml` deliberately must not (Ollama commented out on EC2, and ngrok has **no** `profiles: ["tunnel"]` there - copying the local file over means the next `up` starts no tunnel and **WhatsApp goes silent with nothing to say why**). EC2 is the sole holder of the shared WhatsApp number, mailbox and ngrok domain, which is why local ships with those off. Three deploy traps, all already bitten: **no git on EC2** (scp only), `restart` runs **old code** (rebuild), and `restart` does **not re-read `.env`** (`up -d`). Plus what must never be done there - other teams' containers, the disk watermark, removing OpenSearch, `prune --volumes`.
 
@@ -8432,3 +8442,334 @@ blocks, and the capabilities missed by not reading the repo (PII masking with Lu
 card detection, multilingual, L1/L2/L3 triage, post-handover monitoring) - is in the
 `capability-doc-brief` memory. The product is called **Omnichannel CX Accelerator**, from the
 UI's own title.
+
+## Fix 153 - the app opened on a password box, so a first-time visitor met a login before a product
+
+**Problem.** `http://localhost:8888/admin-ui` went straight to the sign-in card. Anyone arriving
+without a session - a judge, a stakeholder, a prospect - was asked for credentials to a product
+they had never seen, and had to guess whether they were "Admin" or "Customer Login". Nothing on
+screen said what OmnichannelCX was or did.
+
+**Fix.** A home page, added as a **fourth stage** rather than a rewrite. `showStage()` in
+`apps/admin-ui/app.js` was already a clean switch over `apikey` / `app` / `user`; it gained
+`home`, and the boot fall-through at the bottom of the file now lands there instead of on the
+card. A restored session still goes straight to the console or the portal - the home page is for
+first arrival only.
+
+**Files:** `apps/admin-ui/index.html` (new `#homePage` block, back link in the card, cache-buster
+`?v=20260907-home4`), `apps/admin-ui/style.css` (a `HOME PAGE` section, existing colour tokens
+reused), `apps/admin-ui/app.js` (3 edits: the stage line, `openLogin`/`openSignup`/`goHome`, and
+the boot fall-through). All three are bind-mounted, so **no image rebuild was needed**.
+
+**Content, one viewport, no scroll.** Nav (Ganit logo + "OmnichannelCX" left, `Log in` +
+`Sign up` right), headline, one sub-line, four stats, six capability cards in a 3x2 grid, footer.
+Every number is sourced, not invented: **Rs.0.34** from the cost model (LLM only), and 3 / 16 / 5
+counted in the codebase. The six cards were chosen so each answers a different buyer objection -
+continuity, grounding, human-in-the-loop, learning, privacy, observability.
+
+**A dead end caught by looking at the render, not the diff.** The sign-in card has no close
+control - it never needed one when it was the first screen. Opened from a home page it became a
+trap. Added a "Back to home" link, shown by `setBackHome(true)` from the two home entry points and
+hidden by `setBackHome(false)` on **both** logout paths (`doLogout`, `backToPortalSelection`),
+where home is not the previous screen. First placed between the two tab rows, which read wrong on
+screen; moved above the title.
+
+**Three defects only the screenshot revealed:** a hand-drawn "graph" SVG rendered as a blob
+(replaced with a share/network glyph), the headline broke as "across / every channel" (forced with
+a `<br>`), and the centred block left ~120px dead at the bottom (padding and hero size rebalanced).
+None of these were visible in the markup.
+
+**Verification.** Rendered headless at 1440x900 and **looked at**: fits with no scroll. The click
+path was driven for real - a temporary copy of the page auto-calling `openLogin()` - and the card
+opened on the Admin/Login tab with the back link present. The harness file was deleted; `ls
+apps/admin-ui/` confirms it is gone. No Groq spend, no backend change, no test run needed.
+
+**The logo.** `docs/ganit logo.png` (67x68, transparent) copied to
+`apps/admin-ui/ganit-logo.png`, served by the existing `/admin-ui/assets` mount. It carries its
+own colours, so it sits on the bar rather than inside a tinted tile. **It is small** - crisp at
+30px, but an SVG would be better if one exists.
+
+**Not done, deliberately:** the login card and `<title>` still say "Omnichannel CX Accelerator".
+The home page says **OmnichannelCX**, the correct product name. Renaming the rest is a separate,
+deliberate pass - see the `capability-doc-brief` memory on why that name matters.
+
+## Fix 154 - the product had the wrong name in every user-facing surface
+
+**Problem.** The product is called **OmnichannelCX** - one word, no space, no "Accelerator". The
+UI, the API and the README all said "Omnichannel CX Accelerator", a name taken from the UI's own
+`<title>` rather than from the user. The `capability-doc-brief` memory records this as a name
+already corrected twice; the home page (Fix 153) was the only place that had it right.
+
+**Changed - 10 strings, 4 files:**
+
+| File | Was | Now |
+|---|---|---|
+| `apps/admin-ui/index.html` (5) | `<title>`, login card brand, console ribbon, portal ribbon, connectors line | OmnichannelCX |
+| `apps/api/main.py` (2) | FastAPI `title=`, `/` route `name` | OmnichannelCX |
+| `apps/api/routes/email.py` (2) | SMTP test subject and body | OmnichannelCX |
+| `README.md` (1) | H1 | OmnichannelCX |
+
+**The two-tone brand was preserved.** `.modal-brand span` and `.ribbon-name span` colour the inner
+span blue. Removing the SPACE between the two spans - `Omnichannel<span>CX</span>` - renders one
+word with `CX` accented, so no CSS changed. Verified on a rendered screenshot, not by reading the
+markup.
+
+**The customer portal ribbon kept its surface label:** `OmnichannelCX User Tickets`. "User Tickets"
+names the surface, not the product, so replacing it outright would have lost information.
+
+**Verified:** `grep -rn "Accelerator"` and `grep -rn "Omnichannel CX"` across all code file types
+outside `docs/` both return nothing.
+
+**Needs a rebuild.** The four Python strings are baked into the image - see
+[[rebuild-image-to-deploy-python]]. The six UI strings are bind-mounted and were live immediately.
+
+**Also:** the Ganit logo had been COPIED to `apps/admin-ui/ganit-logo.png` in Fix 153, leaving a
+duplicate at `docs/ganit logo.png`. The user caught it. Confirmed byte-identical (md5, 2,889
+bytes), deleted the docs copy, re-verified the served asset still returns HTTP 200.
+
+**Not changed:** `docs/` still contains the old name in historical entries. Rewriting past log
+entries would falsify the record - they describe what was true when written.
+
+## Fix 155 - logging out made the home page unreachable
+
+**Problem, reported by the user with a screenshot.** After logging out you got the sign-in card,
+and the home page was then **unreachable for the rest of the browser session** - nothing links back
+to it, the back link was deliberately hidden on the logout path, and reloading `/admin-ui` re-shows
+the card because the stage decision only runs at boot.
+
+**This was my design decision, not a bug in someone else's code.** Fix 153 landed logout on the
+card on the reasoning that "someone logging out means to sign in again, not to read the landing
+page", and I wrote that into a code comment. It was stated in the plan rather than asked about, and
+the user approved a plan, not that call. The reasoning ignored that the home page had no other
+entrance.
+
+**Fix.** All three logout paths now `showStage('home')`:
+
+| Path | Where |
+|---|---|
+| `doLogout` - admin console | `app.js` |
+| `backToPortalSelection` - "Switch portal" | `app.js` |
+| `doUserLogout` - **customer portal** | `app.js:3509` |
+
+**The third one I had missed entirely** in the original fix - it was only found by grepping every
+`showStage(` call site instead of the two functions I already had in mind. Same failure mode as
+[[enumerate-decision-consumers]]: I fixed the callers I could name.
+
+**`setBackHome` deleted.** With every logout going home, the card is reachable only from the home
+page or from an expired token, and "Back to home" is valid in both - so the toggle had one live
+state left and was dead machinery. The link is now always shown.
+
+**An expired token still lands on the sign-in card** (the boot block, unchanged): that user was
+working and got cut off, so the useful destination is the way back in, not the front door.
+
+**Verified by driving the real flow**, not by reading the diff: a headless browser signed in as
+`Admin_1`, clicked Logout, and the screenshot shows the home page. Harness file deleted afterwards
+(`ls apps/admin-ui/` confirms). UI-only, bind-mounted, no rebuild, no Groq spend.
+
+## Fix 156 - the UI was not Ganit-branded
+
+**The four Ganit colours**, given by the user: `#1701D0` deep blue, `#D5E0F6` pale blue,
+`#EC7730` orange, `#FAE3D0` peach. All four are now on screen.
+
+**Measured contrast first, and it decided the roles.** `#1701D0` scores **10.76:1** on white
+(the old `#2563eb` scored 5.17) so it carries text and buttons; `#EC7730` scores **2.90** and
+therefore FAILS as body text - it is a fill and an accent only. The two pales are backgrounds
+at ~1.3:1. This was computed, not eyeballed.
+
+**Four shades were invented** because Ganit's four do not cover every need, and the user should
+know which are theirs: `--blue-t #1400A8` and `--org-t #C25A1C` (hover states), `--blue-bd
+#B4C8EE` and `--org-bd #F5C9A6` (borders - `#D5E0F6` on white has no visible edge), plus
+`#eef2fc` for the selected inbox row.
+
+**What was deliberately NOT recoloured** - these encode meaning, not brand:
+
+| Kept | Why |
+|---|---|
+| Channel stripes/pills | blue=Email, green=WhatsApp, purple=Web Chat |
+| `COLORS[]`, `LLM_TL_COLORS[]` | 8-10 distinct chart/operation series |
+| Graph node type colours | colour identifies the type |
+| Green/amber/red KPIs | resolved / at-risk / breached |
+| **Connector tiles** | WhatsApp green, Gmail red, Jira `#0052cc` are **third-party brands** - I listed these as a fix and was wrong |
+
+**A console dashboard cannot be strongly branded** and stay readable: it needs many
+distinguishable colours and the brand has two. Branding therefore lives in the chrome - logo,
+header, sidebar, buttons, tabs - and the data stays polychrome. Worth remembering before anyone
+asks why Analytics still looks multicoloured.
+
+**The logo** went from 1 place to 4 (home, login card, both ribbons). On the dark navy ribbon it
+sits on a white plate, because its own arc is deep blue and would vanish.
+
+**Three defects found by rendering, not by reading the diff:** the sidebar's active item was a
+dark-blue fill on near-black and nearly invisible; the selected inbox row was too saturated
+across a whole row; and one KPI tile got a blue->orange gradient that read as a rendering fault
+beside three single-hue tiles.
+
+**An orange marker bar was attempted three times and removed.** It clipped on the rail edge,
+then inside it, then against the tile's own `border-radius`. The solid blue tile was already
+unmistakable - the bar was decoration for a problem already fixed. See
+[[dont-hand-roll-solved-problems]]: three attempts was the stopping point.
+
+**Two claims I made that were wrong**, both from reading a screenshot instead of the code:
+blue words inside the AI reply are the **browser's own find/highlight**, not a CSS rule (no rule
+colours body text); and the connector icons are third-party brands, above.
+
+**Verified** by rendering each change headless and looking at it - the rail, the tabs, the send
+button, the card grid. UI-only, bind-mounted, no rebuild, no Groq spend.
+
+
+## Fix 157 — the Analytics dashboard looked like a stock template
+
+The user supplied a reference UI from a sibling product and asked why ours did not read as
+"calm, modern, aesthetic". Reading the two side by side, the difference was **not colour** — it
+was that the reference is calmer. Three changes came out of that.
+
+**KPI tiles rebuilt.** Label first in sentence case, then a larger value (27 → 30px); the blue
+gradient wash and the coloured top-rule both removed so the card is plain white; the bare emoji
+in the corner became a tinted rounded badge. Colour now lives ONLY in that badge. Both JS render
+paths emit value-before-label, so the visual order is flipped with flex `order` rather than by
+editing two separate functions.
+
+**The operation tables went from six meters a row to one.** ~54 bars on one screen, none saying
+anything the number did not — a meter compares WITHIN one dimension, so Calls keeps it and the
+rest became right-aligned tabular figures, cost and latency muted. Vertical rules dropped
+(whitespace separates instead), row padding 9 → 12px.
+
+**The three sections became tabs.** FinOps / Customer Care / Solution Performance. Sections keep
+their ids and markup and only visibility changes, so every render function still writes into the
+same elements whether or not its tab is open.
+
+**A bug the user found before I did: the tabs did not switch.** `.analytics-section` sets
+`display:flex`, which **overrides the `hidden` attribute** — `hidden` is only `display:none` at
+the browser's default priority. All three sections stayed visible under a tab strip that looked
+like it worked. Fixed with `.analytics-section[hidden]{display:none}`; any element carrying its
+own display rule needs that guard. I had checked that nothing else *controlled* the sections and
+never checked that hiding one actually hid it.
+
+**Then two spacing corrections, both of my own making:** the tab strip's `margin-bottom:18px`
+stacked on `.dash`'s existing 20px child gap (38px of dead space above the content), and the
+three orange section headers duplicated the tab label two lines below it. Headers removed —
+verified first that their "Last 7 days" / "All time" badge was not lost, since all 8 panels
+inside carry their own copy.
+
+**Colour was tried three ways before this and rejected each time**, which is the useful part of
+the record: a Ganit-blue header bar (the user called it a lazy answer, correctly); a warm
+`#FAE3D0`-derived page background, built and reverted because peach spread thin reads as beige;
+and branded chips, built and judged too subtle to matter. **Ganit's palette is saturated and
+belongs in small bounded shapes, not large washes** — that is the lesson those three attempts
+paid for.
+
+## Fix 158 — an Avg cost tile, and the note above it
+
+`cost / calls`, placed between Estimated cost and Avg latency. Deliberately the **same formula**
+as the per-operation table's `AVG COST` column (`avgCostOf`), so the tile cannot contradict the
+rows beneath it. It is the WEIGHTED average (total ÷ total), which does not equal the simple mean
+of that column — 0.000207 against 0.000305 on the current data, because `handoff check` runs 71
+times at 0.000024 while `answer generation` runs 25 times at 0.000493.
+
+`.kpi-grid` was a hard `repeat(4,1fr)`; a fifth tile would have dropped onto its own line at
+quarter width, so it is now `auto-fit` with a 160px floor. **The FinOps tiles also had no `tip`
+support at all** — a separate, simpler render block from `renderKpiTiles` that silently dropped
+the field, so a tooltip set there would never have appeared. Wired up; the tooltip itself was
+then removed, because one "?" among five tiles reads as a defect rather than as help.
+
+The explainer above the table was cut from three lines to one, in the user's own wording:
+*"1 LLM call = 1 model invocation. A single customer interaction typically spans several LLM
+calls."*
+
+## Fix 159 — the conversation chips were five filled pills competing
+
+Above every message sat five saturated pills; in Lineage's meta column, three stacked vertically.
+Corrected in two passes, because the first was an over-correction:
+
+- **Pass 1 stripped every fill.** Wrong: the problem was five SATURATED fills, not fills as such.
+- **Pass 2** gives the two chips that NAME something — the topic and the ticket id — a faint pill
+  back at `#f0f4fc` / `#fafbfc`. Not `--blue-bg`: that is the Ganit pale at FULL strength, which
+  is what made the first attempt still look heavy. The two that report a STATE — sentiment and
+  status — stay as a small dot plus plain text, the dot taking the hue via `currentColor`. The
+  channel pill keeps its fill as the row's anchor.
+
+**The ticket id now takes its status colour** — amber for Open, grey for Logged, green for Closed
+— in Detailed AND Lineage. The id and its status are siblings, so no CSS selector could tint one
+from the other; both render sites already had `statusCls` in scope for the status chip, so the id
+carries the same class and inherits the colour with no new logic. The `::before` dot rules are
+scoped to `.flow-node-status` so the id does not also sprout a dot.
+
+**Baseline alignment:** the chips are inline-flex boxes at different font-sizes (10 / 10.5 / 11px),
+and the row's `align-items:center` centres the BOXES, not the text inside them. One
+`line-height:18px` across every child levelled them.
+
+The same faint-pill treatment then went to the Knowledge graph button and the selected
+Customer-Context tab — the latter softened from the solid Ganit blue **I had set earlier in this
+same session**. Three deliberate levels of blue now exist: faint `#f0f4fc` at rest, `--blue-bg`
+for a selected state, solid `--blue` reserved for primary actions.
+
+## Fix 160 — Lineage was grouped by ticket but headed by intent
+
+**Grouping is ticket-first**, which is the continuity idea itself: `ticketGroup[tkt]` returns a
+ticket to its original group however many other topics intervened, and theme only decides for
+turns carrying no ticket (a bank-initiated offer). The banner above each group nonetheless
+labelled it by INTENT — and a ticket's intent is frozen at creation, so a thread that drifted
+could be mislabelled by its own header.
+
+Banner removed; the topic moved into the card's meta column beside the ticket id and status,
+matching how Detailed labels each row. Detailed had already lost this divider at Fix 31 for
+exactly the same reason.
+
+**All fold machinery went with it** — `collapsedThemes`, `themeSeeded`, `groupKey`, the header
+builder, its click/keydown handlers and the "Collapse all" button. Leaving `collapsed` in place
+would have been worse than dead code: with no header left to click, a collapsed group could never
+have been reopened.
+
+**Topic chip colours unified to one Ganit blue.** They had been keyed on the routing TEAM
+(`retail_banking` green, `claims` blue, `fraud_and_disputes` amber), which meant the SAME intent
+rendered blue in Detailed and green in Lineage, and the hue encoded a team name that appears
+nowhere on screen for anyone to decode.
+
+**Column width took three attempts.** `grid-template-columns:auto` sized the meta column to each
+row's own widest chip, computed per row, so no two rows aligned. Fixed at 172px, then 150px, then
+**124px** — sized to the ticket id, the one element that genuinely cannot wrap. The topic wraps
+to two lines, which is what it should have done from the start; the user had to say "why are you
+wasting spaces" before I stopped widening the column to avoid a wrap.
+
+## Fix 161 — the Connectors cards were unequal and one was styled inline
+
+Cards stretched to different heights (Email carried two extra rows), the status badges were
+saturated filled pills, and Email's IMAP/SMTP block was an inline
+`style="display:grid;grid-template-columns:1fr 1fr;..."` written into a JS string — the only card
+on the page with hand-written layout, matching nothing else.
+
+Now: equal-height cards with the status **pinned to a footer rule** (`margin-top:auto`), so every
+badge lines up across the row; status as a dot plus text, the same language as the conversation
+views; `Phase 2` as a faint Ganit-peach pill, since it is a roadmap label rather than a state and
+so keeps a pill and no dot; vendor icons slightly desaturated but keeping their own brand colours.
+
+**WhatsApp green, Gmail red and Jira `#0052cc` are third-party marks, not ours to restyle.** I had
+listed "brand the connector icons Ganit" as a fix earlier in the session and was wrong.
+
+**Email's two pipes now render only when one is DOWN.** They exist because Email is the only
+connector with two independent connections, and the badge reads `Partial` when one fails — but
+with both up they simply repeated the `Connected` badge above them. Moved into a `.conn-pipes`
+class.
+
+## Fix 162 — Channel Testing hidden from the nav, and a favicon added
+
+The page claimed customer email "arrives automatically via Gmail IMAP polling … every 30 seconds"
+at `digvijayyadav48@gmail.com`. Measured: **`IMAP_ENABLED=false`**, so nothing polls, and the
+configured mailbox is `customersupportomnichannelcx@gmail.com`. It also directed the reader to
+`Connectors → Email Inbox → Poll now`, a control that page does not have.
+
+Its one working half — the WhatsApp form — drives the same pipeline the customer portal already
+drives, and the page sits one click from a demo audience.
+
+**Nav item commented out only.** `#page-sim`, `switchPage('sim')` and
+`/test/whatsapp/inbound-simulate` are all untouched; restoring it is uncommenting one block.
+Verified in a browser: 5 nav items, `nav-sim` gone, `page-sim` still present, no JS errors.
+
+**I first called the page "not stale" after checking only that its two endpoints returned.** The
+endpoints were fine; the page was lying. Checking that a route exists is not checking that the
+screen tells the truth — see [[verify-end-state-not-the-edit]].
+
+**Favicon**: none was declared at all, so browsers showed their generic globe. Points at the Ganit
+mark already served from the assets mount — no new file, no new route. Noted at the user's
+prompting that a favicon normally carries the PRODUCT's identity rather than the vendor's; the
+user chose to keep the Ganit logo.

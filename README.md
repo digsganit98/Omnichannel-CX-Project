@@ -1,4 +1,4 @@
-# Omnichannel CX Accelerator
+# OmnichannelCX
 
 A local, Docker-based customer support system for BFSI (banking, financial services and
 insurance). A customer writes in on WhatsApp, email or web chat; the system works out who they

@@ -9,8 +9,8 @@ router = APIRouter(prefix="/admin/email", tags=["admin"], dependencies=[Depends(
 
 class EmailTestSend(BaseModel):
     to: str
-    subject: str = "Omnichannel CX Gmail SMTP test"
-    body: str = "This is a test email from the Omnichannel CX Accelerator."
+    subject: str = "OmnichannelCX Gmail SMTP test"
+    body: str = "This is a test email from OmnichannelCX."
 
 
 @router.get("/status")

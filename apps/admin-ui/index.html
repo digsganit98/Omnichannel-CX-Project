@@ -3,21 +3,130 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Omnichannel CX Accelerator - Ticket Operations</title>
+<title>OmnichannelCX - Ticket Operations</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/admin-ui/assets/style.css?v=20260904-auth3">
+<link rel="icon" type="image/png" href="/admin-ui/assets/ganit-logo.png">
+<link rel="stylesheet" href="/admin-ui/assets/style.css?v=20260907-hide1">
 </head>
 <body>
+
+<!-- STAGE 0: HOME PAGE ─────────────────────────────────────────────────────────
+     The first thing an unauthenticated visitor sees. Sits in front of the sign-in
+     card (#connectModal), which is unchanged and still the only way in. A restored
+     session skips this entirely — see the stage decision at the bottom of app.js. -->
+<div class="home-page" id="homePage" style="display:none">
+
+  <header class="home-nav">
+    <div class="home-brand">
+      <img src="/admin-ui/assets/ganit-logo.png?v=1" class="home-logo" alt="Ganit">
+      <span class="home-brand-name">OmnichannelCX</span>
+    </div>
+    <div class="home-nav-actions">
+      <button class="home-btn-ghost" onclick="openLogin()">Log in</button>
+      <button class="home-btn-solid" onclick="openSignup()">Sign up</button>
+    </div>
+  </header>
+
+  <main class="home-main">
+
+    <section class="home-hero">
+      <h1 class="home-headline">Agentic customer resolution<br>across multiple channels</h1>
+      <p class="home-sub">WhatsApp, email and web chat arrive as one conversation. Every answer is
+        grounded in the customer's own records and the policies that govern them.</p>
+      <div class="home-stats">
+        <div class="home-stat"><strong>&#8377;0.34</strong><span>AI cost per interaction</span></div>
+        <div class="home-stat-div"></div>
+        <div class="home-stat"><strong>3</strong><span>channels, one conversation</span></div>
+        <div class="home-stat-div"></div>
+        <div class="home-stat"><strong>16</strong><span>intents, routed</span></div>
+        <div class="home-stat-div"></div>
+        <div class="home-stat"><strong>5</strong><span>specialised agents</span></div>
+      </div>
+    </section>
+
+    <section class="home-cards">
+
+      <article class="home-card">
+        <div class="home-card-ic ic-blue">
+          <svg viewBox="0 0 24 24"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-2 12H6v-2h12v2zm0-3H6V9h12v2zm0-3H6V6h12v2z"/></svg>
+        </div>
+        <h3>One Conversation, Every Channel</h3>
+        <p>A question asked on WhatsApp and followed up by email is one case, with one
+          history.</p>
+      </article>
+
+      <article class="home-card">
+        <div class="home-card-ic ic-pur">
+          <svg viewBox="0 0 24 24"><path d="M18 16.1c-.8 0-1.5.3-2 .8l-7.1-4.2c.1-.2.1-.5.1-.7s0-.5-.1-.7L16 7.1c.5.5 1.2.8 2 .8 1.7 0 3-1.3 3-3s-1.3-3-3-3-3 1.3-3 3c0 .2 0 .5.1.7L8 9.9c-.5-.5-1.2-.8-2-.8-1.7 0-3 1.3-3 3s1.3 3 3 3c.8 0 1.5-.3 2-.8l7.1 4.2c-.1.2-.1.4-.1.7 0 1.6 1.3 3 3 3s3-1.3 3-3-1.3-3-3-3z"/></svg>
+        </div>
+        <h3>Grounded Answering</h3>
+        <p>One graph walk collects the records the customer holds and the knowledge
+          explaining it.</p>
+      </article>
+
+      <article class="home-card">
+        <div class="home-card-ic ic-amb">
+          <svg viewBox="0 0 24 24"><path d="M12 12a4 4 0 100-8 4 4 0 000 8zm0 2c-4 0-8 2-8 4.5V21h16v-2.5C20 16 16 14 12 14z"/></svg>
+        </div>
+        <h3>Human-in-the-Loop</h3>
+        <p>9 escalation rules along with AI decide handover to human agents. Held AI-drafted
+          replies become editable.</p>
+      </article>
+
+      <article class="home-card">
+        <div class="home-card-ic ic-grn">
+          <svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 019 9h-3l4 5 4-5h-3A11 11 0 1012 23v-2a9 9 0 110-18z"/><path d="M11 7h2v6l4 2-1 1.7-5-2.7z"/></svg>
+        </div>
+        <h3>Learns From Every Send</h3>
+        <p>An AI-drafted reply an agent sends unedited is marked verified and reused on the next
+          matching problem.</p>
+      </article>
+
+      <article class="home-card">
+        <div class="home-card-ic ic-red">
+          <svg viewBox="0 0 24 24"><path d="M12 1L3 5v6c0 5.6 3.8 10.7 9 12 5.2-1.3 9-6.4 9-12V5l-9-4zm0 10.9h7c-.5 4.1-3.2 7.8-7 9V12H5V6.3l7-3.1v8.7z"/></svg>
+        </div>
+        <h3>Privacy by Design</h3>
+        <p>PAN, Aadhaar, phone and card numbers are masked deterministically before any text
+          reaches an external model.</p>
+      </article>
+
+      <article class="home-card">
+        <div class="home-card-ic ic-pnk">
+          <svg viewBox="0 0 24 24"><path d="M3 3h2v16h16v2H3V3zm4 12l4-5 3 3.5L19 7l1.5 1.3-6 7.7-3-3.5L8.6 16z"/></svg>
+        </div>
+        <h3>Glass-Box Execution</h3>
+        <p>Every answer keeps its evidence, and every AI call is metered &mdash; volumes,
+          latency, sentiment and cost on one console.</p>
+      </article>
+
+    </section>
+
+  </main>
+
+  <footer class="home-foot">
+    <span>Built by Ganit</span>
+    <span class="home-foot-dot">&middot;</span>
+    <span>BFSI-ready</span>
+  </footer>
+
+</div>
 
 <!-- STAGE 1: LOGIN MODE -->
 <div class="modal-overlay" id="connectModal">
   <div class="modal-card login-mode-card">
     <div class="modal-logo">
-      <div class="modal-icon">
-        <svg viewBox="0 0 24 24"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-2 12H6v-2h12v2zm0-3H6V9h12v2zm0-3H6V6h12v2z"/></svg>
-      </div>
-      <span class="modal-brand">Omnichannel <span>CX Accelerator</span></span>
+      <img src="/admin-ui/assets/ganit-logo.png?v=1" class="modal-icon" alt="Ganit">
+      <span class="modal-brand">Omnichannel<span>CX</span></span>
     </div>
+
+    <!-- Without this the card is a dead end: it has no close control, so anyone who opened
+         it could not get back. Always shown — the card is only reachable from the home page
+         or from an expired session, and returning home is valid from both. -->
+    <button class="modal-back" id="modalBackHome" onclick="goHome()">
+      <svg viewBox="0 0 24 24"><path d="M20 11H7.8l5.6-5.6L12 4l-8 8 8 8 1.4-1.4L7.8 13H20z"/></svg>
+      Back to home
+    </button>
     <div>
       <div class="modal-title">Sign in to your workspace</div>
       <div class="modal-sub">Choose the portal that matches your role</div>
@@ -26,6 +135,7 @@
       <button class="login-mode-tab active" id="modeAdminBtn" onclick="switchLoginMode('admin')">Admin</button>
       <button class="login-mode-tab" id="modeUserBtn" onclick="switchLoginMode('user')">Customer Login</button>
     </div>
+
 
     <div id="adminModeForm">
       <div class="customer-auth-tabs">
@@ -119,10 +229,8 @@
 <div class="user-portal" id="userPortal" style="display:none">
   <div class="ribbon">
     <div class="ribbon-logo">
-      <div class="ribbon-icon">
-        <svg viewBox="0 0 24 24"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-2 12H6v-2h12v2zm0-3H6V9h12v2zm0-3H6V6h12v2z"/></svg>
-      </div>
-      <span class="ribbon-name">Omnichannel <span>User Tickets</span></span>
+      <img src="/admin-ui/assets/ganit-logo.png?v=1" class="ribbon-icon" alt="Ganit">
+      <span class="ribbon-name">Omnichannel<span>CX</span> User Tickets</span>
     </div>
     <div class="ribbon-spacer"></div>
     <div class="ribbon-user">
@@ -236,10 +344,8 @@
   <!-- RIBBON -->
   <div class="ribbon">
     <div class="ribbon-logo">
-      <div class="ribbon-icon">
-        <svg viewBox="0 0 24 24"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-2 12H6v-2h12v2zm0-3H6V9h12v2zm0-3H6V6h12v2z"/></svg>
-      </div>
-      <span class="ribbon-name">Omnichannel <span>CX Accelerator</span></span>
+      <img src="/admin-ui/assets/ganit-logo.png?v=1" class="ribbon-icon" alt="Ganit">
+      <span class="ribbon-name">Omnichannel<span>CX</span></span>
     </div>
     <div class="ribbon-spacer"></div>
     <div class="ribbon-user">
@@ -272,10 +378,17 @@
         <svg viewBox="0 0 24 24"><path d="M17 7H7C4.24 7 2 9.24 2 12s2.24 5 5 5h10c2.76 0 5-2.24 5-5s-2.24-5-5-5zM7 15c-1.66 0-3-1.34-3-3s1.34-3 3-3 3 1.34 3 3-1.34 3-3 3z"/></svg>
         <span class="nav-tooltip">Connectors</span>
       </div>
+      <!-- Channel Testing: hidden from the nav, page markup left in place. It is a
+           developer tool - one WhatsApp form that duplicates what the customer portal
+           already does, beside an email panel describing an IMAP poller that is switched
+           off (IMAP_ENABLED=false) and naming a mailbox the system is not configured for.
+           Backstage for a demo audience. Restore by un-commenting this block; #page-sim,
+           its handlers and /test/whatsapp/inbound-simulate are all untouched.
       <div class="nav-item" id="nav-sim" onclick="switchPage('sim')">
         <svg viewBox="0 0 24 24"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-7 3c1.93 0 3.5 1.57 3.5 3.5S13.93 13 12 13s-3.5-1.57-3.5-3.5S10.07 6 12 6zm7 13H5v-.23c0-.62.28-1.2.76-1.58C7.47 15.82 9.64 15 12 15s4.53.82 6.24 2.19c.48.38.76.97.76 1.58V19z"/></svg>
         <span class="nav-tooltip">Run Simulation</span>
       </div>
+      -->
       <div class="nav-item" id="nav-workflow" onclick="openFlowModal()">
         <svg viewBox="0 0 24 24"><path d="M4 8h4v8H4V8zm12 0h4v8h-4V8zM9.5 11h3.2V9l3 3-3 3v-2H9.5v-2z"/></svg>
         <span class="nav-tooltip">Workflow</span>
@@ -379,15 +492,21 @@
           </div>
         </div>
 
+        <!-- Tab strip: the three sections used to stack into one very long scroll. Each is
+             now a view. The sections keep their ids and markup, so every render function
+             still writes into the same elements regardless of which tab is open. -->
+        <div class="an-tabs" id="anTabs">
+          <button class="an-tab on" onclick="switchAnalyticsTab('finops',this)">FinOps</button>
+          <button class="an-tab" onclick="switchAnalyticsTab('care',this)">Customer Care</button>
+          <button class="an-tab" onclick="switchAnalyticsTab('solution',this)">Solution Performance</button>
+        </div>
+
         <!-- ═══ SECTION 1: FINOPS ═══ -->
-        <div class="analytics-section">
-          <div class="section-lbl sec-finops"><span class="section-ico">&#128176;</span>FinOps — LLM Cost &amp; Usage<span class="win-badge" title="Counts LLM calls from the last 7 days only. Older calls are not shown - an operation that has not run recently disappears from these panels.">Last 7 days</span></div>
+        <div class="analytics-section" data-an="finops">
 
           <div class="chart-card">
             <div class="chart-title"><span>LLM usage and cost</span><span class="win-badge" title="This panel counts LLM calls from the last 7 days only. Older calls are not shown.">Last 7 days</span></div>
-            <div class="metric-note">1 LLM call = 1 model invocation — intent classification, an answer-generation
-              step, a tool call, or a subagent step each count separately. A single customer conversation
-              typically spans several LLM calls across these steps, so "calls" here will exceed the conversation count.</div>
+            <div class="metric-note">1 LLM call = 1 model invocation. A single customer interaction typically spans several LLM calls.</div>
             <div id="llmUsagePanel"><div class="empty-state">Loading...</div></div>
           </div>
 
@@ -408,8 +527,7 @@
         </div>
 
         <!-- ═══ SECTION 2: CUSTOMER CARE ANALYTICS ═══ -->
-        <div class="analytics-section">
-          <div class="section-lbl sec-care"><span class="section-ico">&#127911;</span>Customer Care Analytics<span class="win-badge" title="Counts everything on record, with no date filter. Trend arrows inside the tiles compare shorter periods and say so.">All time</span></div>
+        <div class="analytics-section" data-an="care" hidden>
 
           <div class="kpi-grid" id="overviewGrid">
             <div class="kpi-tile kpi-blue"><div class="kpi-val">—</div><div class="kpi-lbl">Loading…</div></div>
@@ -426,8 +544,7 @@
         </div>
 
         <!-- ═══ SECTION 3: SOLUTION PERFORMANCE ANALYTICS ═══ -->
-        <div class="analytics-section">
-          <div class="section-lbl sec-solution"><span class="section-ico">&#9889;</span>Solution Performance Analytics<span class="win-badge" title="Counts everything on record, with no date filter. Trend arrows inside the tiles compare shorter periods and say so.">All time</span></div>
+        <div class="analytics-section" data-an="solution" hidden>
 
           <div class="kpi-grid" id="solutionStatsGrid">
             <div class="kpi-tile kpi-red"><div class="kpi-val">—</div><div class="kpi-lbl">Loading…</div></div>
@@ -456,7 +573,7 @@
       <div class="conn-page">
         <div>
           <div class="dash-title">Connectors</div>
-          <div class="dash-sub">Channel integrations for this Omnichannel CX Accelerator workspace</div>
+          <div class="dash-sub">Channel integrations for this OmnichannelCX workspace</div>
         </div>
         <div class="conn-grid" id="connGrid">
           <div style="color:var(--t3);font-size:12px;padding:20px 0">Loading connector status…</div>
@@ -618,6 +735,6 @@
 <!-- d3-force, vendored (15KB, tree-shaken to the 7 functions used). Local, not a CDN:
      the app has no other external JS and a demo must not depend on a network fetch. -->
 <script src="/admin-ui/assets/vendor-d3-force.js?v=20260902"></script>
-<script src="/admin-ui/assets/app.js?v=20260904-auth3"></script>
+<script src="/admin-ui/assets/app.js?v=20260907-hide1"></script>
 </body>
 </html>
