@@ -1741,7 +1741,7 @@ def test_admin_ui_is_served():
 
     response = TestClient(app).get("/admin-ui")
     assert response.status_code == 200
-    assert "Ticket Operations" in response.text
+    assert "OmnichannelCX" in response.text
     assert "email-simulate-form" in response.text
 
 
