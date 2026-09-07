@@ -8792,7 +8792,7 @@ prompting that a favicon normally carries the PRODUCT's identity rather than the
 user chose to keep the Ganit logo.
 
 
-## Fix 163 — the browser tab named a page that no longer exists
+## Fix 163 — the browser tab named a page that no longer exists (committed `1269aa4`)
 
 `apps/admin-ui/index.html` line 6 read **`OmnichannelCX - Ticket Operations`**. "Ticket
 Operations" is a survivor of the ORIGINAL UI, which really was a ticket screen — an
