@@ -16,11 +16,11 @@ this block is the ONLY place its state exists. Procedure lives in the `ec2-deplo
 memory; do NOT follow `fresh-start-runbook.md` on EC2 - it is written for local and its
 `cx-data` wipe destroys the seed payload.
 
-**As of 2026-09-07, after the deploy + fresh start below.**
+**As of 2026-09-07, after the Fix 153-162 UI deploy below.**
 
 | | |
 |---|---|
-| code level | **Fix 152** - matches local `4bc68a8` |
+| code level | **Fix 162 (UI only)** - matches local `fa1cb9a` for `apps/admin-ui/`; the two changed Python files are ON the box but NOT yet in the image (see below) |
 | host | `ip-172-31-38-51`, public **13.233.212.194**, repo `/home/ec2-user/Omnichannel-CX-Project` |
 | API port | **8889** (local is 8888) |
 | git | **none** - `scp` is the only route in |
@@ -29,13 +29,28 @@ memory; do NOT follow `fresh-start-runbook.md` on EC2 - it is written for local 
 | `RAG_BACKEND` | `neo4j` - verified inside the container |
 | data | 0 conversations / 0 turns / 0 tickets; **5** seeded customers; KB **14/14**; `holdings_linked` 123 |
 | logins | **DESTROYED by the wipe** - portal + admin need re-signup (`sayantini.s.55@gmail.com` / `7890864700`) |
-| containers | api + neo4j fresh; **ngrok up (holds the shared tunnel)**; opensearch up but UNUSED (kept as rollback); mailpit up; Ollama commented out of compose |
-| disk | ~9.0 GB free, **95%** - shared with ~30 other projects |
-| backups on box | `~/seed_backup_bfsi.xlsx`, `~/seed_backup_kb`, `~/seed_backup_rkb` (the irreplaceable payload), `~/backup_pre149` (pre-deploy copies of 8 files) |
+| containers | all 5 up, **untouched by this deploy** (api + neo4j 17h, ngrok/opensearch/mailpit 2d); **ngrok holds the shared tunnel**; opensearch UNUSED (kept as rollback); Ollama commented out of compose |
+| disk | **8.5 GB free, 95%** (measured this deploy) - shared with ~30 other projects |
+| backups on box | `~/seed_backup_bfsi.xlsx`, `~/seed_backup_kb`, `~/seed_backup_rkb` (the irreplaceable payload), `~/backup_pre149` (8 files), **`~/backup_pre162`** (the 5 files this deploy overwrote) |
 
 **`/app/data` exists ONLY in the `cx-data` volume** - the api image has no such directory
 (measured). `bfsi.xlsx`, the KB PDF and the resolution examples were hand-copied in and exist
 nowhere else. **Any wipe must copy them off first.**
+
+**The UI is live; two Python strings are not.** `apps/admin-ui/` is bind-mounted, so the four
+UI files took effect the moment they landed - no rebuild, no restart, nothing else on the box
+disturbed. `apps/api/main.py` and `apps/api/routes/email.py` are also on the box but the image
+still holds the old copies, so `/` and the OpenAPI title still read **"Omnichannel CX
+Accelerator"** and the SMTP test body still names it. **Deliberately not rebuilt**: three strings
+nobody sees are not worth spending image-build headroom at 95% disk. They will correct themselves
+on the next rebuild anyone does for a real reason - no further action is needed to "finish" this
+deploy.
+
+**Verified after copying** (content, not disk presence): every grep count on the box matched
+local exactly - `homePage` 1, `rel="icon"` 1, `OmnichannelCX` 3, `an-tabs` 1, `1701d0` 1,
+`openLogin` 2, logo **2,889 bytes**. Then from inside the box: `/admin-ui` serves the home page,
+`/admin-ui/assets/ganit-logo.png` returns 200, and `/` still returns the old name - which is the
+expected split. The user opened `http://13.233.212.194:8889/admin-ui` and confirmed it renders.
 
 ### Known defects LIVE on this box
 
@@ -263,6 +278,7 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 160 — Lineage was grouped by ticket but headed by intent:** the banner divider removed, the topic moved into the card, and all fold machinery deleted with it.
 - **Fix 161 — the Connectors cards were unequal and one was styled inline:** equal-height cards with the status pinned to a footer rule, and Email's two pipes shown only when one is down.
 - **Fix 162 — Channel Testing hidden from the nav, and a favicon added:** the page described an IMAP poller that is switched off and named a mailbox the system is not configured for.
+- **EC2 deploy 2026-09-07 (second) — Fix 152 to Fix 162, UI only:** four bind-mounted files took effect on landing with no rebuild and no container restarted; the two changed Python files are on the box but deliberately not built into the image.
 - **OPEN - Fix 149 turned three escalation gates into constants (NOT FIXED, measured):** moving the KB into the graph made retrieval EXHAUSTIVE - all 14 chunks, every message - and three gates that read `contexts` to judge relevance silently became no-ops. Measured on all 11 messages sent through the UI today, with contexts rebuilt from `retrieval_evidence`: **`_is_strong_l1_knowledge_answer` TRUE 11/11**, `knowledge_not_found` fired **0/11**, KB chunks per turn **min 14 max 14**. The third gate is the damaging one - returning True SKIPS the handoff check entirely, the rule that reads the customer's own words. Live consequence: the FD question, for which the KB has zero guidance, auto-sent as a confident L1 knowledge answer and volunteered a penalty rule from the model's own general knowledge. Today's real escalations (fraud, claim dispute) were caught earlier by intent-label rules, which MASKS this for the intents that have their own rules and exposes it for everything else. `confidence=0.95` is hardcoded in Priority 2, so `confidence < 0.3` cannot fire either. **Fix 149 verified the PROVENANCE consumers of contexts and never enumerated the DECISION consumers.** This gate has now broken twice in opposite directions (Fix 143 inverted it) because it reads a property of RETRIEVAL to answer a question about RELEVANCE - so the fix is not a patched condition. Fix 150 already supplies the raw material (`customer_holds`, each chunk's `concept`); probe it on real messages before designing the gate.
 - **Reference - local vs the hosted instance:** the two are NOT meant to match. Application code must; `docker-compose.yml` deliberately must not (Ollama commented out on EC2, and ngrok has **no** `profiles: ["tunnel"]` there - copying the local file over means the next `up` starts no tunnel and **WhatsApp goes silent with nothing to say why**). EC2 is the sole holder of the shared WhatsApp number, mailbox and ngrok domain, which is why local ships with those off. Three deploy traps, all already bitten: **no git on EC2** (scp only), `restart` runs **old code** (rebuild), and `restart` does **not re-read `.env`** (`up -d`). Plus what must never be done there - other teams' containers, the disk watermark, removing OpenSearch, `prune --volumes`.
 
@@ -8773,3 +8789,46 @@ screen tells the truth — see [[verify-end-state-not-the-edit]].
 mark already served from the assets mount — no new file, no new route. Noted at the user's
 prompting that a favicon normally carries the PRODUCT's identity rather than the vendor's; the
 user chose to keep the Ganit logo.
+
+
+## EC2 deploy 2026-09-07 (second) — Fix 152 to Fix 162, UI only
+
+**Six files copied, nothing rebuilt, no container restarted, nothing else on the box touched.**
+The box went from `4bc68a8` to `fa1cb9a` for everything a user sees.
+
+**Read state first** (rule 1): disk `8.5 GB free / 95%`, all five containers up — api + neo4j
+17h, ngrok/opensearch/mailpit 2d. Unchanged from the last deploy's record.
+
+**No `.env` change was needed, and that was checked rather than assumed:**
+`git diff 4bc68a8..HEAD -- services/ apps/` grepped for added `getenv`/`environ` returned
+nothing. Fixes 153-162 introduce no new configuration.
+
+| file | route |
+|---|---|
+| `apps/admin-ui/index.html` | bind-mounted — live on landing |
+| `apps/admin-ui/app.js` | bind-mounted — live on landing |
+| `apps/admin-ui/style.css` | bind-mounted — live on landing |
+| `apps/admin-ui/ganit-logo.png` | bind-mounted, **new file** on the box |
+| `apps/api/main.py` | on disk, **not in the image** |
+| `apps/api/routes/email.py` | on disk, **not in the image** |
+
+**Backed up first** to `~/backup_pre162` — the 5 existing files, confirmed present before any
+`scp` ran. The logo is new, so nothing to back up.
+
+**The rebuild was skipped on purpose.** Only two Python files changed and both carry cosmetic
+strings — the `/` route's `name`, the OpenAPI `title`, and the SMTP test subject/body. Weighed
+against a Docker image build at **95% disk on a box shared with ~30 projects**, three strings
+nobody looks at do not justify the headroom. The files are in place, so the next rebuild anyone
+runs for a real reason picks them up. **This deploy is complete as it stands** — it is not a
+half-finished state waiting on a follow-up.
+
+**Verified by content before declaring anything** — grep counts on the box against the same
+greps run locally, and every one matched: `homePage` 1, `rel="icon"` 1, `OmnichannelCX` 3,
+`an-tabs` 1, `1701d0` 1, `openLogin` 2, logo `2,889` bytes. My predicted counts ("expect ≥5,
+≥2") were guesses and were wrong — `grep -c` counts LINES, not occurrences. **Comparing against
+the local file is the check that works; a predicted number is not.**
+
+Then from inside the box: `/admin-ui` serves the home page, the logo returns 200, and `/` still
+returns `"Omnichannel CX Accelerator"` — which is the expected split between bind-mounted and
+baked-in, and is the evidence that the rebuild really was skipped rather than silently needed.
+The user opened `http://13.233.212.194:8889/admin-ui` and confirmed it renders correctly.
