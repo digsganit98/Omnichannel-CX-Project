@@ -9,60 +9,15 @@ Running log of changes made to fix portal / BFSI-data / identity issues, startin
 
 ---
 
-## EC2 - CURRENT STATE  (overwrite this block on every deploy; do not append)
+## EC2 - state and procedure moved out of this file
 
-**Read this first for anything EC2.** The box has no git and no record of its own commit, so
-this block is the ONLY place its state exists. Procedure lives in the `ec2-deployment-rules`
-memory; do NOT follow `fresh-start-runbook.md` on EC2 - it is written for local and its
-`cx-data` wipe destroys the seed payload.
+**Everything about the hosted box now lives in `docs/rules_to_follow/ec2-operations.md`** - what
+it is for, how it differs from local, its CURRENT STATE, the deploy and fresh-start procedures,
+the nevers, and the traps. Read that file first for anything EC2.
 
-**As of 2026-09-07, after the Fix 153-162 UI deploy below.**
-
-| | |
-|---|---|
-| code level | **Fix 163 (UI only)** - matches local for `apps/admin-ui/`; the two changed Python files from the Fix 162 deploy are ON the box but NOT yet in the image (see below) |
-| host | `ip-172-31-38-51`, public **13.233.212.194**, repo `/home/ec2-user/Omnichannel-CX-Project` |
-| API port | **8889** (local is 8888) |
-| git | **none** - `scp` is the only route in |
-| `GROQ_MODEL` | **`openai/gpt-oss-120b`** - DIVERGED from local's `20b`, deliberately: probed 2026-09-07 at 999/1000 requests, healthy |
-| Groq quota | **shared with local** - same `GROQ_API_KEY`; a probe from either machine answers for both |
-| `RAG_BACKEND` | `neo4j` - verified inside the container |
-| data | 0 conversations / 0 turns / 0 tickets; **5** seeded customers; KB **14/14**; `holdings_linked` 123 |
-| logins | **DESTROYED by the wipe** - portal + admin need re-signup (`sayantini.s.55@gmail.com` / `7890864700`) |
-| containers | all 5 up, **untouched by this deploy** (api + neo4j 17h, ngrok/opensearch/mailpit 2d); **ngrok holds the shared tunnel**; opensearch UNUSED (kept as rollback); Ollama commented out of compose |
-| disk | **8.5 GB free, 95%** (measured this deploy) - shared with ~30 other projects |
-| backups on box | `~/seed_backup_bfsi.xlsx`, `~/seed_backup_kb`, `~/seed_backup_rkb` (the irreplaceable payload), `~/backup_pre149` (8 files), `~/backup_pre162` (the 5 files that deploy overwrote), **`~/backup_pre_title`** (`index.html`, Fix 163) |
-
-**`/app/data` exists ONLY in the `cx-data` volume** - the api image has no such directory
-(measured). `bfsi.xlsx`, the KB PDF and the resolution examples were hand-copied in and exist
-nowhere else. **Any wipe must copy them off first.**
-
-**The UI is live; two Python strings are not.** `apps/admin-ui/` is bind-mounted, so the four
-UI files took effect the moment they landed - no rebuild, no restart, nothing else on the box
-disturbed. `apps/api/main.py` and `apps/api/routes/email.py` are also on the box but the image
-still holds the old copies, so `/` and the OpenAPI title still read **"Omnichannel CX
-Accelerator"** and the SMTP test body still names it. **Deliberately not rebuilt**: three strings
-nobody sees are not worth spending image-build headroom at 95% disk. They will correct themselves
-on the next rebuild anyone does for a real reason - no further action is needed to "finish" this
-deploy.
-
-**Verified after copying** (content, not disk presence): every grep count on the box matched
-local exactly - `homePage` 1, `rel="icon"` 1, `OmnichannelCX` 3, `an-tabs` 1, `1701d0` 1,
-`openLogin` 2, logo **2,889 bytes**. Then from inside the box: `/admin-ui` serves the home page,
-`/admin-ui/assets/ganit-logo.png` returns 200, and `/` still returns the old name - which is the
-expected split. The user opened `http://13.233.212.194:8889/admin-ui` and confirmed it renders.
-
-### Known defects LIVE on this box
-
-- **Three escalation gates are constants** (measured 11/11 locally). `_is_strong_l1_knowledge_answer`
-  skips the handoff check, so a question the KB cannot answer can auto-send with invented
-  generality in it. Shipped with the Fix 152 deploy; unfixed.
-- **A 429 sends the raw record dump to the customer** - `generation.get("text") or raw_data`,
-  unguarded. The per-minute token ceiling (8,000) is what trips, and it tripped locally on
-  2026-09-06.
-- **Six Concepts have zero KB chunks**, Fixed Deposit among them, held by 4 customers.
-- **Three KB chunks link to nothing** - `demat_account`, `sip_investment`, `elss_tax_benefit`.
-  Expected: no seeded customer holds those.
+**Do not reconstruct the box's state from the dated entries below.** They are a record of what
+happened on a given day, not of what is true now - and doing exactly that cost a whole session
+on 2026-09-07. The dated EC2 narrative stays here; section 9 of the EC2 doc indexes it.
 
 ## Summary (one line per change)
 
@@ -7587,89 +7542,11 @@ ngrok domain the hosted instance holds. EC2 is on Fix 148 and has **none** of th
 
 ---
 
-## Reference - local vs the hosted instance, and what must never be done to either
+## Reference - local vs the hosted instance
 
-Scattered through Fix 146/146a/148 as narrative. Collected here because a new session
-should not have to reconstruct it from three entries.
-
-### They are not the same machine and are not meant to be
-
-| | local | EC2 (`ip-172-31-38-51`) |
-|---|---|---|
-| what it is for | writing and testing code | the hosted demo clients see |
-| public address | none | public IP, port 8889 open to the internet |
-| API port | 8888 | **8889** |
-| shared resources | **takes none** | **holds all of them** |
-| git | a real checkout | **no git at all** - `fatal: not a git repository` |
-
-**EC2 is the sole holder of the shared external resources**: the Meta WhatsApp number, the
-support mailbox, and the reserved ngrok domain. A laptop that takes one of those steals it
-from the live demo, silently. That is why local ships with `IMAP_ENABLED=false`, no
-`NGROK_DOMAIN`, and ngrok behind `profiles: ["tunnel"]` so `docker compose up` does not
-start it.
-
-### What must MATCH
-
-Application code - `services/`, `apps/`, `shared/`, seed data, the KB. EC2 running old
-code is what caused Fix 146: the deploy was a hand copy that omitted `data/` entirely, the
-Neo4j seed threw `FileNotFoundError`, `_seed_neo4j()` swallowed it, and the app served
-every customer as Unverified for months while looking healthy.
-
-### What SHOULD differ, deliberately
-
-`docker-compose.yml`. It already diverges twice and both are correct:
-
-- **Ollama is commented out on EC2** (service, `ollama-pull`, and the api's
-  `depends_on: ollama` - leave that and compose fails on an undefined dependency). The
-  image was 5.5 GB on a 94%-full disk and its volume was **1.59 kB**, so no model had ever
-  been pulled and the fallback did not exist there anyway.
-- **ngrok has NO `profiles: ["tunnel"]` on EC2.** The profile exists to stop laptops taking
-  the tunnel; EC2 is the machine that should hold it. Copying the local compose there means
-  the next `docker compose up` starts no ngrok and **WhatsApp inbound goes silent with
-  nothing to say why**.
-
-### Deploying to EC2 - the three traps, all of which have already bitten
-
-1. **There is no git.** `git pull` cannot work. Files go up by `scp`, one at a time.
-2. **`docker compose restart` runs OLD code.** Only `apps/admin-ui` is bind-mounted; every
-   Python change needs `docker compose build api`. `docker cp` works and is the wrong fix -
-   it leaves the image stale and the container diverged from the repo, which is the exact
-   condition behind Fix 146.
-3. **`docker compose restart` also does not re-read `.env`.** It reuses the existing
-   container and its original environment. Only `docker compose up -d api` recreates it.
-   `RAG_BACKEND=neo4j` was set, the container was restarted, and the app still reported
-   `opensearch` with a clean startup log and no error anywhere.
-
-### Do NOT do these on EC2
-
-- **Do not touch other teams' containers, images or volumes.** ~42 containers across ~30
-  projects share the box. The 22.5 GB `pwm-chatbot-dependencies_langfuse_clickhouse_data`
-  volume is the largest thing on the disk and is not ours.
-- **Do not raise OpenSearch's disk watermark.** It was considered and rejected: setting
-  flood stage to 99% would let OpenSearch write until ~1.5 GB remained on a disk shared by
-  every other team, to save a tens-of-MB index. The KB now lives in Neo4j, which has no
-  such gate - that is what unblocked it at 94% without freeing a byte.
-- **Do not remove OpenSearch from EC2.** Nothing uses it now (`RAG_BACKEND` defaults to
-  neo4j), but it is the rollback, and re-pulling 1.34 GB onto a 94% disk may fail.
-- **Do not `docker system prune --volumes`.** It would destroy `cx-data` - the SQLite DB
-  and the seeded `data/` payload - and other teams' volumes with it.
-
-### Facts worth not rediscovering
-
-- **ngrok needs no port and none was assigned.** It dials OUT and holds the connection
-  open, so nothing connects inbound to the instance. The person who provisioned the box
-  gave three ports - 8889, 8025, 7474 - and was right that ngrok is not a fourth. Port 4041
-  is ngrok's own dashboard, bound on the host only.
-- **EC2 does not actually need ngrok.** It has a public IP and 8889 already answers from
-  the internet. Meta requires HTTPS for webhooks and 8889 is plain HTTP, so this needs a
-  certificate - a real task, not a cleanup, and it would end the shared-domain contention
-  permanently.
-- **The same `.pem` that unlocks the box sits ON the box**, in two other projects'
-  directories (`dataforge_v2/`, `Document Comparison/`). Not ours to fix, not in our repo,
-  never committed - `*.pem` is gitignored and `git check-ignore` confirms it.
-- **Disk has been 93-96% all session** and drifts upward on its own as other teams build.
-
----
+**Moved to `docs/rules_to_follow/ec2-operations.md` section 2.** The comparison table, what must
+match and what should deliberately differ, the three deploy traps and the do-nots now live there
+with the rest of the EC2 material.
 
 ## Fix 150 - five of nine holding types reached no guidance, and Fix 149 said so in a footnote
 
