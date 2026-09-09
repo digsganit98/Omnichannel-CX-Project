@@ -8881,3 +8881,52 @@ Then from inside the box: `/admin-ui` serves the home page, the logo returns 200
 returns `"Omnichannel CX Accelerator"` — which is the expected split between bind-mounted and
 baked-in, and is the evidence that the rebuild really was skipped rather than silently needed.
 The user opened `http://13.233.212.194:8889/admin-ui` and confirmed it renders correctly.
+
+---
+
+## Fix 164 — The home page argues instead of listing specs
+
+**The problem with the stat strip.** The hero carried four numbers: `₹0.34 AI cost per
+interaction`, `3 channels`, `16 intents`, `5 specialised agents`. The user cut the cost outright
+— a price on a landing page starts a procurement argument before anyone knows what the product
+does. The other three were build facts, not buyer facts: a visitor has no scale to judge whether
+16 intents is a lot, and all three were already stated in the six cards below, so the row
+repeated rather than added.
+
+**What replaced it.** A problem/promise split, chosen by the user from a longer list of
+candidates:
+
+| WHAT WE REMOVE | WHAT WE DELIVER |
+|---|---|
+| Manual customer support | Same minute first response |
+| Interaction channels are separate systems | Omnichannel capability |
+| No continuity, customers repeat queries | Works with the service desk you already run |
+
+Plus a `WHAT WE BUILT` label above the capability grid, so the three section headers read as one
+voice: remove → deliver → built. The headline changed from "Agentic customer resolution" to
+"Agentic customer **Interaction** across multiple channels".
+
+**Two bands side by side, not stacked** — the user's call, and the better one. Stacked bands read
+as a sequence; side by side reads as a contrast, and the eye crosses the divider on its own. It
+also costs about half the vertical space, which mattered (below). Items sit three-abreast inside
+each band, per the user's sketch.
+
+**The left band is deliberately muted and the right one carries the blue.** `--t2` text with
+`--t3` crosses on the left, `--t1` at weight 600 with `--blue` ticks on the right. The contrast
+across the centre divider is the argument; no new colour tokens were added.
+
+**The no-scroll constraint drove the whole layout.** `.home-page` is `position:fixed; inset:0;
+overflow:hidden`, so scrolling is structurally impossible — the failure mode is not a scrollbar,
+it is content **silently clipped** behind the footer, which is worse. Everything must fit in
+`100vh − 100px` (60px nav + 40px footer). The two new rows cost roughly +50px, funded by
+tightening `.home-main`'s gap (`4.5vh→2.8vh`) and padding (`6vh→3.4vh`) rather than letting
+content grow into the footer. The `max-height:700px` safety net was extended to cover the bands.
+
+**Verified by screenshot at three viewport heights, not by assertion** — headless Chrome at
+1440x900, 1366x768 and 1280x700 against the running container. The footer is visible and nothing
+clips at any of them. The first pass had the split at `max-width:940px` against the card grid's
+1080px, which left the items pinched and visibly narrower than the cards below; widening it to
+1080px so the two align was a fix the screenshot caught and a code reading would not have.
+
+No JS changed — nothing reads these nodes. `apps/admin-ui` is bind-mounted, so no rebuild was
+needed for the running container to serve it.

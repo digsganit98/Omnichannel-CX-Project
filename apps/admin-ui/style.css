@@ -1203,8 +1203,8 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 
 /* Body: hero + cards, centred and vertically distributed */
 .home-main{flex:1 1 auto;min-height:0;display:flex;flex-direction:column;
-  justify-content:center;gap:clamp(22px,4.5vh,44px);
-  padding:clamp(28px,6vh,64px) clamp(20px,5vw,72px)}
+  justify-content:center;gap:clamp(16px,2.8vh,28px);
+  padding:clamp(20px,3.4vh,38px) clamp(20px,5vw,72px)}
 
 /* Hero */
 .home-hero{text-align:center;max-width:760px;margin:0 auto}
@@ -1213,14 +1213,36 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .home-sub{margin-top:12px;font-size:clamp(13px,1.15vw,15px);color:var(--t2);
   line-height:1.6;max-width:600px;margin-left:auto;margin-right:auto}
 
-/* Stat strip */
-.home-stats{margin-top:clamp(16px,2.4vh,24px);display:flex;align-items:center;
-  justify-content:center;gap:clamp(14px,2vw,26px);flex-wrap:wrap}
-.home-stat{display:flex;flex-direction:column;align-items:center;gap:2px}
-.home-stat strong{font-size:clamp(19px,1.9vw,24px);font-weight:700;color:var(--blue);
-  line-height:1.1;letter-spacing:-.5px}
-.home-stat span{font-size:11px;color:var(--t3);font-weight:500}
-.home-stat-div{width:1px;height:26px;background:var(--bdr)}
+/* Problem/promise split. Grid is 1fr / 1px / 1fr so the centre divider is a real column
+   rather than a border, which keeps both bands exactly equal width. Wider than the hero
+   (760px) but narrower than the card grid (1080px) so it steps between them. */
+.home-split{margin-top:clamp(16px,2.6vh,26px);display:grid;
+  grid-template-columns:1fr 1px 1fr;gap:clamp(20px,2.8vw,40px);
+  max-width:1080px;width:100%;margin-left:auto;margin-right:auto;text-align:left}
+.home-split-div{background:var(--bdr)}
+
+/* Band label: hairline rules either side of centred small caps. */
+.home-band-hd,.home-sect-hd{display:flex;align-items:center;gap:9px;
+  font-size:10px;font-weight:650;letter-spacing:.9px;text-transform:uppercase;
+  color:var(--t3);white-space:nowrap}
+.home-band-hd::before,.home-band-hd::after,
+.home-sect-hd::before,.home-sect-hd::after{content:"";flex:1 1 auto;height:1px;
+  background:var(--bdr)}
+
+/* Three items abreast inside each band. min-height holds the row bottoms level when the
+   longer phrases wrap to more lines than the short ones. */
+.home-band-items{margin-top:clamp(9px,1.4vh,14px);display:grid;
+  grid-template-columns:repeat(3,1fr);gap:clamp(8px,1vw,14px)}
+.home-bi{display:flex;align-items:flex-start;gap:6px;min-height:40px;
+  font-size:12px;line-height:1.42}
+.home-bi-m{flex:0 0 auto;font-size:10px;line-height:1.55}
+.bi-x{color:var(--t2);font-weight:500}
+.bi-x .home-bi-m{color:var(--t3)}
+.bi-v{color:var(--t1);font-weight:600}
+.bi-v .home-bi-m{color:var(--blue)}
+
+/* Label above the capability grid, matched to the card grid's width. */
+.home-sect-hd{max-width:1080px;width:100%;margin:0 auto -2px}
 
 /* Capability grid — 3x2 */
 .home-cards{display:grid;grid-template-columns:repeat(3,1fr);
@@ -1257,10 +1279,15 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
   .home-cards{gap:9px}
   .home-card p{font-size:11.5px}
   .home-card-ic{width:26px;height:26px;margin-bottom:7px}
+  .home-split{margin-top:12px}
+  .home-band-items{margin-top:7px}
+  .home-bi{min-height:38px;font-size:11px}
 }
 @media (max-width:900px){
   .home-cards{grid-template-columns:repeat(2,1fr);max-width:640px}
-  .home-stat-div{display:none}
+  /* Bands stack; the centre column becomes a horizontal rule between them. */
+  .home-split{grid-template-columns:1fr;gap:14px;max-width:640px}
+  .home-split-div{height:1px}
 }
 
 /* Back-to-home link inside the sign-in card. Shown only when the home page is behind
