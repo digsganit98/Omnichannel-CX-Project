@@ -1201,10 +1201,28 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
   transition:background .12s}
 .home-btn-solid:hover{background:var(--blue-t)}
 
+/* Sign up in the second Ganit colour. Solid orange would fight the solid blue beside it
+   for primacy, so it takes the orange as an outline and text: the palette is complete,
+   and log in stays the one filled button. */
+.home-btn-org{padding:8px 17px;border:1px solid var(--org);border-radius:var(--rs);
+  background:var(--surf);color:var(--org-t);font:600 13px inherit;cursor:pointer;
+  transition:background .12s,color .12s}
+.home-btn-org:hover{background:var(--org-bg)}
+
+/* Fully filled orange variant — swap the class in the markup to use this instead. */
+.home-btn-orgsolid{padding:8px 17px;border:1px solid var(--org);border-radius:var(--rs);
+  background:var(--org);color:#fff;font:600 13px inherit;cursor:pointer;
+  transition:background .12s}
+.home-btn-orgsolid:hover{background:var(--org-t)}
+
 /* Body: hero + cards, centred and vertically distributed */
+/* One gap governs every space between sections — hero, split, label, cards are all
+   siblings here. justify-content:center would bank the leftover height above and below,
+   leaving tight content marooned in whitespace, so the sections space themselves evenly
+   through the available height instead and the padding stays small. */
 .home-main{flex:1 1 auto;min-height:0;display:flex;flex-direction:column;
-  justify-content:center;gap:clamp(16px,2.8vh,28px);
-  padding:clamp(20px,3.4vh,38px) clamp(20px,5vw,72px)}
+  justify-content:space-evenly;gap:clamp(18px,3.4vh,40px);
+  padding:clamp(14px,2vh,26px) clamp(20px,5vw,72px)}
 
 /* Hero */
 .home-hero{text-align:center;max-width:760px;margin:0 auto}
@@ -1216,15 +1234,15 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 /* Problem/promise split. Grid is 1fr / 1px / 1fr so the centre divider is a real column
    rather than a border, which keeps both bands exactly equal width. Wider than the hero
    (760px) but narrower than the card grid (1080px) so it steps between them. */
-.home-split{margin-top:clamp(16px,2.6vh,26px);display:grid;
+.home-split{display:grid;
   grid-template-columns:1fr 1px 1fr;gap:clamp(20px,2.8vw,40px);
   max-width:1080px;width:100%;margin-left:auto;margin-right:auto;text-align:left}
 .home-split-div{background:var(--bdr)}
 
 /* Band label: hairline rules either side of centred small caps. */
 .home-band-hd,.home-sect-hd{display:flex;align-items:center;gap:9px;
-  font-size:10px;font-weight:650;letter-spacing:.9px;text-transform:uppercase;
-  color:var(--t3);white-space:nowrap}
+  font-size:10px;font-weight:700;letter-spacing:.9px;text-transform:uppercase;
+  color:var(--blue);white-space:nowrap}
 .home-band-hd::before,.home-band-hd::after,
 .home-sect-hd::before,.home-sect-hd::after{content:"";flex:1 1 auto;height:1px;
   background:var(--bdr)}
@@ -1234,15 +1252,17 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .home-band-items{margin-top:clamp(9px,1.4vh,14px);display:grid;
   grid-template-columns:repeat(3,1fr);gap:clamp(8px,1vw,14px)}
 .home-bi{display:flex;align-items:flex-start;gap:6px;min-height:40px;
-  font-size:12px;line-height:1.42}
-.home-bi-m{flex:0 0 auto;font-size:10px;line-height:1.55}
-.bi-x{color:var(--t2);font-weight:500}
-.bi-x .home-bi-m{color:var(--t3)}
-.bi-v{color:var(--t1);font-weight:600}
+  font-size:12px;line-height:1.42;color:var(--t1);font-weight:600}
+.home-bi-m{flex:0 0 auto;font-size:11px;line-height:1.45;font-weight:700}
+.bi-x .home-bi-m{color:var(--org-t);font-size:12px}
 .bi-v .home-bi-m{color:var(--blue)}
 
 /* Label above the capability grid, matched to the card grid's width. */
-.home-sect-hd{max-width:1080px;width:100%;margin:0 auto -2px}
+/* The label belongs to the grid beneath it, not between two sections: it is wrapped with
+   the cards so the section gap falls OUTSIDE the pair, and this margin sets the small
+   distance to its own content — the same relationship each band label has to its items. */
+.home-built{max-width:1080px;width:100%;margin:0 auto}
+.home-sect-hd{max-width:1080px;width:100%;margin:0 auto clamp(9px,1.4vh,14px)}
 
 /* Capability grid — 3x2 */
 .home-cards{display:grid;grid-template-columns:repeat(3,1fr);
@@ -1273,15 +1293,62 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .home-foot-dot{color:var(--bdr2)}
 
 /* Short viewports: drop to 2 columns and tighten before anything clips. */
-@media (max-height:700px){
-  .home-headline{font-size:26px}
-  .home-sub{font-size:12.5px;margin-top:9px}
-  .home-cards{gap:9px}
-  .home-card p{font-size:11.5px}
-  .home-card-ic{width:26px;height:26px;margin-bottom:7px}
-  .home-split{margin-top:12px}
+/* The page cannot scroll, so short viewports must be tiered all the way down: the failure
+   mode is the bottom card row sliced by the footer, not a scrollbar. Browser chrome eats
+   100-150px, so a 650px window is really a ~520px viewport — these tiers are set against
+   the viewport, and the tightest one has to survive a laptop with a bookmarks bar open. */
+@media (max-height:760px){
+  .home-main{gap:16px;padding-top:12px;padding-bottom:12px}
+  .home-headline{font-size:27px}
+  .home-sub{font-size:12.5px;margin-top:8px}
   .home-band-items{margin-top:7px}
-  .home-bi{min-height:38px;font-size:11px}
+  .home-bi{min-height:34px;font-size:11.5px}
+  .home-cards{gap:9px}
+  .home-card{padding:13px 15px}
+  .home-card p{font-size:11.5px}
+  .home-card-ic{width:26px;height:26px;margin-bottom:6px}
+}
+
+@media (max-height:640px){
+  .home-main{gap:12px;padding-top:10px;padding-bottom:10px}
+  .home-headline{font-size:23px;letter-spacing:-.7px}
+  .home-sub{font-size:12px;margin-top:6px;line-height:1.5}
+  .home-band-hd,.home-sect-hd{font-size:9.5px}
+  .home-band-items{margin-top:6px;gap:8px}
+  .home-bi{min-height:30px;font-size:11px;line-height:1.35}
+  .home-cards{gap:8px}
+  .home-card{padding:11px 13px;border-radius:9px}
+  .home-card h3{font-size:12.5px;margin-bottom:3px}
+  .home-card p{font-size:11px;line-height:1.45}
+  .home-card-ic{width:22px;height:22px;margin-bottom:5px;border-radius:6px}
+  .home-card-ic svg{width:13px;height:13px}
+}
+
+/* Tightest tier. The three-abreast band items are what break first here — they wrap to
+   three lines each — so each band drops to a single column of three rows, which is both
+   shorter and easier to read than three cramped columns. */
+@media (max-height:560px){
+  .home-main{gap:9px;padding-top:8px;padding-bottom:8px}
+  .home-headline{font-size:20px;line-height:1.12}
+  .home-sub{font-size:11px;margin-top:5px;max-width:560px}
+  .home-split{gap:18px}
+  .home-band-items{grid-template-columns:1fr;gap:2px;margin-top:5px}
+  .home-bi{min-height:0;font-size:10.5px;line-height:1.35}
+  .home-card{padding:9px 11px}
+  .home-card h3{font-size:11.5px}
+  .home-card p{font-size:10.5px;line-height:1.4}
+  .home-card-ic{width:19px;height:19px;margin-bottom:4px}
+  .home-card-ic svg{width:11px;height:11px}
+}
+
+/* Below this the hero sub-paragraph is the only expendable block: the headline states the
+   proposition and the two bands make the argument, so the sentence between them is the one
+   thing that can go without losing a fact. */
+@media (max-height:480px){
+  .home-sub{display:none}
+  .home-main{gap:7px;padding-top:6px;padding-bottom:6px}
+  .home-headline{font-size:18px}
+  .home-card p{font-size:10px}
 }
 @media (max-width:900px){
   .home-cards{grid-template-columns:repeat(2,1fr);max-width:640px}

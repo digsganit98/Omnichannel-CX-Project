@@ -279,6 +279,8 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 161 — the Connectors cards were unequal and one was styled inline:** equal-height cards with the status pinned to a footer rule, and Email's two pipes shown only when one is down.
 - **Fix 162 — Channel Testing hidden from the nav, and a favicon added:** the page described an IMAP poller that is switched off and named a mailbox the system is not configured for.
 - **Fix 163 — the browser tab named a page that no longer exists:** the `<title>` still read "Ticket Operations", a leftover from the original ticket-only UI whose standalone page Fix 49 deleted; now just `OmnichannelCX`.
+- **Fix 164 — the home page listed specifications instead of arguing a case:** the hero's four-number stat strip (led by a price) became two bands — what we remove set against what we deliver — plus a `WHAT WE BUILT` label over the capability cards.
+- **Fix 165 — the home page clipped on a real laptop and spaced itself three different ways:** the bottom card row sat behind the footer below a ~640px viewport; fixed with a four-tier ladder, one single-sourced section gap, Ganit orange and blue throughout, and title-case in the headline.
 - **EC2 deploy 2026-09-07 (second) — Fix 152 to Fix 162, UI only:** four bind-mounted files took effect on landing with no rebuild and no container restarted; the two changed Python files are on the box but deliberately not built into the image.
 - **OPEN - Fix 149 turned three escalation gates into constants (NOT FIXED, measured):** moving the KB into the graph made retrieval EXHAUSTIVE - all 14 chunks, every message - and three gates that read `contexts` to judge relevance silently became no-ops. Measured on all 11 messages sent through the UI today, with contexts rebuilt from `retrieval_evidence`: **`_is_strong_l1_knowledge_answer` TRUE 11/11**, `knowledge_not_found` fired **0/11**, KB chunks per turn **min 14 max 14**. The third gate is the damaging one - returning True SKIPS the handoff check entirely, the rule that reads the customer's own words. Live consequence: the FD question, for which the KB has zero guidance, auto-sent as a confident L1 knowledge answer and volunteered a penalty rule from the model's own general knowledge. Today's real escalations (fraud, claim dispute) were caught earlier by intent-label rules, which MASKS this for the intents that have their own rules and exposes it for everything else. `confidence=0.95` is hardcoded in Priority 2, so `confidence < 0.3` cannot fire either. **Fix 149 verified the PROVENANCE consumers of contexts and never enumerated the DECISION consumers.** This gate has now broken twice in opposite directions (Fix 143 inverted it) because it reads a property of RETRIEVAL to answer a question about RELEVANCE - so the fix is not a patched condition. Fix 150 already supplies the raw material (`customer_holds`, each chunk's `concept`); probe it on real messages before designing the gate.
 - **Reference - local vs the hosted instance:** the two are NOT meant to match. Application code must; `docker-compose.yml` deliberately must not (Ollama commented out on EC2, and ngrok has **no** `profiles: ["tunnel"]` there - copying the local file over means the next `up` starts no tunnel and **WhatsApp goes silent with nothing to say why**). EC2 is the sole holder of the shared WhatsApp number, mailbox and ngrok domain, which is why local ships with those off. Three deploy traps, all already bitten: **no git on EC2** (scp only), `restart` runs **old code** (rebuild), and `restart` does **not re-read `.env`** (`up -d`). Plus what must never be done there - other teams' containers, the disk watermark, removing OpenSearch, `prune --volumes`.
@@ -8930,3 +8932,50 @@ clips at any of them. The first pass had the split at `max-width:940px` against 
 
 No JS changed — nothing reads these nodes. `apps/admin-ui` is bind-mounted, so no rebuild was
 needed for the running container to serve it.
+
+---
+
+## Fix 165 — What the screenshots caught that the code reading did not
+
+**The clipping was mine and my testing hid it.** Fix 164 was verified at 900, 768 and 700px and
+called done. The user's window is ~650px of browser chrome plus viewport — a real viewport near
+560 — so the bottom card row sat behind the footer, unreachable, because `.home-page` is
+`position:fixed; overflow:hidden` and cannot scroll. **I picked test heights that passed rather
+than heights that were real.** The `max-height:700px` block was the only tier below the default
+and it did not tighten nearly enough.
+
+Replaced with four tiers — 760, 640, 560, 480 — that step type, padding and icon sizes down in
+turn. At 560 each band drops to a single column, which is both shorter and more legible than
+three cramped columns wrapping to three lines each. At 480 the hero sub-paragraph hides: the
+headline states the proposition and the bands make the argument, so the sentence between them is
+the only block that can go without losing a fact. Verified at 900, 768, 700, 640, 600, 560, 500,
+460 and 420 — footer clear at every one.
+
+**Three gaps, three mechanisms.** `.home-split` was nested inside `.home-hero` and set its own
+`margin-top` on `2.6vh`, while the other gaps came from `.home-main`'s flex gap on `2.8vh`, and
+the `WHAT WE BUILT` label carried a `-2px` correction. They looked even at 700px by coincidence
+and drifted apart everywhere else. The split is now a sibling, the label is wrapped with its
+cards in `.home-built`, and **one flex gap governs every space between sections**. The label sits
+near its grid the way each band label sits near its items — the `-2px` had been papering over the
+fact that it was structurally a section of its own.
+
+**Too much air at the edges, too little between sections.** `justify-content:center` banked all
+the leftover height above and below while the content stayed tight in the middle; `space-evenly`
+with a wider gap and smaller padding spends it between the sections instead.
+
+**Ganit colours, and only Ganit colours.** The crosses were `--t3` grey, then `--org`, and read as
+faint at both — the glyph was 10px against 12px text, inherited weight 500, and `#EC7730` sits
+near 3:1 on this background where the blue is 10.76:1. They are now `--org-t` at 12px and weight
+700. The three section labels are `--blue`. `--red` was considered and rejected: it is a Tailwind
+default already in the file, not a brand colour, and the palette is exactly four hex values —
+`1701D0`, `D5E0F6`, `EC7730`, `FAE3D0`.
+
+**One weight, not two.** The left band was weight 500 in grey against the right's 600 in
+near-black, intended as muted-problem/bold-promise. Side by side at one size that does not read as
+emphasis, it reads as two different fonts. Both sides now share one treatment and only the mark
+colour differs.
+
+**Copy and buttons.** The headline is title-case and reads Interaction, not resolution.
+"Omnichannel capability" gained "with full knowledge". Log in takes the solid blue as the primary
+action and Sign up the solid Ganit orange; an outline-orange variant (`.home-btn-org`) is in the
+CSS unused, one word away if the two filled buttons ever compete too hard.
