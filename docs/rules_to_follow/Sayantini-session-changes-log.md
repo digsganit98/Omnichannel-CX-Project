@@ -33,7 +33,7 @@ aborts rather than inventing a merge commit if something unexpected has landed o
 | date | `main` tip after | what went across |
 |---|---|---|
 | 2026-09-09 23:06 | `2bda59f` | Everything through Fix 165 — the ticket-model redesign, the OmnichannelCX rebrand and UI redesign, the home page, the one-pager, and the EC2 operations doc. **Reconstructed from git, not recorded at the time**; the method and exact steps were not written down. |
-| 2026-09-10 | `<this commit>` | Fix 166 (`e40a508`) — the FinOps rate change — plus this log entry. Fast-forward. |
+| 2026-09-10 | `936b993` | Fix 166 (`e40a508`) — the FinOps rate change — plus this log entry (`936b993`). Fast-forward. |
 
 ## Summary (one line per change)
 
