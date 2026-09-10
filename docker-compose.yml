@@ -50,7 +50,8 @@ services:
       GROQ_API_KEY: ${GROQ_API_KEY:-}
       GROQ_MODEL: ${GROQ_MODEL:-openai/gpt-oss-20b}
       LLM_OBSERVABILITY_ENABLED: ${LLM_OBSERVABILITY_ENABLED:-true}
-      LLM_COST_RATES_JSON: '${LLM_COST_RATES_JSON:-{"openai/gpt-oss-20b":{"input":0.075,"output":0.3},"openai/gpt-oss-120b":{"input":0.15,"output":0.6}}}'
+      # AWS Bedrock standard tier, Asia Pacific (Mumbai), 2026-09-10.
+      LLM_COST_RATES_JSON: '${LLM_COST_RATES_JSON:-{"openai/gpt-oss-20b":{"input":0.08,"output":0.35},"openai/gpt-oss-120b":{"input":0.18,"output":0.71}}}'
       LANGFUSE_ENABLED: ${LANGFUSE_ENABLED:-false}
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
       LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}

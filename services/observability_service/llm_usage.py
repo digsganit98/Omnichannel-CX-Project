@@ -12,11 +12,12 @@ logger = logging.getLogger(__name__)
 _LLM_CONTEXT: ContextVar[dict[str, Any]] = ContextVar("llm_observation_context", default={})
 
 _DEFAULT_RATES_PER_MILLION = {
-    # Groq public rates, read from the live /v1/models endpoint (which reports USD
-    # per token) and converted to per-million here. Override with LLM_COST_RATES_JSON
-    # when exact commercial rates differ.
-    "openai/gpt-oss-20b": {"input": 0.075, "output": 0.3},
-    "openai/gpt-oss-120b": {"input": 0.15, "output": 0.6},
+    # AWS Bedrock standard-tier rates, Asia Pacific (Mumbai), read from the Bedrock
+    # pricing page on 2026-09-10. Note these price the DEPLOYMENT TARGET, not the
+    # provider currently called at runtime (Groq) — the panel is therefore a Bedrock
+    # forecast. Override with LLM_COST_RATES_JSON when commercial rates differ.
+    "openai/gpt-oss-20b": {"input": 0.08, "output": 0.35},
+    "openai/gpt-oss-120b": {"input": 0.18, "output": 0.71},
     # Retired: the Llama models were removed from Groq and now 404. Kept so existing
     # llm_usage_events rows recorded against them still cost out in the analytics panel.
     "llama-3.1-8b-instant": {"input": 0.05, "output": 0.08},

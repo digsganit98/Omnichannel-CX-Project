@@ -236,6 +236,7 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 163 — the browser tab named a page that no longer exists:** the `<title>` still read "Ticket Operations", a leftover from the original ticket-only UI whose standalone page Fix 49 deleted; now just `OmnichannelCX`.
 - **Fix 164 — the home page listed specifications instead of arguing a case:** the hero's four-number stat strip (led by a price) became two bands — what we remove set against what we deliver — plus a `WHAT WE BUILT` label over the capability cards.
 - **Fix 165 — the home page clipped on a real laptop and spaced itself three different ways:** the bottom card row sat behind the footer below a ~640px viewport; fixed with a four-tier ladder, one single-sourced section gap, Ganit orange and blue throughout, and title-case in the headline.
+- **Fix 166 — FinOps cost rates moved to AWS Bedrock Mumbai:** repriced both gpt-oss models to the Bedrock standard-tier rates across all three rate sites, closing the "rates are unverified" open item; existing rows keep their Groq costs.
 - **EC2 deploy 2026-09-07 (second) — Fix 152 to Fix 162, UI only:** four bind-mounted files took effect on landing with no rebuild and no container restarted; the two changed Python files are on the box but deliberately not built into the image.
 - **OPEN - Fix 149 turned three escalation gates into constants (NOT FIXED, measured):** moving the KB into the graph made retrieval EXHAUSTIVE - all 14 chunks, every message - and three gates that read `contexts` to judge relevance silently became no-ops. Measured on all 11 messages sent through the UI today, with contexts rebuilt from `retrieval_evidence`: **`_is_strong_l1_knowledge_answer` TRUE 11/11**, `knowledge_not_found` fired **0/11**, KB chunks per turn **min 14 max 14**. The third gate is the damaging one - returning True SKIPS the handoff check entirely, the rule that reads the customer's own words. Live consequence: the FD question, for which the KB has zero guidance, auto-sent as a confident L1 knowledge answer and volunteered a penalty rule from the model's own general knowledge. Today's real escalations (fraud, claim dispute) were caught earlier by intent-label rules, which MASKS this for the intents that have their own rules and exposes it for everything else. `confidence=0.95` is hardcoded in Priority 2, so `confidence < 0.3` cannot fire either. **Fix 149 verified the PROVENANCE consumers of contexts and never enumerated the DECISION consumers.** This gate has now broken twice in opposite directions (Fix 143 inverted it) because it reads a property of RETRIEVAL to answer a question about RELEVANCE - so the fix is not a patched condition. Fix 150 already supplies the raw material (`customer_holds`, each chunk's `concept`); probe it on real messages before designing the gate.
 - **Reference - local vs the hosted instance:** the two are NOT meant to match. Application code must; `docker-compose.yml` deliberately must not (Ollama commented out on EC2, and ngrok has **no** `profiles: ["tunnel"]` there - copying the local file over means the next `up` starts no tunnel and **WhatsApp goes silent with nothing to say why**). EC2 is the sole holder of the shared WhatsApp number, mailbox and ngrok domain, which is why local ships with those off. Three deploy traps, all already bitten: **no git on EC2** (scp only), `restart` runs **old code** (rebuild), and `restart` does **not re-read `.env`** (`up -d`). Plus what must never be done there - other teams' containers, the disk watermark, removing OpenSearch, `prune --volumes`.
@@ -3536,11 +3537,12 @@ question is evidence of being wrong, not a request to rephrase.**
   all**, so making it real means threading a parameter through `aggregator.py`.
 - **`get_ticket_trend` / `/analytics/trend` is a dead endpoint** — computes a 14-day window,
   nothing in the frontend calls it.
-- **Cost rates are unverified.** The code comment says they came from Groq's `/v1/models`;
+- **Cost rates are unverified.** ~~The code comment says they came from Groq's `/v1/models`;
   that endpoint returns **no pricing at all** today. The arithmetic is exact (recomputed 6
   rows from stored tokens, zero mismatches), but `input 0.075 / output 0.30` cannot be
-  checked against the source it cites. Also: an unknown model silently costs **$0.00**
-  (`rate_not_configured`), which would make a model swap look free.
+  checked against the source it cites.~~ **CLOSED by Fix 166** — repriced to AWS Bedrock
+  Mumbai standard tier, a readable source. Also: an unknown model silently costs **$0.00**
+  (`rate_not_configured`), which would make a model swap look free — **still open**.
 - The offers cache is verified in isolation (5 requests → 1 call) but **not observed over a
   normal working day**.
 
@@ -8856,3 +8858,60 @@ colour differs.
 "Omnichannel capability" gained "with full knowledge". Log in takes the solid blue as the primary
 action and Sign up the solid Ganit orange; an outline-orange variant (`.home-btn-org`) is in the
 CSS unused, one word away if the two filled buttons ever compete too hard.
+
+---
+
+## Fix 166 — FinOps cost rates moved to AWS Bedrock Mumbai
+
+**The rates were never verifiable and now they are.** The Session 16 open item said it plainly:
+the code comment credited Groq's `/v1/models` endpoint, *"that endpoint returns no pricing at
+all today"*, and so `input 0.075 / output 0.30` **could not be checked against the source it
+cites**. The user supplied the AWS Bedrock pricing page for Asia Pacific (Mumbai), standard
+tier, which is a real readable source. That open item is now closed.
+
+| model | input $/1M | output $/1M |
+|---|---|---|
+| `openai/gpt-oss-20b` | 0.075 → **0.08** | 0.30 → **0.35** |
+| `openai/gpt-oss-120b` | 0.15 → **0.18** | 0.60 → **0.71** |
+
+**Three sites, and only one of them governs the panel.** Editing the Python alone would have
+changed nothing on screen — the compose file carries a `:-` default that overrides it at
+runtime, and `.env` has no `LLM_COST_RATES_JSON` line at all, so the compose default IS the
+live value.
+
+- `docker-compose.yml:54` — the live value
+- `.env.example:49` — fresh-clone template
+- `services/observability_service/llm_usage.py:19-20` — Python fallback, plus the comment,
+  which no longer credits an endpoint that serves no prices
+
+**These price the deployment target, not the provider being billed.** The system calls Groq at
+runtime; the panel now reports what those same tokens would cost on Bedrock in Mumbai. The user
+chose this deliberately (option A of two) because the deployment story for a BFSI pitch is AWS,
+not Groq. The `llm_usage.py` comment says so so the next reader does not "correct" it back.
+
+**History was left alone, on purpose.** Cost is computed once in `record_llm_call` and written
+onto the row; nothing recomputes it. The 210 existing `llm_usage_events` rows keep their Groq
+costs, so a 7-day window spanning today blends two rate regimes. Backfilling would rewrite a
+measured record to match a rate that was not in force when the call was made.
+
+**Verified in the running process, not in the file.** `docker compose up -d api` (a `restart`
+does not re-read `docker-compose.yml`; no rebuild needed, since the compose env var wins over
+the baked-in Python fallback). Then, inside the container:
+
+    openai/gpt-oss-20b  {'input': 0.08, 'output': 0.35}
+    openai/gpt-oss-120b {'input': 0.18, 'output': 0.71}
+    _estimate_cost_usd(20b,  1000, 1000) -> 0.00043  == (0.08+0.35)/1000
+    _estimate_cost_usd(120b, 1000, 1000) -> 0.00089  == (0.18+0.71)/1000
+
+`source: env_config`, confirming the compose value is the one in force. A tree-wide grep for
+every old rate returns nothing outside this log's own history.
+
+**Still open, unchanged by this fix:** an unknown model silently costs **$0.00**
+(`rate_not_configured` in metadata, invisible in the UI), so a model swap still looks free. And
+the rates remain a snapshot — nothing re-reads AWS pricing, so the next change is silent again.
+
+**Correction to a memory, recorded here because it affects the cost model:** `cost-model` says
+`gpt-oss` is **not available in ap-south-1 (Mumbai)**, Sydney only, verified 2026-09-07. The
+user's pricing page shows Mumbai with both models priced. AWS added the region since. The
+consequence recorded there — that Indian data residency forces Claude Haiku rather than
+gpt-oss — no longer follows.
