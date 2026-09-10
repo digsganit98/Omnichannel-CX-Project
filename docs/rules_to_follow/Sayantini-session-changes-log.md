@@ -19,6 +19,22 @@ the nevers, and the traps. Read that file first for anything EC2.
 happened on a given day, not of what is true now - and doing exactly that cost a whole session
 on 2026-09-07. The dated EC2 narrative stays here; section 9 of the EC2 doc indexes it.
 
+## Merges to `main`
+
+Record every merge of `Sayantini-phase2-ui-changes` into `main` here: the date, the resulting
+`main` tip, and what went across. **This section did not exist until 2026-09-10** — the merge
+on 2026-09-09 was found only by reading git, and a merge that only git knows about is invisible
+to anyone reading this file.
+
+`main` is the repo's default branch and is shared. History is linear — every merge so far has
+been a fast-forward, no merge commits. Keep it that way with `git merge --ff-only`, which
+aborts rather than inventing a merge commit if something unexpected has landed on `main`.
+
+| date | `main` tip after | what went across |
+|---|---|---|
+| 2026-09-09 23:06 | `2bda59f` | Everything through Fix 165 — the ticket-model redesign, the OmnichannelCX rebrand and UI redesign, the home page, the one-pager, and the EC2 operations doc. **Reconstructed from git, not recorded at the time**; the method and exact steps were not written down. |
+| 2026-09-10 | `<this commit>` | Fix 166 (`e40a508`) — the FinOps rate change — plus this log entry. Fast-forward. |
+
 ## Summary (one line per change)
 
 Keep this list updated: add a one-sentence entry here for every fix/change made in any session.
@@ -8862,6 +8878,8 @@ CSS unused, one word away if the two filled buttons ever compete too hard.
 ---
 
 ## Fix 166 — FinOps cost rates moved to AWS Bedrock Mumbai
+
+*Committed `e40a508`, merged to `main` 2026-09-10 (fast-forward). See "Merges to `main`" above.*
 
 **The rates were never verifiable and now they are.** The Session 16 open item said it plainly:
 the code comment credited Groq's `/v1/models` endpoint, *"that endpoint returns no pricing at
