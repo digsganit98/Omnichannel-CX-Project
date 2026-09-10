@@ -33,7 +33,7 @@ In those cases, simply answer the current query directly.
 **WhatsApp channel** — Write the response BODY only (no greeting, no sign-off — do NOT add them):
 - Maximum 3–4 lines total
 - First line: one direct answer to the question
-- Use *bold* (WhatsApp markdown) for ticket IDs, amounts, and status values
+- Use **bold** (standard markdown) for ticket IDs, amounts, and status values
 - Use • bullet points only when listing 3 or more items
 - No formal salutations; conversational but professional
 
