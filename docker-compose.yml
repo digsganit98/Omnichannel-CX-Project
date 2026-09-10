@@ -73,11 +73,27 @@ services:
       neo4j:
         condition: service_healthy
 
+  # Not started by `docker compose up` - only `docker compose --profile tunnel up`.
+  # ngrok is the WhatsApp webhook's public entry point, and a reserved free-tier domain
+  # allows ONE online session. The hosted instance holds the team domain, so a laptop
+  # starting this either dies with ERR_NGROK_334 or steals the tunnel and receives real
+  # customers' WhatsApp messages. Nothing depends_on ngrok, so gating it starts nothing
+  # else late. The hosted instance is started by hand and must pass --profile tunnel.
   ngrok:
+    profiles: ["tunnel"]
     image: ngrok/ngrok:latest
     environment:
       NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN:-}
-    command: http --url=${NGROK_DOMAIN:-https://smartly-shredder-overhang.ngrok-free.dev} --log=stdout api:8000
+    # The default used to be the TEAM's reserved domain, so an unset NGROK_DOMAIN
+    # silently contended for the tunnel the hosted instance is using. It now falls back
+    # to a plain `http api:8000`, which ngrok answers with a random ephemeral URL - no
+    # use as a webhook, but it takes nothing from anyone. Set NGROK_DOMAIN to your own
+    # reserved domain to get a stable one.
+    #
+    # `${VAR:?message}` was tried here and is wrong: compose interpolates the whole file
+    # before it filters profiles, so a missing variable breaks EVERY compose command,
+    # including ones that never touch this service.
+    command: http ${NGROK_DOMAIN:+--url=${NGROK_DOMAIN}} --log=stdout api:8000
     ports:
       - "4040:4040"
     depends_on:

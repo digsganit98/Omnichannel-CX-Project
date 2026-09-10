@@ -2,13 +2,13 @@
 
 from fastapi import APIRouter, HTTPException
 
-from apps.api.dependencies.security import require_admin_key
+from apps.api.dependencies.security import require_admin_auth
 from fastapi import Depends
 
 router = APIRouter(
     prefix="/admin/neo4j",
     tags=["admin"],
-    dependencies=[Depends(require_admin_key)],
+    dependencies=[Depends(require_admin_auth)],
 )
 
 
@@ -100,30 +100,47 @@ def graph_schema() -> dict:
         client.close()
 
 
+@router.get("/graph")
+def full_graph(limit: int = 3000) -> dict:
+    """Every node and relationship currently in the graph, for the live graph view.
+
+    /schema answers "what does this system know how to know" (one node per label).
+    This answers "what does it hold right now" — and it grows with traffic, because
+    each message writes an :Interaction, its :Ticket, a :ResolutionMemory and a
+    :HANDLED_BY edge to the answering :Agent.
+    """
+    client = _get_client()
+    try:
+        from services.neo4j_service.query_library import get_full_graph
+        return get_full_graph(client, limit=limit)
+    finally:
+        client.close()
+
+
 def _count_nodes(client) -> dict:
-    labels = ["Customer", "Account", "CreditCard", "FixedDeposit", "Loan", "Claim",
-              "Transaction", "ChargePenalty", "Product", "Policy", "KYC",
-              "Agent", "Interaction", "Ticket", "ResolutionMemory"]
-    counts = {}
-    for label in labels:
-        try:
-            rows = client.query(f"MATCH (n:{label}) RETURN count(n) AS total")
-            counts[label] = rows[0]["total"] if rows else 0
-        except Exception:
-            counts[label] = 0
-    return counts
+    """Live label counts - one query, whatever labels the graph actually holds.
+
+    This was a hardcoded list of 15 labels queried one at a time. A label added
+    later (`:KBChunk`, when RAG_BACKEND=neo4j) was simply invisible here, and
+    `/admin/neo4j/status` is what the fresh-start runbook checks to confirm a
+    seed worked - so the check could pass while missing a whole node type.
+    """
+    try:
+        rows = client.query(
+            "MATCH (n) UNWIND labels(n) AS label "
+            "RETURN label, count(*) AS total ORDER BY total DESC"
+        )
+    except Exception:
+        return {}
+    return {row["label"]: row["total"] for row in rows}
 
 
 def _count_relationships(client) -> dict:
-    rel_types = ["HAS_ACCOUNT", "HAS_CREDIT_CARD", "HAS_FD", "HAS_LOAN", "HAS_CLAIM",
-                 "HAS_POLICY", "HAS_TRANSACTION", "HAS_CHARGE", "HAS_INTERACTION",
-                 "HAS_TICKET", "KYC_VERIFIED_BY", "PRODUCT_IS",
-                 "CREATED_MEMORY", "HANDLED_BY"]
-    counts = {}
-    for rel in rel_types:
-        try:
-            rows = client.query(f"MATCH ()-[r:{rel}]->() RETURN count(r) AS total")
-            counts[rel] = rows[0]["total"] if rows else 0
-        except Exception:
-            counts[rel] = 0
-    return counts
+    """Live relationship-type counts - same reasoning as _count_nodes above."""
+    try:
+        rows = client.query(
+            "MATCH ()-[r]->() RETURN type(r) AS rel, count(r) AS total ORDER BY total DESC"
+        )
+    except Exception:
+        return {}
+    return {row["rel"]: row["total"] for row in rows}

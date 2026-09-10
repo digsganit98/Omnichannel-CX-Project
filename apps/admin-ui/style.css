@@ -3,7 +3,12 @@
   --bg:#f8f9fb;--surf:#fff;--surf2:#f2f4f7;
   --bdr:#e4e7ec;--bdr2:#d0d5dd;
   --t1:#101828;--t2:#475467;--t3:#98a2b3;
-  --blue:#2563eb;--blue-bg:#eff6ff;--blue-bd:#bfdbfe;--blue-t:#1d4ed8;
+  /* Ganit brand. #1701D0 scores 10.76:1 on white (the old #2563eb scored 5.17), so
+     every blue-on-white label in the app got MORE legible, not less. --blue-bd is a
+     mix of the two Ganit blues: the pale #D5E0F6 needs a visible edge against white. */
+  --blue:#1701d0;--blue-bg:#d5e0f6;--blue-bd:#b4c8ee;--blue-t:#1400a8;
+  /* Ganit accents, used deliberately rather than everywhere - see the ORANGE notes. */
+  --org:#ec7730;--org-bg:#fae3d0;--org-bd:#f5c9a6;--org-t:#c25a1c;
   --grn:#16a34a;--grn-bg:#f0fdf4;--grn-bd:#bbf7d0;--grn-t:#15803d;
   --amb:#d97706;--amb-bg:#fffbeb;--amb-bd:#fde68a;--amb-t:#b45309;
   --pnk:#db2777;--pnk-bg:#fdf2f8;--pnk-bd:#fbcfe8;--pnk-t:#be185d;
@@ -19,8 +24,7 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .modal-overlay.hidden{display:none}
 .modal-card{background:var(--surf);border-radius:14px;padding:32px 28px;width:360px;display:flex;flex-direction:column;gap:16px;box-shadow:0 20px 60px rgba(0,0,0,.35)}
 .modal-logo{display:flex;align-items:center;gap:9px}
-.modal-icon{width:32px;height:32px;background:var(--blue);border-radius:8px;display:flex;align-items:center;justify-content:center}
-.modal-icon svg{width:16px;height:16px;fill:#fff}
+.modal-icon{width:32px;height:32px;object-fit:contain;display:block;flex:0 0 auto}
 .modal-brand{font-size:14px;font-weight:700;color:var(--t1);line-height:1.3}
 .modal-brand span{color:var(--blue)}
 .modal-title{font-size:15px;font-weight:600;color:var(--t1)}
@@ -30,7 +34,7 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .modal-field input{padding:8px 10px;border:1px solid var(--bdr);border-radius:var(--rs);font-family:inherit;font-size:13px;color:var(--t1);background:var(--surf2);outline:none;transition:border-color .15s}
 .modal-field input:focus{border-color:var(--blue);background:var(--surf)}
 .modal-btn{padding:9px;border-radius:var(--rs);border:none;background:var(--blue);color:#fff;font-family:inherit;font-size:13px;font-weight:600;cursor:pointer;transition:background .12s}
-.modal-btn:hover{background:#1d4ed8}
+.modal-btn:hover{background:var(--blue-t)}
 .confirm-icon{display:flex;justify-content:center;padding:4px 0 2px}
 .modal-err{font-size:12px;color:var(--red-t);background:var(--red-bg);border:1px solid var(--red-bd);border-radius:var(--rs);padding:7px 10px;display:none}
 .modal-err.show{display:block}
@@ -43,7 +47,18 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .customer-auth-tabs{display:flex;gap:4px}
 .customer-auth-tab{flex:1;border:1px solid var(--bdr);background:var(--surf2);color:var(--t3);border-radius:var(--rs);padding:7px;font:600 11px inherit;cursor:pointer}
 .customer-auth-tab.active{background:var(--blue);border-color:var(--blue);color:#fff}
-#customerLoginForm,#customerSignupForm{display:flex;flex-direction:column;gap:12px}
+#customerLoginForm,#customerSignupForm,#adminLoginForm,#adminSignupForm{display:flex;flex-direction:column;gap:12px}
+
+/* Shared demo credentials on the sign-in card. The stack is hosted for the whole team, so
+   the alternative is the password living in a chat thread someone has to scroll back to. */
+.demo-accounts{display:flex;flex-direction:column;gap:6px;padding-top:12px;border-top:1px solid var(--bdr)}
+.demo-accounts-label{font-size:11px;font-weight:600;color:var(--t3)}
+.demo-account{display:flex;align-items:center;gap:9px;width:100%;text-align:left;padding:8px 10px;border:1px solid var(--bdr);border-radius:var(--rs);background:var(--surf2);cursor:pointer;font-family:inherit;transition:border-color .15s,background .15s}
+.demo-account:hover{border-color:var(--blue);background:var(--surf)}
+.demo-account svg{width:15px;height:15px;flex:0 0 15px;fill:var(--t3)}
+.demo-account-text{display:flex;flex-direction:column;gap:1px;min-width:0}
+.demo-account-name{font-size:12px;font-weight:600;color:var(--t1)}
+.demo-account-creds{font-size:11px;color:var(--t3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
 /* ── AUTH PAGE (stage 2) ── */
 .auth-page{position:fixed;inset:0;background:linear-gradient(135deg,#0f172a 0%,#1e3a5f 100%);display:flex;align-items:center;justify-content:center;z-index:400}
@@ -153,15 +168,14 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 /* RIBBON */
 .ribbon{height:48px;background:var(--navy);display:flex;align-items:center;padding:0 16px;gap:12px;flex-shrink:0;z-index:100}
 .ribbon-logo{display:flex;align-items:center;gap:8px}
-.ribbon-icon{width:28px;height:28px;background:var(--blue);border-radius:7px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
-.ribbon-icon svg{width:15px;height:15px;fill:#fff}
+.ribbon-icon{width:28px;height:28px;border-radius:7px;background:#fff;padding:3px;object-fit:contain;display:block;flex-shrink:0}
 .ribbon-name{font-size:12px;font-weight:600;color:#fff;letter-spacing:-.1px;white-space:nowrap}
-.ribbon-name span{color:#60a5fa;font-weight:700}
+.ribbon-name span{color:var(--blue-bg);font-weight:700}
 .ribbon-spacer{flex:1}
 .ribbon-user{display:flex;align-items:center;gap:8px}
 .ribbon-switch{border:1px solid rgba(255,255,255,.18);background:transparent;color:#cbd5e1;border-radius:6px;padding:5px 9px;font:600 10px inherit;cursor:pointer}
 .ribbon-switch:hover{background:rgba(255,255,255,.08);color:#fff}
-.ribbon-user-av{width:28px;height:28px;border-radius:50%;background:#1e40af;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:600;color:#fff}
+.ribbon-user-av{width:28px;height:28px;border-radius:50%;background:var(--blue);display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:600;color:#fff}
 .ribbon-user-info{display:flex;flex-direction:column;align-items:flex-end}
 .ribbon-user-name{font-size:12px;font-weight:500;color:#fff}
 .ribbon-user-role{font-size:10px;color:#94a3b8}
@@ -177,7 +191,7 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .leftnav{width:52px;background:var(--navy);display:flex;flex-direction:column;align-items:center;padding:8px 0;gap:2px;flex-shrink:0;border-right:1px solid rgba(255,255,255,.06)}
 .nav-item{width:38px;height:38px;border-radius:8px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:#64748b;transition:all .15s;position:relative}
 .nav-item:hover{background:rgba(255,255,255,.07);color:#94a3b8}
-.nav-item.active{background:rgba(37,99,235,.25);color:#60a5fa}
+.nav-item.active{background:var(--blue);color:#fff}
 .nav-item svg{width:17px;height:17px;fill:currentColor}
 .nav-item .nav-tooltip{position:absolute;left:46px;top:50%;transform:translateY(-50%);background:var(--t1);color:#fff;font-size:11px;font-weight:500;padding:4px 9px;border-radius:6px;white-space:nowrap;pointer-events:none;opacity:0;transition:opacity .15s;z-index:200}
 .nav-item:hover .nav-tooltip{opacity:1}
@@ -234,7 +248,7 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .q-list::-webkit-scrollbar-thumb{background:var(--bdr);border-radius:3px}
 .qi{display:flex;border-radius:var(--r);border:1px solid transparent;cursor:pointer;overflow:hidden;margin-bottom:3px;background:var(--surf);transition:all .12s}
 .qi:hover{background:var(--surf2)}
-.qi.on{background:var(--blue-bg);border-color:var(--blue-bd)}
+.qi.on{background:#eef2fc;border-color:var(--blue-bd);box-shadow:inset 3px 0 0 var(--blue)}
 .qi.done{opacity:.55}
 .cs{width:4px;flex-shrink:0}
 .cwa{background:#22c55e}.cem{background:#2563eb}.ccl{background:#f59e0b}.cig{background:#ec4899}.ctw{background:#0ea5e9}.cwc{background:#7c3aed}.cdef{background:#94a3b8}
@@ -268,7 +282,7 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .hbtn{font-size:11px;padding:5px 12px;border-radius:var(--rs);border:1px solid var(--bdr2);background:var(--surf);color:var(--t2);cursor:pointer;font-family:inherit;font-weight:500;transition:all .12s}
 .hbtn:hover{background:var(--surf2);color:var(--t1)}
 .hbtn.prim{background:var(--blue);color:#fff;border-color:var(--blue)}
-.hbtn.prim:hover{background:#1d4ed8}
+.hbtn.prim:hover{background:var(--blue-t)}
 .hbtn.wrn{background:var(--red-bg);color:var(--red-t);border-color:var(--red-bd)}
 
 /* CHANNEL FILTER BAR */
@@ -305,8 +319,6 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .mchbdg{display:flex;align-items:center;gap:3px;font-size:9px;font-weight:500;padding:1px 6px;border-radius:20px;border:1px solid}
 .escbanner{display:flex;align-items:flex-start;gap:8px;padding:9px 13px;background:var(--amb-bg);border:1px solid var(--amb-bd);border-radius:var(--r);font-size:11.5px;color:var(--amb-t);line-height:1.5}
 .escbanner svg{width:14px;height:14px;fill:var(--amb);flex-shrink:0;margin-top:1px}
-.resbanner{display:none;align-items:center;gap:8px;padding:8px 13px;background:var(--grn-bg);border:1px solid var(--grn-bd);border-radius:var(--r);font-size:12px;color:var(--grn-t);font-weight:500;flex-shrink:0;margin:0 18px}
-.resbanner svg{width:14px;height:14px;fill:var(--grn)}
 .empty-conv{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;color:var(--t3);font-size:13px;gap:8px}
 .empty-conv svg{width:32px;height:32px;fill:var(--bdr2)}
 
@@ -320,8 +332,8 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .cbox:focus-within{border-color:var(--blue);background:var(--surf)}
 .cinput{flex:1;background:transparent;border:none;outline:none;font-family:inherit;font-size:13px;color:var(--t1);resize:none;min-height:20px;line-height:1.5}
 .cinput::placeholder{color:var(--t3)}
-.sndbtn{width:32px;height:32px;border-radius:50%;background:var(--blue);border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:background .12s}
-.sndbtn:hover{background:#1d4ed8}
+.sndbtn{width:32px;height:32px;border-radius:50%;background:var(--org);border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:background .12s}
+.sndbtn:hover{background:var(--org-t)}
 .sndbtn svg{width:13px;height:13px;fill:#fff}
 
 /* RIGHT PANEL */
@@ -414,6 +426,9 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .flow-node-status{font-size:9px;font-weight:600;padding:2px 8px;border-radius:20px;display:inline-block;width:fit-content}
 .fns-active{background:var(--amb-bg);color:var(--amb-t);border:1px solid var(--amb-bd)}
 .fns-done{background:var(--grn-bg);color:var(--grn-t);border:1px solid var(--grn-bd)}
+/* A logged thread: recorded, no human needed. Neutral on purpose - amber would read
+   as work waiting on someone, green as a case that was worked and finished. */
+.fns-logged{background:var(--surf2);color:var(--t3);border:1px solid var(--bdr)}
 
 /* highlighted turn (navigated from ticket page) */
 .flow-step--highlight{background:#fffbeb;border-radius:10px;outline:2px solid #fde68a;outline-offset:2px;animation:tkt-highlight-fade 2.6s ease-out forwards}
@@ -475,8 +490,8 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .viewtab{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;font-weight:600;padding:7px 14px;border:1px solid var(--bdr);border-bottom:none;border-radius:8px 8px 0 0;color:var(--t3);background:var(--surf2);cursor:pointer;font-family:inherit;transition:all .12s;position:relative;top:1px}
 .viewtab svg{fill:currentColor}
 .viewtab:hover{color:var(--t1)}
-.viewtab.on{color:#ea580c;background:var(--surf);border-color:var(--bdr);font-weight:700}
-.viewtab.on::after{content:"";position:absolute;left:0;right:0;bottom:-1px;height:2px;background:#ea580c}
+.viewtab.on{color:var(--org-t);background:var(--surf);border-color:var(--bdr);font-weight:700}
+.viewtab.on::after{content:"";position:absolute;left:0;right:0;bottom:-1px;height:2px;background:var(--org)}
 
 /* ── LINEAGE OVERVIEW (conversation history view) ── */
 /* Timeline-strip rows: each request is a small left section (ticket + status)
@@ -485,17 +500,18 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
    Row's left border = THEME colour (via --lin-clr); dots = channel. Click drills
    into the Detailed view for that request. */
 .flow-theme-body.lineage{gap:8px;padding:2px 2px 8px}
-.lin-row{display:grid;grid-template-columns:auto 1fr;gap:14px;align-items:center;
+.lin-row{display:grid;grid-template-columns:124px 1fr;gap:12px;align-items:center;
   background:var(--surf);border:1px solid var(--bdr);border-left:3px solid var(--lin-clr,var(--t3));
   border-radius:var(--r);padding:10px 14px;cursor:pointer;outline:none;transition:box-shadow .12s,border-color .12s}
 .lin-row:hover{border-color:var(--bdr2);box-shadow:var(--shadow)}
 .lin-row:focus-visible{box-shadow:0 0 0 2px var(--blue)}
 /* left meta section: ticket + status stacked, divided from the timeline */
 .lin-meta{display:flex;flex-direction:column;align-items:flex-start;gap:5px;align-self:stretch;
-  justify-content:center;border-right:1px solid var(--bdr);padding-right:12px}
+  justify-content:center;border-right:1px solid var(--bdr);padding-right:12px;min-width:0}
+.lin-meta .det-intent{white-space:normal;line-height:1.35;max-width:100%}
 .lin-main{min-width:0}
 .lin-tkt{font-size:8.5px;font-weight:700;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.3px;
-  color:var(--amb-t);background:var(--amb-bg);border:1px solid var(--amb-bd);border-radius:5px;padding:2px 6px;text-transform:uppercase;max-width:150px;overflow:hidden;text-overflow:ellipsis}
+  color:var(--org-t);background:var(--org-bg);border:1px solid var(--org-bd);border-radius:5px;padding:2px 6px;text-transform:uppercase;max-width:112px;overflow:hidden;text-overflow:ellipsis}
 .lin-tkt--none{color:var(--t3);background:var(--surf2);border-color:var(--bdr)}
 .det-intent{font-size:8.5px;font-weight:700;letter-spacing:.3px;text-transform:uppercase;color:var(--blue-t);background:var(--blue-bg);border:1px solid var(--blue-bd);border-radius:5px;padding:2px 6px}
 /* the mini timeline */
@@ -605,12 +621,7 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .spinning{animation:spin .8s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
 /* Analytics section headers — coloured left accent bar + icon chip + label */
-.section-lbl{display:flex;align-items:center;gap:10px;font-size:13px;font-weight:700;color:var(--t1);letter-spacing:.2px;margin-bottom:14px;padding-left:12px;position:relative}
-.section-lbl::before{content:"";position:absolute;left:0;top:1px;bottom:1px;width:4px;border-radius:3px;background:var(--blue)}
-.section-ico{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:7px;font-size:14px;background:var(--blue-bg);border:1px solid var(--blue-bd);line-height:1}
-.sec-finops::before{background:linear-gradient(var(--grn),var(--grn-t))}.sec-finops .section-ico{background:var(--grn-bg);border-color:var(--grn-bd)}
-.sec-care::before{background:linear-gradient(var(--blue),var(--blue-t))}.sec-care .section-ico{background:var(--blue-bg);border-color:var(--blue-bd)}
-.sec-solution::before{background:linear-gradient(var(--amb),var(--amb-t))}.sec-solution .section-ico{background:var(--amb-bg);border-color:var(--amb-bd)}
+
 .stat-grid{display:grid;gap:12px}
 .stat-card{background:var(--surf);border:1px solid var(--bdr);border-radius:var(--r);padding:14px 16px}
 .stat-val{font-size:26px;font-weight:600;color:var(--t1);margin-bottom:2px}
@@ -657,36 +668,57 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .sse-badge{font-size:10px;font-weight:500;padding:2px 8px;border-radius:20px;background:var(--grn-bg);border:1px solid var(--grn-bd);color:var(--grn-t)}
 .metric-note{font-size:11px;color:var(--t3);font-style:italic;line-height:1.5;margin:-6px 0 12px}
 .analytics-section{display:flex;flex-direction:column;gap:14px;padding-bottom:6px;border-bottom:1px solid var(--bdr)}
+.analytics-section[hidden]{display:none}
 .analytics-section:last-of-type{border-bottom:none;padding-bottom:0}
 
 /* ── Shared KPI tile system (used across the whole Analytics page) ───────────── */
-.kpi-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px}
-.kpi-tile{position:relative;background:var(--surf);border:1px solid var(--bdr);border-radius:10px;padding:16px 16px 14px;overflow:hidden;transition:transform .15s,box-shadow .15s}
-.kpi-tile::before{content:"";position:absolute;top:0;left:0;right:0;height:3px}
-.kpi-tile:hover{transform:translateY(-2px);box-shadow:0 6px 18px rgba(15,23,42,.07)}
-.kpi-icon{position:absolute;top:13px;right:14px;font-size:15px;opacity:.85;line-height:1}
-.kpi-val{font-size:27px;font-weight:700;color:var(--t1);letter-spacing:-.5px;line-height:1.1}
-.kpi-lbl{font-size:10.5px;text-transform:uppercase;letter-spacing:.5px;font-weight:600;color:var(--t3);margin-top:5px}
-.kpi-sub{font-size:11px;color:var(--t3);margin-top:4px}
+.kpi-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:16px}
+/* Tiles read label-first, then a large value - a labelled fact rather than a scoreboard.
+   The card itself is plain white: colour lives ONLY in the icon badge, so the page is
+   mostly black-white-grey and the number carries the weight. Both JS render paths emit
+   value-before-label, so the visual order is flipped with flex `order` rather than by
+   editing two separate render functions. */
+.kpi-tile{position:relative;display:flex;flex-direction:column;background:var(--surf);
+  border:1px solid var(--bdr);border-radius:12px;padding:15px 16px 16px;overflow:hidden;
+  transition:border-color .15s,box-shadow .15s}
+.kpi-tile:hover{border-color:var(--bdr2);box-shadow:0 4px 14px rgba(16,24,40,.06)}
+/* Tinted rounded badge instead of a bare glyph floating in the corner. */
+.kpi-icon{position:absolute;top:13px;right:14px;width:28px;height:28px;border-radius:8px;
+  display:flex;align-items:center;justify-content:center;font-size:13px;line-height:1;
+  background:var(--blue-bg);color:var(--blue)}
+.kpi-lbl{order:1;font-size:11.5px;font-weight:500;color:var(--t2);letter-spacing:0;
+  text-transform:none;margin:0 34px 8px 0;line-height:1.3}
+.kpi-val{order:2;font-size:30px;font-weight:700;color:var(--t1);letter-spacing:-1px;line-height:1.05}
+.kpi-sub{order:3;font-size:11px;color:var(--t3);margin-top:7px;line-height:1.4}
 .kpi-has-tip{cursor:help}
-.kpi-help{position:absolute;bottom:11px;right:12px;width:15px;height:15px;border-radius:50%;background:var(--surf2);border:1px solid var(--bdr);color:var(--t3);font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center;cursor:help;line-height:1}
+.kpi-help{position:absolute;bottom:13px;right:13px;width:15px;height:15px;border-radius:50%;background:var(--surf2);border:1px solid var(--bdr);color:var(--t3);font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center;cursor:help;line-height:1}
 .kpi-has-tip:hover .kpi-help{background:var(--blue);border-color:var(--blue);color:#fff}
-.kpi-blue::before{background:linear-gradient(90deg,var(--blue),#60a5fa)}.kpi-blue{background:linear-gradient(180deg,var(--blue-bg),var(--surf) 60%)}.kpi-blue .kpi-icon{color:var(--blue)}
-.kpi-pur::before{background:linear-gradient(90deg,var(--pur),#a78bfa)}.kpi-pur{background:linear-gradient(180deg,var(--pur-bg),var(--surf) 60%)}.kpi-pur .kpi-icon{color:var(--pur)}
-.kpi-grn::before{background:linear-gradient(90deg,var(--grn),#4ade80)}.kpi-grn{background:linear-gradient(180deg,var(--grn-bg),var(--surf) 60%)}.kpi-grn .kpi-icon{color:var(--grn)}
-.kpi-amb::before{background:linear-gradient(90deg,var(--amb),#fbbf24)}.kpi-amb{background:linear-gradient(180deg,var(--amb-bg),var(--surf) 60%)}.kpi-amb .kpi-icon{color:var(--amb)}
-.kpi-red::before{background:linear-gradient(90deg,var(--red),#f87171)}.kpi-red{background:linear-gradient(180deg,var(--red-bg),var(--surf) 60%)}.kpi-red .kpi-icon{color:var(--red)}
-.kpi-pnk::before{background:linear-gradient(90deg,var(--pnk),#f472b6)}.kpi-pnk{background:linear-gradient(180deg,var(--pnk-bg),var(--surf) 60%)}.kpi-pnk .kpi-icon{color:var(--pnk)}
+/* Two Ganit treatments alternating by POSITION. Every KPI `tone` is hardcoded per tile in
+   JS ('Open tickets' is amber whether it reads 2 or 200), so the tile colour never carried
+   meaning - only the NUMBER's colour is conditional, and that is untouched. Keying off
+   nth-child rather than the tone class is what makes all three rows alternate: the rows
+   carry different tone sequences, so a name-based map left one row orange-orange-orange. */
+/* Ganit accent, rationed: every FOURTH badge is peach/orange so the row has a rhythm
+   without the barber-pole effect of alternating every tile. */
+.kpi-grid .kpi-tile:nth-child(4n) .kpi-icon{background:var(--org-bg);color:var(--org-t)}
+
 
 /* ── LLM usage & cost panel (creative redesign) ─────────────────────────────── */
 /* operation table with token-share meters */
 .llm-num{text-align:right !important;font-variant-numeric:tabular-nums}
-.llm-op-table td{padding-top:9px;padding-bottom:9px}
+.llm-op-table td{padding-top:12px;padding-bottom:12px}
 /* Column rules. Every cell here is a meter followed by a right-aligned number, so with
    only horizontal rules one column's value ran straight into the next column's bar.
    Scoped to this table - the 3-column agent table reads fine without them. */
 .llm-op-table th:not(:last-child),
-.llm-op-table td:not(:last-child){border-right:1px solid var(--bdr);padding-right:12px}
+.llm-op-table td:not(:last-child){padding-right:16px}
+/* Plain figures for every column but the one meter: right-aligned, tabular so digits line
+   up down the column, and the secondary pair muted so the eye reads volume and cost first. */
+.llm-num{text-align:right;font-variant-numeric:tabular-nums;color:var(--t1);
+  font-size:11.5px;white-space:nowrap}
+.llm-num--muted{color:var(--t3)}
+.llm-op-table th:not(:first-child){text-align:right}
+.llm-op-table th:nth-child(2){text-align:left}
 .llm-op-table th:not(:first-child),
 .llm-op-table td:not(:first-child){padding-left:12px}
 .llm-op-cell{font-weight:600;color:var(--t1) !important;white-space:nowrap;cursor:help}
@@ -698,7 +730,7 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .llm-op-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:8px;vertical-align:middle}
 .llm-meter-cell{min-width:150px}
 .llm-meter-wrap{display:flex;align-items:center;gap:10px}
-.llm-meter{flex:1;height:7px;background:var(--surf2);border-radius:5px;overflow:hidden}
+.llm-meter{flex:1;height:6px;background:var(--surf2);border-radius:5px;overflow:hidden;opacity:.75}
 .llm-meter-fill{height:100%;border-radius:5px;transition:width .5s ease}
 .llm-meter-val{font-size:11px;color:var(--t2);font-variant-numeric:tabular-nums;min-width:52px;text-align:right}
 .llm-cost{color:var(--grn-t) !important;font-weight:600}
@@ -739,19 +771,42 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .conn-page::-webkit-scrollbar{width:3px}
 .conn-page::-webkit-scrollbar-thumb{background:var(--bdr);border-radius:3px}
 .conn-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px;margin-top:14px}
-.conn-card{background:var(--surf);border:1px solid var(--bdr);border-radius:var(--r);padding:18px;display:flex;flex-direction:column;gap:12px}
-.conn-card:hover{border-color:var(--bdr2)}
-.conn-hdr{display:flex;align-items:center;gap:12px}
-.conn-icon{width:40px;height:40px;border-radius:10px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
-.conn-icon svg{width:20px;height:20px;fill:#fff}
-.conn-nm{font-size:13px;font-weight:600;color:var(--t1)}
-.conn-desc{font-size:12px;color:var(--t3)}
-.conn-status{display:flex;align-items:center;justify-content:space-between}
-.conn-badge{font-size:10px;font-weight:600;padding:2px 9px;border-radius:20px;border:1px solid}
-.conn-badge.connected{background:var(--grn-bg);border-color:var(--grn-bd);color:var(--grn-t)}
-.conn-badge.disconnected{background:var(--surf2);border-color:var(--bdr);color:var(--t3)}
-.conn-badge.error{background:var(--red-bg);border-color:var(--red-bd);color:var(--red-t)}
-.conn-badge.phase2{background:#fff8e1;border-color:#f59e0b;color:#b45309;font-weight:700;letter-spacing:.3px}
+/* Cards are equal-height with the status pinned to the bottom, so a card carrying extra
+   detail (Email's two pipes) no longer stands taller than its neighbours and every badge
+   lines up across the row. */
+.conn-card{background:var(--surf);border:1px solid var(--bdr);border-radius:12px;padding:18px;
+  display:flex;flex-direction:column;gap:12px;transition:border-color .14s,box-shadow .14s}
+.conn-card:hover{border-color:var(--bdr2);box-shadow:0 4px 14px rgba(16,24,40,.06)}
+.conn-hdr{display:flex;align-items:flex-start;gap:12px}
+/* The vendor marks keep their own brand colours - WhatsApp green, Gmail red, Jira blue are
+   not ours to restyle - but they sit on a soft tinted plate rather than a saturated block,
+   which is what made the row read as five loud squares. */
+.conn-icon{width:38px;height:38px;border-radius:10px;display:flex;align-items:center;
+  justify-content:center;flex-shrink:0;filter:saturate(.92)}
+.conn-icon svg{width:19px;height:19px;fill:#fff}
+.conn-nm{font-size:13.5px;font-weight:600;color:var(--t1);letter-spacing:-.1px}
+.conn-desc{font-size:11.5px;color:var(--t3);line-height:1.45;margin-top:2px}
+/* Pinned to the card's foot: margin-top:auto in a flex column. */
+.conn-status{display:flex;align-items:center;justify-content:space-between;
+  margin-top:auto;padding-top:12px;border-top:1px solid var(--bdr)}
+/* Status as a dot plus plain text, matching the chip language used in the conversation
+   views - no filled pill, so the colour is a signal rather than a block. */
+.conn-badge{font-size:11px;font-weight:600;padding:0;border:0;background:none;
+  display:inline-flex;align-items:center;gap:6px}
+.conn-badge::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor;flex:0 0 auto}
+.conn-badge.connected{color:var(--grn-t)}
+.conn-badge.disconnected{color:var(--t3)}
+.conn-badge.error{color:var(--red-t)}
+/* "Phase 2" is a roadmap label, not a state - it keeps a faint pill and no dot. */
+.conn-badge.phase2{background:var(--org-bg);border:1px solid var(--org-bd);color:var(--org-t);
+  padding:2px 9px;border-radius:20px;font-weight:600;letter-spacing:.2px}
+.conn-badge.phase2::before{display:none}
+/* Email's two pipes, shown only when one is down (see the JS) - was an inline grid
+   written into the JS string, matching nothing else on the page. */
+.conn-pipes{display:grid;grid-template-columns:1fr auto;gap:5px 12px;font-size:11px;
+  color:var(--t2);padding:10px 12px;background:var(--surf2);border-radius:8px}
+.conn-pipes .cp-k{color:var(--t3)}
+.conn-pipes .cp-down{color:var(--red-t);font-weight:600}
 .conn-fields{display:flex;flex-direction:column;gap:6px;border-top:1px solid var(--bdr);padding-top:10px}
 .conn-field label{font-size:10px;font-weight:600;color:var(--t3);text-transform:uppercase;letter-spacing:.4px;display:block;margin-bottom:3px}
 .conn-field input{width:100%;font-family:inherit;font-size:12px;padding:6px 9px;border:1px solid var(--bdr);border-radius:var(--rs);color:var(--t1);background:var(--surf2);outline:none}
@@ -778,7 +833,7 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .sim-field textarea{resize:vertical;min-height:72px}
 .sim-field input:focus,.sim-field textarea:focus{border-color:var(--blue);background:var(--surf)}
 .sim-btn{padding:8px 16px;border-radius:var(--rs);border:none;background:var(--blue);color:#fff;font-family:inherit;font-size:12px;font-weight:600;cursor:pointer;transition:background .12s}
-.sim-btn:hover{background:#1d4ed8}
+.sim-btn:hover{background:var(--blue-t)}
 .sim-btn:disabled{opacity:.5;cursor:not-allowed}
 .sim-result{margin-top:10px;padding:10px;border-radius:var(--rs);background:#0f172a;color:#7dd3fc;font-size:11px;font-family:monospace;white-space:pre-wrap;max-height:180px;overflow-y:auto;display:none}
 .sim-status{font-size:11px;margin-top:8px;padding:7px 10px;border-radius:var(--rs);background:var(--amb-bg);border:1px solid var(--amb-bd);color:var(--amb-t);display:none}
@@ -827,7 +882,7 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
    now the button's only child. */
 .kg-btn{width:100%;display:flex;align-items:center;justify-content:center;gap:8px;
   margin-top:10px;padding:8px 10px;cursor:pointer;font:inherit;font-size:11.5px;font-weight:600;
-  background:var(--blue-bg);border:1px solid var(--blue-bd);border-radius:var(--rs);color:var(--blue-t);
+  background:#f0f4fc;border:1px solid #e0e8f8;border-radius:var(--rs);color:var(--blue-t);
   transition:background .13s ease,border-color .13s ease}
 .kg-btn:hover{border-color:var(--blue)}
 .kg-btn:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
@@ -933,6 +988,15 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .cctx-refresh:hover{color:var(--t1)}
 .cctx-muted{font-size:11px;color:var(--t3)}
 
+/* "No open escalations." — a line, not a card: there is no list to head or fold. It stands
+   in the panel flow where the Open Tickets card would be, so it is styled as .rplbl is:
+   its visual siblings are the card LABELS either side of it, not body text inside a card.
+   Blue like the rest: it stands in for the Open Tickets card, whose label is blue, and it
+   sits on the panel background rather than inside a card, so it does not read as a heading
+   for the card below it. */
+.rp-noesc{font-size:10px;font-weight:600;color:var(--blue-t);text-transform:uppercase;
+  letter-spacing:.5px;padding:2px 0}
+
 /* Tabs wrap rather than scroll: in a ~260px panel a hidden tab is a lost tab. Empty
    categories are dropped upstream, so five is the practical maximum here. */
 .cctx-tabs{display:flex;flex-wrap:wrap;gap:3px;margin-bottom:9px}
@@ -946,6 +1010,7 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
   height:14px;padding:0 3px;border-radius:20px;background:var(--red-bg);color:var(--red-t);
   font-size:9px;font-weight:700}
 .cctx-tab.on .cctx-count{background:var(--red-t);color:#fff}
+.cctx-tab.on{font-weight:700}
 
 /* Every panel is in the DOM; .on decides which one shows. Switching is a class
    toggle — no re-render, no request. */
@@ -1003,6 +1068,16 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 /* Knowledge-graph schema: real SVG, fixed layout, drawn edges. */
 .kgs-wrap{width:max-content;min-width:100%}
 .kgs{display:block;width:auto;max-width:none;height:calc(var(--kgs-h,600px) * var(--kgs-s,1));max-height:calc(96vh - 200px)}
+/* The live view carries a 19-chip key that wraps to two rows, so its header is
+   taller than the 200px the shared cap assumes and the drawing was clipped at
+   the foot. Give that view its own budget rather than truncating the key. */
+.kgs-live{max-height:calc(96vh - 250px);width:100%;height:auto}
+/* The live view's key is 19 chips, which wrapped to two rows and pushed the drawing
+   past the 200px header the cap above assumes - so the picture was clipped at the
+   bottom. Tighter chips keep it to one row, and the cap then holds. */
+.kgs-key-live{gap:4px 9px;font-size:9.5px;line-height:1.45}
+.kgs-key-live .kgs-k{white-space:nowrap}
+.kgs-key-live i{width:8px;height:8px}
 .kgs-e{fill:none;stroke:#cbd5e1;stroke-width:1.4}
 .kgs-el{font-size:11.5px;font-weight:700;fill:var(--t2);font-family:ui-monospace,Menlo,Consolas,monospace}
 .kgs-h{font-size:9.5px;font-weight:700;letter-spacing:.5px;text-transform:uppercase}
@@ -1032,3 +1107,330 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .fl-llm{font-size:17px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;fill:var(--blue-t);font-family:ui-monospace,Menlo,Consolas,monospace}
 .fl-end{font-size:25px;font-weight:800;letter-spacing:1px}
 
+
+
+/* ── Live knowledge graph: force-directed, every node and relationship ────────
+   Companion to the fixed schema diagram above, not a replacement. Positions come
+   from a simulation run to convergence before paint (app.js::kgForceLayout), so
+   this is still a STATIC picture — nothing animates after the modal opens. */
+.kgs-live{background:#0f1420;border-radius:10px}
+/* Edges are the DOMINANT element, not faint threads behind the nodes: in a graph
+   drawing you should see the web first and the dots second. fill:none matters now
+   that these are <path> arcs rather than <line>. */
+/* Leaf edges: a record to the customer or concept it belongs to. Was .7px at 75%
+   opacity, which at 278 nodes is invisible - so connected leaves read as loose
+   dots and the graph looked disconnected when it never was. */
+.kgl-e{fill:none;stroke:#7c8fc9;stroke-width:1;stroke-opacity:.5}
+.kgl-note{font-size:10px;fill:#94a3b8;pointer-events:none}
+.kgl-n{stroke:none;cursor:pointer;transition:stroke .12s}
+/* Hubs get a ring so a centre reads as a centre. Sizing alone was not enough:
+   the old scale made a 40-edge customer barely twice a 1-edge transaction. */
+.kgl-hub{stroke:#0f1420;stroke-width:2}
+.kgl-n:hover{stroke:#fff;stroke-width:1.4}
+/* Small, dim: a label must not out-weigh the node it names. */
+.kgl-lab{font-size:9px;fill-opacity:.85;font-weight:600;fill:#e2e8f0;pointer-events:none}
+/* Concepts read differently from customers on purpose: a customer name is one
+   person's corner of the graph, a Concept is the shared spine several corners
+   meet on. Same size, lighter weight, warmer hue - present without competing. */
+.kgl-lab-con{font-weight:500;fill:#fcd34d;fill-opacity:.95}
+/* The live view colours by node TYPE and fills the swatch, so the shared .kgs-key
+   border (which inherits currentColor) would ring every chip in body text colour. */
+.kgs-live ~ .kgs-key i,.kg-legend .kgs-key i{border-color:transparent}
+
+/* Schema <-> Live switch. Class is kg-vtab, NOT kg-sw: .kg-sw is already the 9x9
+   legend swatch defined above, and reusing the name collapsed these buttons to 9px. */
+/* Sits on the title row, pushed right so it clears the title and stops short of the
+   close button. margin-left:auto claims the empty middle of .kg-modal-head. */
+.kg-head-tabs{margin-left:auto;align-self:center;display:flex}
+.kg-switch{display:inline-flex;gap:0;border:1px solid var(--bdr);border-radius:7px;overflow:hidden;background:var(--surf)}
+.kg-vtab{font:inherit;font-size:11px;font-weight:600;padding:4px 14px;border:0;
+  background:transparent;color:var(--t2);cursor:pointer;transition:all .12s;white-space:nowrap}
+.kg-vtab + .kg-vtab{border-left:1px solid var(--bdr)}
+.kg-vtab:hover{background:var(--surf2);color:var(--t1)}
+.kg-vtab.on{background:var(--blue);color:#fff}
+
+/* Graph modal: give the diagram the vertical space back.
+   The legend bar was its own band under the header - 14 chips wrapping to two
+   rows plus a counts line, ~80px of a ~570px card, while the diagram below it
+   was letterboxed into what remained. The chips are reference material, not a
+   heading: they belong on one dense row, and the counts belong on that row too
+   rather than owning a line of their own. */
+.kg-legend{padding:5px 16px 6px;gap:5px 10px;line-height:1.3}
+.kg-legend .kgs-key{gap:4px 10px;font-size:9.5px;flex:1 1 auto}
+.kg-legend .kgs-key span{gap:4px}
+.kg-legend .kgs-key i{width:8px;height:8px;border-radius:2px;border-width:1px}
+/* On the same row as the chips, hard right, instead of below them. */
+.kg-legend .kg-counts{margin-left:auto;white-space:nowrap;align-self:center;font-size:9.5px}
+/* The body's own padding added a third band of dead space above the drawing. */
+.kg-modal-body{padding:4px 10px 8px}
+
+/* Both diagrams were cut off along the bottom edge.
+   .kg-modal-body carries overflow-y:hidden, so anything taller than the body is
+   clipped with no scrollbar to reach it - and the schema view stacks an
+   explanatory note ABOVE its svg, which pushes the diagram down by however tall
+   that note wraps to. Combined with the taller .kgs-live cap this change added,
+   the last row of both pictures fell outside the box.
+   Scroll instead of clip: a diagram that does not fit should still be reachable. */
+.kg-modal-body{overflow-y:auto}
+/* Leave the svg room for the note above it and the key below, rather than
+   letting it claim the body's whole height and push them out of view. */
+.kgs-live{max-height:calc(96vh - 190px)}
+
+/* ── HOME PAGE ─────────────────────────────────────────────────────────────────
+   Stage 0: the unauthenticated landing view. Deliberately fits one viewport with
+   no scroll — body already sets overflow:hidden, so anything that overflows is
+   LOST, not scrollable. Every size below is chosen against 1440x900; the clamp()
+   values let it shrink to ~1280x720 rather than clipping. */
+.home-page{position:fixed;inset:0;z-index:400;background:var(--bg);
+  display:flex;flex-direction:column;overflow:hidden}
+
+/* Navbar */
+.home-nav{flex:0 0 auto;height:60px;padding:0 clamp(20px,4vw,56px);
+  display:flex;align-items:center;justify-content:space-between;
+  background:var(--surf);border-bottom:1px solid var(--bdr)}
+.home-brand{display:flex;align-items:center;gap:10px}
+.home-logo{width:30px;height:30px;flex:0 0 auto;object-fit:contain;display:block}
+.home-brand-name{font-size:16px;font-weight:700;color:var(--t1);letter-spacing:-.2px}
+.home-nav-actions{display:flex;align-items:center;gap:10px}
+.home-btn-ghost{padding:8px 15px;border:1px solid var(--bdr2);border-radius:var(--rs);
+  background:var(--surf);color:var(--t2);font:600 13px inherit;cursor:pointer;
+  transition:border-color .12s,color .12s}
+.home-btn-ghost:hover{border-color:var(--t3);color:var(--t1)}
+.home-btn-solid{padding:8px 17px;border:1px solid var(--blue);border-radius:var(--rs);
+  background:var(--blue);color:#fff;font:600 13px inherit;cursor:pointer;
+  transition:background .12s}
+.home-btn-solid:hover{background:var(--blue-t)}
+
+/* Sign up in the second Ganit colour. Solid orange would fight the solid blue beside it
+   for primacy, so it takes the orange as an outline and text: the palette is complete,
+   and log in stays the one filled button. */
+.home-btn-org{padding:8px 17px;border:1px solid var(--org);border-radius:var(--rs);
+  background:var(--surf);color:var(--org-t);font:600 13px inherit;cursor:pointer;
+  transition:background .12s,color .12s}
+.home-btn-org:hover{background:var(--org-bg)}
+
+/* Fully filled orange variant — swap the class in the markup to use this instead. */
+.home-btn-orgsolid{padding:8px 17px;border:1px solid var(--org);border-radius:var(--rs);
+  background:var(--org);color:#fff;font:600 13px inherit;cursor:pointer;
+  transition:background .12s}
+.home-btn-orgsolid:hover{background:var(--org-t)}
+
+/* Body: hero + cards, centred and vertically distributed */
+/* One gap governs every space between sections — hero, split, label, cards are all
+   siblings here. justify-content:center would bank the leftover height above and below,
+   leaving tight content marooned in whitespace, so the sections space themselves evenly
+   through the available height instead and the padding stays small. */
+.home-main{flex:1 1 auto;min-height:0;display:flex;flex-direction:column;
+  justify-content:space-evenly;gap:clamp(18px,3.4vh,40px);
+  padding:clamp(14px,2vh,26px) clamp(20px,5vw,72px)}
+
+/* Hero */
+.home-hero{text-align:center;max-width:760px;margin:0 auto}
+.home-headline{font-size:clamp(27px,3.2vw,42px);font-weight:700;color:var(--t1);
+  line-height:1.15;letter-spacing:-1px}
+.home-sub{margin-top:12px;font-size:clamp(13px,1.15vw,15px);color:var(--t2);
+  line-height:1.6;max-width:600px;margin-left:auto;margin-right:auto}
+
+/* Problem/promise split. Grid is 1fr / 1px / 1fr so the centre divider is a real column
+   rather than a border, which keeps both bands exactly equal width. Wider than the hero
+   (760px) but narrower than the card grid (1080px) so it steps between them. */
+.home-split{display:grid;
+  grid-template-columns:1fr 1px 1fr;gap:clamp(20px,2.8vw,40px);
+  max-width:1080px;width:100%;margin-left:auto;margin-right:auto;text-align:left}
+.home-split-div{background:var(--bdr)}
+
+/* Band label: hairline rules either side of centred small caps. */
+.home-band-hd,.home-sect-hd{display:flex;align-items:center;gap:9px;
+  font-size:10px;font-weight:700;letter-spacing:.9px;text-transform:uppercase;
+  color:var(--blue);white-space:nowrap}
+.home-band-hd::before,.home-band-hd::after,
+.home-sect-hd::before,.home-sect-hd::after{content:"";flex:1 1 auto;height:1px;
+  background:var(--bdr)}
+
+/* Three items abreast inside each band. min-height holds the row bottoms level when the
+   longer phrases wrap to more lines than the short ones. */
+.home-band-items{margin-top:clamp(9px,1.4vh,14px);display:grid;
+  grid-template-columns:repeat(3,1fr);gap:clamp(8px,1vw,14px)}
+.home-bi{display:flex;align-items:flex-start;gap:6px;min-height:40px;
+  font-size:12px;line-height:1.42;color:var(--t1);font-weight:600}
+.home-bi-m{flex:0 0 auto;font-size:11px;line-height:1.45;font-weight:700}
+.bi-x .home-bi-m{color:var(--org-t);font-size:12px}
+.bi-v .home-bi-m{color:var(--blue)}
+
+/* Label above the capability grid, matched to the card grid's width. */
+/* The label belongs to the grid beneath it, not between two sections: it is wrapped with
+   the cards so the section gap falls OUTSIDE the pair, and this margin sets the small
+   distance to its own content — the same relationship each band label has to its items. */
+.home-built{max-width:1080px;width:100%;margin:0 auto}
+.home-sect-hd{max-width:1080px;width:100%;margin:0 auto clamp(9px,1.4vh,14px)}
+
+/* Capability grid — 3x2 */
+.home-cards{display:grid;grid-template-columns:repeat(3,1fr);
+  gap:clamp(10px,1.1vw,16px);max-width:1080px;width:100%;margin:0 auto}
+.home-card{background:var(--surf);border:1px solid var(--bdr);border-radius:10px;
+  padding:clamp(15px,2vh,22px) clamp(15px,1.3vw,20px);
+  display:flex;flex-direction:column;
+  transition:border-color .14s,box-shadow .14s,transform .14s}
+.home-card:hover{border-color:var(--bdr2);box-shadow:0 3px 12px rgba(16,24,40,.07);
+  transform:translateY(-1px)}
+.home-card-ic{width:30px;height:30px;border-radius:7px;display:flex;
+  align-items:center;justify-content:center;margin-bottom:9px}
+.home-card-ic svg{width:16px;height:16px}
+.home-card h3{font-size:13.5px;font-weight:650;color:var(--t1);margin-bottom:5px;
+  letter-spacing:-.1px}
+.home-card p{font-size:12px;color:var(--t2);line-height:1.52}
+/* Icon tints reuse the existing per-colour token pairs. */
+.ic-blue,.ic-amb,.ic-red{background:var(--blue-bg)}
+.ic-blue svg,.ic-amb svg,.ic-red svg{fill:var(--blue);color:var(--blue)}
+.ic-pur,.ic-grn,.ic-pnk{background:var(--org-bg)}
+.ic-pur svg,.ic-grn svg,.ic-pnk svg{fill:var(--org-t);color:var(--org-t)}
+
+/* Footer */
+.home-foot{flex:0 0 auto;height:40px;padding:0 clamp(20px,4vw,56px);
+  display:flex;align-items:center;gap:7px;
+  border-top:1px solid var(--bdr);background:var(--surf);
+  font-size:11.5px;color:var(--t3)}
+.home-foot-dot{color:var(--bdr2)}
+
+/* Short viewports: drop to 2 columns and tighten before anything clips. */
+/* The page cannot scroll, so short viewports must be tiered all the way down: the failure
+   mode is the bottom card row sliced by the footer, not a scrollbar. Browser chrome eats
+   100-150px, so a 650px window is really a ~520px viewport — these tiers are set against
+   the viewport, and the tightest one has to survive a laptop with a bookmarks bar open. */
+@media (max-height:760px){
+  .home-main{gap:16px;padding-top:12px;padding-bottom:12px}
+  .home-headline{font-size:27px}
+  .home-sub{font-size:12.5px;margin-top:8px}
+  .home-band-items{margin-top:7px}
+  .home-bi{min-height:34px;font-size:11.5px}
+  .home-cards{gap:9px}
+  .home-card{padding:13px 15px}
+  .home-card p{font-size:11.5px}
+  .home-card-ic{width:26px;height:26px;margin-bottom:6px}
+}
+
+@media (max-height:640px){
+  .home-main{gap:12px;padding-top:10px;padding-bottom:10px}
+  .home-headline{font-size:23px;letter-spacing:-.7px}
+  .home-sub{font-size:12px;margin-top:6px;line-height:1.5}
+  .home-band-hd,.home-sect-hd{font-size:9.5px}
+  .home-band-items{margin-top:6px;gap:8px}
+  .home-bi{min-height:30px;font-size:11px;line-height:1.35}
+  .home-cards{gap:8px}
+  .home-card{padding:11px 13px;border-radius:9px}
+  .home-card h3{font-size:12.5px;margin-bottom:3px}
+  .home-card p{font-size:11px;line-height:1.45}
+  .home-card-ic{width:22px;height:22px;margin-bottom:5px;border-radius:6px}
+  .home-card-ic svg{width:13px;height:13px}
+}
+
+/* Tightest tier. The three-abreast band items are what break first here — they wrap to
+   three lines each — so each band drops to a single column of three rows, which is both
+   shorter and easier to read than three cramped columns. */
+@media (max-height:560px){
+  .home-main{gap:9px;padding-top:8px;padding-bottom:8px}
+  .home-headline{font-size:20px;line-height:1.12}
+  .home-sub{font-size:11px;margin-top:5px;max-width:560px}
+  .home-split{gap:18px}
+  .home-band-items{grid-template-columns:1fr;gap:2px;margin-top:5px}
+  .home-bi{min-height:0;font-size:10.5px;line-height:1.35}
+  .home-card{padding:9px 11px}
+  .home-card h3{font-size:11.5px}
+  .home-card p{font-size:10.5px;line-height:1.4}
+  .home-card-ic{width:19px;height:19px;margin-bottom:4px}
+  .home-card-ic svg{width:11px;height:11px}
+}
+
+/* Below this the hero sub-paragraph is the only expendable block: the headline states the
+   proposition and the two bands make the argument, so the sentence between them is the one
+   thing that can go without losing a fact. */
+@media (max-height:480px){
+  .home-sub{display:none}
+  .home-main{gap:7px;padding-top:6px;padding-bottom:6px}
+  .home-headline{font-size:18px}
+  .home-card p{font-size:10px}
+}
+@media (max-width:900px){
+  .home-cards{grid-template-columns:repeat(2,1fr);max-width:640px}
+  /* Bands stack; the centre column becomes a horizontal rule between them. */
+  .home-split{grid-template-columns:1fr;gap:14px;max-width:640px}
+  .home-split-div{height:1px}
+}
+
+/* Back-to-home link inside the sign-in card. Shown only when the home page is behind
+   it (openLogin/openSignup); hidden on the logout paths, where home is not the
+   previous screen. */
+.modal-back{align-self:flex-start;display:inline-flex;align-items:center;gap:5px;
+  padding:0;border:0;background:none;color:var(--t3);
+  font:500 12px inherit;cursor:pointer;transition:color .12s}
+.modal-back:hover{color:var(--blue)}
+.modal-back svg{width:13px;height:13px;fill:currentColor}
+
+/* Analytics view tabs. Underline style rather than filled pills: the page already carries
+   filled chips for filters, so a filled tab here would read as another filter. */
+.an-tabs{display:flex;gap:4px;border-bottom:1px solid var(--bdr);margin:-8px 0 -6px}
+.an-tab{position:relative;border:0;background:none;padding:9px 14px 11px;cursor:pointer;
+  font:600 12.5px inherit;color:var(--t3);transition:color .12s}
+.an-tab:hover{color:var(--t1)}
+.an-tab.on{color:var(--blue)}
+.an-tab.on::after{content:"";position:absolute;left:8px;right:8px;bottom:-1px;height:2px;
+  border-radius:2px 2px 0 0;background:var(--blue)}
+
+/* ── Lineage meta column: quiet, not three stacked pills ──────────────────────
+   Scoped to .lin-meta ONLY. The same classes appear in the Detailed chip row,
+   where a filled pill sits among other filled pills and is correct; here three
+   of them stack vertically and every one shouted. Colour still separates all
+   three - it just stops filling shapes: the id is plain mono, the status keeps
+   its own hue as a small dot, and the topic is coloured text. */
+.lin-meta .lin-tkt{background:#fafbfc;border:1px solid #ecedf0;border-radius:5px;
+  padding:2px 7px;font-size:9px;font-weight:600;max-width:100%;align-self:flex-start}
+.lin-meta .lin-tkt.fns-active{color:var(--amb-t)}
+.lin-meta .lin-tkt.fns-done{color:var(--grn-t)}
+.lin-meta .lin-tkt.fns-logged{color:var(--t3)}
+.lin-meta .lin-tkt--none{color:var(--t3)}
+.lin-meta .flow-node-status{background:none!important;border:0!important;padding:0;
+  font-size:10px;font-weight:500;color:var(--t2);display:inline-flex;align-items:center;gap:5px}
+.lin-meta .flow-node-status::before{content:"";width:5px;height:5px;border-radius:50%;
+  background:currentColor;flex:0 0 auto}
+/* The status hue moves onto the dot via currentColor, so each state stays distinct. */
+.lin-meta .fns-active{color:var(--amb-t)}
+.lin-meta .fns-done{color:var(--grn-t)}
+.lin-meta .fns-logged{color:var(--t3)}
+.lin-meta .det-intent{background:#f0f4fc;border:1px solid #e0e8f8;border-radius:5px;
+  padding:3px 8px;color:var(--blue-t);
+  font-size:10.5px;font-weight:600;letter-spacing:0;text-transform:none;align-self:flex-start}
+
+/* ── Detailed header row: one filled chip, the rest quiet ─────────────────────
+   Same correction as .lin-meta, for the five-pill row above each message. The
+   CHANNEL pill deliberately keeps its fill: it is the row's anchor and the one
+   identity worth spotting at a glance. Sentiment and status keep their own hue
+   on a dot, the topic becomes coloured text, and the ticket id recedes to mono
+   grey - so the row reads as one marker plus labels, not five competing blocks. */
+.det-head .lin-tkt{background:#fafbfc;border:1px solid #ecedf0;
+  border-radius:5px;padding:2px 7px;font-size:10px;font-weight:600;max-width:none}
+/* Status tints the id's TEXT; the pill behind it stays neutral so the row keeps one
+   quiet ground rather than three competing tints. */
+.det-head .lin-tkt.fns-active{color:var(--amb-t)}
+.det-head .lin-tkt.fns-done{color:var(--grn-t)}
+.det-head .lin-tkt.fns-logged{color:var(--t3)}
+/* One line-height across every child so the text sits on one baseline; the row's
+   align-items:center only centres the BOXES, which differ in font-size. */
+.det-head > *{line-height:18px}
+.det-head .det-intent{background:#f0f4fc;border:1px solid #e0e8f8;
+  border-radius:5px;padding:2px 8px;color:var(--blue-t);
+  font-size:11px;font-weight:600;letter-spacing:0;text-transform:none}
+.det-head .flow-emotion,
+.det-head .flow-node-status{background:none!important;border:0!important;padding:0;
+  font-size:10.5px;font-weight:500;display:inline-flex;align-items:center;gap:5px}
+.det-head .flow-emotion::before,
+.det-head .flow-node-status::before{content:"";width:5px;height:5px;border-radius:50%;
+  background:currentColor;flex:0 0 auto}
+.det-head .fe-frustrated{color:var(--red-t)}
+.det-head .fe-concerned{color:var(--amb-t)}
+.det-head .fe-positive{color:var(--grn-t)}
+.det-head .fe-neutral{color:var(--t3)}
+.det-head .fns-active{color:var(--amb-t)}
+.det-head .fns-done{color:var(--grn-t)}
+.det-head .fns-logged{color:var(--t3)}
+/* Sentiment and status are bare text, the other three are padded - 10px reads evenly. */
+.det-head{gap:10px}

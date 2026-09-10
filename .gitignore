@@ -17,5 +17,16 @@ artifacts/*
 !artifacts/.gitkeep
 logs/*
 .claude/
-Retail_Pivot_Checklist.xlsx
-*.docx
+
+docs/Omega discussions/
+backups/
+
+# Private keys - never commit. SSH/EC2 credentials.
+*.pem
+*.ppk
+*.key
+id_rsa*
+
+# .env backups - same secrets as .env itself
+.env.bak*
+.env.*.bak

@@ -1,0 +1,33 @@
+-- 017: introduce the LOGGED ticket status.
+--
+-- A ticket used to exist only when a human was needed, because one boolean
+-- (ticket_decision.required) decided BOTH "is this a distinct matter?" and "does a person
+-- have to review the reply?". There was no way to say "this is a thread, no human
+-- required" - the overwhelmingly common case - so most exchanges had no ticket at all,
+-- and the admin UI (which groups a conversation by ticket_id) rendered obviously related
+-- messages as disconnected boxes.
+--
+-- LOGGED is that missing vocabulary: a grouping id and nothing more. It becomes OPEN the
+-- first time a message on the thread triggers a hold.
+--
+-- NO DATA CHANGE. Nothing writes 'logged' yet - that is a later phase of the redesign.
+-- This migration exists to record the vocabulary change alongside the code that teaches
+-- every read site to expect it, the same way 016 recorded resolved -> closed. Landing the
+-- readers BEFORE the writers is deliberate: the failure this ordering prevents is a
+-- logging ticket reaching the reply prompt (which asked `status != 'closed'` and so
+-- admitted it) while being invisible in the admin UI (which asked `status === 'open' ||
+-- 'in_progress'` and so dropped it) - an unticketed-looking case the model would still
+-- quote back to the customer.
+--
+-- Deliberately NOT a CHECK constraint on tickets.status: the column has never had one,
+-- adding it needs a full table rebuild in SQLite, and the enforcement that matters lives
+-- in TicketStatus (Python) and the inclusion lists each read site now declares.
+
+-- No statement to run: tickets.status is a free TEXT column, so the new value needs no
+-- schema change. Recorded in schema_migrations so the vocabulary change has a dated entry
+-- and 018 cannot be numbered over it.
+--
+-- (An earlier draft asserted "no row already carries 'logged'" via RAISE(ABORT, ...).
+-- SQLite rejects that outside a trigger body - "RAISE() may only be used within a
+-- trigger-program" - and it broke every fresh database until it was removed.)
+SELECT 1;

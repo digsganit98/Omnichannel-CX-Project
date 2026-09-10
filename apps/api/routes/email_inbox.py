@@ -1,9 +1,9 @@
 from fastapi import APIRouter, Depends
 
-from apps.api.dependencies.security import require_admin_key
+from apps.api.dependencies.security import require_admin_auth
 from services.channel_service.email_inbox_poller import EmailInboxPoller
 
-router = APIRouter(prefix="/admin/email-inbox", tags=["admin"], dependencies=[Depends(require_admin_key)])
+router = APIRouter(prefix="/admin/email-inbox", tags=["admin"], dependencies=[Depends(require_admin_auth)])
 
 _poller: EmailInboxPoller | None = None
 

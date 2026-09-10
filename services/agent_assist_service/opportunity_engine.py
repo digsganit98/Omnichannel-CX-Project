@@ -21,6 +21,8 @@ import json
 import logging
 from datetime import datetime, timezone
 
+from services.pii_service.masker import mask_text, unmask_text
+
 logger = logging.getLogger(__name__)
 
 MAX_OPPORTUNITIES = 2
@@ -250,14 +252,20 @@ pitch for each. Rules:
    numbers from the candidate's basis (amounts, days, points).
 4. Never repeat or paraphrase an offer from the ALREADY SUGGESTED list.
 5. If nothing fits well, return an empty array. Fewer good offers beat more weak ones.
-6. Respond with ONLY a JSON array, no markdown, no commentary:
+6. Never promise or imply an outcome: no approval, no guaranteed rate, no eligibility.
+   Offer the product, never the decision.
+7. Never state a timeline or deadline that is not in the candidate's basis.
+8. Never repeat a full account, card or policy number. Last 4 digits only.
+9. Respond with ONLY a JSON array, no markdown, no commentary:
 [{"product": "<product id from candidates>", "kind": "cross_sell|up_sell",
   "pitch": "<=20 word sentence>", "reason": "<why now, <=15 words>", "confidence": 0.0-1.0}]
 
-GOOD pitch: "Your INR 5,00,000 FD matures in 40 days - renew now to lock today's rate."
+GOOD pitch: "Your INR 5,00,000 FD matures in 40 days - renewal options are available now."
 GOOD pitch: "With INR 1,80,000 average balance, a fixed deposit could earn you far more."
 BAD pitch (no numbers): "We have great fixed deposit options for valued customers like you."
 BAD pitch (not in candidates): "Consider our new personal loan at attractive rates."
+BAD pitch (promises an outcome): "You are pre-approved for this card at a guaranteed 8% rate."
+BAD pitch (invented deadline): "Apply within 7 days to secure this offer."
 BAD pitch (too long): any sentence over 20 words."""
 
 
@@ -397,6 +405,27 @@ def generate_opportunities(
         turns=turns,
         already_suggested=already_suggested,
     )
+    # Mask PII before the prompt leaves the boundary, as every other prose call does
+    # (answer_generation, intent_classification and case_summary all mask; handoff_check
+    # masks at its own call site). This one did not, and it carries the widest customer
+    # text of any of them: the customer's real name plus up to ten conversation turns,
+    # verbatim. An account or card number the customer typed into a message went to the
+    # provider unmasked - exactly what masker.py exists to catch.
+    #
+    # The whole assembled prompt is masked in one call rather than each input separately,
+    # so a field added to build_user_prompt later cannot quietly escape masking. The
+    # candidate block is masked too; candidate ids are code-generated product keys, so
+    # there is nothing there for the patterns to match.
+    # The customer's own identity values, so they are masked by exact match as well as by
+    # pattern. Built inline rather than imported: groq_generator._known_values is private,
+    # and every cross-service import of that module takes only the public GroqGenerator.
+    known_values = {
+        "name": graph_context.get("name") or "",
+        "phone": graph_context.get("phone") or "",
+        "email": graph_context.get("email") or "",
+    } if graph_context else {}
+    user_prompt, pii_mapping = mask_text(user_prompt, known_values)
+
     result = generator._generate(
         _SYSTEM_PROMPT,
         user_prompt,
@@ -406,4 +435,7 @@ def generate_opportunities(
     if not result.get("llm_used"):
         return {"opportunities": [], "llm_error": result.get("error")}
 
-    return {"opportunities": parse_and_validate(result.get("text") or "", candidates)}
+    # Unmask before parsing: a pitch may address the customer by name, and the placeholder
+    # must not reach the offer draft an agent approves and sends.
+    raw_text = unmask_text(result.get("text") or "", pii_mapping)
+    return {"opportunities": parse_and_validate(raw_text, candidates)}

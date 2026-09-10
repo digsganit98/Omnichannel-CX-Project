@@ -1,18 +1,24 @@
 from datetime import datetime, timezone
 from enum import StrEnum
+import logging
 import re
 
 from pydantic import BaseModel, Field
 
 from services.agent_service.cx_agent import CXAgent
+from services.agent_service.handoff import needs_human
 from services.channel_service.delivery import OutboundDeliveryService
 from services.pii_service.masker import mask_text
+from services.rag_service.config import rag_top_k
 from services.rag_service.groq_generator import GroqGenerator
 from services.rag_service.rag_pipeline import RAGPipeline
 from services.ticket_service.ticket_manager import TicketManager
-from shared.schemas.intents import Intent, IntentResult, Urgency
+from shared.schemas.intents import Intent, IntentResult
 from shared.schemas.messages import InboundMessage
-from shared.schemas.tickets import Ticket, TicketStatus
+from shared.schemas.tickets import SERVICEABLE_TICKET_STATUSES, Ticket, TicketStatus
+
+
+logger = logging.getLogger(__name__)
 
 
 MANUAL_REVIEW_INTENTS = {
@@ -84,8 +90,27 @@ class QueryResolution(BaseModel):
 
 
 class TicketDecision(BaseModel):
+    """Two decisions that are currently the same value, deliberately named apart.
+
+    `required` has always answered TWO questions at once: does a ticket exist, and does a
+    human review the reply? `review_gate.py` gates the hold on it, so they cannot disagree —
+    which was the point, but it also means there is no way to say "this is a distinct matter,
+    and no human is needed". That is the common case: a customer asking why a claim was
+    rejected needs a thread id and no person.
+
+    `hold_required` is that second question, named separately so the review gate stops reading
+    the ticket question. It DEFAULTS to `required`, so behaviour is identical today; a later
+    phase can make ticket creation unconditional without touching the hold.
+    """
+
     required: bool
     reason: str | None = None
+    # None means "same as required" - see model_post_init below.
+    hold_required: bool | None = None
+
+    def model_post_init(self, __context) -> None:
+        if self.hold_required is None:
+            object.__setattr__(self, "hold_required", self.required)
 
 
 class TicketAction(StrEnum):
@@ -350,46 +375,126 @@ class QueryResolutionAgent:
                 },
             )
 
-        # ── Priority 2: Neo4j transactional data (loans, claims, etc.) ───────
-        if intent and self.neo4j_client:
+        # ── Priority 2: the customer's own records ───────────────────────────
+        # The gate here used to be `intent in TRANSACTIONAL_INTENTS`, so 9 of 16 intents
+        # reached this branch and returned nothing - a KYC question, a complaint, a general
+        # enquiry got no customer data at all, however plainly the answer sat in the graph.
+        # A 2-3 word classification decided which of a customer's records existed.
+        #
+        # The gate is gone. What survives is a data check: if this customer has records, use
+        # them; if they have none, fall through to the knowledge base. That is a fact about
+        # the customer rather than a guess about their question, so a misclassified message
+        # can no longer hide a record from the answer.
+        if self.neo4j_client:
             try:
-                from services.neo4j_service.queries import neo4j_answer, TRANSACTIONAL_INTENTS
-                if intent in TRANSACTIONAL_INTENTS:
-                    graph_ctx = context.get("graph_context", {})
-                    customer_id = graph_ctx.get("customer_id", "")
-                    if customer_id:
-                        raw_data = neo4j_answer(self.neo4j_client, intent, customer_id)
-                        if raw_data:
-                            neo4j_ctx = [{
-                                "text": raw_data,
-                                "score": 0.95,
-                                "metadata": {
-                                    "source": "neo4j_customer_graph",
-                                    "doc_type": "customer_graph",
-                                    # Persisted verbatim by add_retrieval_evidence and read back
-                                    # by the provenance endpoint, which keys on "retrieval". The
-                                    # RAG paths set it (opensearch_vector / keyword_fallback);
-                                    # without it here the graph branch stored no backend at all,
-                                    # so the panel fell back to guessing from the intent label.
-                                    "retrieval": "neo4j_graph",
-                                },
-                            }]
-                            # Pass through Groq so the LLM produces a natural CS response
-                            # rather than returning raw field=value database output.
-                            generation = self.rag.generator.generate_answer(
-                                message.text, neo4j_ctx, context
-                            )
-                            return QueryResolution(
-                                answer=generation.get("text") or raw_data,
-                                confidence=0.95,
-                                contexts=neo4j_ctx,
-                                citations=[{"index": 1, "source": "neo4j_customer_graph", "score": 0.95}],
-                                retrieval_backend="neo4j_graph",
-                                llm={
-                                    "model": generation.get("model"),
-                                    "llm_used": generation.get("llm_used", False),
-                                },
-                            )
+                from services.neo4j_service.queries import neo4j_answer
+                graph_ctx = context.get("graph_context", {})
+                customer_id = graph_ctx.get("customer_id", "")
+                if customer_id:
+                    raw_data = neo4j_answer(self.neo4j_client, intent, customer_id)
+                    if raw_data:
+                        neo4j_ctx = [{
+                            "text": raw_data,
+                            "score": 0.95,
+                            "metadata": {
+                                "source": "neo4j_customer_graph",
+                                "doc_type": "customer_graph",
+                                # Persisted verbatim by add_retrieval_evidence and read back
+                                # by the provenance endpoint, which keys on "retrieval". The
+                                # RAG paths set it (opensearch_vector / keyword_fallback);
+                                # without it here the graph branch stored no backend at all,
+                                # so the panel fell back to guessing from the intent label.
+                                "retrieval": "neo4j_graph",
+                            },
+                        }]
+                        # The knowledge base as WELL as the records, not instead of them.
+                        # This branch used to return here, and Priority 3 below never ran -
+                        # fine while a TRANSACTIONAL_INTENTS gate meant only account
+                        # questions reached it. With the gate gone the branch fires for
+                        # every customer who HAS records, including on questions whose
+                        # answer is a procedure rather than a figure: "how do I file a
+                        # claim?" would be answered from her three existing claims, having
+                        # never seen the filing process the KB holds.
+                        #
+                        # Both sources go to the model and it uses what answers the
+                        # question. Records first, because a question about this customer
+                        # should be answered about THIS customer where both could apply.
+                        # RETRIEVAL only. rag.answer() would also call generate_answer
+                        # internally (rag_pipeline.py:49) and hand back a finished reply -
+                        # which this branch then discards and regenerates, costing a second
+                        # LLM call on every message. Against a 1000-request/day budget and
+                        # ~8 calls per message already, that is a wasted call per customer
+                        # message for nothing.
+                        # The KB used to be fetched here by a SECOND retrieval - a vector
+                        # similarity search, ranked on the customer's wording, top 4. It is
+                        # now inside raw_data above: neo4j_answer walks
+                        # Customer -> holding -> Concept <- KBChunk and appends every chunk,
+                        # each marked as guidance for something she HOLDS or as general.
+                        #
+                        # Two things the old shape could not do. A chunk about a product she
+                        # holds could rank 5th on wording and never arrive - the graph knows
+                        # it is hers regardless of phrasing. And a chunk about a product she
+                        # does NOT hold ("how do I apply for a home loan?") was reachable
+                        # only by similarity; it now always arrives, marked general.
+                        #
+                        # The similarity path is still there behind Priority 3 below, for
+                        # customers with no records at all - nothing to walk from.
+                        #
+                        # The chunks are ALSO emitted as contexts, not only folded into
+                        # raw_data. contexts is the audit trail - citations, retrieval
+                        # evidence and the provenance panel all read it, and
+                        # test_process_intents_never_route_to_customer_graph asserts a
+                        # process question shows a knowledge_base doc_type. Passing the
+                        # text to the model while leaving contexts empty answers the
+                        # customer correctly and tells the operator the KB was never
+                        # consulted, which is worse than either.
+                        kb_ctx = []
+                        try:
+                            from services.neo4j_service.queries import get_guidance
+
+                            for item in get_guidance(self.neo4j_client, customer_id):
+                                kb_ctx.append({
+                                    "text": item["text"],
+                                    # Held guidance outranks general: the graph knows she
+                                    # owns the product, which no wording match can assert.
+                                    "score": 0.9 if item["is_hers"] else 0.6,
+                                    "metadata": {
+                                        "source": f"kb_graph:{item['concept']}",
+                                        "doc_type": "knowledge_base",
+                                        "concept": item["concept"],
+                                        "customer_holds": item["is_hers"],
+                                        "retrieval": "neo4j_concept_walk",
+                                    },
+                                })
+                        except Exception:
+                            # Same reasoning as the similarity call this replaced: logged,
+                            # never silent. A graph that stops returning guidance must be
+                            # visible, not degrade quietly to records-only replies.
+                            logger.warning("kb_guidance_walk_failed", exc_info=True)
+                            kb_ctx = []
+                        combined_ctx = neo4j_ctx + kb_ctx
+                        # Pass through Groq so the LLM produces a natural CS response
+                        # rather than returning raw field=value database output.
+                        generation = self.rag.generator.generate_answer(
+                            message.text, combined_ctx, context
+                        )
+                        return QueryResolution(
+                            answer=generation.get("text") or raw_data,
+                            confidence=0.95,
+                            contexts=combined_ctx,
+                            citations=[{"index": 1, "source": "neo4j_customer_graph", "score": 0.95}],
+                            # Deliberately still neo4j_graph, not a new "hybrid" value: two
+                            # escalation rules key on this field (Rule 7's exemption and
+                            # _answered_from_customer_record's L2 gate, both via
+                            # CUSTOMER_RECORD_BACKENDS). A new value would silently change
+                            # when replies are held for a human, which is not what adding
+                            # KB passages is meant to do.
+                            retrieval_backend="neo4j_graph",
+                            llm={
+                                "model": generation.get("model"),
+                                "llm_used": generation.get("llm_used", False),
+                            },
+                        )
             except Exception:
                 pass
 
@@ -502,9 +607,26 @@ class TicketCreationAgent:
         self.tickets = tickets
         self.generator = generator or GroqGenerator()
 
-    def decide(self, analysis: IntentResult, resolution: QueryResolution, context: dict | None = None) -> TicketDecision:
-        reason = self._escalation_reason(analysis, resolution, context or {})
-        return TicketDecision(required=reason is not None, reason=reason)
+    def decide(self, analysis: IntentResult, resolution: QueryResolution, context: dict | None = None,
+               message: InboundMessage | None = None) -> TicketDecision:
+        """Two independent answers, from one escalation judgement.
+
+        PHASE 4 of the ticket-model redesign. `required` used to be `reason is not None`,
+        which made a ticket exist only when a human was needed - so the common case ("this
+        is a distinct matter, nobody needs to look at it") had no vocabulary, and the admin
+        UI, which groups a conversation by ticket_id, could not group it. Every unticketed
+        exchange rendered as its own disconnected box however obviously related.
+
+        Now a ticket ALWAYS exists (it is the name of a matter), and the escalation rules -
+        entirely unchanged - decide only the HOLD. The two questions were never the same
+        question; Phase 1 split the field so this line could stop conflating them.
+        """
+        reason = self._escalation_reason(analysis, resolution, context or {}, message)
+        return TicketDecision(
+            required=True,                     # a ticket is a grouping id: always
+            hold_required=reason is not None,  # a human is needed: unchanged rules
+            reason=reason,
+        )
 
     def detect_action(self, message: InboundMessage, context: dict) -> TicketActionDecision:
         if not context.get("active_ticket"):
@@ -618,10 +740,15 @@ class TicketCreationAgent:
             customer=customer,
             sentiment=analysis.sentiment,
             graph_context=graph_context,
+            # Phase 4: the hold decides the status. No hold -> LOGGED, a grouping id nobody
+            # is working. A hold -> OPEN, a case a human is on. An existing thread that now
+            # needs a person is PROMOTED logged -> open inside create_or_get_ticket.
+            hold_required=bool(decision.hold_required),
         )
 
     @staticmethod
-    def _escalation_reason(analysis: IntentResult, resolution: QueryResolution, context: dict) -> str | None:
+    def _escalation_reason(analysis: IntentResult, resolution: QueryResolution, context: dict,
+                           message: InboundMessage | None = None) -> str | None:
         # Rule 0: L1/L2/L3 resolution-level decision — DELIBERATELY CHECKED FIRST, before every
         # intent-based rule below (including ones that otherwise say "never escalate", such as
         # Rule 3 ticket_status or Rule 3b informational intents). The resolution engine looks at
@@ -632,8 +759,27 @@ class TicketCreationAgent:
         level = str(decision.get("resolution_level", "")).upper()
         if level == "L3":
             return f"critical_escalation:{analysis.intent.value}"
+        # L2 means "needs customer-specific data or an operational check". That is only a
+        # reason to involve a human when we could NOT get that data. When the customer's own
+        # record answered the question (the graph, or their own ticket), holding the correct
+        # answer for review adds a wait and no accuracy — the agent would read the same record.
+        # L3 stays unconditional: risk always reaches a human regardless of how well we answered.
         if level == "L2":
-            return f"assisted_resolution_required:{analysis.intent.value}"
+            # Two different things arrive as "L2" — L2's own definition says so: "a backend/data
+            # lookup specific to this customer" AND "operational approval". Fix 117 made the gate
+            # ask "did the customer's record answer this?", which is right for the lookup half:
+            # holding a correct card limit or premium date helps nobody. It is wrong for the other
+            # half. "I need this claim honoured, I have hospital bills pending" was answered from
+            # the graph — accurately — and auto-sent, because the gate saw a good answer. She was
+            # not asking for data. Retrieval cannot honour a claim; only a person can. And no rule
+            # below catches it: claim_status is INFORMATIONAL, so Rule 3b returns None on the
+            # label alone, and the label is identical to "why was my claim rejected?", which
+            # genuinely is a lookup. The distinction lives in the message text, which only the
+            # resolution classifier reads — so it is made there and read here.
+            if decision.get("l2_kind") == "action":
+                return f"approval_required:{analysis.intent.value}"
+            if not _answered_from_customer_record(resolution, context):
+                return f"assisted_resolution_required:{analysis.intent.value}"
 
         # Rule 1: Customer explicitly asked for human
         if analysis.intent == Intent.HUMAN_ESCALATION:
@@ -643,35 +789,60 @@ class TicketCreationAgent:
         if analysis.intent in MANUAL_REVIEW_INTENTS:
             return f"manual_review_required:{analysis.intent.value}"
 
-        # Rule 2b: Intents that need live banking data this system does not have.
-        # RAG may return generic KB content that looks like an answer but isn't the
-        # customer's actual balance or transfer status — always escalate to a human.
-        if analysis.intent in {Intent.ACCOUNT_BALANCE_INQUIRY, Intent.FUND_TRANSFER}:
+        # Rule 2b: Moving money needs a human. Narrowed from {balance, transfer}: escalating a
+        # balance question sent the customer a holding message and a wait for an answer the
+        # agent could not give either — this system has no core-banking feed, so nobody on
+        # this side can see a live balance. The graph branch now says so directly and the
+        # reply is auto-sent. fund_transfer stays: it is a request to ACT on money, not to
+        # read it, and that warrants a person regardless of what we can retrieve.
+        if analysis.intent == Intent.FUND_TRANSFER:
             return "no_live_banking_data"
 
         if _is_strong_l1_knowledge_answer(resolution):
             return None
 
+        # Rule 2c: READ THE MESSAGE. Every rule above and below keys off a label - an
+        # Intent value, a level, a score - and that is how a real complaint auto-sent on
+        # 2026-09-02: "I've uploaded those documents already and nothing has happened.
+        # This is unacceptable." classified as claim_status (0.95), which Rule 3b exempts,
+        # so no rule could see the words. Sentiment was detected as negative and read by
+        # nothing. See services/agent_service/handoff.py for the measurement.
+        #
+        # Placed HERE deliberately:
+        #  - after Rule 0, so credible risk still wins and this cannot downgrade an L3;
+        #  - after Rule 2, so an already-escalating intent keeps its own specific reason;
+        #  - BEFORE Rules 3/3b, because those return None on the label alone and are
+        #    exactly what suppressed the complaint. A content signal must outrank a
+        #    category exemption.
+        # Fails open (returns None) on any error, so a quota-exhausted or slow model
+        # leaves today's behaviour untouched rather than blocking every reply.
+        if message is not None and getattr(message, "text", ""):
+            handoff_reason, _detail = needs_human(message.text)
+            if handoff_reason:
+                return f"handoff_{handoff_reason}"
+
         # Rule 3: Ticket status is a lookup — never create a new ticket
         if analysis.intent == Intent.TICKET_STATUS:
             return None
 
-        # Rule 9: Same intent handled ≥ 2 times (outbound, unresolved) with no active ticket.
-        # Only count turns where resolved=False/0 — if prior turns were resolved successfully,
-        # the customer asking again is a new check, not an unresolved follow-up.
-        # MUST come before Rule 3b so informational intents (loan_status etc.) can still
-        # escalate when the system has repeatedly failed to give a useful answer.
-        recent_turns = context.get("recent_turns", [])
-        repeat_count = sum(
-            1 for t in recent_turns
-            if (
-                t.get("direction") == "outbound"
-                and t.get("intent") == analysis.intent.value
-                and not t.get("resolved")
-            )
-        )
-        if repeat_count >= 2 and not context.get("active_ticket"):
-            return "repeated_unresolved_query"
+        # Rule 9 (repeated unresolved query) REMOVED. It counted prior outbound turns on the
+        # same intent carrying resolved=0, meaning "we have failed this customer twice". That
+        # is not what the flag says: NOTHING sets resolved=1 on a reply. Measured across every
+        # outbound turn ever written here — 1 row at 1 (a ticket-closure notice), 20 at 0,
+        # 10 NULL — so a correct, well-delivered answer is recorded identically to a failure.
+        # The rule was therefore counting REPEATED TOPICS, not repeated failures, and it
+        # ticketed a customer whose previous question had been answered correctly.
+        #
+        # Nothing is lost. Every failure it aimed at is already caught AT THE POINT OF FAILURE,
+        # which is strictly better because it does not require the customer to ask twice first:
+        # Rule 0 (L2 gate) when the customer's record could not answer, Rule 5 on a weak intent
+        # classification, Rule 7 when retrieval found nothing or found it weakly. Rule 9 was the
+        # only rule judging failure retrospectively by counting history rather than by reading
+        # the answer in hand. Same reasoning as Rules 4 and 6: escalate on the question asked,
+        # not on the customer's circumstances.
+        #
+        # `conversation_turns.resolved` is left in place but is now read by nothing on this
+        # path — an effectively dead column, kept because dropping it needs a table rebuild.
 
         # Rule 3b: Pure informational intents — customer is asking for data, not reporting a
         # problem. High urgency/negative sentiment on a status query means they are anxious,
@@ -679,38 +850,93 @@ class TicketCreationAgent:
         if analysis.intent in INFORMATIONAL_INTENTS:
             return None
 
-        # Rule 4: High urgency
-        if analysis.urgency == Urgency.HIGH:
-            return "high_urgency"
+        # Rule 4 (high urgency) REMOVED. Urgency is set by the intent classifier reading TONE —
+        # capitals, "urgent", "ASAP". Escalating on it contradicted the system's own stated
+        # principle in two places: the L1/L2/L3 prompt ("frustration or urgency in wording does
+        # NOT by itself justify L2/L3; the actual content of the query does") and Rule 3b's
+        # comment ("high urgency on a status query means the customer is anxious, not that an
+        # incident needs tracking"). Rule 3b shielded only three intents, so "URGENT!! what are
+        # your FD rates??" was held for a human. Urgency still feeds ticket PRIORITY scoring,
+        # which is where a tone signal belongs — it just no longer decides that a ticket exists.
 
         # Rule 5: Low intent confidence (industry threshold: 0.6)
         if analysis.confidence < 0.6:
             return "low_intent_confidence"
 
-        # Rule 6: Repeat customer with many open tickets — only escalate if this specific intent
-        # is not already covered by an existing ticket (prevents piling on more tickets when
-        # the customer is already overwhelmed with open cases).
-        customer_tickets = context.get("customer_tickets", [])
-        if len(customer_tickets) >= 3:
-            existing_intents = {t.get("intent") for t in customer_tickets}
-            if analysis.intent.value not in existing_intents:
-                return "repeat_customer_new_issue"
-            return None  # Existing ticket already covers this intent — no new one needed
+        # Rule 6 (>=3 open tickets, new intent) REMOVED. How many OTHER cases a customer has open
+        # says nothing about whether THIS message needs a human: a customer with three open
+        # tickets asking "what are your branch timings?" was escalated for being unlucky. The
+        # threshold of 3 was never derived from anything. If the new issue genuinely needs a
+        # person, the content rules (0, 2, 5, 7) catch it on its own merits. Like urgency, a
+        # crowded case load is a PRIORITY signal, not a reason a ticket exists.
 
-        # Rule 7: No knowledge found and not sourced from Neo4j
-        if not resolution.contexts and resolution.retrieval_backend != "neo4j_graph":
-            return "knowledge_not_found"
-
-        # Rule 8: Very low retrieval confidence (industry threshold: 0.3)
-        if resolution.confidence < 0.3 and resolution.retrieval_backend not in (
-            "neo4j_graph", "customer_ticket_lookup"
-        ):
-            return "low_retrieval_confidence"
+        # Rule 7: We have no answer good enough to send. Merged from the former Rules 7 and 8,
+        # which asked the same question ("can we actually answer this?") split by an
+        # implementation detail — nothing retrieved vs. something retrieved but weak. They
+        # carried DIFFERENT exemption lists, so a customer_ticket_lookup returning zero rows
+        # escalated while one returning a weak row did not; that asymmetry was unintended.
+        # One rule, one exemption list, so the two halves cannot drift apart again.
+        if resolution.retrieval_backend not in CUSTOMER_RECORD_BACKENDS:
+            if not resolution.contexts:
+                return "knowledge_not_found"
+            if resolution.confidence < 0.3:
+                return "low_retrieval_confidence"
 
         return None
 
 
 # ── Backwards-compatible aliases ─────────────────────────────────────────────
+# Backends that read the CUSTOMER'S OWN record rather than general knowledge. An answer from
+# one of these is customer-specific by construction, which is exactly what L2 asks for.
+CUSTOMER_RECORD_BACKENDS = {"neo4j_graph", "customer_ticket_lookup"}
+
+
+# Collections in graph_context that ARE the customer's own records. Presence of a non-empty
+# one means the customer's record set was in the prompt. Deliberately excludes the identity
+# fields (name/email/phone/city/segment), which are always present and prove nothing, and
+# open_cases, which is ticket state rather than a record that can answer a question.
+CUSTOMER_RECORD_COLLECTIONS = (
+    "accounts", "credit_cards", "fixed_deposits", "loans", "policies", "claims",
+)
+
+
+def _customer_records_supplied(context: dict | None) -> bool:
+    """True when this customer's own records were put in front of the model.
+
+    The customer-context block in groq_generator runs on EVERY message regardless of intent
+    and emits whatever graph_context holds, so the records reach the model by that path as
+    well as by intent-routed retrieval.
+    """
+    graph_context = (context or {}).get("graph_context") or {}
+    return any(graph_context.get(k) for k in CUSTOMER_RECORD_COLLECTIONS)
+
+
+def _answered_from_customer_record(resolution: QueryResolution, context: dict | None = None) -> bool:
+    """True when the reply was grounded in this customer's own data.
+
+    This asks about GROUNDING, not about which retrieval branch ran. It used to ask only the
+    latter - `retrieval_backend in CUSTOMER_RECORD_BACKENDS` - and that backend is set only
+    when `intent in TRANSACTIONAL_INTENTS`, so the answer depended on a CLASSIFICATION LABEL.
+    Observed live: "What is the amount due on my credit card and by when?" classified as
+    general_inquiry, retrieval therefore went to the KB pdf, this returned False, and the
+    reply was held for a human - while the reply it held quoted the card's balance and due
+    date correctly, because the customer-context block had supplied the record set anyway.
+    A misclassification became a false hold on a question the system had already answered.
+
+    So either path counts: the intent-routed retrieval, or the records being supplied. The
+    confidence and contexts checks still apply to the retrieval path, because there a low
+    score means retrieval genuinely failed.
+
+    Fix 117 is preserved: when the customer's records hold nothing relevant, graph_context
+    carries no non-empty collection and this still returns False, so the question is still
+    escalated - which is what that rule exists for.
+    """
+    if resolution.retrieval_backend in CUSTOMER_RECORD_BACKENDS:
+        if resolution.contexts and resolution.confidence >= 0.3:
+            return True
+    return _customer_records_supplied(context)
+
+
 def _is_strong_l1_knowledge_answer(resolution: QueryResolution) -> bool:
     decision = resolution.resolution_decision or {}
     if str(decision.get("resolution_level", "")).upper() != "L1":
@@ -743,10 +969,23 @@ class WorkflowAutomationAgent:
         ticket: Ticket | None,
         channel: str = "",
         customer_name: str = "",
+        forked_now: bool = False,
     ) -> str:
         body = _strip_email_boilerplate((resolution.answer or "").strip()) if resolution else ""
 
-        if ticket:
+        # SERVICEABLE only, not "a ticket exists". Under Phase 4 of the ticket-model
+        # redesign every query gets a ticket, so `if ticket:` told a customer asking
+        # "what is my card limit?" that their request was "logged under reference tkt_x"
+        # and a team "will follow up" - for a question that was answered completely, in
+        # full, in the same message. Nobody is following up, and the reference is an
+        # internal grouping id they cannot use.
+        #
+        # This is decision 1 of the redesign: the customer sees a reference only once the
+        # thread is serviceable, which is exactly when there IS something to follow up on.
+        # It is also the Fix 119 false-reference failure, reappearing through the door the
+        # redesign opened. A LOGGED ticket still exists and still groups the conversation -
+        # it is simply not mentioned to the customer.
+        if ticket and ticket.status in SERVICEABLE_TICKET_STATUSES:
             ref = f"*{ticket.ticket_id}*" if channel == "whatsapp" else ticket.ticket_id
             team = ticket.assigned_team.replace("_", " ")
             if getattr(ticket, "escalation_reason", None) == "customer_requested_human":
@@ -760,6 +999,22 @@ class WorkflowAutomationAgent:
                 ticket_note = (
                     f"Your request has been logged under reference {ref}. "
                     f"Our {team} team will follow up with you."
+                )
+            # The referee judged this a separate matter while other threads were live.
+            # Saying so is what a human agent does, and it is the one continuity decision
+            # the customer needs told: without it they cannot know whether "my dispute"
+            # now refers to one case or two, and neither can anyone reading the thread.
+            # Only serviceable threads count - announcing a split from a logging id would
+            # expose an internal reference (decision 1).
+            # `forked_now`, not the ticket's forked_from metadata. The metadata is stored on
+            # the TICKET and so stays true for its whole life: reading it here announced the
+            # split on every later message of the thread, including ones that plainly
+            # continued it and that this same reply then names by reference. Forking is a
+            # fact about ONE message; only the message that actually forked should say so.
+            if forked_now:
+                ticket_note = (
+                    "This looks like a separate issue from your existing request, "
+                    "so we have raised it on its own. " + ticket_note
                 )
             # Skip the appended reference when the reply already gave it. The note exists
             # so every reply carries its ticket id; a reply naming that id already

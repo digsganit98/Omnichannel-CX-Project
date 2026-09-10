@@ -1,6 +1,23 @@
 (function () {
 'use strict';
 
+// The "Why this answer?" provenance panel, hidden from the UI.
+//
+// Turned off rather than deleted: the retrieval evidence behind it is still
+// written on every reply (retrieval_evidence, one row per context), and the
+// panel is the only surface that reads it. What was wrong was its COPY - the
+// standing text described a vector search ("closest matches found", "always
+// returns a nearest match, even when nothing relevant exists"), which is the
+// mechanism Fix 149 removed. The answer path now walks the graph, returns
+// every chunk, and marks each as the customer's or general - so the panel
+// described a system that no longer runs, on a demo surface.
+//
+// Set back to true once the copy is rewritten for the concept walk and the
+// panel shows `customer_holds`, which is the fact worth surfacing and the one
+// it currently omits. Nothing else needs changing: openWhyModal, the route and
+// the styles are all untouched.
+var SHOW_WHY_THIS_ANSWER = false;
+
 // ── Channel metadata ─────────────────────────────────────────────────────────
 var CH = {
   whatsapp: { label:'WhatsApp', pill:'pwa', stripe:'cwa', bg:'#f0fdf4', bd:'#bbf7d0', clr:'#16a34a',
@@ -52,18 +69,16 @@ var TEAM_LABEL = {
 };
 // A stable colour per theme so dividers are visually distinct. Uses the same
 // token vocabulary as the rest of the flow view (border/bg/text triples).
+// One colour for every topic chip. These used to vary by the routing TEAM behind the
+// intent (retail_banking green, claims blue, fraud amber...), which meant the SAME intent
+// rendered blue in Detailed and green in Lineage, and the hue encoded a team name shown
+// nowhere on screen. The chip's text is the label; the colour was decoration.
+var THEME_TONE = { t:'var(--blue-t)', bg:'var(--blue-bg)', bd:'var(--blue-bd)' };
 var THEME_COLOR = {
-  card_services:        { t:'var(--wc)',    bg:'var(--wc-bg)',   bd:'var(--wc-bd)' },
-  loans:                { t:'#db2777',      bg:'#fdf2f8',        bd:'#fbcfe8' },
-  collections:          { t:'#db2777',      bg:'#fdf2f8',        bd:'#fbcfe8' },
-  fraud_and_disputes:   { t:'var(--amb-t)', bg:'var(--amb-bg)',  bd:'var(--amb-bd)' },
-  retail_banking:       { t:'var(--grn-t)', bg:'var(--grn-bg)',  bd:'var(--grn-bd)' },
-  payments:             { t:'var(--grn-t)', bg:'var(--grn-bg)',  bd:'var(--grn-bd)' },
-  claims:               { t:'var(--blue-t)',bg:'var(--blue-bg)', bd:'var(--blue-bd)' },
-  insurance_operations: { t:'var(--blue-t)',bg:'var(--blue-bg)', bd:'var(--blue-bd)' },
-  compliance:           { t:'var(--t2)',    bg:'var(--surf2)',   bd:'var(--bdr)' },
-  customer_care:        { t:'var(--t2)',    bg:'var(--surf2)',   bd:'var(--bdr)' },
-  general:              { t:'var(--t3)',    bg:'var(--surf2)',   bd:'var(--bdr)' }
+  card_services: THEME_TONE, loans: THEME_TONE, collections: THEME_TONE,
+  fraud_and_disputes: THEME_TONE, retail_banking: THEME_TONE, payments: THEME_TONE,
+  claims: THEME_TONE, insurance_operations: THEME_TONE, compliance: THEME_TONE,
+  customer_care: THEME_TONE, general: THEME_TONE
 };
 // System-event "intents" that aren't real customer topics — excluded from
 // grouping and from node/row titles so they never surface as a theme.
@@ -143,11 +158,6 @@ var state = { convs: [], selectedConvId: null, convDetail: null, simTimer: null,
   // signal; the rows are for acting on. Held here so the choice survives the poll
   // re-render, and shared across conversations (it is a display preference, not data).
   tktOpen: false,
-  // Theme-group fold state. Keyed "<conversation_id>:<groupIndex>"; presence in
-  // the Set = collapsed. Persists across the inbox poll re-render. `themeSeeded`
-  // tracks which conversations have had their default (all-but-latest collapsed)
-  // applied, so re-renders don't re-collapse groups the agent opened.
-  collapsedThemes: {}, themeSeeded: {},
   // Conversation view mode per conversation_id: 'detailed' (spine, default) or
   // 'lineage' (compact 3-column history overview). Clicking a lineage row drills
   // back into 'detailed', focused on that request.
@@ -169,8 +179,12 @@ function isTokenExpired(token) {
 }
 
 function adminHeaders() {
-  var h = { 'x-admin-key': adminKey };
+  // The session token is the credential. x-admin-key is only still sent when someone set
+  // one by hand (it stays valid server-side for the runbook and scripted calls); sending
+  // an empty header made every request carry a value that could never authenticate.
+  var h = {};
   if (adminToken) h['Authorization'] = 'Bearer ' + adminToken;
+  if (adminKey) h['x-admin-key'] = adminKey;
   return h;
 }
 
@@ -193,11 +207,47 @@ function toast(msg) {
 
 // ── Stage management ──────────────────────────────────────────────────────────
 function showStage(stage) {
+  // Four stages: 'home' the unauthenticated landing page, 'apikey' the combined sign-in
+  // card (it kept its id), 'app' the console, 'user' the customer portal. The separate
+  // 'auth' page that sat behind the API-key prompt is gone, along with the prompt itself.
+  document.getElementById('homePage').style.display = stage === 'home' ? 'flex' : 'none';
   document.getElementById('connectModal').classList.toggle('hidden', stage !== 'apikey');
-  document.getElementById('authPage').classList.toggle('hidden', stage !== 'auth');
   document.getElementById('mainShell').style.display = stage === 'app' ? 'flex' : 'none';
   document.getElementById('userPortal').style.display = stage === 'user' ? 'flex' : 'none';
 }
+
+// ── Home page entry points ────────────────────────────────────────────────────
+// Both buttons open the existing sign-in card unchanged — the only difference is
+// which tab it lands on. Admin mode is the default for both, matching the card's
+// own default; a customer switches with the tabs inside it, as before.
+window.openLogin = function() {
+  switchLoginMode('admin');
+  switchAdminAuth('login');
+  showStage('apikey');
+};
+
+window.openSignup = function() {
+  switchLoginMode('admin');
+  switchAdminAuth('signup');
+  showStage('apikey');
+};
+
+window.goHome = function() {
+  showStage('home');
+};
+
+// Analytics view switch. Every section stays in the DOM and keeps its ids - only
+// visibility changes - so the render functions need no knowledge of which tab is open,
+// and data loaded for a hidden section is still there when you switch to it.
+window.switchAnalyticsTab = function(name, btn) {
+  var secs = document.querySelectorAll('.analytics-section[data-an]');
+  for (var i = 0; i < secs.length; i++) {
+    secs[i].hidden = secs[i].getAttribute('data-an') !== name;
+  }
+  var tabs = document.querySelectorAll('#anTabs .an-tab');
+  for (var j = 0; j < tabs.length; j++) tabs[j].classList.remove('on');
+  if (btn) btn.classList.add('on');
+};
 
 window.switchLoginMode = function(mode) {
   var isAdmin = mode === 'admin';
@@ -227,34 +277,90 @@ function onCustomerAuthSuccess(data) {
   bootUserPortal();
 }
 
-// ── STAGE 1: API Key ──────────────────────────────────────────────────────────
-document.getElementById('connectBtn').addEventListener('click', async function() {
-  var key = document.getElementById('adminKeyInput').value.trim();
-  if (!key) return;
+// ── ADMIN SIGN-IN ─────────────────────────────────────────────────────────────
+// This used to be a separate first stage that asked the operator to paste
+// ADMIN_API_KEY, which then unlocked the username/password page behind it. The key was
+// the real credential - every admin call sent it - so the account login on top of it
+// granted nothing, and creating the first account required already holding the key.
+// Signing in now issues the JWT the backend was already minting, and that token is what
+// authenticates. Mirrors the customer side, which has always worked this way.
+
+window.switchAdminAuth = function(tab) {
+  var isLogin = tab === 'login';
+  document.getElementById('adminLoginForm').style.display = isLogin ? 'flex' : 'none';
+  document.getElementById('adminSignupForm').style.display = isLogin ? 'none' : 'flex';
+  document.getElementById('adminLoginTab').classList.toggle('active', isLogin);
+  document.getElementById('adminSignupTab').classList.toggle('active', !isLogin);
+  document.getElementById('connectErr').classList.remove('show');
+};
+
+function adminAuthError(message) {
   var err = document.getElementById('connectErr');
-  err.classList.remove('show');
-  var btn = document.getElementById('connectBtn');
-  btn.disabled = true; btn.textContent = 'Verifying…';
+  err.textContent = message;
+  err.classList.add('show');
+}
+
+// The shared admin account for the hosted demo. Fills the form rather than signing in
+// directly, so the credentials stay visible and anyone can see what they are signing in as.
+// This account is created by signing up once on the deployed stack - it is not seeded, so
+// on a fresh database the Sign Up tab has to be used first.
+window.fillAdminDemo = function() {
+  document.getElementById('adminUsernameInput').value = 'Admin_1';
+  document.getElementById('adminPasswordInput').value = 'Admin_1_2026';
+  document.getElementById('connectErr').classList.remove('show');
+  document.getElementById('connectBtn').focus();
+};
+
+// Shared by both forms: the two endpoints return the same shape, and the only thing that
+// makes a session is storing the token before showing the app.
+async function submitAdminAuth(path, body, btn, busyLabel, idleLabel) {
+  document.getElementById('connectErr').classList.remove('show');
+  btn.disabled = true; btn.textContent = busyLabel;
   try {
-    var res = await fetch('/admin/auth/verify-key', {
+    var res = await fetch(path, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ api_key: key })
+      body: JSON.stringify(body)
     });
     var data = await res.json().catch(function(){ return {}; });
-    if (!res.ok) throw new Error(data.detail || 'Invalid key');
-    adminKey = key;
-    sessionStorage.setItem('cx-admin-key', key);
-    showStage('auth');
+    if (!res.ok) throw new Error(data.detail || 'Sign-in failed');
+    adminToken = data.token;
+    currentUser = data.user || null;
+    sessionStorage.setItem('cx-admin-jwt', adminToken);
+    if (currentUser) sessionStorage.setItem('cx-admin-user', JSON.stringify(currentUser));
+    showStage('app');
+    bootApp();
   } catch(e) {
-    adminKey = '';
-    err.classList.add('show');
+    adminToken = '';
+    adminAuthError(e.message || 'Sign-in failed');
   } finally {
-    btn.disabled = false; btn.textContent = 'Continue as Admin';
+    btn.disabled = false; btn.textContent = idleLabel;
   }
+}
+
+document.getElementById('connectBtn').addEventListener('click', function() {
+  var username = document.getElementById('adminUsernameInput').value.trim();
+  var password = document.getElementById('adminPasswordInput').value;
+  if (!username || !password) return adminAuthError('Please enter username and password.');
+  submitAdminAuth('/admin/auth/login', { username: username, password: password },
+    this, 'Signing in…', 'Sign in as Admin');
 });
-document.getElementById('adminKeyInput').addEventListener('keydown', function(e) {
-  if (e.key === 'Enter') document.getElementById('connectBtn').click();
+
+document.getElementById('adminSignupBtn').addEventListener('click', function() {
+  var username = document.getElementById('adminSignupUsername').value.trim();
+  var email = document.getElementById('adminSignupEmail').value.trim();
+  var password = document.getElementById('adminSignupPassword').value;
+  var confirm = document.getElementById('adminSignupConfirm').value;
+  if (!username || !email || !password) return adminAuthError('Please fill in every field.');
+  if (password !== confirm) return adminAuthError('Passwords do not match.');
+  submitAdminAuth('/admin/auth/signup', { username: username, email: email, password: password },
+    this, 'Creating account…', 'Create Admin Account');
+});
+
+['adminUsernameInput', 'adminPasswordInput'].forEach(function(id) {
+  document.getElementById(id).addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') document.getElementById('connectBtn').click();
+  });
 });
 
 // ── STAGE 2: Auth (Login / Signup) ────────────────────────────────────────────
@@ -330,79 +436,6 @@ document.getElementById('customerSignupBtn').addEventListener('click', async fun
   }
 });
 
-window.switchAuthTab = function(tab) {
-  document.getElementById('loginForm').style.display = tab === 'login' ? 'block' : 'none';
-  document.getElementById('signupForm').style.display = tab === 'signup' ? 'block' : 'none';
-  document.getElementById('authTabLogin').classList.toggle('active', tab === 'login');
-  document.getElementById('authTabSignup').classList.toggle('active', tab === 'signup');
-  document.getElementById('authErr').classList.remove('show');
-  document.getElementById('authErr').textContent = '';
-};
-
-function showAuthErr(msg) {
-  var el = document.getElementById('authErr');
-  el.textContent = msg;
-  el.classList.add('show');
-}
-
-function onAuthSuccess(data) {
-  adminToken = data.token;
-  currentUser = data.user;
-  sessionStorage.setItem('cx-admin-jwt', adminToken);
-  sessionStorage.setItem('cx-admin-user', JSON.stringify(currentUser));
-  updateRibbonUser();
-  showStage('app');
-  bootApp();
-}
-
-document.getElementById('loginBtn').addEventListener('click', async function() {
-  var username = document.getElementById('loginUsername').value.trim();
-  var password = document.getElementById('loginPassword').value;
-  if (!username || !password) { showAuthErr('Please enter username and password.'); return; }
-  var btn = document.getElementById('loginBtn');
-  btn.disabled = true; btn.textContent = 'Logging in…';
-  try {
-    var data = await fetch('/admin/auth/login', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-admin-key': adminKey },
-      body: JSON.stringify({ username: username, password: password })
-    }).then(function(r) { return r.json().then(function(d) { if (!r.ok) throw new Error(d.detail || 'Login failed'); return d; }); });
-    onAuthSuccess(data);
-  } catch(e) {
-    showAuthErr(e.message);
-  } finally {
-    btn.disabled = false; btn.textContent = 'Login';
-  }
-});
-document.getElementById('loginPassword').addEventListener('keydown', function(e) {
-  if (e.key === 'Enter') document.getElementById('loginBtn').click();
-});
-
-document.getElementById('signupBtn').addEventListener('click', async function() {
-  var username = document.getElementById('signupUsername').value.trim();
-  var email = document.getElementById('signupEmail').value.trim();
-  var password = document.getElementById('signupPassword').value;
-  var confirm = document.getElementById('signupConfirm').value;
-  if (!username || !email || !password) { showAuthErr('All fields are required.'); return; }
-  if (password !== confirm) { showAuthErr('Passwords do not match.'); return; }
-  if (password.length < 6) { showAuthErr('Password must be at least 6 characters.'); return; }
-  var btn = document.getElementById('signupBtn');
-  btn.disabled = true; btn.textContent = 'Creating account…';
-  try {
-    var data = await fetch('/admin/auth/signup', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-admin-key': adminKey },
-      body: JSON.stringify({ username: username, email: email, password: password })
-    }).then(function(r) { return r.json().then(function(d) { if (!r.ok) throw new Error(d.detail || 'Signup failed'); return d; }); });
-    onAuthSuccess(data);
-    toast('Account created — welcome, ' + data.user.username + '!');
-  } catch(e) {
-    showAuthErr(e.message);
-  } finally {
-    btn.disabled = false; btn.textContent = 'Create account';
-  }
-});
-
 // ── Logout ────────────────────────────────────────────────────────────────────
 window.doLogout = function() {
   stopRealtime();
@@ -411,14 +444,16 @@ window.doLogout = function() {
   currentUser = null;
   sessionStorage.removeItem('cx-admin-jwt');
   sessionStorage.removeItem('cx-admin-user');
-  document.getElementById('loginUsername').value = '';
-  document.getElementById('loginPassword').value = '';
-  document.getElementById('signupUsername').value = '';
-  document.getElementById('signupEmail').value = '';
-  document.getElementById('signupPassword').value = '';
-  document.getElementById('signupConfirm').value = '';
-  switchAuthTab('login');
-  showStage('auth');
+  // Back to the home page, not the sign-in card. Landing on the card left the home page
+  // unreachable for the rest of the session — nothing links back to it and a reload just
+  // re-shows the card. Signing out returns you to the front door; signing in again is one
+  // click from there. (An EXPIRED token still lands on the card — see the boot block at
+  // the bottom of this file — because that user was working, not leaving.)
+  document.getElementById('adminUsernameInput').value = '';
+  document.getElementById('adminPasswordInput').value = '';
+  switchAdminAuth('login');
+  switchLoginMode('admin');
+  showStage('home');
 };
 
 window.backToPortalSelection = function() {
@@ -430,9 +465,9 @@ window.backToPortalSelection = function() {
   sessionStorage.removeItem('cx-admin-key');
   sessionStorage.removeItem('cx-admin-jwt');
   sessionStorage.removeItem('cx-admin-user');
-  document.getElementById('adminKeyInput').value = '';
+  document.getElementById('adminPasswordInput').value = '';
   switchLoginMode('admin');
-  showStage('apikey');
+  showStage('home');
 };
 
 function updateRibbonUser() {
@@ -499,14 +534,24 @@ function customerLabel(conv) {
 // renders a status and nothing else - the case-summary LLM was handed the raw value and
 // wrote "resolved" onto the agent's screen. The value itself is now the word.
 function statusLabel(s) {
-  return (s || '').toLowerCase() === 'closed' ? 'Closed' : 'Open';
+  var v = (s || '').toLowerCase();
+  if (v === 'closed') return 'Closed';
+  // "Logged", not "Open": the whole point of the status is that nothing is pending on a
+  // person. Labelling it Open would tell an agent there is work here and would put the
+  // word "Open" in front of a customer for a question already answered.
+  if (v === 'logged') return 'Logged';
+  return 'Open';
 }
 
 function urgencyToStatus(conv) {
   if (conv.status === 'closed') return 'closed';
-  var allTkts = [].concat(_allTickets.open, _allTickets.closed);
-  var convTkts = allTkts.filter(function(t) { return t.conversation_id === conv.conversation_id; });
-  if (convTkts.length > 0 && convTkts.every(function(t) { return t.status === 'closed'; })) return 'closed';
+  var convTkts = allTickets().filter(function(t) { return t.conversation_id === conv.conversation_id; });
+  // Nothing serviceable left => nothing is waiting on a person, so the banner reads as
+  // settled. Logging threads are ignored on BOTH sides of this test: they never keep a
+  // conversation looking active, and a conversation made only of them is not "closed"
+  // work either - it just has no open cases, which is what the banner says (Fix 121).
+  var hasServiceable = convTkts.some(isServiceable);
+  if (convTkts.length > 0 && !hasServiceable) return 'closed';
   return conv.status || 'open';
 }
 
@@ -529,7 +574,8 @@ window.loadConversations = async function() {
   try {
     var results = await Promise.all([api('/admin/conversations'), api('/admin/tickets'), loadPendingDrafts()]);
     var convs = results[0], tks = results[1];
-    _allTickets.open   = tks.filter(function(t) { return t.status === 'open' || t.status === 'in_progress'; });
+    _allTickets.logged = tks.filter(function(t) { return t.status === 'logged'; });
+    _allTickets.open   = tks.filter(isServiceable);
     _allTickets.closed = tks.filter(function(t) { return t.status === 'closed'; });
     var prevIds = state.convs.map(function(c){ return c.conversation_id; }).sort().join(',');
     var newIds = convs.map(function(c){ return c.conversation_id; }).sort().join(',');
@@ -558,7 +604,7 @@ async function refreshSelectedConv() {
     if (detail.turns && detail.turns.length !== prevLen) {
       state.convDetail = detail;
       renderCentre(detail);
-      renderRight(detail, [].concat(_allTickets.open, _allTickets.closed));
+      renderRight(detail, allTickets());
       loadCaseSummary(detail.conversation_id, false);
     }
   } catch(e) {}
@@ -603,10 +649,9 @@ async function selectConv(convId) {
   msgsEl.className = 'msgs';
   msgsEl.innerHTML = '<div style="padding:20px;text-align:center;color:var(--t3);font-size:12px">Loading…</div>';
   document.getElementById('compwrap').style.display = 'none';
-  document.getElementById('resbanner').style.display = 'none';
   try {
-    var cachedTickets = _allTickets.open.length || _allTickets.closed.length
-      ? Promise.resolve([].concat(_allTickets.open, _allTickets.closed))
+    var cachedTickets = allTickets().length
+      ? Promise.resolve(allTickets())
       : api('/admin/tickets');
     var results = await Promise.all([
       api('/admin/conversations/' + encodeURIComponent(convId)),
@@ -624,8 +669,37 @@ async function selectConv(convId) {
   }
 }
 
-var EMOTION_MAP = { critical:'Frustrated', high:'Frustrated', medium:'Concerned', low:'Positive' };
-var EMOTION_CLS  = { critical:'fe-frustrated', high:'fe-frustrated', medium:'fe-concerned', low:'fe-positive' };
+// Sentiment, read the same way by the per-message badge and the right panel's meter, so
+// the two can never disagree on screen. The badge used to derive its label from URGENCY
+// (low -> "Positive", medium -> "Concerned", high -> "Frustrated"), which is a different
+// measurement wearing sentiment's name: low urgency means the request is not time-critical,
+// not that the customer is happy. Four calm factual questions ("what is my credit card
+// limit?") badged Positive while the panel beside them read 100% neutral, because the
+// classifier had labelled every one of them neutral and the badge never looked.
+//
+// The classifier's own label wins; the keyword pass below is the fallback for a turn it
+// never labelled, and is the same one the panel has always used for that case.
+var NEG_KW = ['angry','bad','terrible','frustrated','late','failed','problem','damaged','not received','not credited','charged twice','cancel','fraud','stolen','unauthorized','incorrect charge','overdue','default','claim rejected','policy lapsed','blocked account','money gone','wrong transfer','human agent','human representative'];
+var POS_KW = ['thanks','thank you','great','good','helpful','resolved','approved','credited','disbursed','processed','excellent','perfect','awesome'];
+function clientSentiment(text) {
+  var t = (text || '').toLowerCase();
+  if (NEG_KW.some(function(w){ return t.indexOf(w) !== -1; })) return 'negative';
+  if (POS_KW.some(function(w){ return t.indexOf(w) !== -1; })) return 'positive';
+  return 'neutral';
+}
+
+// No "Concerned" tier: the classifier emits three values, and the panel's four-level scale
+// is derived from PERCENTAGES across five messages, which has no meaning for a single one.
+var SENTIMENT_LABEL = { positive:'Positive', negative:'Frustrated', neutral:'Neutral' };
+var SENTIMENT_CLS   = { positive:'fe-positive', negative:'fe-frustrated', neutral:'fe-neutral' };
+
+// The sentiment of one inbound turn: the classifier's label if it has one, else keywords.
+function turnSentiment(turn) {
+  if (!turn) return 'neutral';
+  var s = turn.metadata && turn.metadata.sentiment;
+  if (s) return String(s).toLowerCase();
+  return clientSentiment(turn.text);
+}
 
 function renderCentre(conv) {
   var turns = conv.turns || [];
@@ -638,9 +712,19 @@ function renderCentre(conv) {
   var _metaEl = document.getElementById('convMeta');
   if (_metaEl) _metaEl.innerHTML = '';
 
+  // "No open tickets" used to be a banner across the middle of the conversation, which put
+  // the answer to "is anything outstanding?" in a different place depending on the answer:
+  // the banner when the count was zero, the right panel's Open Tickets card when it was not.
+  // It now reads as one line in the right panel beside that card (see renderRight), so the
+  // agent looks in one place either way. isDone is still read below, for the reply
+  // placeholder only.
   var isDone = urgencyToStatus(conv_meta) === 'closed';
-  document.getElementById('resbanner').style.display = isDone ? 'flex' : 'none';
-  document.getElementById('compwrap').style.display = isDone ? 'none' : 'block';
+  // The compose box stays on a closed conversation. Closing is not the end of contact:
+  // a customer writes back after a case is closed, and an agent who has just closed one
+  // may still owe them a word - closing notifies nobody, which is why the banner above no
+  // longer claims it does. Removing the only reply surface left the agent reading a
+  // conversation they could not answer.
+  document.getElementById('compwrap').style.display = 'block';
 
   // Channel filter bar
   // Counts here must match what the pane below actually renders, not raw DB turns: turns
@@ -728,7 +812,7 @@ function renderCentre(conv) {
   // Used below to drive per-turn status display.
   var convIsResolved = conv.status === 'closed';
   var tktStatusMap = {};
-  [].concat(_allTickets.open, _allTickets.closed).forEach(function(t) {
+  allTickets().forEach(function(t) {
     tktStatusMap[t.ticket_id] = t.status;
   });
 
@@ -771,7 +855,7 @@ function renderCentre(conv) {
   // message is not tagged with the id - the first tagged turn is whatever came next.
   // On a real dispute that was "any update on my dispute?", so a transaction_dispute
   // case was headed TICKET STATUS: the follow-up question, not the matter.
-  var _tk = [].concat(_allTickets.open, _allTickets.closed);
+  var _tk = allTickets();
   for (var ti = 0; ti < steps.length; ti++) {
     var tk = stepTicket[ti];
     if (!tk || ticketTheme[tk]) continue;
@@ -852,16 +936,7 @@ function renderCentre(conv) {
     prevTicket = tkt;
   });
 
-  // Seed default fold state ONCE per conversation: latest group (index 0)
-  // expanded, all older groups collapsed. Done only if not seeded yet, so a
-  // poll re-render never re-collapses a group the agent manually opened.
   var convKey = conv.conversation_id;
-  if (!state.themeSeeded[convKey]) {
-    groups.forEach(function(g, gi) {
-      if (gi > 0) state.collapsedThemes[convKey + ':' + gi] = true;
-    });
-    state.themeSeeded[convKey] = true;
-  }
 
   // The AI holding message injected when a reply is held for human review
   // (mirrors HOLDING_MESSAGE in services/orchestration_service/graph.py). When a
@@ -961,10 +1036,15 @@ function renderCentre(conv) {
     var isLatestUnit = u.idx === 0;
     var nodeStatus;
     if (tktStatus === 'closed') nodeStatus = 'closed';
+    // A logged thread is shown, not hidden: this view is the customer's story, and a
+    // grouping id is precisely the thing that makes two messages one matter. It renders
+    // as its own state so it never reads as work waiting on a person.
+    else if (tktStatus === 'logged') nodeStatus = 'logged';
     else if (tktStatus === 'open' || tktStatus === 'in_progress') nodeStatus = 'active';
     else if (!isLatestUnit) nodeStatus = 'closed';
     else nodeStatus = convIsResolved ? 'closed' : (conv.status || 'active');
-    var statusCls = (nodeStatus === 'active' || nodeStatus === 'open' || nodeStatus === 'in_progress') ? 'fns-active' : 'fns-done';
+    var statusCls = nodeStatus === 'logged' ? 'fns-logged'
+      : (nodeStatus === 'active' || nodeStatus === 'open' || nodeStatus === 'in_progress') ? 'fns-active' : 'fns-done';
 
     // Customer message text (strips a leading duplicated subject line).
     function custText(inbound) {
@@ -1024,10 +1104,10 @@ function renderCentre(conv) {
       }
 
       var timeStr = fmtTime(ex.ref);
-      // Per-exchange sentiment from that inbound message's urgency.
-      var exUrg = ((ex.inbound && ex.inbound.urgency) || '').toLowerCase();
-      var exEmotion = EMOTION_MAP[exUrg] || 'Neutral';
-      var exEmotionCls = EMOTION_CLS[exUrg] || 'fe-neutral';
+      // Per-exchange sentiment, from the same source the right panel reads.
+      var exSent = turnSentiment(ex.inbound);
+      var exEmotion = SENTIMENT_LABEL[exSent] || 'Neutral';
+      var exEmotionCls = SENTIMENT_CLS[exSent] || 'fe-neutral';
       // Blank on a turn the classifier never labelled (an outbound-only exchange); the
       // pill is then not drawn at all, rather than showing a made-up 'General'.
       var exIntentRaw = (ex.inbound && ex.inbound.intent) || (ex.reply && ex.reply.intent) || '';
@@ -1048,7 +1128,7 @@ function renderCentre(conv) {
         +     '<span class="cp ' + chn.pill + '" style="font-size:10px">' + chn.svg + chn.label + '</span>'
         +     '<span class="flow-emotion ' + exEmotionCls + '">' + escH(exEmotion) + '</span>'
         +     (exIntent ? '<span class="det-intent">' + escH(exIntent) + '</span>' : '')
-        +     (u.ticket ? '<span class="lin-tkt">' + escH(u.ticket) + '</span>' : '<span class="lin-tkt lin-tkt--none">no ticket</span>')
+        +     (u.ticket ? '<span class="lin-tkt ' + statusCls + '">' + escH(u.ticket) + '</span>' : '<span class="lin-tkt lin-tkt--none">no ticket</span>')
         +     '<span class="flow-node-status ' + statusCls + '">' + escH(statusLabel(nodeStatus)) + '</span>'
         +     (timeStr ? '<span class="lin-time">' + escH(timeStr) + '</span>' : '')
         +   '</div>'
@@ -1062,7 +1142,7 @@ function renderCentre(conv) {
         +     // Only on a real answer. A holding message ("Support Agent will help you
               // shortly") explains nothing — the actual reply is still a pending draft, so
               // any retrieval shown against it would be unrelated to what the customer read.
-              (ex.reply && ex.reply.turn_id && !isHolding(ex.reply.text)
+              (SHOW_WHY_THIS_ANSWER && ex.reply && ex.reply.turn_id && !isHolding(ex.reply.text)
                 ? '<button class="det-why" type="button" data-turn="' + escH(ex.reply.turn_id) + '"'
                   + ' title="Show where this answer\'s information came from">Why this answer?</button>'
                 : '')
@@ -1089,15 +1169,20 @@ function renderCentre(conv) {
   // left border follows the THEME colour (dots follow channel). Click drills into
   // the Detailed view for this request. Same `unit` shape as renderUnit, so the
   // two views never diverge on grouping.
-  function renderLineageRow(u, themeColor) {
+  function renderLineageRow(u, themeColor, themeLabel) {
     var tktStatus = u.ticket ? tktStatusMap[u.ticket] : null;
     var isLatestUnit = u.idx === 0;
     var nodeStatus;
     if (tktStatus === 'closed') nodeStatus = 'closed';
+    // A logged thread is shown, not hidden: this view is the customer's story, and a
+    // grouping id is precisely the thing that makes two messages one matter. It renders
+    // as its own state so it never reads as work waiting on a person.
+    else if (tktStatus === 'logged') nodeStatus = 'logged';
     else if (tktStatus === 'open' || tktStatus === 'in_progress') nodeStatus = 'active';
     else if (!isLatestUnit) nodeStatus = 'closed';
     else nodeStatus = convIsResolved ? 'closed' : (conv.status || 'active');
-    var statusCls = (nodeStatus === 'active' || nodeStatus === 'open' || nodeStatus === 'in_progress') ? 'fns-active' : 'fns-done';
+    var statusCls = nodeStatus === 'logged' ? 'fns-logged'
+      : (nodeStatus === 'active' || nodeStatus === 'open' || nodeStatus === 'in_progress') ? 'fns-active' : 'fns-done';
 
     function fmtTime(turn) {
       var dd = turn && turn.created_at ? new Date(turn.created_at) : null;
@@ -1146,8 +1231,9 @@ function renderCentre(conv) {
     var metaHtml = offerReply
       ? '<span class="nba-badge nba-badge-upsell">Offer</span>'
         + '<span class="flow-node-status fns-done">Sent</span>'
-      : (u.ticket ? '<span class="lin-tkt">' + escH(u.ticket) + '</span>' : '<span class="lin-tkt lin-tkt--none">no ticket</span>')
-        + '<span class="flow-node-status ' + statusCls + '">' + escH(statusLabel(nodeStatus)) + '</span>';
+      : (u.ticket ? '<span class="lin-tkt ' + statusCls + '">' + escH(u.ticket) + '</span>' : '<span class="lin-tkt lin-tkt--none">no ticket</span>')
+        + '<span class="flow-node-status ' + statusCls + '">' + escH(statusLabel(nodeStatus)) + '</span>'
+        + (themeLabel ? '<span class="det-intent">' + escH(themeLabel) + '</span>' : '');
     var snipHtml = offerReply
       ? '<div class="lin-snip"><span class="lin-snip-lbl">Offer sent</span>' + escH(offerReply.text || '') + '</div>'
       : '<div class="lin-snip"><span class="lin-snip-lbl">Opened with</span>' + escH(query || '—') + '</div>';
@@ -1201,16 +1287,6 @@ function renderCentre(conv) {
 
   // ── Render theme groups with foldable headers ───────────────────────────
   groups.forEach(function(g, gi) {
-    var groupKey = convKey + ':' + gi;
-    // If we're navigating to a specific ticket, force-open the group that holds
-    // it so the highlighted turn isn't hidden inside a collapsed group.
-    if (state.highlightTicketId) {
-      var hasHighlight = g.items.some(function(it) {
-        var tid = (it.step.inbound && it.step.inbound.ticket_id) || (it.step.outbound && it.step.outbound.ticket_id) || null;
-        return tid === state.highlightTicketId;
-      });
-      if (hasHighlight) delete state.collapsedThemes[groupKey];
-    }
     var units = buildUnits(g.items);        // merged request units for this group
 
     // In Detailed mode, render ONLY the single focused request. Skip any group
@@ -1228,44 +1304,13 @@ function renderCentre(conv) {
       });
     }
 
-    var collapsed = !detailSingle && !!state.collapsedThemes[groupKey];
-
     var groupEl = document.createElement('div');
-    groupEl.className = 'flow-theme-group' + (collapsed ? ' collapsed' : '');
+    groupEl.className = 'flow-theme-group';
 
-    // Theme header (divider). In Lineage it's foldable (toggles the group); in
-    // single-request Detailed it's a static label (nothing to fold to).
-    var header = document.createElement('div');
-    header.className = 'flow-theme-divider' + (detailSingle ? ' static' : '');
-    if (!detailSingle) {
-      header.setAttribute('role', 'button');
-      header.setAttribute('tabindex', '0');
-      header.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
-    }
-    header.style.cssText = '--th-t:' + g.color.t + ';--th-bg:' + g.color.bg + ';--th-bd:' + g.color.bd;
-    header.innerHTML =
-        '<span class="ftd-line"></span>'
-      + '<span class="ftd-label">'
-      +   (detailSingle ? '' : '<svg class="ftd-chev" viewBox="0 0 24 24" width="11" height="11"><path d="M8 5l8 7-8 7z"/></svg>')
-      +   '<span class="ftd-dot"></span>'
-      +   escH(g.themeLabel)
-      + '</span>'
-      + '<span class="ftd-line r"></span>';
-    if (!detailSingle) {
-      var toggle = function() {
-        if (state.collapsedThemes[groupKey]) delete state.collapsedThemes[groupKey];
-        else state.collapsedThemes[groupKey] = true;
-        renderCentre(conv);
-      };
-      header.addEventListener('click', toggle);
-      header.addEventListener('keydown', function(e) {
-        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
-      });
-    }
-    // Detailed shows ONE request at a time (Fix 31), so this divider divides nothing -
-    // and now that every row carries its own intent pill it just repeats the row beneath
-    // it. Kept in Lineage, where it genuinely separates one request from the next.
-    if (!detailSingle) groupEl.appendChild(header);
+    // Dropped in BOTH views now. Detailed lost it at Fix 31 (one request on screen, so it
+    // divided nothing); Lineage loses it here for the same reason - each row carries its
+    // own ticket chip, status and intent, so a banner above one card repeated the card.
+    // Nothing appends `header`; the fold handlers below are dead with it and are removed.
 
     // Group body — stacked exchange rows (detailed) or compact summary rows (lineage).
     var bodyEl = document.createElement('div');
@@ -1274,34 +1319,13 @@ function renderCentre(conv) {
     // Each unit is a request; render it per the active view mode.
     units.forEach(function(u) {
       bodyEl.appendChild(viewMode === 'lineage'
-        ? renderLineageRow(u, g.color)
+        ? renderLineageRow(u, g.color, g.themeLabel)
         : renderUnit(u, g.color));
     });
 
     groupEl.appendChild(bodyEl);
     box.appendChild(groupEl);
   });
-
-  // "Collapse/Expand all" toggle at the end of the channel-filter bar. Only
-  // meaningful in Lineage (multiple foldable theme sections); Detailed shows a
-  // single request. Collapses every THEME section and flips to "Expand all".
-  if (groups.length && viewMode === 'lineage') {
-    var allThemeKeys = groups.map(function(_, gi) { return convKey + ':' + gi; });
-    var everyCollapsed = allThemeKeys.every(function(k) { return state.collapsedThemes[k]; });
-    var caBtn = document.createElement('button');
-    caBtn.className = 'chfilt chfilt-collapse';
-    caBtn.innerHTML = (everyCollapsed
-      ? '<svg viewBox="0 0 24 24" width="12" height="12"><path d="M7 10l5 5 5-5z"/></svg>Expand all'
-      : '<svg viewBox="0 0 24 24" width="12" height="12"><path d="M7 14l5-5 5 5z"/></svg>Collapse all');
-    caBtn.addEventListener('click', function() {
-      allThemeKeys.forEach(function(k) {
-        if (everyCollapsed) delete state.collapsedThemes[k];
-        else state.collapsedThemes[k] = true;
-      });
-      renderCentre(conv);
-    });
-    bar.appendChild(caBtn);
-  }
 
   // Scroll the highlighted turn into view and clear the pending highlight
   if (state.highlightTicketId) {
@@ -1361,8 +1385,9 @@ function renderDraftCard(conv, viewMode, shownInboundTurnIds) {
     if (!onDetailed || !belongsHere) {
       mount.innerHTML = '';
       // The compose box was hidden for the draft that is no longer shown; restore
-      // it so the agent still has a reply surface on this request.
-      if (compose && conv.status !== 'closed') {
+      // it so the agent still has a reply surface on this request. Restored on closed
+      // conversations too - see renderCentre: a closed case still gets replies.
+      if (compose) {
         compose.style.display = 'block';
       }
       return;
@@ -1442,14 +1467,6 @@ function renderRight(conv, tickets) {
 
   var turns = conv.turns || [];
 
-  var NEG_KW = ['angry','bad','terrible','frustrated','late','failed','problem','damaged','not received','not credited','charged twice','cancel','fraud','stolen','unauthorized','incorrect charge','overdue','default','claim rejected','policy lapsed','blocked account','money gone','wrong transfer','human agent','human representative'];
-  var POS_KW = ['thanks','thank you','great','good','helpful','resolved','approved','credited','disbursed','processed','excellent','perfect','awesome'];
-  function clientSentiment(text) {
-    var t = (text || '').toLowerCase();
-    if (NEG_KW.some(function(w){ return t.indexOf(w) !== -1; })) return 'negative';
-    if (POS_KW.some(function(w){ return t.indexOf(w) !== -1; })) return 'positive';
-    return 'neutral';
-  }
   var inbound = turns.filter(function(t) { return t.direction === 'inbound'; });
   // Sentiment window: the last N customer messages (newest), so the panel
   // reflects how the customer feels NOW, not a lifetime average. Counts,
@@ -1458,7 +1475,7 @@ function renderRight(conv, tickets) {
   var recent = inbound.slice(-SENT_WINDOW);
   var sentCounts = { positive: 0, neutral: 0, negative: 0 };
   recent.forEach(function(t) {
-    var s = (t.metadata && t.metadata.sentiment) ? t.metadata.sentiment.toLowerCase() : clientSentiment(t.text);
+    var s = turnSentiment(t);
     if (sentCounts[s] !== undefined) sentCounts[s]++;  else sentCounts.neutral++;
   });
   var total = recent.length || 1;
@@ -1478,8 +1495,10 @@ function renderRight(conv, tickets) {
   }
 
 
-  var _snapTickets = (tickets || [].concat(_allTickets.open, _allTickets.closed))
-    .filter(function(t) { return t.conversation_id === conv.conversation_id && (t.status === 'open' || t.status === 'in_progress'); });
+  // SERVICEABLE: the panel shows the agent what needs a person, so logging threads
+  // stay out of it.
+  var _snapTickets = (tickets || allTickets())
+    .filter(function(t) { return t.conversation_id === conv.conversation_id && isServiceable(t); });
 
   var body = document.getElementById('rpbody');
   body.innerHTML = ''
@@ -1566,14 +1585,18 @@ function renderRight(conv, tickets) {
     }).catch(function() {});
   }
 
-  var allTickets = tickets || [].concat(_allTickets.open, _allTickets.closed);
-  var convTickets = allTickets.filter(function(t) {
-    return t.conversation_id === conv.conversation_id
-      && (t.status === 'open' || t.status === 'in_progress');
+  var _tickets = tickets || allTickets();
+  var convTickets = _tickets.filter(function(t) {
+    return t.conversation_id === conv.conversation_id && isServiceable(t);
   });
-  if (convTickets.length) {
+  if (!convTickets.length) {
+    // Nothing open: a plain line, not a card. There is no list to head, count or fold,
+    // so the card chrome would be a container for nothing. This is where the old
+    // centre-pane banner went (see renderCentre).
+    body.innerHTML += '<div class="rp-noesc">No open escalations.</div>';
+  } else {
     var tktHtml = convTickets.map(function(t) {
-      var isOpen = t.status === 'open' || t.status === 'in_progress';
+      var isOpen = isServiceable(t);
       var stBg = t.status === 'closed' ? 'background:var(--grn-bg);border-color:var(--grn-bd);color:var(--grn-t)' :
                  isOpen ? 'background:var(--amb-bg);border-color:var(--amb-bd);color:var(--amb-t)' :
                  'background:var(--surf2);border-color:var(--bdr);color:var(--t3)';
@@ -1741,10 +1764,11 @@ window.resolveTicket = function(btn, ticketId) {
     return loadConversations();
   }).then(function() {
     if (state.convDetail) {
-      var all = [].concat(_allTickets.open, _allTickets.closed);
+      var all = allTickets();
+      // SERVICEABLE: a logging thread is not outstanding work, so it must not keep a
+      // conversation showing as active (mirrors the same rule in repository.append_turn).
       var stillOpen = all.some(function(t) {
-        return t.conversation_id === state.convDetail.conversation_id
-          && (t.status === 'open' || t.status === 'in_progress');
+        return t.conversation_id === state.convDetail.conversation_id && isServiceable(t);
       });
       state.convDetail.status = stillOpen ? 'active' : 'closed';
       state.convs.forEach(function(c) {
@@ -1855,7 +1879,7 @@ function renderBars(containerId, items, lk, vk, colorFn) {
   var el = document.getElementById(containerId);
   if (!items || !items.length) { el.innerHTML = '<div class="empty-state">No data yet</div>'; return; }
   var max = Math.max.apply(null, items.map(function(i){return i[vk];}));
-  var COLORS = ['#2563eb','#16a34a','#d97706','#dc2626','#7c3aed','#0ea5e9','#ec4899','#f59e0b','#10b981','#6366f1'];
+  var COLORS = ['var(--blue)'];
   el.innerHTML = items.map(function(item, idx) {
     var pct = max > 0 ? Math.round((item[vk]/max)*100) : 0;
     var clr = colorFn ? colorFn(item[lk], idx) : COLORS[idx % COLORS.length];
@@ -1876,15 +1900,19 @@ function renderIntentBars(data) {
   renderBars('intentBars', items, 'intent', 'count', null);
 }
 
-// Pipeline order: 1-3 fire on EVERY inbound message, 4-5 only when ticket matching is
-// ambiguous, 6-8 when an agent opens a conversation. Anything unlisted sorts last.
+// Pipeline order: 1-5 fire on EVERY inbound message, 6-7 only when ticket matching is
+// ambiguous, 7-9 when an agent opens a conversation. Anything unlisted sorts last.
+//
+// handoff_check sits at 4 because that is where it runs: inside _escalation_reason, after
+// the resolution level is known and BEFORE the reply is written, since what it decides is
+// whether that reply reaches the customer at all.
 var LLM_OP_ORDER = {
   ticket_action_detection: 1,
   intent_classification: 2,
   resolution_level_classification: 3,
-  answer_generation: 4,
-  ticket_referee: 5,
-  ticket_refine_referee: 6,
+  handoff_check: 4,
+  answer_generation: 5,
+  ticket_referee: 6,
   case_summary: 7,
   customer_context: 8,
   opportunity_generation: 9
@@ -1896,15 +1924,15 @@ var LLM_OP_PURPOSE = {
   ticket_action_detection:
     'Runs before intent, and only when keyword rules cannot decide: does this message mean the customer considers their issue resolved? A YES closes the open ticket.',
   intent_classification:
-    'EVERY message. Classifies the message into one of ~20 BFSI intents, which decides whether the answer comes from the knowledge graph or the knowledge base.',
+    'EVERY message. Classifies the message into one of 16 BFSI intents, which decides whether the answer comes from the knowledge graph or the knowledge base.',
   resolution_level_classification:
     'EVERY message. Decides L1 / L2 / L3 — whether the query can be answered directly or must escalate into a ticket.',
+  handoff_check:
+    'EVERY message. Reads the customer’s own words — not the intent label — and answers one question: must a person see this before a reply is sent? Holds the reply when they are asking for a human, saying we already failed them, in distress, or asking for a decision only a person can make.',
   answer_generation:
     'EVERY message. Writes the customer-facing reply from whatever the retrieval step returned (graph records, ticket record, or KB passages).',
   ticket_referee:
     'Only when ticket matching is ambiguous: the message matches no open ticket but same-intent tickets exist. Picks the right one or says NEW. Any doubt forks a new ticket.',
-  ticket_refine_referee:
-    'Only when a vague ticket may need narrowing — e.g. a general dispute becoming a specific card dispute. Refines the existing ticket instead of forking a duplicate.',
   case_summary:
     'When an agent opens a conversation. Writes the situation and open items for someone picking the case up cold. Cached against the newest turn, so re-opening costs nothing.',
   customer_context:
@@ -1914,7 +1942,10 @@ var LLM_OP_PURPOSE = {
 };
 
 // Stable colour per operation so the same op keeps its colour across the table + meters.
-var LLM_OP_COLORS = ['--blue', '--pur', '--grn', '--amb', '--pnk', '--red'];
+// One colour, not a scale: every row here is already labelled by name, so colour was
+// never the key and cycling hues only added noise. The line charts below DO keep a
+// multi-hue scale - there the colour is the only thing telling two series apart.
+var LLM_OP_COLORS = ['--blue'];
 function llmOpColor(name, idx) {
   // deterministic by index so ordering (cost-desc) reads as a gentle palette walk
   return 'var(' + LLM_OP_COLORS[idx % LLM_OP_COLORS.length] + ')';
@@ -1924,6 +1955,13 @@ function llmOpColor(name, idx) {
 // frac = 0..1 (share of the column max), color = css colour, valueLabel = printed text.
 // The <td> stays a real table cell; the flex row lives on an inner wrapper so the
 // four metric cells keep their own table columns.
+// A plain right-aligned figure. Six meters per row put ~54 bars on one screen, none
+// saying anything the number did not: a meter compares WITHIN one dimension, so one
+// column earns it and the rest were decoration.
+function llmNumCell(valueLabel, muted) {
+  return '<td class="llm-num' + (muted ? ' llm-num--muted' : '') + '">' + valueLabel + '</td>';
+}
+
 function llmMeterCell(frac, color, valueLabel) {
   var pct = Math.max(2, Math.round((frac || 0) * 100));
   return '<td class="llm-meter-cell"><div class="llm-meter-wrap">'
@@ -1946,6 +1984,7 @@ function renderLlmUsagePanel(data) {
     { val: Number(calls).toLocaleString(), lbl: 'LLM calls', tone: 'blue', icon: '&#9673;' },
     { val: (totals.total_tokens || 0).toLocaleString(), lbl: 'Tokens', tone: 'pur', icon: '&#9632;' },
     { val: '$' + cost.toFixed(6), lbl: 'Estimated cost', tone: 'grn', icon: '&#36;' },
+    { val: '$' + (calls ? cost / calls : 0).toFixed(6), lbl: 'Avg cost', tone: 'blue', icon: '&#8721;' },
     { val: avg.toFixed(0) + ' ms', lbl: 'Avg latency', tone: 'amb', icon: '&#9201;' },
   ];
 
@@ -1986,17 +2025,19 @@ function renderLlmUsagePanel(data) {
         + escH((row.operation || 'unknown').replace(/_/g, ' '))
         + (purpose ? '<span class="llm-op-q">?</span>' : '') + '</td>'
       + llmMeterCell(cl / maxCalls, clr, cl.toLocaleString())
-      + llmMeterCell(tok / maxTok, clr, tok.toLocaleString())
-      + llmMeterCell(co / maxCost, clr, '$' + co.toFixed(6))
-      + llmMeterCell(avgCostOf(row) / maxAvgC, clr, '$' + avgCostOf(row).toFixed(6))
-      + llmMeterCell(lat / maxLat, clr, lat.toFixed(0) + ' ms')
+      + llmNumCell(tok.toLocaleString())
+      + llmNumCell('$' + co.toFixed(6))
+      + llmNumCell('$' + avgCostOf(row).toFixed(6), true)
+      + llmNumCell(lat.toFixed(0) + ' ms', true)
       + '</tr>';
   }).join('');
 
   el.innerHTML =
     '<div class="kpi-grid">'
     + cards.map(function(c) {
-      return '<div class="kpi-tile kpi-' + c.tone + '">'
+      return '<div class="kpi-tile kpi-' + c.tone + (c.tip ? ' kpi-has-tip' : '') + '"'
+        + (c.tip ? ' title="' + escH(c.tip) + '"' : '') + '>'
+        + (c.tip ? '<span class="kpi-help" title="' + escH(c.tip) + '">?</span>' : '')
         + '<div class="kpi-icon">' + c.icon + '</div>'
         + '<div class="kpi-val">' + c.val + '</div>'
         + '<div class="kpi-lbl">' + c.lbl + '</div>'
@@ -2073,10 +2114,10 @@ function renderModelVersionTable(data) {
         + '<span class="llm-op-dot" style="background:' + clr + '"></span>'
         + llmVerCellLabel(row) + '</td>'
       + llmMeterCell(cl / maxCalls, clr, cl.toLocaleString())
-      + llmMeterCell(tok / maxTok, clr, tok.toLocaleString())
-      + llmMeterCell(co / maxCost, clr, '$' + co.toFixed(6))
-      + llmMeterCell(avgCostOf(row) / maxAvgC, clr, '$' + avgCostOf(row).toFixed(6))
-      + llmMeterCell(lat / maxLat, clr, lat.toFixed(0) + ' ms')
+      + llmNumCell(tok.toLocaleString())
+      + llmNumCell('$' + co.toFixed(6))
+      + llmNumCell('$' + avgCostOf(row).toFixed(6), true)
+      + llmNumCell(lat.toFixed(0) + ' ms', true)
       + '</tr>';
   }).join('');
 
@@ -2501,18 +2542,25 @@ window.loadConnectors = async function() {
   var mailboxTxt = (inboxRes && inboxRes.configured) ? escH(inboxRes.mailbox || 'INBOX') : '—';
   var errorHtml = (inboxRes && inboxRes.last_error)
     ? '<div style="font-size:10px;color:#dc2626;margin-top:6px;word-break:break-all">'+escH(inboxRes.last_error)+'</div>' : '';
-  var pipeOk  = '<span style="color:var(--grn-t);font-weight:600">Active</span>';
-  var pipeBad = '<span style="color:var(--red-t);font-weight:600">Down</span>';
+  // The two pipes are only worth showing when one has FAILED. With both up the badge
+  // already says Connected and the rows just repeated it in every screenshot; with one
+  // down the badge says Partial and these rows are the only thing saying WHICH half.
+  var inPipeUp  = !!inboxConfigured;
+  var outPipeUp = emStatus === 'connected';
+  var pipesHtml = (inPipeUp && outPipeUp) ? '' :
+      '<div class="conn-pipes">'
+    +   '<span class="cp-k">Inbound (IMAP)</span>'
+    +   '<span class="' + (inPipeUp ? '' : 'cp-down') + '">' + (inPipeUp ? 'Active' : 'Down') + '</span>'
+    +   '<span class="cp-k">Outbound (SMTP)</span>'
+    +   '<span class="' + (outPipeUp ? '' : 'cp-down') + '">' + (outPipeUp ? 'Active' : 'Down') + '</span>'
+    + '</div>';
   inboxCard.innerHTML =
     '<div class="conn-hdr">'
     + '<div class="conn-icon" style="background:#db4437"><svg viewBox="0 0 24 24" fill="#fff"><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/></svg></div>'
     + '<div><div class="conn-nm">Email</div><div class="conn-desc">Gmail · inbound IMAP auto-poll + outbound SMTP delivery</div></div>'
     + '</div>'
-    + '<div class="conn-status"><span class="conn-badge ' + emailBadgeCls + '">' + emailBadgeTxt + '</span></div>'
-    + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;font-size:11px;color:var(--t2);margin-top:10px">'
-    + '<span style="color:var(--t3)">Inbound (IMAP)</span><span>' + (inboxConfigured ? pipeOk : pipeBad) + '</span>'
-    + '<span style="color:var(--t3)">Outbound (SMTP)</span><span>' + (emStatus === 'connected' ? pipeOk : pipeBad) + '</span>'
-    + '</div>';
+    + pipesHtml
+    + '<div class="conn-status"><span class="conn-badge ' + emailBadgeCls + '">' + emailBadgeTxt + '</span></div>';
   // Insert after WhatsApp so the card order is: WhatsApp · Email · Call · Jira.
   grid.insertBefore(inboxCard, grid.children[1] || null);
 
@@ -2524,7 +2572,7 @@ window.loadConnectors = async function() {
   webCard.className = 'conn-card';
   webCard.innerHTML =
     '<div class="conn-hdr">'
-    + '<div class="conn-icon" style="background:#2563eb"><svg viewBox="0 0 24 24" fill="#fff"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-2 12H6v-2h12v2zm0-3H6V9h12v2zm0-3H6V6h12v2z"/></svg></div>'
+    + '<div class="conn-icon" style="background:var(--blue)"><svg viewBox="0 0 24 24" fill="#fff"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-2 12H6v-2h12v2zm0-3H6V9h12v2zm0-3H6V6h12v2z"/></svg></div>'
     + '<div><div class="conn-nm">Web Chat</div><div class="conn-desc">Customer portal · in-app chat (synchronous inbound + reply)</div></div>'
     + '</div>'
     + '<div class="conn-status"><span class="conn-badge connected">Connected</span></div>';
@@ -2655,7 +2703,23 @@ window.loadAudit = async function() {
 // lives in the CRM (Jira sync). This cache remains: it is filled by
 // loadConversations() and consumed by the inbox status logic, the spine/lineage
 // views, and the right-panel Open Tickets card.
-var _allTickets = { open: [], closed: [] };
+// Three buckets, because a ticket now has three states an agent can encounter.
+// LOGGED is a grouping id: the system opened a thread for a question it answered on its
+// own, and no human is needed. It is NOT work, so it must stay out of queues, counts and
+// anything shown as "open" — but it still EXISTS, so it must not vanish from lookups
+// either. The old shape was { open, closed }, and every caller did concat(open, closed) —
+// which silently dropped any third status. allTickets() exists so no caller can forget one.
+var _allTickets = { logged: [], open: [], closed: [] };
+
+// Every ticket, whatever its status. Use for lookups by id and for rendering history.
+function allTickets() {
+  return [].concat(_allTickets.logged, _allTickets.open, _allTickets.closed);
+}
+
+// A human is on it. Use for queues, badges, counts and anything labelled "open".
+function isServiceable(t) {
+  return !!t && (t.status === 'open' || t.status === 'in_progress');
+}
 
 function fmtDateTime(iso) {
   if (!iso) return '—';
@@ -2776,16 +2840,21 @@ window.loadUserTickets = async function() {
   refresh.textContent = 'Refreshing...';
   try {
     var tickets = await userApi('/user/tickets');
+    // The CUSTOMER's own view. A logging id is internal and is never shown to them
+    // (redesign decision 1), so it belongs in neither group.
+    var openTickets = tickets.filter(isServiceable);
+    var closedTickets = tickets.filter(function(t) { return t.status === 'closed'; });
+    // Count what is actually RENDERED. Counting the raw response instead would report every
+    // logging id the endpoint returns - so a customer with two real requests would read
+    // "14 tickets" above a list showing two.
+    var shownCount = openTickets.length + closedTickets.length;
     document.getElementById('userTicketCount').textContent =
-      tickets.length + ' ticket' + (tickets.length === 1 ? '' : 's');
-    if (!tickets.length) {
+      shownCount + ' ticket' + (shownCount === 1 ? '' : 's');
+    if (!shownCount) {
       list.innerHTML = '<div class="user-empty">No requests submitted yet.</div>';
       return;
     }
     list.innerHTML = '';
-    var isOpen = function(t) { return t.status === 'open' || t.status === 'in_progress'; };
-    var openTickets = tickets.filter(isOpen);
-    var closedTickets = tickets.filter(function(t) { return !isOpen(t); });
 
     function renderGroup(heading, group) {
       if (!group.length) return;
@@ -2849,10 +2918,29 @@ function kgEsc(s) { return escH(String(s == null ? '' : s)); }
 // rest of the panel. The endpoint caches against the newest turn, so re-opening an
 // unchanged conversation costs nothing; only Refresh forces a regeneration.
 var _csumFor = null;
+// The fetched summary HTML, keyed by conversation id. Caching the RESULT rather than the
+// fact that a fetch happened is what makes this correct: renderRight rebuilds the right
+// panel and resets #csum-body to the literal "Summarising…" placeholder, but the old guard
+// (`_csumFor === conversationId`) then returned before re-filling it - so the card sat on
+// that placeholder forever with nothing in flight. Holding the text lets a re-render restore
+// it instantly and for free; a fetch happens only when nothing is cached, or on Refresh.
+var _csumCache = {};
+
+function applyCaseSummary(conversationId) {
+  var el = document.getElementById('csum-body');
+  if (!el) return false;
+  var cached = _csumCache[conversationId];
+  if (cached === undefined) return false;
+  el.innerHTML = cached;
+  return true;
+}
 
 async function loadCaseSummary(conversationId, force) {
   if (!conversationId) return;
-  if (!force && _csumFor === conversationId) return;   // already loaded for this conversation
+  // A re-render wiped the card back to the placeholder: refill it from the cache. This runs
+  // even when the fetch is skipped below, which is exactly the case the old guard broke.
+  if (!force && applyCaseSummary(conversationId)) return;
+  if (!force && _csumFor === conversationId) return;   // fetch already in flight for this one
   _csumFor = conversationId;
   var bodyEl = document.getElementById('csum-body');
   if (!bodyEl) return;
@@ -2866,6 +2954,8 @@ async function loadCaseSummary(conversationId, force) {
     if (!bodyEl) return;
     if (!p.summary) {
       // Say why there is nothing rather than showing an empty card.
+      // NOT cached: "no messages yet" and "unavailable" are transient states, and caching
+      // them would keep the card empty after the conversation gains its first message.
       bodyEl.innerHTML = '<span class="csum-muted">'
         + (p.status === 'empty' ? 'No messages yet.' : 'Summary unavailable right now.')
         + '</span>';
@@ -2877,8 +2967,9 @@ async function loadCaseSummary(conversationId, force) {
     // rewording the situation instead of returning nothing. Every value it ever
     // produced was an echo or empty, through three prompt rules written to stop it.
     // Open work is in the Open Tickets card directly below, with status and Resolve.
-    bodyEl.innerHTML =
-      (p.summary.situation ? '<div class="csum-sit">' + escH(p.summary.situation) + '</div>' : '');
+    var html = (p.summary.situation ? '<div class="csum-sit">' + escH(p.summary.situation) + '</div>' : '');
+    _csumCache[conversationId] = html;   // survives the next renderRight
+    bodyEl.innerHTML = html;
   } catch (e) {
     if (_csumFor !== conversationId) return;
     var el = document.getElementById('csum-body');
@@ -3371,7 +3462,7 @@ window.doUserLogout = function() {
   document.getElementById('userIdInput').value = '';
   document.getElementById('userPasswordInput').value = '';
   switchLoginMode('user');
-  showStage('apikey');
+  showStage('home');
 };
 
 var portalChatTimer = null;
@@ -3447,7 +3538,7 @@ window.doChangePassword = async function() {
     // Verify current password via login, then update
     await fetch('/admin/auth/login', {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-admin-key': adminKey },
+      headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ username: currentUser.username, password: current })
     }).then(function(r) { return r.json().then(function(d) { if (!r.ok) throw new Error('Current password is incorrect'); return d; }); });
 
@@ -3514,13 +3605,14 @@ if (savedEmailSecret) document.getElementById('emailSecret').value = savedEmailS
 if (userToken && portalUser && !isTokenExpired(userToken)) {
   showStage('user');
   bootUserPortal();
-} else if (adminKey && adminToken && !isTokenExpired(adminToken)) {
+} else if (adminToken && !isTokenExpired(adminToken)) {
   showStage('app');
   bootApp();
-} else if (adminKey) {
-  showStage('auth');
 } else {
-  showStage('apikey');
+  // First arrival with no session: the home page. The sign-in card ('apikey') is one
+  // click away via openLogin/openSignup, and every logout path still returns straight
+  // to it — someone logging out means to sign in again, not to read the landing page.
+  showStage('home');
 }
 
 })();
@@ -3551,17 +3643,10 @@ var KG_INTENT_READS = {
   ResolutionMemory: ['(Priority 0 — verified memories only)']
 };
 
-// Tiers give the schema its shape. Order matters: identity, then what the customer
-// HOLDS, then what they are DEALING WITH, then the catalog everything hangs off.
-var KG_TIERS = [
-  { key: 'identity', label: 'Identity', types: ['Customer'] },
-  { key: 'holdings', label: 'Holdings — what the customer has',
-    types: ['Account', 'CreditCard', 'FixedDeposit', 'Loan', 'Policy', 'Claim',
-            'Transaction', 'ChargePenalty', 'KYC'] },
-  { key: 'case', label: 'Case layer — what they are dealing with',
-    types: ['Ticket', 'Interaction', 'ResolutionMemory', 'Agent'] },
-  { key: 'catalog', label: 'Catalog', types: ['Product'] }
-];
+// KG_TIERS lived here: a second list of node types, referenced by nothing. It was one
+// `KBChunk` short of correct and would have been "fixed" instead of KG_MAP, which is
+// what actually draws the diagram. The tier of each node is a property on its KG_MAP
+// entry, and the colours are KG_TIER_FILL - there is no third place to update.
 
 // Prefetched at load and rendered synchronously on click — the same shape the customer-360
 // button used (fetch first, then `onclick` only renders). A fetch inside the click handler
@@ -3591,30 +3676,64 @@ function kgShowModal(title, sub, counts, body) {
   if (old) bar.removeChild(old);
   var key = bodyEl.querySelector('.kgs-key');
   if (key) bar.insertBefore(key, bar.firstChild);
+  // Same treatment for the Schema/Graph switch, but into the TITLE row rather than the
+  // legend bar: rendered at the foot of the body it sat below a 1400px-wide diagram and
+  // needed a horizontal scroll to reach, and parked in the legend it read as part of the
+  // colour key. The header slot is empty space next to the title.
+  var tabSlot = document.getElementById('graphModalTabs');
+  var sw = bodyEl.querySelector('.kg-switch');
+  if (tabSlot) {
+    tabSlot.innerHTML = '';
+    if (sw) tabSlot.appendChild(sw);
+  }
   document.getElementById('graphModal').classList.remove('hidden');
 }
 
-window.openSchemaModal = function() {
+window.openSchemaModal = function(_isRedraw) {
   var sc = _schemaData;
+  // Refetch on every open, then redraw. The database changes with every conversation -
+  // each message writes an :Interaction, its :Ticket and a :ResolutionMemory - so a
+  // cached payload from page load shows a graph that no longer exists. Draw from cache
+  // first so the modal opens instantly, then replace it when the fresh data arrives.
+  // _isRedraw guards the recursion.
+  if (!_isRedraw) {
+    loadSystemDiagrams().then(function() {
+      var modal = document.getElementById('graphModal');
+      // Only redraw if this view is still the one on screen: the user may have closed the
+      // modal or switched to the live tab while the fetch was in flight.
+      if (modal && !modal.classList.contains('hidden')
+          && document.querySelector('.kg-vtab.on')
+          && document.querySelector('.kg-vtab.on').textContent === 'Schema') {
+        openSchemaModal(true);
+      }
+    });
+  }
   if (!sc || !sc.reachable) {
-    kgShowModal('Neo4j knowledge graph', 'Node types and how they connect', '',
+    kgShowModal(KG_MODAL_TITLE, KG_MODAL_SUB, '',
       '<div class="kg-empty">Schema not loaded'
-      + (sc && sc.error ? ': ' + kgEscape(sc.error) : ' — is Neo4j running?') + '</div>');
-    loadSystemDiagrams();
+      + (sc && sc.error ? ': ' + kgEscape(sc.error) : ' — is the graph database running?') + '</div>'
+      + kgToggleHtml('schema'));
     return;
   }
   var total = (sc.nodes || []).reduce(function(a, n) { return a + (n.count || 0); }, 0);
-  kgShowModal('Neo4j knowledge graph',
-    'Node types and how they connect — live counts from the running database',
+  // Title and subtitle are FIXED across both tabs: this is one modal about one graph,
+  // and swapping the header made a tab-switch look like a different feature.
+  // The counts line is the one part that differs, and both tabs now count the same
+  // database the same way — the schema tab used to report "16 connections" (distinct
+  // source-rel-target PATTERNS) beside the live tab's "195 relationships" (actual
+  // edges), two true numbers that read as a contradiction.
+  kgShowModal(KG_MODAL_TITLE, KG_MODAL_SUB,
     (sc.nodes || []).length + ' node types · ' + (sc.edges || []).length
-      + ' relationship types · ' + total + ' nodes live',
-    renderSchemaSvg(sc));
+      + ' connection patterns · ' + total + ' nodes'
+      + (_liveGraph && _liveGraph.reachable
+          ? ' · ' + (_liveGraph.edges || []).length + ' relationships' : ''),
+    renderSchemaSvg(sc) + kgToggleHtml('schema'));
 };
 
 window.openFlowModal = function() {
   var wf = _flowData;
   if (!wf || !wf.edges) {
-    kgShowModal('LangGraph workflow', 'The pipeline every inbound message runs through', '',
+    kgShowModal('Workflow', 'The pipeline every inbound message runs through', '',
       '<div class="kg-empty">Workflow not loaded.</div>');
     loadSystemDiagrams();
     return;
@@ -3622,38 +3741,62 @@ window.openFlowModal = function() {
   // Counted from the LAYOUT, not from wf.steps/wf.edges. The payload's step list comes
   // from the older WorkflowStep enum - it names retrieve_knowledge / decide_resolution /
   // create_or_update_ticket where the graph actually runs resolve_query / decide_ticket /
-  // create_ticket / skip_ticket - and its edge list collapses each branch into one row
-  // ("a | b"), so the header read 15 steps and 17 edges over a diagram showing 16 and 22.
+  // create_ticket - and its edge list collapses each branch into one row ("a | b"), so the
+  // header disagreed with the picture until it was counted from here instead.
+  //
+  // The layout draws only REACHABLE paths. graph.py still wires decide_ticket -> skip_ticket
+  // as a landing spot if `required` ever goes false again, but Phase 4 hardcodes it True
+  // (orchestration_agents.py: `required=True`), so that branch cannot execute and drawing it
+  // would tell a viewer routine questions get no ticket - the exact model the redesign removed.
+  // decide_ticket moved from kind 'step' to 'agent' when Rule 2c gave it an LLM call.
+  // Neither counts as a 'gate', so the step and decision-point totals below are unchanged.
   var drawnSteps = Object.keys(FLOW_MAP).filter(function(k) { return k.indexOf('__') !== 0; }).length;
   var branches = Object.keys(FLOW_MAP).filter(function(k) { return FLOW_MAP[k].kind === 'gate'; }).length;
-  kgShowModal('LangGraph workflow',
+  kgShowModal('Workflow',
     'The pipeline every inbound message runs through — WhatsApp, email and web chat alike',
     drawnSteps + ' steps · ' + FLOW_EDGES.length + ' edges · '
-      + branches + ' decision points · ' + (wf.framework || 'LangGraph'),
+      + branches + ' decision points',
     renderFlowSvg(wf));
 };
 
 // Fetch both payloads once, up front. Failures are silent: the click handler above
 // reports "not loaded" and retries, so a slow start never leaves a stuck modal.
+// Credentials for the code appended AFTER the main IIFE: api() and adminHeaders() are
+// declared inside it, so nothing here can see them — that scope boundary silently broke
+// the first version of the diagram loader. Reads the same sessionStorage keys api() does.
+// Must send the session token: since sign-in moved to username/password, the admin key is
+// normally absent and a key-only header authenticates nothing.
+function outerAdminHeaders() {
+  var h = {};
+  try {
+    var token = sessionStorage.getItem('cx-admin-jwt') || '';
+    if (token) h['Authorization'] = 'Bearer ' + token;
+    var key = sessionStorage.getItem('cx-admin-key') || '';
+    if (key) h['x-admin-key'] = key;
+  } catch (e) {}
+  return h;
+}
+
 function loadSystemDiagrams() {
-  // Uses fetch directly, NOT the api() helper: api() and adminKey are declared inside the
-  // main IIFE, so this code (appended after it) cannot see them — that scope boundary is
-  // what silently broke the first version. The key is read from sessionStorage, the same
-  // place api() gets it.
   function kgFetch(path) {
-    var key = '';
-    try { key = sessionStorage.getItem('cx-admin-key') || ''; } catch (e) {}
-    return fetch(path, { headers: { 'x-admin-key': key } }).then(function(r) {
+    return fetch(path, { headers: outerAdminHeaders() }).then(function(r) {
       if (!r.ok) throw new Error(r.status + ' ' + r.statusText);
       return r.json();
     });
   }
-  kgFetch('/admin/neo4j/schema')
-    .then(function(d) { _schemaData = d; })
-    .catch(function(e) { _schemaData = { reachable: false, error: String(e.message || e) }; });
-  kgFetch('/admin/orchestration/workflow')
-    .then(function(d) { _flowData = d; })
-    .catch(function() { _flowData = null; });
+  // Returns a promise so a modal opener can REDRAW when fresh data lands. The payloads
+  // used to be fetched once at page load and rendered from cache forever, so the graph
+  // showed the database as it was before the conversation you just had - the counts and
+  // the picture both stale until a browser refresh.
+  return Promise.all([
+    kgFetch('/admin/neo4j/schema')
+      .then(function(d) { _schemaData = d; })
+      .catch(function(e) { _schemaData = { reachable: false, error: String(e.message || e) }; }),
+    kgFetch('/admin/orchestration/workflow')
+      .then(function(d) { _flowData = d; })
+      .catch(function() { _flowData = null; }),
+    loadLiveGraph(),
+  ]);
 }
 
 // Real SVG with drawn edges. Layout is a fixed hand-authored map, NOT a physics sim: the
@@ -3703,6 +3846,27 @@ var KG_MAP = {
                      props: ['kyc_status', 'registered_at'] },
   Product:         { x: kgCol(1), y: 370, w: 230, h: 78, tier: 'catalog', head: 'Shared catalogue',
                      props: ['product_id / name', 'Account, FD, Card, Loan'] },
+  // Only exists when RAG_BACKEND=neo4j - the KB chunks live in OpenSearch otherwise.
+  // No conditional needed: the renderer skips any label with no live count, so this
+  // box appears exactly on the deployments where the nodes are real.
+  // Placed in the 400px gap BETWEEN Product and Claim because it links to Product on
+  // its left and KYC on its right - both edges stay short and cross nothing.
+  KBChunk:         { x: 600, y: 370, w: 226, h: 82, tier: 'catalog', head: 'Knowledge base',
+                     // The count on this box is every :KBChunk, and two different things
+                     // share the label: the KB proper (doc_type knowledge_base) and the
+                     // labelled L1/L2/L3 examples the resolution engine matches against
+                     // (doc_type resolution_example). Only the first is what a customer
+                     // gets read back to them, so the split is named rather than left as
+                     // one number nobody can decompose.
+                     props: ['chunk_id / doc_type', 'text + embedding (384d)',
+                             'KB + resolution examples'] },
+  // The hub the ANSWER path walks. A subject the bank deals with: sold ones have a
+  // Product, all of them have guidance, and a customer's holding points here too -
+  // so one walk goes holding -> Concept <- KBChunk without touching the catalogue.
+  // Placed on its own row because three different node types point AT it.
+  Concept:         { x: 380, y: 505, w: 300, h: 92, tier: 'catalog', head: 'What the bank deals with',
+                     props: ['name / sold', 'Home Loan, Credit Card, KYC…',
+                             'sold=false: SIP, ELSS, Demat'] },
 
   Ticket:          { x: kgCol(7), y:  26, w: KG_COLW, h: 82, tier: 'case', head: 'The case',
                      props: ['ticket_id / status', 'scope = continuity', 'intent / priority'] },
@@ -3743,7 +3907,47 @@ var KG_EDGES = [
   { from: 'Customer', to: 'Interaction',      rel: 'HAS_INTERACTION', top: 14, gutter: 1912, enter: 'b' },
   { from: 'Ticket',   to: 'Interaction',      rel: 'HAS_MESSAGE',     fs: 'b', ts: 't' },
   { from: 'Interaction', to: 'Agent',         rel: 'HANDLED_BY',      fs: 'r', ts: 'l' },
-  { from: 'Interaction', to: 'ResolutionMemory', rel: 'CREATED_MEMORY', fs: 'b', ts: 't' }
+  { from: 'Interaction', to: 'ResolutionMemory', rel: 'CREATED_MEMORY', fs: 'b', ts: 't' },
+
+  // Phase 2 - what makes the KB part of the graph rather than a search box beside it.
+  // KBChunk sits in the gap between Product and Claim on the same row, so both edges
+  // are short side-to-side hops that cross nothing. Both are skipped automatically
+  // when RAG_BACKEND is not neo4j: no :KBChunk nodes exist, and the count guard in
+  // renderSchemaSvg drops any edge whose endpoint has no live count.
+  // ABOUT is a straight hop left into Product (clear gap at x=464-600).
+  // ABOUT_TOPIC cannot go straight right: Claim occupies x=864-1060 on this same row
+  // and a horizontal line at y~410 would cut through it. It takes a lane below every
+  // box instead, like the other long edges - lane 492 is under Claim/ResolutionMemory
+  // (both end at y=452) and above the 525 canvas edge.
+  { from: 'KBChunk',  to: 'Product',          rel: 'ABOUT',           fs: 'l', ts: 'r' },
+  { from: 'KBChunk',  to: 'KYC',              rel: 'ABOUT_TOPIC',     lane: 492, gutter: 570 },
+
+  // The Concept layer - what the answer path actually walks. ABOUT above is the
+  // catalogue view (a chunk about a product the bank SELLS); these three are the
+  // walk: a customer's holding and a KB chunk both arrive at the same Concept, so
+  // guidance about something she owns is reachable by traversal rather than by
+  // matching her wording. A chunk whose Concept has no Product - SIP, ELSS, Demat -
+  // is reachable here and nowhere else.
+  { from: 'Product',  to: 'Concept',          rel: 'INSTANCE_OF',     fs: 'b', ts: 'l' },
+  { from: 'KBChunk',  to: 'Concept',          rel: 'EXPLAINS',        fs: 'b', ts: 't' },
+  // Every holding reaches the hub, not just the four that carry a :PRODUCT_IS
+  // edge. Fix 149 linked holdings by riding PRODUCT_IS, which exists only on
+  // Account, CreditCard, FixedDeposit and Loan - so Policy, Claim, Charge,
+  // Transaction and KYC reached no guidance at all, and this diagram drew the
+  // single Account edge as though that were the whole design. Fix 150 wired the
+  // other five (17 -> 123 edges); one line each here, or the picture keeps
+  // under-reporting the thing the walk depends on.
+  { from: 'Account',  to: 'Concept',          rel: 'INSTANCE_OF',     lane: 616, gutter: 102 },
+  { from: 'Policy',   to: 'Concept',          rel: 'INSTANCE_OF',     lane: 616, gutter: 22 },
+  { from: 'Claim',    to: 'Concept',          rel: 'INSTANCE_OF',     lane: 604, gutter: 32 },
+  { from: 'ChargePenalty', to: 'Concept',     rel: 'INSTANCE_OF',     lane: 616, gutter: 42 },
+  { from: 'Transaction',   to: 'Concept',     rel: 'INSTANCE_OF',     lane: 616, gutter: 52 },
+  { from: 'KYC',      to: 'Concept',          rel: 'INSTANCE_OF',     lane: 604, gutter: 62 },
+  // The remaining three holdings. All nine now reach the hub, which is what the
+  // walk depends on; drawing six of nine said the layer was partial when it is not.
+  { from: 'CreditCard',   to: 'Concept',      rel: 'INSTANCE_OF',     lane: 616, gutter: 72 },
+  { from: 'FixedDeposit', to: 'Concept',      rel: 'INSTANCE_OF',     lane: 604, gutter: 82 },
+  { from: 'Loan',         to: 'Concept',      rel: 'INSTANCE_OF',     lane: 616, gutter: 92 }
 ];
 
 var KG_TIER_FILL = {
@@ -3765,7 +3969,15 @@ function renderSchemaSvg(sc) {
   var counts = {};
   (sc.nodes || []).forEach(function(n) { counts[n.id] = n.count; });
 
-  var W = 1955, H = 525;
+  // H grew from 525 to 640 for the Concept row at y=505. Concept is the hub the
+  // ANSWER path walks - a holding and a KB chunk meet there - so it needs its own
+  // row rather than being squeezed into the gap between Product and KBChunk.
+  // H 700: the Concept box ends at y=597 and the six holding->Concept edges route
+  // through lanes below it. At H=640 four of those lanes (644-680) fell outside
+  // the canvas entirely and were clipped - the diagram appeared cut off along the
+  // bottom edge. The nine share two lanes (604/616) instead of nine of their own
+  // plus its label.
+  var W = 1955, H = 660;
   var svg = '<svg class="kgs" style="--kgs-w:' + W + 'px;--kgs-h:' + H + 'px;--kgs-s:0.76" width="' + W + '" height="' + H
           + '" viewBox="0 0 ' + W + ' ' + H + '" xmlns="http://www.w3.org/2000/svg">';
   svg += '<defs><marker id="kgar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" '
@@ -3841,7 +4053,10 @@ function renderSchemaSvg(sc) {
     // PRODUCT_IS is drawn from all four holdings that carry a product, and the count is
     // the TOTAL across them - so four identical ":PRODUCT_IS x17" in a row said the same
     // thing four times and overstated each edge. Label it once, on the first arrow.
-    if (seen[l.rel] && l.rel === 'PRODUCT_IS') return;
+    // Same for INSTANCE_OF: nine holdings plus Product all point at Concept, and
+    // nine identical ":INSTANCE_OF" labels stacked in a column said one thing nine
+    // times. The statement is "every holding reaches the hub" - it is made once.
+    if (seen[l.rel] && (l.rel === 'PRODUCT_IS' || l.rel === 'INSTANCE_OF')) return;
     seen[l.rel] = true;
     var w = l.text.length * KGL_CH;
     var lx, ly;
@@ -3958,23 +4173,21 @@ var FLOW_MAP = {
   'close_ticket':                { x: 3090, y:  40, w: FL_W, h: 102, kind: 'step', owner: 'Ticket Creation',
                                    note: 'mark the selected ticket closed' },
 
-  'classify_intent':             { x: 2110, y: 470, w: FL_W, h: 136, kind: 'agent', owner: 'Intent Classification', llm: 'intent',
-                                   note: 'ONE LLM call returns intent +|urgency + sentiment + language|written onto the turn (sql)' },
+  'classify_intent':             { x: 2110, y: 470, w: FL_W, h: 150, kind: 'agent', owner: 'Intent Classification', llm: 'intent',
+                                   note: 'ONE LLM call returns intent +|urgency + sentiment + language|reads the last 5 turns, both sides|written onto the turn (sql)' },
   'validate_customer':           { x: 2600, y: 470, w: FL_W, h: 136, kind: 'gate', owner: 'Customer Validation',
                                    note: 'registered for this intent?' },
   'reject_unregistered_customer':{ x: 2600, y: 650, w: FL_W, h: 108, kind: 'step', owner: 'Customer Validation',
                                    note: 'ask them to write from|a registered address' },
   'resolve_query':               { x: 3090, y: 470, w: FL_W, h: 164, kind: 'agent', owner: 'Query Resolution', llm: 'grade+answer',
-                                   note: 'answers from the RL memory, their|tickets or records (graph),|or the KB (kb)|- then grades it L1 / L2 / L3' },
-  'decide_ticket':               { x: 3580, y: 470, w: FL_W, h: 136, kind: 'gate', owner: 'Ticket Creation',
-                                   note: 'does a human need to see this?|L2/L3 always -> ticket' },
+                                   note: 'answers from the RL memory, their|tickets or records (graph),|or the KB ({kbstore})|- then grades it L1 / L2 / L3' },
+  'decide_ticket':               { x: 3580, y: 470, w: FL_W, h: 150, kind: 'agent', owner: 'Ticket Creation', llm: 'needs a person?',
+                                   note: 'a ticket is created either way -|this decides the HOLD only|risk, the words themselves,|or no answer good enough' },
   'create_ticket':               { x: 4070, y: 446, w: FL_W, h: 145, kind: 'agent', owner: 'Ticket Creation', llm: 'same matter?',
                                    note: 'same matter or new? matched on|transactions (graph)|the ticket is written (sql)' },
-  'skip_ticket':                 { x: 4070, y: 600, w: FL_W, h: 92, kind: 'step', owner: 'Ticket Creation',
-                                   note: 'answer directly' },
 
-  'send_outbound_reply':         { x: 4030, y: 212, w: 500, h: 200, kind: 'gate', owner: 'Workflow Automation',
-                                   note: 'REVIEW GATE|hold <=> ticket required|customer gets a holding message|an agent edits or approves,|then sends it manually' },
+  'send_outbound_reply':         { x: 4030, y: 212, w: 500, h: 214, kind: 'gate', owner: 'Workflow Automation',
+                                   note: 'REVIEW GATE|hold <=> hold_required|the hold reason is shown, not the level|customer gets a holding message|an agent edits or approves,|then sends it manually' },
   'persist_audit_events':        { x: 4600, y: 240, w: FL_W, h: 145, kind: 'step',
                                    note: 'turn + citations + evidence (sql)|Interaction closed, memory (graph)' },
   '__end__':                     { x: 5090, y: 264, w: 122, h: 58, kind: 'end', label: 'END' }
@@ -4000,10 +4213,8 @@ var FLOW_EDGES = [
   { f: 'validate_customer', t: 'reject_unregistered_customer', fs: 'b', ts: 't', cond: 'not' },
   { f: 'reject_unregistered_customer', t: 'send_outbound_reply', band: 800, gx: 4590, ts: 'b' },
   { f: 'resolve_query', t: 'decide_ticket', fs: 'r', ts: 'l' },
-  { f: 'decide_ticket', t: 'create_ticket', fs: 'r', ts: 'l', cond: 'required' },
-  { f: 'decide_ticket', t: 'skip_ticket', fs: 'b', ts: 'l', cond: 'no' },
+  { f: 'decide_ticket', t: 'create_ticket', fs: 'r', ts: 'l' },
   { f: 'create_ticket', t: 'send_outbound_reply', fs: 't', ts: 'b' },
-  { f: 'skip_ticket', t: 'send_outbound_reply', band: 800, gx: 4630, ts: 'b' },
 
   { f: 'send_outbound_reply', t: 'persist_audit_events', fs: 'r', ts: 'l' },
   { f: 'persist_audit_events', t: '__end__', fs: 'r', ts: 'l' }
@@ -4023,8 +4234,32 @@ function flAnchor(n, side) {
   return [n.x + n.w, n.y + n.h / 2];
 }
 
+// Which store backs the KB, read from the live payload rather than written into the
+// note. RAG_BACKEND selects it at runtime, so a hardcoded word is wrong on one of the
+// two deployments - and when it is neo4j the KB is IN the graph, which is the whole
+// point of the (:KBChunk)-[:ABOUT]->(:Product) links and cannot be said by a fixed
+// string. Falls back to 'kb' when the payload is missing or shaped unexpectedly:
+// a vague word beats a confidently wrong one.
+function flowKbStore(wf) {
+  try {
+    var agents = (wf && wf.agents) || [];
+    for (var i = 0; i < agents.length; i++) {
+      if (agents[i].name !== 'query_resolution_agent') continue;
+      var ex = String(agents[i].execution || '');
+      // execution reads "<graph>_traversal_for_records_or_<store>_vector_search_for_kb_..."
+      var m = ex.match(/_or_([a-z0-9]+)_vector_search_for_kb/);
+      if (!m) return 'kb';
+      // On Neo4j the chunks are nodes in the same graph, so say so in the vocabulary
+      // the other boxes already use; anything else names the store it actually is.
+      return m[1] === 'neo4j' ? 'graph' : m[1];
+    }
+  } catch (e) {}
+  return 'kb';
+}
+
 function renderFlowSvg(wf) {
   var W = 5300, H = 850;
+  var kbStore = flowKbStore(wf);
   var svg = '<svg class="kgs" style="--kgs-w:' + W + 'px;--kgs-h:' + H + 'px;--kgs-s:0.44" width="' + W + '" height="' + H
           + '" viewBox="0 0 ' + W + ' ' + H + '" xmlns="http://www.w3.org/2000/svg">';
   svg += '<defs><marker id="flar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" '
@@ -4089,12 +4324,15 @@ function renderFlowSvg(wf) {
       }
       svg += '<text class="fl-name" x="' + (n.x + 11) + '" y="' + ty + '" fill="' + c[2] + '">'
            + kgEscape(key) + '</text>';
-      (n.note || '').split('|').forEach(function(line, i) {
+      // {kbstore} resolves BEFORE escaping, so the substituted word is escaped with
+      // the rest of the line, and before the colouring below so it is highlighted
+      // like any other store name.
+      (n.note || '').replace(/\{kbstore\}/g, kbStore).split('|').forEach(function(line, i) {
         if (!line) return;
         // sql / graph / kb name the STORE a fact came from. They sit inside the sentence
         // rather than on a line of their own - a separate line just restated the note in
         // different words - so they are coloured to read as sources, not as prose.
-        var html = kgEscape(line).replace(/(sql|graph|kb)/g, function(w) {
+        var html = kgEscape(line).replace(/\b(sql|graph|kb|opensearch)\b/g, function(w) {
           return '<tspan class="fl-store">' + w + '</tspan>';
         });
         svg += '<text class="fl-note" x="' + (n.x + 11) + '" y="' + (ty + 32 + i * 25) + '">'
@@ -4134,4 +4372,565 @@ if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', loadSystemDiagrams);
 } else {
   loadSystemDiagrams();
+}
+
+
+// ── Live graph: every node and relationship, force-directed ───────────────────
+// Companion to openSchemaModal, NOT a replacement. The schema view answers "what does
+// this system know how to know" (one box per label, hand-positioned). This answers
+// "what does it hold right now" — and it GROWS: each inbound message writes an
+// :Interaction, its :Ticket, a :ResolutionMemory and a :HANDLED_BY edge to the
+// answering :Agent, so a freshly wiped database is the floor, not the shape.
+var _liveGraph = null;
+
+// One modal, one heading. Both tabs show the same graph — Schema is its shape, Live is
+// its contents — so the title must not change when you switch, or the switch reads as
+// navigation to a different feature rather than a change of view.
+var KG_MODAL_TITLE = 'Knowledge graph';
+var KG_MODAL_SUB = 'The shape of the graph, and every node and relationship in it right now';
+
+var KG_COLOURS = {
+  Customer: '#f59e0b', Account: '#3b82f6', Transaction: '#60a5fa', CreditCard: '#a855f7',
+  FixedDeposit: '#14b8a6', Loan: '#ef4444', Claim: '#ec4899', Policy: '#8b5cf6',
+  Product: '#22c55e', Interaction: '#06b6d4', ResolutionMemory: '#eab308',
+  KYC: '#64748b', ChargePenalty: '#f97316', Agent: '#f43f5e', Ticket: '#fb7185'
+};
+
+// Layout is d3-force (vendored, apps/admin-ui/vendor-d3-force.js), not hand-rolled.
+// A hand-written Fruchterman-Reingold went through many rounds here and never produced
+// an even distribution: nodes clumped where their seeds fell, or — when repulsion was
+// raised to spread them — were driven onto the frame leaving a hollow centre. d3 solves
+// exactly this (quadtree n-body, proper collision iterations) and does it in one pass.
+// Measured against the hand-rolled version on the live 178-node graph:
+//   min gap 25px (was 13) · median 25px · p90/median 1.9x (was 5.6x) · 6% near the frame
+// Ticked to completion here and painted static — nothing animates after the modal opens.
+function kgForceLayout(nodes, edges, W, H) {
+  var N = nodes.length;
+  if (!N) return {};
+  var d3f = window.d3force;
+  var out = {};
+
+  // Fallback: if the vendored bundle failed to load, lay out on a grid rather than
+  // throwing. An ugly graph beats a blank modal.
+  if (!d3f || !d3f.forceSimulation) {
+    var c = Math.ceil(Math.sqrt(N));
+    nodes.forEach(function(n, i) {
+      out[n.id] = { x: 30 + (i % c) * ((W - 60) / c), y: 30 + Math.floor(i / c) * ((H - 60) / c) };
+    });
+    return out;
+  }
+
+  // d3 mutates these objects, so give it copies — never the caller's payload.
+  var sim = nodes.map(function(n) { return { id: n.id }; });
+  var lnk = edges.map(function(e) { return { source: e.source, target: e.target }; });
+
+  var s = d3f.forceSimulation(sim)
+    .force('link', d3f.forceLink(lnk).id(function(d) { return d.id; })
+      .distance(30).strength(0.7))
+    .force('charge', d3f.forceManyBody().strength(-120).distanceMax(400))
+    .force('center', d3f.forceCenter(W / 2, H / 2))
+    .force('collide', d3f.forceCollide(12).strength(1).iterations(3))
+    // The x/y forces at 0.10/0.12 are what keep the middle populated: without them the
+    // drawing hollows out, which was the single worst symptom of the old layout.
+    .force('x', d3f.forceX(W / 2).strength(0.10))
+    .force('y', d3f.forceY(H / 2).strength(0.12))
+    .stop();
+  for (var t = 0; t < 420; t++) s.tick();
+
+  // Fit to frame: the simulation settles at whatever size its forces balance at, which
+  // is not related to the canvas.
+  var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  sim.forEach(function(n) {
+    if (n.x < minX) minX = n.x;
+    if (n.x > maxX) maxX = n.x;
+    if (n.y < minY) minY = n.y;
+    if (n.y > maxY) maxY = n.y;
+  });
+  var pad = 22;
+  var sc = Math.min((W - 2 * pad) / Math.max(1, maxX - minX),
+                    (H - 2 * pad) / Math.max(1, maxY - minY));
+  var offX = (W - (maxX - minX) * sc) / 2, offY = (H - (maxY - minY) * sc) / 2;
+  sim.forEach(function(n) {
+    out[n.id] = { x: offX + (n.x - minX) * sc, y: offY + (n.y - minY) * sc };
+  });
+  return out;
+}
+
+// Identity first, then the one or two numbers that matter for that node type. Ordered,
+// not alphabetical: a hover is read top-down and stops early.
+var KG_TIP_FIELDS = [
+  'name', 'customer_id', 'product_id', 'concept', 'sold',
+  'account_number', 'card_id', 'loan_id', 'policy_id', 'claim_id', 'fd_id',
+  'txn_id', 'ticket_id', 'turn_id', 'agent_id', 'chunk_id',
+  'category', 'product_type', 'account_type', 'card_variant', 'loan_type',
+  'policy_type', 'claim_status', 'kyc_status', 'status', 'doc_type',
+  'balance_due', 'min_amount_due', 'amount_inr', 'amount', 'coverage_inr',
+  'premium_inr', 'principal_amount', 'maturity_amount', 'dpd',
+  'emis_paid', 'emis_pending', 'charge_type', 'reason', 'description'
+];
+
+// Never worth a line in a hover: an embedding is 384 floats, and the rest are internal
+// bookkeeping a reader cannot act on.
+var KG_TIP_SKIP = {
+  embedding: 1, document_version: 1, text: 1, message: 1, resolution_text: 1,
+  memory_key: 1, last_updated: 1, registered_at: 1, created_at: 1, updated_at: 1
+};
+
+function kgTipLabel(key) {
+  return key.replace(/_/g, ' ');
+}
+
+function kgTipValue(v) {
+  var s = String(v);
+  return s.length > 64 ? s.slice(0, 61) + '…' : s;
+}
+
+// ── Node hover: what a reader needs, in the order they need it ──────────────
+//
+// The previous hover was the generic field dump below - KG_TIP_FIELDS in
+// priority order, then whatever else the node carried, up to seven lines. It
+// opened on the LEAST readable thing a node has: "account_number:
+// 40900000100004" led a charge, and a guidance chunk's actual question was
+// truncated at 40 characters underneath "chunk_id: InboxIQ_BFSI_KB.pdf::7".
+// Nothing said what the node WAS - a reader assembled that from six key:value
+// pairs.
+//
+// Now: the node's name first, then one plain-English line, then supporting
+// facts. Raw ids never lead and are shortened to their last four characters;
+// money and dates are formatted; field names are not shown at all.
+
+var KG_TYPE_NAMES = {
+  ChargePenalty: 'Charge', KBChunk: 'Guidance', FixedDeposit: 'Fixed Deposit',
+  CreditCard: 'Credit Card', ResolutionMemory: 'Past Resolution'
+};
+
+// Returns null for anything not numeric. The seed carries the literal string
+// "N/A" in amount fields on unsettled claims, so every caller must test the
+// RESULT of this rather than the raw property: `p.amount_approved_inr` is
+// truthy for "N/A", and concatenating the null result printed "null approved".
+function kgMoney(v) {
+  if (v == null || v === '') return null;
+  var n = Number(v);
+  if (!isFinite(n)) return null;
+  return 'Rs.' + Math.round(n).toLocaleString('en-IN');
+}
+
+// `prefix + money + suffix`, or nothing at all when the value is not a number.
+function kgAmt(v, prefix, suffix) {
+  var m = kgMoney(v);
+  return m ? (prefix || '') + m + (suffix || '') : null;
+}
+
+function kgDate(v) {
+  if (!v) return null;
+  var d = new Date(String(v).slice(0, 10));
+  if (isNaN(d.getTime())) return null;
+  return d.getDate() + ' ' + ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul',
+    'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][d.getMonth()] + ' ' + d.getFullYear();
+}
+
+// Last four characters, so an id identifies a row without spending a line on it.
+function kgShortId(v) {
+  var s = String(v || '');
+  return s.length > 4 ? '···' + s.slice(-4) : s;
+}
+
+function kgWords(v) {
+  // "MinBalanceNonMaintenance" -> "Min balance non maintenance"
+  var s = String(v || '').replace(/_/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2');
+  return s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
+}
+
+// Each builder returns the lines BELOW the node name. Falsy entries are dropped,
+// so a node missing a field simply has a shorter tooltip rather than an empty
+// label. Capped at four lines plus the name and the connection count.
+var KG_TIP_BUILDERS = {
+  Customer: function(p) {
+    return [[p.name, p.segment].filter(Boolean).join(' · '),
+            [p.city, p.occupation].filter(Boolean).join(' · ')];
+  },
+  Concept: function(p) {
+    return [p.name, p.sold ? 'Sold by the bank' : 'Explained, not sold'];
+  },
+  KBChunk: function(p) {
+    var t = String(p.text || '');
+    // The KB is stored as "Q: ... A: ...", and the question is the one line that
+    // identifies a chunk at a glance.
+    var q = t.match(/Q:\s*([^\n]+?)(?:\s*A:|$)/);
+    var a = t.match(/A:\s*([\s\S]+)/);
+    return [q ? '"' + q[1].trim() + '"' : t.slice(0, 70),
+            a ? a[1].trim().slice(0, 90) + (a[1].length > 90 ? '…' : '') : null,
+            p.doc_type === 'resolution_example' ? 'Classifier example' : null];
+  },
+  Product: function(p) {
+    return [p.product_name || p.name, [p.category, p.product_type].filter(Boolean).join(' · ')];
+  },
+  Account: function(p) {
+    return [[kgWords(p.account_sub_type || p.account_type), 'account',
+             kgShortId(p.account_number)].filter(Boolean).join(' '),
+            [p.status, p.branch].filter(Boolean).join(' · '),
+            kgAmt(p.min_balance_required, 'Min balance ')];
+  },
+  CreditCard: function(p) {
+    return [[p.card_variant, p.card_network].filter(Boolean).join(' · '),
+            kgAmt(p.total_amount_due, '', ' due'),
+            [kgAmt(p.min_amount_due, 'Min '),
+             kgDate(p.payment_due_date) ? 'by ' + kgDate(p.payment_due_date) : null]
+              .filter(Boolean).join(' · ')];
+  },
+  Loan: function(p) {
+    return [[kgWords(p.loan_type), p.status].filter(Boolean).join(' · '),
+            kgAmt(p.outstanding_amount, '', ' outstanding'),
+            [p.emis_paid != null ? p.emis_paid + ' EMIs paid' : null,
+             p.emis_pending != null ? p.emis_pending + ' left' : null]
+              .filter(Boolean).join(' · ')];
+  },
+  FixedDeposit: function(p) {
+    return [kgAmt(p.maturity_amount, '', ' at maturity') || p.status,
+            [p.interest_rate ? p.interest_rate + '%' : null,
+             kgDate(p.maturity_date) ? 'matures ' + kgDate(p.maturity_date) : null]
+              .filter(Boolean).join(' · '),
+            kgShortId(p.fd_id)];
+  },
+  Policy: function(p) {
+    return [[kgWords(p.policy_type), p.status].filter(Boolean).join(' · '),
+            [kgAmt(p.premium_inr, '', '/yr'),
+             kgDate(p.next_premium_due) ? 'renews ' + kgDate(p.next_premium_due) : null]
+              .filter(Boolean).join(' · '),
+            p.nominee_name ? 'Nominee: ' + p.nominee_name : null];
+  },
+  Claim: function(p) {
+    return [[kgWords(p.claim_type), p.status].filter(Boolean).join(' · '),
+            [kgAmt(p.amount_approved_inr, '', ' approved'),
+             kgAmt(p.amount_claimed_inr, 'of ')]
+              .filter(Boolean).join(' '),
+            p.reason];
+  },
+  ChargePenalty: function(p) {
+    return [[kgWords(p.charge_type), kgMoney(p.amount)]
+              .filter(Boolean).join(' · '),
+            p.reason,
+            [p.account_number ? 'Account ' + kgShortId(p.account_number) : null,
+             kgDate(p.charge_date),
+             p.reversal_status === 'Charged' ? 'not reversed' : p.reversal_status]
+              .filter(Boolean).join(' · ')];
+  },
+  Transaction: function(p) {
+    return [[p.txn_type === 'Debit' && p.beneficiary_name ? 'Paid ' + p.beneficiary_name
+              : kgWords(p.txn_type), kgMoney(p.amount)]
+              .filter(Boolean).join(' · '),
+            [p.status, p.channel].filter(Boolean).join(' · '),
+            [kgDate(p.txn_date), p.account_number ? kgShortId(p.account_number) : null]
+              .filter(Boolean).join(' · ')];
+  },
+  KYC: function(p) {
+    return [p.kyc_status, kgDate(p.registered_at) ? 'Registered ' + kgDate(p.registered_at) : null];
+  },
+  Ticket: function(p) {
+    return [p.subject || kgWords(p.intent),
+            [p.status, p.ticket_scope].filter(Boolean).join(' · '),
+            kgShortId(p.ticket_id)];
+  },
+  Interaction: function(p) {
+    return [p.message ? '"' + String(p.message).slice(0, 70) + '"' : kgWords(p.intent),
+            [p.channel, p.status].filter(Boolean).join(' · '),
+            kgDate(p.updated_at || p.created_at)];
+  },
+  Agent: function(p) {
+    return [p.name, kgWords(p.agent_type)];
+  },
+  ResolutionMemory: function(p) {
+    return [p.intent_type ? kgWords(p.intent_type) : p.memory_key,
+            p.verified ? 'Verified by an agent' : 'Not yet verified',
+            'Reused ' + (p.times_reused || 0) + ' times'];
+  }
+};
+
+function kgNodeTip(n, degree) {
+  var props = n.props || {};
+  var lines = [KG_TYPE_NAMES[n.type] || kgWords(n.type)];
+  var build = KG_TIP_BUILDERS[n.type];
+  if (build) {
+    try {
+      build(props).forEach(function(l) {
+        if (l && String(l).trim() && lines.length < 5) lines.push(String(l).trim());
+      });
+    } catch (e) { /* a malformed node falls back to the name alone */ }
+  }
+  // No builder, or one that produced nothing: the label is better than an
+  // otherwise empty tooltip.
+  if (lines.length === 1 && n.label && n.label !== n.type) lines.push(n.label);
+  lines.push('── ' + degree + ' connection' + (degree === 1 ? '' : 's'));
+  return lines;
+}
+
+function renderLiveGraphSvg(g) {
+  var nodes = g.nodes || [], edges = g.edges || [];
+  if (!nodes.length) return '<div class="kg-empty">The graph is empty.</div>';
+
+  var byId = {};
+  nodes.forEach(function(n) { byId[n.id] = n; });
+
+  var deg = {}, nbr = {};
+  nodes.forEach(function(n) { deg[n.id] = 0; nbr[n.id] = []; });
+  edges.forEach(function(e) {
+    if (deg[e.source] == null || deg[e.target] == null) return;
+    deg[e.source]++; deg[e.target]++;
+    nbr[e.source].push(e.target); nbr[e.target].push(e.source);
+  });
+
+  // A force layout drew this before, and it could not answer the question the view
+  // exists for: WHICH nodes are the centres and what hangs off them. Everything came
+  // out the same size in one mesh, a node with a single edge was flung to the rim, and
+  // 1px arcs at 278 nodes are invisible - so correctly connected leaves looked
+  // disconnected. The graph has two kinds of hub and it should simply be drawn that way:
+  //
+  //   Customer (5)  - one per person, their records hang off them
+  //   Concept  (19) - the shared spine; holdings AND knowledge chunks both point here,
+  //                   which is what makes this ONE graph rather than five separate trees
+  //
+  // So: customers on an outer ring with their records in a fan, concepts on an inner
+  // ring, and the customer->concept edges drawn across the middle where they are the
+  // whole point. Deterministic, not simulated - the same data draws the same picture.
+  var customers = nodes.filter(function(n) { return n.type === 'Customer'; });
+  var concepts  = nodes.filter(function(n) { return n.type === 'Concept'; });
+  var hubIds = {};
+  customers.concat(concepts).forEach(function(n) { hubIds[n.id] = 1; });
+
+  // H 780: the customer ring reaches CY +/- 830*0.33 = 274, plus a 96px record fan
+  // and a 30px second arc, so the outermost dot sits ~400 from centre and clears it.
+  // The canvas is proportioned like the box it is drawn into. It was 1320x800
+  // (aspect 1.65) inside a modal body nearer 3:1, so preserveAspectRatio scaled
+  // the picture to fit the HEIGHT and left ~45% of the width as dead margin on
+  // either side - the drawing rendered at roughly half the size it had room for,
+  // with every node crushed toward the centre. Widening the coordinate space and
+  // the ring ellipses below spends that margin on the graph instead.
+  var W = 2200, H = 780, CX = W / 2, CY = H / 2 - 10;
+  var pos = {}, ring = {};
+
+  // Concepts: inner ring. Ordered by degree so the busiest sit apart rather than
+  // adjacent, which keeps their fans from overlapping.
+  concepts.sort(function(a, b) { return deg[b.id] - deg[a.id]; });
+  var CR = 300;
+  concepts.forEach(function(n, i) {
+    var a = (i / concepts.length) * Math.PI * 2 - Math.PI / 2;
+    pos[n.id] = { x: CX + Math.cos(a) * CR, y: CY + Math.sin(a) * CR * 0.40 };
+    ring[n.id] = 'concept';
+  });
+
+  // Customers: outer ring, offset half a step so they sit between concept spokes.
+  var UR = 830;
+  customers.forEach(function(n, i) {
+    var a = (i / customers.length) * Math.PI * 2 - Math.PI / 2 + Math.PI / customers.length;
+    pos[n.id] = { x: CX + Math.cos(a) * UR, y: CY + Math.sin(a) * UR * 0.33 };
+    ring[n.id] = 'customer';
+  });
+
+  // Everything else fans off the hub it is attached to, on the far side of that hub
+  // from the centre - so a customer's records sit OUTSIDE them and a concept's chunks
+  // sit around it, and neither crosses the middle where the spine edges run.
+  var placed = {};
+  Object.keys(pos).forEach(function(id) { placed[id] = 1; });
+
+  // A FULL circle. Fanning over ~190 degrees away from centre made every customer
+  // read as a half-moon rather than as a hub with its records around it - my own
+  // addition, and the wrong shape for what this is meant to show.
+  function fanAround(hub, kids, r0) {
+    if (!kids.length) return;
+    var hp = pos[hub.id];
+    var step = (Math.PI * 2) / kids.length;
+    kids.forEach(function(kid, i) {
+      var a = step * i - Math.PI / 2;
+      // Two arcs when there are many, so a 20-child fan does not stretch into a line.
+      var r = r0 + (kids.length > 9 && i % 2 ? 30 : 0);
+      pos[kid.id] = { x: hp.x + Math.cos(a) * r, y: hp.y + Math.sin(a) * r };
+      placed[kid.id] = 1;
+    });
+  }
+
+  // Customers first: a record belongs to its owner, not to a concept it also touches.
+  customers.forEach(function(c) {
+    var kids = (nbr[c.id] || []).map(function(id) { return byId[id]; })
+      .filter(function(k) { return k && !hubIds[k.id] && !placed[k.id]; });
+    fanAround(c, kids, 96);
+  });
+  concepts.forEach(function(c) {
+    var kids = (nbr[c.id] || []).map(function(id) { return byId[id]; })
+      .filter(function(k) { return k && !hubIds[k.id] && !placed[k.id]; });
+    fanAround(c, kids, 74);
+  });
+
+  // Whatever the two passes above did not reach. This is NOT the same as having no
+  // edges: a node two hops from any hub (a Claim under a Policy, a chunk under a
+  // Concept already full) is fully connected and simply had no pass claim it. Calling
+  // these 'disconnected' put a caption on screen that contradicted the database - 14
+  // against a real count of 1. So place them next to a neighbour that IS placed, and
+  // only call a node unconnected when it truly has degree 0.
+  var leftover = nodes.filter(function(n) { return !placed[n.id]; });
+  leftover.forEach(function(n) {
+    var anchor = null;
+    (nbr[n.id] || []).some(function(id) {
+      if (pos[id]) { anchor = pos[id]; return true; }
+      return false;
+    });
+    if (anchor) {
+      var a = Math.random() * Math.PI * 2;
+      pos[n.id] = { x: anchor.x + Math.cos(a) * 34, y: anchor.y + Math.sin(a) * 34 };
+      placed[n.id] = 1;
+    }
+  });
+  var orphans = nodes.filter(function(n) { return deg[n.id] === 0; });
+  orphans.forEach(function(n, i) {
+    pos[n.id] = { x: 40 + i * 22, y: H - 26 };
+    placed[n.id] = 1;
+  });
+
+  // The viewBox is the drawing's own bounding box, not the nominal canvas.
+  //
+  // W/H above are the coordinate space the ring layout computes in; the nodes
+  // only ever occupy part of it. Publishing "0 0 W H" and letting
+  // preserveAspectRatio letterbox it meant the picture was scaled to fit
+  // whichever axis was tighter - height, on a wide modal - and the spare width
+  // became two dead margins, with every node crushed into the middle. Fitting
+  // the box to the content lets the same drawing fill the container.
+  //
+  // Padding covers what is drawn beyond a node's centre: the 13px hub radius,
+  // its label sitting ~19px above it, and the orphan caption on the bottom row.
+  var bx0 = Infinity, by0 = Infinity, bx1 = -Infinity, by1 = -Infinity;
+  nodes.forEach(function(n) {
+    var q = pos[n.id];
+    if (!q) return;
+    if (q.x < bx0) bx0 = q.x;
+    if (q.x > bx1) bx1 = q.x;
+    if (q.y < by0) by0 = q.y;
+    if (q.y > by1) by1 = q.y;
+  });
+  var padX = 26, padT = 30, padB = orphans.length ? 40 : 26;
+  if (!isFinite(bx0)) { bx0 = 0; by0 = 0; bx1 = W; by1 = H; }
+  var vx = bx0 - padX, vy = by0 - padT;
+  var vw = Math.max(1, (bx1 - bx0) + padX * 2);
+  var vh = Math.max(1, (by1 - by0) + padT + padB);
+
+  var svg = '<svg class="kgs kgs-live" style="--kgs-w:' + Math.round(vw)
+          + 'px;--kgs-h:' + Math.round(vh)
+          + 'px;--kgs-s:1" viewBox="' + vx.toFixed(1) + ' ' + vy.toFixed(1) + ' '
+          + vw.toFixed(1) + ' ' + vh.toFixed(1)
+          + '" preserveAspectRatio="xMidYMid meet" xmlns="http://www.w3.org/2000/svg">';
+
+  // Spine edges (hub to hub) drawn first and heavier: these carry the design - a
+  // customer's holding reaching the same Concept a knowledge chunk explains.
+  // ONE edge colour. Splitting edges into an amber 'spine' and faint leaves was my own
+  // emphasis, not something the graph has: there is one kind of relationship here, and
+  // the amber tangle became the loudest thing in a picture where it should not be.
+  edges.forEach(function(e) {
+    var a = pos[e.source], b = pos[e.target];
+    if (!a || !b) return;
+    svg += '<line class="kgl-e" x1="' + a.x.toFixed(1) + '" y1="' + a.y.toFixed(1)
+        + '" x2="' + b.x.toFixed(1) + '" y2="' + b.y.toFixed(1) + '">'
+        + '<title>' + kgEscape(e.rel) + '</title></line>';
+  });
+
+  nodes.forEach(function(n) {
+    var p = pos[n.id];
+    if (!p) return;
+    // Hubs are drawn as hubs. The old range was 2.2-5px, so a 40-edge customer was
+    // barely twice a 1-edge transaction and no centre was visible at all.
+    var r = ring[n.id] === 'customer' ? 13 : ring[n.id] === 'concept' ? 9 : 3.4;
+    var cls = 'kgl-n' + (ring[n.id] ? ' kgl-hub' : '');
+    // Native <title>. A custom hover panel was tried here and reverted: the
+    // browser's own tooltip already works on an SVG child, survives every
+    // redraw of this view, and needs no listener to keep in step with it.
+    // Only the CONTENT of these lines changed - see kgNodeTip.
+    var lines = kgNodeTip(n, deg[n.id]);
+    svg += '<circle class="' + cls + '" cx="' + p.x.toFixed(1) + '" cy="' + p.y.toFixed(1)
+        + '" r="' + r + '" fill="' + (KG_COLOURS[n.type] || '#94a3b8')
+        + '"><title>' + kgEscape(lines.join('\n')) + '</title></circle>';
+  });
+
+  // Every hub is labelled - all 24 of them. That is the point of the view: a reader
+  // should be able to name each centre without hovering.
+  customers.concat(concepts).forEach(function(n) {
+    var p = pos[n.id];
+    if (!p) return;
+    var isCust = ring[n.id] === 'customer';
+    svg += '<text class="kgl-lab' + (isCust ? '' : ' kgl-lab-con') + '" x="' + p.x.toFixed(1)
+        + '" y="' + (p.y - (isCust ? 19 : 15)).toFixed(1) + '" text-anchor="middle">'
+        + kgEscape(n.label || n.type) + '</text>';
+  });
+
+  if (orphans.length) {
+    // Anchored to the orphan row itself, not to H: the viewBox is now the
+    // content's bounding box, and a caption positioned from the nominal canvas
+    // height would fall outside it and be clipped.
+    svg += '<text class="kgl-note" x="40" y="' + (H - 26 - 18) + '">'
+        + orphans.map(function(n) { return kgEscape(n.label || n.type); }).join(', ')
+        + ' — no relationships yet</text>';
+  }
+
+  svg += '</svg>';
+
+  var present = {};
+  nodes.forEach(function(n) { present[n.type] = (present[n.type] || 0) + 1; });
+  var key = '<div class="kgs-key kgs-key-live">' + Object.keys(present)
+    .sort(function(a, b) { return present[b] - present[a] || a.localeCompare(b); })
+    .map(function(t) {
+      return '<span class="kgs-k"><i style="background:' + (KG_COLOURS[t] || '#94a3b8')
+           + '"></i>' + kgEscape(t) + ' ' + present[t] + '</span>';
+    }).join('') + '</div>';
+
+  return svg + key;
+}
+
+window.openLiveGraphModal = function(_isRedraw) {
+  var g = _liveGraph;
+  // Refetch and redraw — see openSchemaModal. This view is the one that visibly grows as
+  // messages arrive, so a stale payload is most obvious here.
+  if (!_isRedraw) {
+    loadLiveGraph().then(function() {
+      var modal = document.getElementById('graphModal');
+      if (modal && !modal.classList.contains('hidden')
+          && document.querySelector('.kg-vtab.on')
+          && document.querySelector('.kg-vtab.on').textContent === 'Graph') {
+        openLiveGraphModal(true);
+      }
+    });
+  }
+  if (!g || !g.reachable) {
+    kgShowModal(KG_MODAL_TITLE, KG_MODAL_SUB, '',
+      '<div class="kg-empty">Graph not loaded'
+      + (g && g.error ? ': ' + kgEscape(g.error) : ' — is the graph database running?') + '</div>'
+      + kgToggleHtml('live'));
+    return;
+  }
+  var rels = {};
+  (g.edges || []).forEach(function(e) { rels[e.rel] = 1; });
+  kgShowModal(KG_MODAL_TITLE, KG_MODAL_SUB,
+    (g.nodes || []).length + ' nodes · ' + (g.edges || []).length + ' relationships · '
+      + Object.keys(rels).length + ' types in use'
+      + (g.truncated ? ' · truncated' : ''),
+    renderLiveGraphSvg(g) + kgToggleHtml('live'));
+};
+
+// Schema <-> Live switch. Both views keep their own entry point; neither replaces the
+// other — the schema diagram answers a question the live graph cannot, and vice versa.
+// Graph first, then Schema. The live graph is what the button opens and what a
+// reader wants to see - the database as it stands. The schema is the reference
+// view behind it, so it reads second rather than leading.
+function kgToggleHtml(active) {
+  return '<div class="kg-switch">'
+    + '<button type="button" class="kg-vtab' + (active === 'live' ? ' on' : '')
+    + '" onclick="openLiveGraphModal()">Graph</button>'
+    + '<button type="button" class="kg-vtab' + (active === 'schema' ? ' on' : '')
+    + '" onclick="openSchemaModal()">Schema</button>'
+    + '</div>';
+}
+
+function loadLiveGraph() {
+  return fetch('/admin/neo4j/graph', { headers: outerAdminHeaders() })
+    .then(function(r) {
+      if (!r.ok) throw new Error(r.status + ' ' + r.statusText);
+      return r.json();
+    })
+    .then(function(d) { _liveGraph = d; })
+    .catch(function(e) { _liveGraph = { reachable: false, error: String(e.message || e) }; });
 }

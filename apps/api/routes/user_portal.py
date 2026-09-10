@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 from apps.api.dependencies.runtime import get_repository, get_router
 from services.channel_service.adapters.web_chat_adapter import WebChatAdapter
 from shared.schemas.messages import EmailWebhookPayload, WebChatWebhookPayload, WhatsAppWebhookPayload
+from shared.schemas.tickets import SERVICEABLE_TICKET_STATUSES, TicketStatus
 from shared.utils.ids import new_id
 
 from .webhooks import handle_email_message, handle_whatsapp_message
@@ -21,6 +22,10 @@ router = APIRouter(prefix="/user", tags=["user-portal"])
 logger = logging.getLogger(__name__)
 
 _TOKEN_TTL_SECONDS = 28800
+
+# Statuses a customer may see on their own ticket: a case a human is on, or a finished
+# one. LOGGED is deliberately absent - it is an internal grouping id (redesign decision 1).
+_CUSTOMER_VISIBLE_STATUSES = frozenset(SERVICEABLE_TICKET_STATUSES) | {TicketStatus.CLOSED}
 
 
 class UserLoginRequest(BaseModel):
@@ -514,6 +519,12 @@ def get_user_ticket_detail(
     repo = get_repository()
     ticket = repo.get_ticket(ticket_id)
     if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    # A LOGGED ticket is an internal grouping id for a question that was answered without a
+    # human (redesign decision 1: logging ids are never shown to the customer). The list this
+    # modal opens from already filters them out, so this is not reachable through the UI - it
+    # is closed here because the endpoint takes a ticket_id directly and is customer-facing.
+    if str(ticket.get("status") or "").lower() not in _CUSTOMER_VISIBLE_STATUSES:
         raise HTTPException(status_code=404, detail="Ticket not found")
     conversation = repo.get_conversation(ticket.get("conversation_id"))
     if not conversation or not _owns_conversation(conversation, user_id):

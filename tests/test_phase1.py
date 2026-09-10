@@ -16,7 +16,7 @@ from services.channel_service.adapters.email_adapter import EmailAdapter
 from services.channel_service.adapters.whatsapp_adapter import WhatsAppAdapter
 from services.channel_service.connectors.email_sender import SMTPEmailConnector
 from services.channel_service.delivery import OutboundDeliveryService
-from services.crm_service.client import CRMResult
+from services.crm_service.client import CRMClient, CRMResult
 from services.intent_service.classifier import classify_intent
 from services.orchestration_service.graph import OrchestrationGraph
 from services.orchestration_service.router import OmnichannelRouter
@@ -62,7 +62,63 @@ class UnderstatedLLM:
         }
 
 
+class FakeGenerator:
+    """Stands in for GroqGenerator so a test graph never builds a real Groq client.
+
+    Before this existed, TicketCreationAgent fell back to `generator or GroqGenerator()`
+    and OrchestrationGraph had no way to pass one in, so EVERY test that built a graph
+    carried a live client: a measured 10 real Groq calls per suite run, billed against
+    the demo's free-tier quota.
+
+    Returns llm_used=False so both consumers take their non-LLM branch, which is the
+    pre-existing behaviour these tests were written against:
+      * detect_action  — only acts when llm_used is true, so it falls through to its
+                         deterministic keyword result
+      * _referee_match — treats a non-answer as NEW, the documented safe default
+    """
+
+    model = "test"
+
+    def __init__(self):
+        self.calls = []
+
+    def _generate(self, system_prompt="", user_prompt="", operation="llm_generation",
+                  metadata=None, json_mode=False, max_tokens=None):
+        self.calls.append(operation)
+        return {"text": "", "model": self.model, "llm_used": False}
+
+    def generate_answer(self, query, contexts, conversation_context=None):
+        self.calls.append("answer_generation")
+        return {"text": "", "model": self.model, "llm_used": False}
+
+
+class _FakeStore:
+    """The retrieval half of RAGPipeline, without the generation half.
+
+    The graph branch of QueryResolutionAgent now reads `self.rag.store.similarity_search`
+    directly rather than calling `rag.answer()`, because answer() also runs
+    generate_answer internally and the branch then discards that reply and generates
+    again - a second LLM call on every message. A fake without a `store` makes that call
+    raise AttributeError into the branch's except, so the KB silently contributes nothing.
+    """
+
+    def similarity_search(self, query, k=None):
+        return [{
+            "text": "Loan applications require KYC documents, income proof and property papers.",
+            "score": 0.88,
+            "metadata": {"source": "InboxIQ_BFSI_KB.pdf:p7", "doc_type": "knowledge_base",
+                         "document_version": "test-v1"},
+        }]
+
+
 class FakeRAG:
+    # QueryResolutionAgent's Neo4j and ticket-lookup branches call
+    # `self.rag.generator.generate_answer(...)` directly, bypassing .answer().
+    # Without this attribute those branches reach whatever generator the real
+    # RAGPipeline built - i.e. a live Groq client.
+    generator = FakeGenerator()
+    store = _FakeStore()
+
     def answer(self, query, context):
         if "unknown" in query.lower():
             return {"answer": "manual review", "confidence": 0.0, "contexts": [], "citations": [], "llm": {}}
@@ -102,18 +158,51 @@ class FakeResolutionEngine:
 
 
 class FakeNeo4j:
-    """Stub Neo4j client that returns canned BFSI graph data."""
+    """Stub Neo4j client that returns canned BFSI graph data.
+
+    The record branch answers the single relationship walk in
+    `queries.get_all_customer_records`, which returns `label` + `props` per row. It used to
+    match on the literal node label appearing in the Cypher ("Loan" in cypher) and return
+    the seven columns `get_loan_status` named - a shape that only existed while there was a
+    query per record type naming its own columns. Those queries are gone, so a fake keyed on
+    them silently returned NOTHING and eight tests failed on empty graph context rather than
+    on anything they were written to check.
+    """
 
     def query(self, cypher, params=None):
-        if "customer_id" in cypher and "$cid" in cypher and "Loan" in cypher:
-            return [{"loan_id": "L001", "loan_type": "Personal Loan", "status": "Active",
-                     "amount_inr": 500000, "interest_rate": 10.5, "next_step": "Pay EMI by 5th",
-                     "last_updated": "2024-01-01"}]
-        if "customer_id" in cypher and "$cid" in cypher and "Claim" in cypher:
-            return []
+        if "properties(n)" in cypher:
+            return [
+                {"label": "Loan", "props": {
+                    "loan_id": "L001", "loan_type": "Personal Loan", "status": "Active",
+                    "amount_inr": 500000, "interest_rate": 10.5,
+                    "next_step": "Pay EMI by 5th", "last_updated": "2024-01-01",
+                    # Present so a test can assert the fields the old column list dropped.
+                    "emis_paid": 12, "emis_pending": 48, "total_emis": 60,
+                }, "parent_policy_type": None},
+            ]
         if "phone" in cypher or "email" in cypher:
             return [{"customer_id": "CUST-001", "email": "customer@example.com",
                      "phone": "+919999999999", "city": "Mumbai"}]
+        # The Concept walk that replaced the KB's similarity search. Keyed on the
+        # relationship type rather than on a column name: the query returns `text` /
+        # `concept` / `is_hers`, and `text` is far too common a word to key a fake on.
+        #
+        # Without this branch the guidance walk returns [], the KB never reaches
+        # `contexts`, and every test asserting a process question saw the knowledge
+        # base fails - the exact trap the docstring above records, one layer along.
+        # One chunk is marked is_hers to exercise both headings.
+        if "EXPLAINS" in cypher:
+            return [
+                {"text": "Q: How do I apply for a home loan? A: Submit the application "
+                         "form with KYC documents, income proofs and property papers.",
+                 "concept": "Home Loan", "is_hers": False},
+                {"text": "Q: How do I file a health insurance claim? A: Inform the "
+                         "insurer within 24-48 hours of hospitalisation.",
+                 "concept": "Health Insurance", "is_hers": False},
+                {"text": "Q: What are the requirements for a personal loan? A: A stable "
+                         "income, a good credit score and minimal existing debt.",
+                 "concept": "Personal Loan", "is_hers": True},
+            ]
         return []
 
     def write(self, cypher, params=None):
@@ -180,28 +269,48 @@ class WorkbookNeo4j:
             return []
 
         customer_id = str(params.get("cid", ""))
-        if "HAS_LOAN" in cypher:
-            return [{
-                "loan_id": str(row["LoanID"]),
-                "loan_type": str(row["LoanType"]),
-                "status": str(row["Status"]),
-                "amount_inr": row["BalanceDue"],
-                "interest_rate": row["InterestRate"],
-                "next_step": str(row["NextStep"]),
-                "last_updated": str(row["LastUpdatedDate"]),
-            } for row in self.loans if str(row["CRN"]) == customer_id]
-        if "HAS_CLAIM" in cypher:
-            policy_type_by_id = {str(p["PolicyID"]): str(p.get("PolicyType") or "") for p in self.policies}
-            return [{
-                "claim_id": str(row["ClaimID"]),
-                "policy_type": policy_type_by_id.get(str(row.get("PolicyID") or ""), ""),
-                "claim_type": str(row["ClaimType"]),
-                "status": str(row["ClaimStatus"]),
-                "amount_claimed": row["AmountClaimed"],
-                "amount_approved": row["AmountApproved"],
-                "reason": str(row["ReasonForStatus"]),
-                "last_updated": str(row["LastUpdatedDate"]),
-            } for row in self.claims if str(row["CRN"]) == customer_id]
+
+        # The single relationship walk in queries.get_all_customer_records, which returns
+        # `label` + `props` per row instead of a query per record type naming its columns.
+        # This double used to branch on HAS_LOAN / HAS_CLAIM appearing in the Cypher and
+        # return the old column shape; the new query names no relationship and no field, so
+        # those branches stopped matching and every caller saw an EMPTY graph - which reads
+        # downstream as "not a real BFSI customer" and rejected the sender before any ticket
+        # could be created.
+        if "properties(n)" in cypher:
+            policy_type_by_id = {
+                str(p["PolicyID"]): str(p.get("PolicyType") or "") for p in self.policies
+            }
+            rows = []
+            for row in self.loans:
+                if str(row["CRN"]) != customer_id:
+                    continue
+                rows.append({"label": "Loan", "parent_policy_type": None, "props": {
+                    "loan_id": str(row["LoanID"]),
+                    "loan_type": str(row["LoanType"]),
+                    "status": str(row["Status"]),
+                    "amount_inr": row["BalanceDue"],
+                    "interest_rate": row["InterestRate"],
+                    "next_step": str(row["NextStep"]),
+                    "last_updated": str(row["LastUpdatedDate"]),
+                }})
+            for row in self.claims:
+                if str(row["CRN"]) != customer_id:
+                    continue
+                rows.append({
+                    "label": "Claim",
+                    "parent_policy_type": policy_type_by_id.get(str(row.get("PolicyID") or ""), ""),
+                    "props": {
+                        "claim_id": str(row["ClaimID"]),
+                        "claim_type": str(row["ClaimType"]),
+                        "status": str(row["ClaimStatus"]),
+                        "amount_claimed_inr": row["AmountClaimed"],
+                        "amount_approved_inr": row["AmountApproved"],
+                        "reason": str(row["ReasonForStatus"]),
+                        "last_updated": str(row["LastUpdatedDate"]),
+                    },
+                })
+            return rows
         return []
 
     def write(self, cypher, params=None):
@@ -223,7 +332,29 @@ class Recorder:
 _DEFAULT_TEST_NEO4J = object()
 
 
-def graph(repository, whatsapp=None, email=None, crm=None, neo4j_client=_DEFAULT_TEST_NEO4J, resolution_engine=None):
+def offline_crm():
+    """A CRMClient that cannot reach the network.
+
+    `CRMClient()` reads CRM_PROVIDER/CRM_BASE_URL from .env, which point at the real
+    Jira. OrchestrationGraph does `crm or CRMClient()`, so every test that passed no
+    crm POSTed to promptlings.atlassian.net — a measured 30 real POSTs per suite run.
+    They 400'd, were swallowed as `crm_sync_failed`, and the test carried on, which is
+    why this went unnoticed.
+
+    Forcing provider="disabled" makes `configured` False, so create_ticket returns
+    CRMResult("not_configured") without any HTTP. That is the same *shape* of outcome
+    the tests already ran against (a non-"synced" result), so behaviour is unchanged.
+    """
+    client = CRMClient()
+    client.provider = "disabled"
+    client.base_url = ""
+    client.api_token = ""
+    client.project_key = ""
+    return client
+
+
+def graph(repository, whatsapp=None, email=None, crm=None, neo4j_client=_DEFAULT_TEST_NEO4J,
+          resolution_engine=None, generator=None):
     if neo4j_client is _DEFAULT_TEST_NEO4J:
         neo4j_client = EmptyNeo4j()
     return OrchestrationGraph(
@@ -231,9 +362,12 @@ def graph(repository, whatsapp=None, email=None, crm=None, neo4j_client=_DEFAULT
         agent=CXAgent(NoLLM()),
         rag=FakeRAG(),
         delivery=OutboundDeliveryService(whatsapp=whatsapp, email=email),
-        crm=crm,
+        # Both default to offline stand-ins: passing None here reached the real
+        # Groq and the real Jira on every run.
+        crm=crm or offline_crm(),
         neo4j_client=neo4j_client,
         resolution_engine=resolution_engine or FakeResolutionEngine(),
+        generator=generator or FakeGenerator(),
     )
 
 
@@ -275,8 +409,14 @@ def test_whatsapp_bfsi_query_resolves_with_citation_and_sends_reply():
     assert response.citations[0]["source"] == "InboxIQ_BFSI_KB.pdf:p3"
     assert response.outbound_status == "sent"
     assert sender.sent
+    # Phase 4 of the ticket-model redesign: a routine question now DOES get a ticket - a
+    # LOGGED grouping id, so the UI can thread it - but no human is involved, so the reply
+    # is still auto-sent (workflow_status above). The old assertion here was
+    # `skipped is True`, which encoded the model where a ticket meant "a person is needed".
     ticket_step = next(entry for entry in response.workflow_trace if entry["step"] == "create_or_update_ticket")
-    assert ticket_step["details"]["skipped"] is True
+    assert "skipped" not in ticket_step["details"]
+    assert response.ticket_id is not None
+    assert repo.get_ticket(response.ticket_id)["status"] == "logged"
     evidence = repo.list_retrieval_evidence()
     assert evidence[0]["source"] == "InboxIQ_BFSI_KB.pdf:p3"
 
@@ -315,6 +455,8 @@ def test_registered_customer_account_query_is_not_blocked():
         delivery=OutboundDeliveryService(whatsapp=sender),
         neo4j_client=neo4j,
         resolution_engine=FakeResolutionEngine(),
+        crm=offline_crm(),
+        generator=FakeGenerator(),
     )
     response = workflow.run(message)
     assert response.workflow_status != "customer_validation_required"
@@ -344,6 +486,8 @@ def test_resolution_l3_overrides_never_escalate_intent():
         delivery=OutboundDeliveryService(whatsapp=sender),
         neo4j_client=neo4j,
         resolution_engine=FakeResolutionEngine(level="L3"),
+        crm=offline_crm(),
+        generator=FakeGenerator(),
     )
     response = workflow.run(message)
     assert response.intent == "loan_status"
@@ -374,10 +518,17 @@ def test_resolution_l1_preserves_never_escalate_intent():
         delivery=OutboundDeliveryService(whatsapp=sender),
         neo4j_client=neo4j,
         resolution_engine=FakeResolutionEngine(level="L1"),
+        crm=offline_crm(),
+        generator=FakeGenerator(),
     )
     response = workflow.run(message)
     assert response.intent == "loan_status"
-    assert response.ticket_id is None
+    # "Never escalate" now means NO HOLD, not "no ticket": Phase 4 gives every query a
+    # grouping id, and the escalation rules - unchanged - decide only whether a human sees
+    # it. A LOGGED status is exactly the assertion "no escalation happened".
+    assert repo.get_ticket(response.ticket_id)["status"] == "logged"
+    assert response.held_for_review is False
+    assert response.workflow_status == "answer_delivered"
 
 
 def test_high_risk_keyword_forces_l3_before_llm_call():
@@ -401,6 +552,8 @@ def test_high_risk_keyword_forces_l3_before_llm_call():
         rag=FakeRAG(),
         delivery=OutboundDeliveryService(whatsapp=sender),
         neo4j_client=neo4j,
+        crm=offline_crm(),
+        generator=FakeGenerator(),
     )
     response = workflow.run(message)
     assert response.ticket_id is not None
@@ -418,6 +571,8 @@ def test_distinct_l3_intents_create_distinct_team_tickets():
         delivery=OutboundDeliveryService(whatsapp=sender),
         neo4j_client=WorkbookNeo4j(),
         resolution_engine=FakeResolutionEngine(level="L3"),
+        crm=offline_crm(),
+        generator=FakeGenerator(),
     )
 
     fraud = workflow.run(
@@ -457,6 +612,8 @@ def test_distinct_l3_fraud_incidents_create_distinct_tickets():
         delivery=OutboundDeliveryService(whatsapp=sender),
         neo4j_client=WorkbookNeo4j(),
         resolution_engine=FakeResolutionEngine(level="L3"),
+        crm=offline_crm(),
+        generator=FakeGenerator(),
     )
 
     takeover = workflow.run(
@@ -901,7 +1058,11 @@ def test_query_resolution_agent_routes_transactional_intent_to_neo4j():
     from services.channel_service.adapters.whatsapp_adapter import WhatsAppAdapter
     from shared.schemas.messages import WhatsAppWebhookPayload
 
-    agent = QueryResolutionAgent(neo4j_client=FakeNeo4j(), resolution_engine=FakeResolutionEngine())
+    # Without rag=, QueryResolutionAgent falls back to `rag or RAGPipeline()`, which
+    # builds a REAL Groq client - this test previously passed only because a live API
+    # answered it.
+    agent = QueryResolutionAgent(rag=FakeRAG(), neo4j_client=FakeNeo4j(),
+                                 resolution_engine=FakeResolutionEngine())
     msg = WhatsAppAdapter().normalize(
         WhatsAppWebhookPayload(from_="+919999999999", text="What is my loan status?",
                                message_id="test-1", metadata={"provider": "test"})
@@ -975,8 +1136,23 @@ def test_process_intents_never_route_to_customer_graph():
         intent=Intent.LOAN_APPLICATION.value,
     )
 
-    assert claim.retrieval_backend != "neo4j_graph"
-    assert loan.retrieval_backend != "neo4j_graph"
+    # These used to assert `retrieval_backend != "neo4j_graph"`, i.e. that a PROCESS
+    # question must not reach the customer's records at all. That was the right guard while
+    # the graph branch RETURNED and the knowledge base below it never ran: routing a "how do
+    # I file a claim?" to the graph meant answering it from three claims already filed.
+    #
+    # The branch now passes the KB passages alongside the records in one prompt, so the
+    # model has the procedure AND the customer's context and picks what answers the
+    # question. Confirmed in the running app on 2026-09-04: "How do I apply for a home
+    # loan?" returned the application process - form, KYC documents, salary slips, property
+    # documents, eligibility assessment - and did not recite the customer's existing loan.
+    #
+    # What still matters is that the KB was actually consulted, so that is what is asserted.
+    for resolution in (claim, loan):
+        doc_types = {c.get("metadata", {}).get("doc_type") for c in resolution.contexts}
+        assert "knowledge_base" in doc_types, (
+            f"a process question must still see the KB; got {doc_types}"
+        )
 
 
 def test_five_question_kb_and_graph_e2e_matrix():
@@ -1078,6 +1254,8 @@ def test_five_question_kb_and_graph_e2e_matrix():
             delivery=delivery,
             neo4j_client=neo4j,
             resolution_engine=FakeResolutionEngine(),
+            crm=offline_crm(),
+            generator=FakeGenerator(),
         )
         response = workflow.run(case["message"])
 
@@ -1120,8 +1298,10 @@ def test_investment_faqs_are_l1_kb_answers_without_tickets():
         agent=CXAgent(NoLLM()),
         rag=RAGPipeline(store=EmptyStore(), generator=NoGeneration()),
         delivery=OutboundDeliveryService(whatsapp=Recorder()),
+        crm=offline_crm(),
         neo4j_client=EmptyNeo4j(),
         resolution_engine=FakeResolutionEngine(),
+        generator=FakeGenerator(),
     )
 
     sip = workflow.run(whatsapp_message(message_id="sip-l1", text="What is SIP?"))
@@ -1493,7 +1673,10 @@ def test_invalid_crm_url_does_not_block_whatsapp_reply(monkeypatch):
 
     repo = SQLiteCXRepository(":memory:")
     sender = Recorder()
-    response = graph(repo, whatsapp=sender).run(
+    # This test is ABOUT a misconfigured CRM, so it must get a real CRMClient reading the
+    # env above — not the suite's offline_crm() default. The URL is invalid, so requests
+    # rejects it locally without any network call.
+    response = graph(repo, whatsapp=sender, crm=CRMClient()).run(
         whatsapp_message(message_id="crm-failure-reply", text="unknown question xyz")
     )
 
@@ -1558,7 +1741,7 @@ def test_admin_ui_is_served():
 
     response = TestClient(app).get("/admin-ui")
     assert response.status_code == 200
-    assert "Ticket Operations" in response.text
+    assert "OmnichannelCX" in response.text
     assert "email-simulate-form" in response.text
 
 
@@ -1765,13 +1948,23 @@ def test_generate_answer_masks_pii_before_sending_to_groq_and_restores_name():
 def test_specific_scope_refines_open_other_ticket_instead_of_forking():
     """Omnichannel continuation: a vague dispute ("...:other" scope) followed by a
     specific follow-up ("...:card") on ANY channel must refine the open ticket,
-    not create a duplicate (Sayantini email->web_chat split, 23 Jul 2026)."""
+    not create a duplicate (Sayantini email->web_chat split, 23 Jul 2026).
+
+    UPDATED, not fixed: this test was written when a STRING COMPARISON on the scope
+    decided all three outcomes below, so a generator-less manager could refine, attach and
+    fork on its own. Relatedness is now judged by the referee, so the manager needs one -
+    and the three outcomes are now its verdicts, scripted here in order:
+      1. attach  -> the card details refine the vague ticket
+      2. NEW     -> "I ALSO want to dispute a UPI payment" is a separate matter
+      3. attach  -> repeating the card details lands on the refined ticket
+    The BEHAVIOUR asserted is unchanged; only who decides it has moved."""
     from services.ticket_service.ticket_manager import TicketManager
     from shared.schemas.intents import Urgency
     from shared.schemas.messages import Channel, InboundMessage
 
     repo = SQLiteCXRepository(":memory:")
-    manager = TicketManager(repo)
+    referee = _FakeRefereeGenerator([], attach_first=True)
+    manager = TicketManager(repo, generator=referee)
 
     def inbound(channel: Channel, text: str, msg_id: str) -> InboundMessage:
         return InboundMessage(
@@ -1809,7 +2002,10 @@ def test_specific_scope_refines_open_other_ticket_instead_of_forking():
     events = [e["event_type"] for e in repo.list_ticket_events(vague.ticket_id)]
     assert "ticket_scope_refined" in events
 
-    # Guard rail: a DIFFERENT specific scope (UPI) is a distinct incident -> new ticket.
+    # Guard rail: a genuinely different matter is a distinct incident -> new ticket.
+    # The referee makes this call now (it reads "I ALSO want to dispute a UPI payment"),
+    # where the old model inferred it from ":upi" != ":card".
+    referee.answers = ["NEW"]
     upi = manager.create_or_get_ticket(
         conv_id, cust_id,
         inbound(Channel.WHATSAPP, "I also want to dispute a UPI payment of Rs. 900.", "m3"),
@@ -1820,6 +2016,10 @@ def test_specific_scope_refines_open_other_ticket_instead_of_forking():
     assert upi.metadata["ticket_scope"] == "transaction_dispute:upi"
 
     # Idempotency: repeating the card details still lands on the refined ticket.
+    # Scripted explicitly: two tickets are open by now, and "attach to the first id in the
+    # prompt" would pick whichever the candidate ranking put first (the newer UPI one).
+    # Naming the ticket is what this step is actually asserting.
+    referee.answers = [vague.ticket_id]
     repeat = manager.create_or_get_ticket(
         conv_id, cust_id,
         inbound(Channel.WEB_CHAT, "Again: the card charge at TechMart is the disputed one.", "m4"),
@@ -1835,16 +2035,27 @@ class _FakeRefereeGenerator:
     """Stands in for GroqGenerator: returns a scripted answer per call and
     records the prompts it was given."""
 
-    def __init__(self, answers: list[str]):
+    def __init__(self, answers: list[str], attach_first: bool = False):
         self.answers = list(answers)
         self.prompts: list[str] = []
         self.raise_error = False
+        # When the scripted answers run out: NEW by default (the safe fallback), or attach
+        # to the first candidate id in the prompt. The fixture needs the latter, because the
+        # refinement it sets up is now the referee's decision rather than a string compare.
+        self.attach_first = attach_first
 
     def _generate(self, system_prompt: str, user_prompt: str, operation: str = "llm_generation", metadata=None) -> dict:
         if self.raise_error:
             raise RuntimeError("llm down")
         self.prompts.append(user_prompt)
-        answer = self.answers.pop(0) if self.answers else "NEW"
+        if self.answers:
+            answer = self.answers.pop(0)
+        elif self.attach_first:
+            import re as _re
+            found = _re.search(r"tkt_[0-9a-f]+", user_prompt)
+            answer = found.group(0) if found else "NEW"
+        else:
+            answer = "NEW"
         return {"text": answer, "llm_used": True, "model": "fake"}
 
 
@@ -1856,7 +2067,12 @@ def _referee_fixture():
     from shared.schemas.messages import Channel, InboundMessage
 
     repo = SQLiteCXRepository(":memory:")
-    manager = TicketManager(repo)
+    # The refinement step below (":other" opener + specific follow-up) is now decided by the
+    # REFEREE, not by comparing scope strings - so the fixture has to supply a generator for
+    # it to attach at all. Without one the manager forks, which is the correct safe default
+    # (doubt forks, never merges) but leaves the fixture with two tickets instead of one.
+    # Each test replaces manager.generator with its own scripted fake afterwards.
+    manager = TicketManager(repo, generator=_FakeRefereeGenerator([], attach_first=True))
 
     counter = {"n": 0}
 

@@ -46,7 +46,7 @@ from .routes.whatsapp import router as whatsapp_router
 configure_structured_logging(os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Omnichannel CX Accelerator", version="2.0.0")
+app = FastAPI(title="OmnichannelCX", version="2.0.0")
 
 
 @app.on_event("startup")
@@ -127,7 +127,7 @@ async def request_logging(request, call_next):
 @app.get("/")
 def root() -> dict:
     return {
-        "name": "Omnichannel CX Accelerator",
+        "name": "OmnichannelCX",
         "phase": 2,
         "implemented_phases": [1, 2],
         "channels": ["whatsapp", "email", "web_chat"],

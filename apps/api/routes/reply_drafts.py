@@ -12,13 +12,13 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from apps.api.dependencies.runtime import get_repository
-from apps.api.dependencies.security import require_admin_key
+from apps.api.dependencies.security import require_admin_auth
 from services.channel_service.delivery import OutboundDeliveryService
 from shared.schemas.messages import Channel, InboundMessage
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/admin/reply-drafts", tags=["admin"], dependencies=[Depends(require_admin_key)])
+router = APIRouter(prefix="/admin/reply-drafts", tags=["admin"], dependencies=[Depends(require_admin_auth)])
 
 
 class SendDraftRequest(BaseModel):

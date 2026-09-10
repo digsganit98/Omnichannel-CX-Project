@@ -13,7 +13,7 @@ from services.workflow_service.approvals import requires_approval
 from services.workflow_service.sla import sla_hours
 from shared.schemas.intents import Intent, Urgency
 from shared.schemas.messages import InboundMessage
-from shared.schemas.tickets import Ticket, TicketStatus
+from shared.schemas.tickets import SERVICEABLE_TICKET_STATUSES, Ticket, TicketStatus
 from shared.utils.ids import new_id
 
 
@@ -29,6 +29,16 @@ class TicketManager:
         # Optional graph client, used only to keep a resolved ticket's status in step with
         # the graph copy. Optional so every existing caller keeps working untouched.
         self.neo4j_client = neo4j_client
+        # Did the LAST create_or_get_ticket call open a new thread away from live ones?
+        # Reset at the start of every call and read by the caller straight afterwards.
+        #
+        # Deliberately NOT taken from the ticket's own `forked_from` metadata: that is
+        # stored on the ticket, so it stays true for the ticket's whole life. Reading it
+        # per-reply told a customer "this looks like a separate issue from your existing
+        # request" on the third message of a thread they were plainly continuing, on a
+        # ticket the same reply then named. Forking is a fact about ONE message at ONE
+        # moment; the metadata is the permanent record of it, this is the event.
+        self.forked_now = False
 
     def create_or_get_ticket(
         self,
@@ -41,57 +51,127 @@ class TicketManager:
         customer: dict | None = None,
         sentiment: str = "neutral",
         graph_context: dict | None = None,
+        hold_required: bool = True,
     ) -> Ticket:
+        """Get the ticket this message belongs to, creating one if it is a new matter.
+
+        ``hold_required`` decides the STATUS, not whether a ticket exists (Phase 4 of the
+        ticket-model redesign): False means a LOGGED thread - a grouping id nobody is
+        working - and True means OPEN, a case a human is on. It defaults to True so any
+        caller that has not been updated keeps producing serviceable tickets exactly as
+        before, rather than silently creating invisible ones.
+        """
+        # The scope is an ATTRIBUTE of the thread, not a test of identity. It keys the
+        # resolution memory (query_library.search_resolution_memory), labels each candidate
+        # in the referee prompt (_scope_label), mirrors onto the Ticket node, and filters
+        # agent-assist - so it is still computed and still stored. What it no longer does is
+        # DECIDE which ticket a message belongs to.
+        #
+        # It used to decide, by string equality, and it cannot: _ticket_scope matches
+        # KEYWORDS, so it can only answer "what kind of thing is this about?" - never "is
+        # this the same instance?". Measured on the live code: 9 of 16 intents have no scope
+        # rules at all and collapse to "<intent>:manual_review", so every message on those
+        # intents shared one label; and the 7 that DO have rules fail the same way - "dispute
+        # ANOTHER charge, my gym billed me twice" scores the identical
+        # transaction_dispute:card as the original dispute, and two different claim ids both
+        # score claim_status:other. Live consequence: a customer's savings-balance question
+        # and their credit-card dues question merged into one ticket, and because the string
+        # matched first, the LLM referee was never called at all (measured: 0 calls).
+        #
+        # So relatedness is judged where the judgement belongs - by the referee, reading the
+        # text. Code keeps every guardrail: it builds the candidate set (bounded, ranked,
+        # serviceable guaranteed a slot), it validates that the answer is one of the ids it
+        # supplied, and every failure path - no generator, LLM error, unparseable answer,
+        # genuine doubt - returns None, which forks. Doubt forks, never merges.
         ticket_scope = _ticket_scope(intent.value, message.text, escalation_reason, graph_context)
-        existing = (
-            self.repository.find_active_ticket_for_scope(conversation_id, intent.value, ticket_scope)
-            if ticket_scope
-            else self.repository.find_active_ticket_for_intent(conversation_id, intent.value)
-        )
-        if not existing and ticket_scope and ticket_scope != f"{intent.value}:other":
-            # Omnichannel continuation: a vague opener ("dispute a transaction") gets the
-            # ":other" fallback scope; when the customer then supplies specifics ("on my
-            # Mastercard"), the specific scope must REFINE that open ticket, not fork a
-            # duplicate. Only ":other" is upgraded — two specific scopes (card vs upi)
-            # are genuinely distinct incidents and still get separate tickets.
-            #
-            # But "vague ticket open + specific message arrived" is NOT proof the two are
-            # the same matter. Live example: a dispute ticket sat at ":other" (the customer's
-            # IMPS details did not match any scope keyword), then "I ALSO have a problem with
-            # a UPI payment" arrived — a second, separate complaint — and this rule absorbed
-            # it into the first ticket's description as "[Details added: ...]". The complaint
-            # stopped existing as its own item, with no error and nothing visibly wrong: the
-            # silent-merge failure the referee below was built to prevent.
-            #
-            # So the referee gets a VETO here — not a vote. It can block a merge it judges to
-            # be a different matter, but it is never a precondition: when no generator is
-            # configured, or the call fails, refinement proceeds exactly as before. Making
-            # the referee a precondition would silently disable refinement whenever the LLM
-            # is unavailable, turning a deterministic behaviour into an LLM-dependent one.
-            fallback = self.repository.find_active_ticket_for_scope(
-                conversation_id, intent.value, f"{intent.value}:other"
-            )
-            if fallback and not self._referee_rejects(fallback, message):
-                existing = self._refine_ticket_scope(fallback, ticket_scope, message)
-        if not existing and ticket_scope:
-            # Tier-4 omnichannel referee: the scope label didn't string-match any
-            # active ticket (e.g. a vague "any update on my dispute?" follow-up
-            # arriving on another channel after the ticket was refined to :card).
-            # Labels can't answer "same matter or new matter?" — ask the LLM to
-            # pick among the CODE-VETTED candidates or say NEW. Any doubt/error/
-            # absent-LLM ⇒ new ticket: a spurious fork is visible and fixable; a
-            # spurious merge corrupts the record silently.
-            #
-            # Candidates are NOT filtered by the incoming intent. Filtering by it excluded
-            # the commonest follow-up there is: "any update on my dispute?" classifies as
-            # ticket_status, so a transaction_dispute ticket was never a candidate, the
-            # referee never ran, and the question opened a brand-new ticket about asking
-            # after a ticket. Relatedness is a judgement about the text — which is exactly
-            # what the referee reads — not about two intent labels being equal.
-            candidates = self.repository.list_active_tickets_for_conversation(conversation_id)
-            if candidates:
-                existing = self._referee_match(candidates, message)
+        forked_from: list[str] = []
+        # Whether THIS call opened a new thread away from live ones. Reset per call and read
+        # by the caller immediately after; see `forked_now` on __init__ for why it is not
+        # taken from the ticket's own metadata.
+        self.forked_now = False
+        existing = None
+        # DETERMINISTIC FIRST, and only this one: the SAME message text on an already-open
+        # thread is the same matter by definition - a retry, a webhook redelivery, or a
+        # customer repeating themselves. This is not a judgement about relatedness, so it
+        # needs no LLM, and it must not depend on one: without it, an outage or a
+        # non-answering generator turns every repeat into a duplicate ticket. The old
+        # scope-string match used to absorb this case incidentally; now it is explicit and
+        # narrow - EXACT text equality on an active ticket of the same intent, nothing more.
+        # Checked against EVERY active ticket, not just the newest of this intent:
+        # find_active_ticket_for_intent returns the most recent one, so an unrelated ticket
+        # opened in between (a second fraud report, say) would hide the thread the repeat
+        # actually belongs to.
+        _text = (message.text or "").strip()
+        if _text:
+            for _t in self.repository.list_active_tickets_for_conversation(conversation_id):
+                if (_t.description or "").strip() == _text:
+                    existing = _t
+                    break
+        # Candidates are NOT filtered by the incoming intent: "any update on my dispute?"
+        # classifies as ticket_status, so an intent filter would exclude the very dispute it
+        # is asking about. Relatedness is about the text, not about two labels being equal.
+        candidates = self.repository.list_active_tickets_for_conversation(conversation_id)
+        if existing is None and candidates:
+            existing = self._referee_match(candidates, message)
+            if existing is None:
+                # A DIFFERENT matter. Recorded so the reply can say so: forking is the
+                # decision the customer most needs told, because otherwise they cannot know
+                # whether "my dispute" now means one thing or two.
+                forked_from = [t.ticket_id for t in candidates
+                               if t.status in SERVICEABLE_TICKET_STATUSES]
+                # This MESSAGE forked. Distinct from the metadata below, which records the
+                # same fact permanently on the ticket for provenance.
+                self.forked_now = bool(forked_from)
+        # REFINEMENT, re-triggered by the referee's decision rather than by comparing scope
+        # strings. A vague opener ("I want to dispute a transaction") takes the ":other" /
+        # ":manual_review" fallback; when the specifics arrive the thread must LEARN them:
+        #   - the scope keys the resolution memory, so a stale ":other" files a verified
+        #     resolution under the wrong key and it is never reused;
+        #   - the description is frozen at the opener, so without appending, the ticket's own
+        #     text never names the merchant or amount - which is what the admin UI shows and
+        #     what the referee falls back to when Neo4j is unavailable.
+        if existing and ticket_scope:
+            current = (existing.metadata or {}).get("ticket_scope") or ""
+            if current != ticket_scope and current.split(":")[-1] in ("other", "manual_review"):
+                existing = self._refine_ticket_scope(existing, ticket_scope, message)
         if existing:
+            # PROMOTION: a logging thread becomes serviceable the first time any message on
+            # it needs a person. This is the "logged -> open" transition the redesign is
+            # built around, and it is one-way: nothing here ever demotes an open ticket back
+            # to logged, because a human being done is a separate decision (closing it).
+            if hold_required and existing.status == TicketStatus.LOGGED:
+                # escalation_reason is written HERE, not just into the event below: it is the
+                # ticket row's own record of why a person became involved, and until now a
+                # promoted ticket carried NULL forever while an identically-serviceable
+                # ticket that opened OPEN carried the reason. Analytics reads the column to
+                # tell "a human worked this" from "this was only ever a grouping id" (the
+                # avg-resolution-time average), so leaving it NULL made a promoted case
+                # indistinguishable from a logging one.
+                self.repository.update_ticket(
+                    existing.ticket_id,
+                    status=TicketStatus.OPEN.value,
+                    escalation_reason=escalation_reason,
+                )
+                self.repository.add_ticket_event(
+                    existing.ticket_id, "ticket_promoted", "orchestration",
+                    {"from": TicketStatus.LOGGED.value, "to": TicketStatus.OPEN.value,
+                     "escalation_reason": escalation_reason},
+                )
+                self._mirror_status_to_graph(existing, TicketStatus.OPEN.value)
+                # Re-read through _ticket(): update_ticket returns a RAW row (metadata_json,
+                # priority_breakdown_json), not the model's field shape.
+                # A promoted ticket is now real work, so it also reaches Jira - which it
+                # never did while it was logged (sync_ticket skips those).
+                existing = self.sync_ticket(existing.ticket_id, customer=customer)
+            # This message just landed on an existing thread. Record it as ACTIVITY so the
+            # referee's candidate list can rank by "last touched" (migration 018).
+            #
+            # This is the exact spot where the old model lost that fact: the function
+            # returned here without writing anything, so a ticket could receive messages
+            # for days while every timestamp on it stayed frozen at creation. Deliberately
+            # not update_ticket() - that would move updated_at, which analytics reads as
+            # the close time.
+            self.repository.touch_ticket_activity(existing.ticket_id)
             return existing
         priority, breakdown = score_priority(intent, urgency, sentiment, graph_context)
         ticket = Ticket(
@@ -103,6 +183,8 @@ class TicketManager:
             intent=intent.value,
             priority=priority,
             assigned_team=assign_team(intent.value),
+            # Phase 4: no hold -> a LOGGED grouping id; a hold -> an OPEN case.
+            status=TicketStatus.OPEN if hold_required else TicketStatus.LOGGED,
             approval_status="pending" if requires_approval(intent.value) else "not_required",
             escalation_reason=escalation_reason,
             sla_due_at=datetime.now(timezone.utc) + timedelta(hours=sla_hours(priority.value)),
@@ -112,6 +194,16 @@ class TicketManager:
                 "channel": message.channel.value,
                 "provider": message.provider,
                 "ticket_scope": ticket_scope,
+                # Serviceable threads that were open when the referee judged this a
+                # separate matter. Empty for the common case (nothing else was live, or
+                # the referee was never consulted). PROVENANCE ONLY - kept so an agent and
+                # the lineage view can see where a thread came from. It must NOT drive
+                # customer-facing text: it lives on the TICKET, so it stays true for the
+                # ticket's whole life, and reading it in compose_answer announced "this
+                # looks like a separate issue" on every later message of a thread the
+                # customer was plainly continuing. That is a per-MESSAGE fact - see
+                # `forked_now`.
+                "forked_from": forked_from,
             },
         )
         self.repository.create_ticket(ticket)
@@ -148,66 +240,16 @@ class TicketManager:
         self._audit(ticket, "ticket_scope_refined", details)
         return Ticket(**updated)
 
-    def _referee_rejects(self, ticket: Ticket, message: InboundMessage) -> bool:
-        """True only when the LLM RAN and judged this a SEPARATE matter from a vague ticket.
-
-        This asks a different question from _referee_match, and needs its own prompt.
-        _referee_match compares two *specific* matters ("is this the same transaction as
-        the one in that ticket?"). Here the ticket is by definition vague — it is the
-        ":other" scope precisely because it names no transaction, merchant or amount — so
-        that question cannot be answered sensibly: "does this message describe something
-        different from a ticket that describes nothing?" is trivially yes, which vetoed
-        every legitimate refinement. (Observed live: a vague dispute opener followed by
-        "It was the Rs.28,991 IMPS transfer to Kimaya Seth" — plainly the missing details —
-        was rejected as NEW.)
-
-        The right question is about the customer's INTENT in sending it: are they filling
-        in the details of the matter they just raised, or raising an additional one?
-
-        Deliberately asymmetric with _referee_match: that one treats "could not decide" as
-        "no match" (safe, because the fallback is a new ticket). Here the fallback is an
-        existing, working refinement, so "could not decide" must mean "do not block" —
-        otherwise an absent or failing LLM would quietly switch refinement off.
-        """
-        if not self.generator:
-            return False
-        try:
-            masked_text, _ = mask_text(message.text)
-            masked_desc, _ = mask_text((ticket.description or "")[:300])
-            result = self.generator._generate(
-                system_prompt=(
-                    "A customer raised a support issue but described it only vaguely. A newer "
-                    "message from the same customer contains specific details.\n"
-                    "Decide which of these it is:\n"
-                    "SAME — the message supplies the missing specifics of the issue they already "
-                    "raised (the transaction, merchant, amount, card or account they meant).\n"
-                    "SEPARATE — the message raises an ADDITIONAL, different issue. Wording such as "
-                    "\"I also\", \"another\", \"a second\", \"besides that\", or a second distinct "
-                    "problem alongside the first, indicates SEPARATE.\n"
-                    "When in doubt answer SAME: the vague issue has no details yet, so specifics "
-                    "usually belong to it.\n"
-                    "Reply with exactly one word: SAME or SEPARATE."
-                ),
-                user_prompt=(
-                    f'The vaguely-described open issue: "{masked_desc}"\n\n'
-                    f'The newer message: "{masked_text}"\n\n'
-                    "Answer SAME or SEPARATE."
-                ),
-                operation="ticket_refine_referee",
-            )
-            if not result.get("llm_used"):
-                return False
-            verdict = (result.get("text") or "").strip().upper()
-            rejected = verdict.startswith("SEPARATE")
-            if rejected:
-                self._audit(ticket, "ticket_refine_rejected", {
-                    "ticket_id": ticket.ticket_id,
-                    "verdict": verdict[:40],
-                    "detail_text": message.text[:200],
-                })
-            return rejected
-        except Exception:
-            return False
+    # _referee_rejects was DELETED here. It was a veto on the string-based ":other" merge:
+    # code picked a ticket by comparing scope strings, then asked the LLM to block the merge
+    # if it judged the matter different. With the string-based merge gone there is nothing
+    # left for it to guard - the referee below now makes the decision outright rather than
+    # second-guessing one already made.
+    #
+    # It also could not simply be kept. Its tie-break was "When in doubt answer SAME", i.e.
+    # doubt MERGES - correct when the fallback was an existing working refinement, and the
+    # exact inverse of this system's rule now that the fallback is a new ticket. Keeping it
+    # would have reintroduced the silent merge this change removes.
 
     def _referee_match(self, candidates: list[Ticket], message: InboundMessage) -> Ticket | None:
         """Ask the LLM whether an unmatched message refers to an open ticket or a new matter.
@@ -294,6 +336,21 @@ class TicketManager:
 
     def sync_ticket(self, ticket_id: str, customer: dict | None = None) -> Ticket:
         ticket = self._ticket(ticket_id)
+        # A LOGGED ticket is a grouping id for a question that needed no human, so there is
+        # nothing for anyone to work in Jira. Under the ticket-model redesign every customer
+        # query gets one (~10 tickets -> ~40+), so without this filter "what is my card
+        # limit?" would raise a Jira issue for a question answered instantly.
+        #
+        # The filter is HERE, at the sync boundary, rather than at the create call site:
+        # sync_ticket has two callers (create_or_get_ticket and the admin re-sync route),
+        # and a logging ticket must not reach Jira through either. The record still exists
+        # in our own store, so a future logging/monitoring system can read it (decision 2).
+        if ticket.status == TicketStatus.LOGGED:
+            self.repository.add_ticket_event(
+                ticket_id, "crm_sync_skipped", "crm_integration",
+                {"reason": "logged_ticket_not_serviceable"},
+            )
+            return ticket
         result = self.crm.create_ticket(ticket, customer)
         updates = {
             "crm_sync_status": result.status,
@@ -351,23 +408,35 @@ class TicketManager:
         # keeps feeding a closed case to the model as trusted context — so a customer
         # asking "anything pending?" after resolution would still be told their dispute
         # is open. Best-effort: a graph failure must never block resolving a ticket.
-        if self.neo4j_client is not None:
-            try:
-                from services.neo4j_service import writer as neo4j_writer
-                neo4j_writer.upsert_ticket_node(
-                    self.neo4j_client,
-                    ticket_id=ticket_id,
-                    customer_id=self._graph_customer_id(ticket),
-                    intent=ticket.intent or "",
-                    priority=ticket.priority.value if hasattr(ticket.priority, "value") else str(ticket.priority),
-                    status=status.value,
-                    ticket_scope=(ticket.metadata or {}).get("ticket_scope"),
-                    title=ticket.title,
-                )
-            except Exception:
-                pass
+        self._mirror_status_to_graph(ticket, status.value)
         self._audit(ticket, "ticket_status_updated", {"status": status.value})
         return updated
+
+    def _mirror_status_to_graph(self, ticket: Ticket, status: str) -> None:
+        """Copy a ticket's status onto its graph node.
+
+        get_open_cases reads the GRAPH, not SQLite, and hands the result to the reply
+        generator as trusted context. A status change that does not reach the node means
+        the model is told about a case whose state is stale - which is how a resolved
+        dispute kept being reported as open. Best-effort by design: a graph failure must
+        never block the SQLite write that already succeeded.
+        """
+        if self.neo4j_client is None:
+            return
+        try:
+            from services.neo4j_service import writer as neo4j_writer
+            neo4j_writer.upsert_ticket_node(
+                self.neo4j_client,
+                ticket_id=ticket.ticket_id,
+                customer_id=self._graph_customer_id(ticket),
+                intent=ticket.intent or "",
+                priority=ticket.priority.value if hasattr(ticket.priority, "value") else str(ticket.priority),
+                status=status,
+                ticket_scope=(ticket.metadata or {}).get("ticket_scope"),
+                title=ticket.title,
+            )
+        except Exception:
+            pass
 
     def _graph_customer_id(self, ticket: Ticket) -> str:
         """The ticket's customer as the GRAPH keys it (CRN…), not the SQLite id (cust_…).
@@ -497,9 +566,26 @@ def _referenced_txn(text: str, graph_context: dict | None) -> str | None:
 
 def _ticket_scope(intent: str, text: str, escalation_reason: str | None,
                   graph_context: dict | None = None) -> str | None:
-    """Keep active L3/L2 tickets from merging unrelated incidents under one broad intent."""
-    if not escalation_reason:
-        return None
+    """Name the MATTER this message is about, so two messages on it can be matched.
+
+    The scope answers "which incident is this?" - a phishing report and a disputed UPI
+    charge are both fraud_report, and must not merge into one ticket.
+
+    This used to begin `if not escalation_reason: return None`, which made sense while a
+    ticket existed only when something escalated. Under Phase 4 every query gets a ticket,
+    and most are NOT escalated - so that guard left the majority of tickets with a NULL
+    scope. The consequences compound, because three things are gated on scope:
+
+      * find_active_ticket_for_scope cannot match a scopeless ticket;
+      * the refinement path (":other" -> specific) never runs;
+      * the REFEREE never runs at all - it sits behind `if not existing and ticket_scope`.
+
+    So a follow-up on the same matter would fork a new ticket every time, which is the
+    exact failure the redesign exists to remove. Relatedness is a property of the text,
+    not of whether a human was needed, so the scope is now computed for every message.
+    `escalation_reason` is still accepted because some branches read it, and callers pass
+    it unchanged.
+    """
     lowered = text.lower()
     tokens = set(re.findall(r"[a-z0-9]+", lowered))
 

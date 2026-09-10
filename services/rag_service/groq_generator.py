@@ -4,6 +4,9 @@ import re
 import time
 from pathlib import Path
 
+# The account-balance qualifier is defined ONCE, beside the graph branch that also emits
+# it. neo4j_service.queries imports nothing from this package, so there is no cycle.
+from services.neo4j_service.queries import _BALANCE_LABEL
 from services.observability_service import record_llm_call
 from services.pii_service.masker import mask_text, unmask_text
 
@@ -158,8 +161,34 @@ class GroqGenerator:
             f"[{item.get('metadata', {}).get('source', 'unknown')}]:\n{item['text']}"
             for item in contexts
         )
-        graph_ctx_text = _format_graph_context(ctx.get("graph_context"), ctx.get("intent"))
+        _active = ctx.get("active_ticket") or {}
+        # Records are NOT rendered here. They arrive in `contexts` from neo4j_answer()
+        # and are concatenated into "Retrieved context:" below, so rendering them again
+        # sent every card, account, policy, claim, charge, transaction and KYC row twice
+        # in one prompt. See _format_graph_context for the measurement.
+        graph_ctx_text = _format_graph_context(
+            ctx.get("graph_context"), ctx.get("intent"),
+            active_ticket_id=_active.get("ticket_id") if isinstance(_active, dict) else None,
+            include_records=False,
+        )
         conv_history_text = _format_conversation_history(ctx.get("recent_turns", []))
+        # Our own earlier replies are turns in that history, and they quote the ticket id
+        # that was live when they were sent. History reaches the model verbatim, so a
+        # CLOSED reference gets read back out and repeated as current: observed on
+        # 2026-09-04, a reply carrying "logged under tkt_d1a7a0beccc8" (closed) alongside
+        # "logged under tkt_aacdbe15be5a" (the real, open one) - two references, one of
+        # them dead.
+        #
+        # The open-cases block was already correct - get_open_cases filters to open and
+        # in_progress - so the leak is entirely through history. _redact_closed_ticket_ids
+        # was written for exactly this and wired only to case_summary, which means the
+        # agent's summary was protected and the CUSTOMER'S reply was not.
+        #
+        # Placed before _mask_fragments below: masking first would leave the redaction
+        # marker to be masked as if it were content.
+        conv_history_text = _redact_closed_ticket_ids(
+            conv_history_text, (ctx.get("graph_context") or {}).get("open_cases") or []
+        )
         # Conversation summary is a raw pipe-delimited log — inject it only when there are
         # no recent_turns to avoid sending redundant and hard-to-parse content to the LLM.
         conv_summary = (ctx.get("conversation_summary") or "").strip() if not conv_history_text else ""
@@ -173,11 +202,25 @@ class GroqGenerator:
             [query, graph_ctx_text, conv_history_text, conv_summary], known_values
         )
 
+        # Keyed on whether the model actually RECEIVED account data, not on whether this
+        # one block is non-empty. Since records moved out of graph_ctx_text and into
+        # `contexts`, an empty block no longer means "no account data" - the records can
+        # be sitting in Retrieved context while this note tells the model to say it
+        # cannot see the account, which would be a lie to the customer.
+        #
+        # On `source` rather than doc_type: the ResolutionMemory cache also emits
+        # doc_type "customer_graph" while carrying a cached ANSWER and none of this
+        # customer's records, so doc_type would suppress the note on a branch that
+        # genuinely has no account data.
+        _has_records = any(
+            (item.get("metadata") or {}).get("source") == "neo4j_customer_graph"
+            for item in contexts
+        )
         no_data_note = (
             "- IMPORTANT: No customer account context is provided. Do NOT say 'I checked your account' or "
             "imply you have access to account data. Say: 'I am currently unable to access your account "
             "details — let me connect you with our support team.'\n"
-            if not graph_ctx_text else ""
+            if not graph_ctx_text and not _has_records else ""
         )
         user_prompt = (
             f"{channel_rule}{lang_rule}\n\n"
@@ -230,15 +273,35 @@ class GroqGenerator:
         graph_ctx = ctx.get("graph_context")
         graph_text = _format_graph_context(graph_ctx) if graph_ctx else ""
 
-        # Last 3 inbound turns give the classifier conversation context so it can
-        # correctly handle follow-ups like "What about the other issue I mentioned?"
+        # Last 5 turns, BOTH directions, speaker-labelled.
+        #
+        # This used to keep 3 INBOUND turns only, which discarded the one thing that
+        # identifies what a thread is about. Measured on a real conversation: the customer
+        # wrote "I've uploaded these documents already and nothing has happened" and the
+        # 3-inbound window held three document-related messages with the word "claim"
+        # nowhere in it - because "claim" and the id CLM001003 appear exclusively in OUR
+        # REPLIES, which the direction filter threw away. The classifier picked the one
+        # intent whose definition contains "documents" (kyc_update, 0.92) and its stated
+        # reason - "User uploaded documents for KYC" - was a fair reading of what it was
+        # shown. One turn earlier the same text classified correctly, because the anchor
+        # message had not yet aged out of the window.
+        #
+        # 5 is where the anchor survives: measured on that conversation, 3 turns contains
+        # no "claim" at all; 4 and above contain both "claim" and CLM001003. Cost is
+        # ~1420 -> ~1528 prompt tokens (+108) against an 8000 tokens-per-minute tier cap.
+        # Excerpts are 200 chars rather than 400 for the same reason.
+        #
+        # Mirrors _format_conversation_history, which answer generation has always used
+        # with both directions - the classifier was the only consumer stripping replies.
+        #
+        # A window still SLIDES: on a long enough thread the anchor ages out again. The
+        # durable fix is passing the active ticket's subject, a fact about the thread
+        # rather than a position in a list. Not done here.
         recent = ctx.get("recent_turns", [])
         history_lines = []
-        for t in list(reversed(recent))[:6]:
-            if t.get("direction") == "inbound":
-                history_lines.append(f"  Prior message: {(t.get('text') or '')[:150]}")
-                if len(history_lines) >= 3:
-                    break
+        for t in list(reversed(recent))[-5:]:
+            who = "Customer" if t.get("direction") == "inbound" else "Support"
+            history_lines.append(f"  [{who}]: {(t.get('text') or '')[:200]}")
         history_text = "\n".join(history_lines)
 
         # Mask PII before it reaches the LLM — see generate_answer() for why fragments are
@@ -276,7 +339,7 @@ class GroqGenerator:
             '"language": "<ISO-639-1 code>", '
             '"reason": "<one short sentence>"}\n\n'
             + (f"Customer account context:\n{graph_text}\n\n" if graph_text else "")
-            + (f"Recent customer messages (for context):\n{history_text}\n\n" if history_text else "")
+            + (f"Recent conversation (for context):\n{history_text}\n\n" if history_text else "")
             + f"Customer message: {message}"
         )
 
@@ -727,15 +790,137 @@ def _safe_amount(value) -> str:
         return str(value) if value else "N/A"
 
 
-def _format_graph_context(graph_ctx: dict | None, current_intent: str | None = None) -> str:
+# Section order and headings. Order is deliberate rather than alphabetical: holdings first,
+# then activity, then anything that is a problem, because a customer's own products are the
+# frame the rest is read against.
+_RECORD_SECTIONS = (
+    ("loans", "Loans"),
+    ("credit_cards", "Credit Cards"),
+    ("accounts", "Accounts"),
+    ("fixed_deposits", "Fixed Deposits"),
+    ("policies", "Policies"),
+    ("claims", "Claims"),
+    ("charges", "Charges and Penalties"),
+    ("transactions", "Recent Transactions"),
+    ("kyc", "KYC"),
+)
+
+# Never rendered. Account and card numbers are masked downstream anyway and add nothing to
+# an answer; customer_id already appears in the header; the rest is bookkeeping.
+_SKIP_RECORD_FIELDS = {
+    "account_number", "card_number", "customer_id",
+    # A transaction carries the COUNTERPARTY's account number. Rendering every record's
+    # fields surfaced 14-digit beneficiary accounts that the old hand-written transaction
+    # line never printed - someone else's account number, in a prompt, to answer a question
+    # about the customer's own money.
+    "beneficiary_account",
+    "embedding", "record_hash", "created_at", "updated_at",
+}
+
+# Identity first, then what the record IS, then its state. Neo4j returns properties in
+# storage order, which put "Total emis" first and the loan's own id last - readable enough
+# for a machine, poor for a model scanning for the record it was asked about. Anything not
+# listed keeps its natural order after these.
+_FIELD_PRIORITY = (
+    "loan_id", "card_id", "account_type", "fd_id", "policy_id", "claim_id",
+    "charge_id", "txn_id",
+    "loan_type", "policy_type", "claim_type", "charge_type", "txn_type",
+    "card_variant", "card_network", "account_sub_type",
+    "status", "kyc_status", "reversal_status",
+)
+
+# Fields whose bare number would mislead, and the label that must travel with them. The
+# average-monthly-balance figure is the whole reason this mapping exists: presented as
+# "Balance" it was read back to a customer as their current balance, which this system has
+# no feed for. Keeping the qualifier IN the label means the value cannot be emitted without
+# it - see _BALANCE_LABEL and the note above it.
+_FIELD_LABELS = {"avg_monthly_balance": _BALANCE_LABEL}
+
+# Field names whose values are money, so they read as rupees rather than bare floats.
+_AMOUNT_FIELD_RE = re.compile(
+    r"amount|balance|principal|premium|coverage|limit|fee|due_inr|_inr$|charge$",
+    re.IGNORECASE,
+)
+
+
+# Abbreviations that survive a naive title-case as noise. "Dpd" and "Inr" mean nothing on
+# screen; "DPD (days past due)" and dropping the redundant currency suffix do.
+_LABEL_WORDS = {
+    "dpd": "DPD (days past due)",
+    "ifsc": "IFSC",
+    "kyc": "KYC",
+    "emis": "EMIs",
+    "txn": "Transaction",
+    "upi": "UPI",
+    "id": "ID",
+    "avg": "Average",
+    "inr": "",
+}
+
+
+def _field_label(field: str) -> str:
+    """Human-readable label for a field name, with any mandatory qualifier attached."""
+    if field in _FIELD_LABELS:
+        return _FIELD_LABELS[field]
+    # Substitute per underscore-separated WORD. A first version ran \b-anchored regexes over
+    # the whole field name, which matched `dpd` but not `times_90_plus_dpd` - the boundary
+    # sits at the underscore, so the abbreviation was only ever fixed when it was the entire
+    # name.
+    label = field[: -len("_inr")] if field.endswith("_inr") else field
+    words = [_LABEL_WORDS.get(word, word) for word in label.split("_")]
+    text = " ".join(word for word in words if word).strip()
+    return text[:1].upper() + text[1:] if text else field
+
+
+def _format_record(record: dict) -> str:
+    """One record as `Label: value | Label: value`, every field it has.
+
+    Amount-shaped fields are formatted as rupees; everything else is printed as stored.
+    Empty values are dropped rather than shown as blanks, so a sparse record stays short.
+    """
+    def sort_key(field: str) -> tuple[int, int]:
+        try:
+            return (0, _FIELD_PRIORITY.index(field))
+        except ValueError:
+            return (1, 0)
+
+    parts = []
+    for field in sorted(record, key=sort_key):
+        value = record[field]
+        if field in _SKIP_RECORD_FIELDS or value in (None, "", "N/A"):
+            continue
+        text = _safe_amount(value) if _AMOUNT_FIELD_RE.search(field) else str(value)
+        parts.append(f"{_field_label(field)}: {text}")
+    return " | ".join(parts)
+
+
+def _format_graph_context(graph_ctx: dict | None, current_intent: str | None = None,
+                          active_ticket_id: str | None = None,
+                          include_records: bool = True) -> str:
     """Convert the Neo4j graph context dict into a clean human-readable string.
 
-    ``current_intent`` names what THIS message is about. Without it the open-cases block
-    is a list of what the customer has raised with nothing to say which one the message
-    in hand concerns, so a dispute arriving while a card case was open came back as
-    "your dispute has been logged under <the card ticket>". Defaults to None so the
-    classifier caller - the step that decides intent, and which must see every case -
-    is unchanged.
+    ``include_records`` controls only the holdings blocks (cards, accounts, policies,
+    claims, charges, transactions, KYC, FDs). It exists because the ANSWER prompt
+    receives those same records a second time through ``contexts`` - neo4j_answer()
+    renders them from get_all_customer_records(), and this function renders them from
+    get_customer_context_for_customer(), which calls that same function. Two renderers,
+    four pipeline steps apart, neither aware of the other: measured at ~1,089 duplicate
+    tokens a message, and the answer prompt was refused with a 429 for exceeding a
+    tokens-per-minute ceiling by less than that.
+
+    Defaults to True so the OTHER caller - classify_message, a different LLM call whose
+    only source of records is this function - is unchanged. Only the answer prompt opts
+    out. Identity and open cases are always emitted: they are this function's alone, and
+    neo4j_answer cannot supply them (its Cypher walks outward from the Customer node, so
+    it never returns the customer, and it excludes :Ticket).
+
+    ``current_intent`` and ``active_ticket_id`` were the two inputs to a continuity
+    claim this function no longer makes - see the open-cases block below for why. Both
+    are kept in the signature, accepted and unused, because three call sites pass them
+    positionally or by keyword and a signature change would be a wider edit than the
+    behaviour warrants. They are the natural inputs to a correct continuity claim, so
+    the day the referee's verdict is available before this prompt is built, the answer
+    arrives here rather than needing a new parameter.
     """
     if not graph_ctx:
         return ""
@@ -750,72 +935,22 @@ def _format_graph_context(graph_ctx: dict | None, current_intent: str | None = N
         lines.append(f"Customer Name: {graph_ctx['name']}")
     if graph_ctx.get("city"):
         lines.append(f"City: {graph_ctx['city']}")
-    loans = graph_ctx.get("loans") or []
-    if loans:
-        lines.append("Loans:")
-        for loan in loans:
-            lines.append(
-                f"  - {loan.get('loan_type', 'Loan')} (ID: {loan.get('loan_id', '')}) | "
-                f"Status: {loan.get('status', '')} | "
-                f"Amount: {_safe_amount(loan.get('amount_inr', 0))} | "
-                f"Next step: {loan.get('next_step', '')}"
-            )
-    claims = graph_ctx.get("claims") or []
-    if claims:
-        lines.append("Claims:")
-        for claim in claims:
-            lines.append(
-                f"  - {claim.get('policy_type', '')} / {claim.get('claim_type', '')} "
-                f"(ID: {claim.get('claim_id', '')}) | "
-                f"Status: {claim.get('status', '')} | "
-                f"Claimed: {_safe_amount(claim.get('amount_claimed', 0))}"
-            )
-    policies = graph_ctx.get("policies") or []
-    if policies:
-        lines.append("Policies:")
-        for p in policies:
-            maturity = f" | Maturity: {p['maturity_date']}" if p.get("maturity_date") else ""
-            next_due = f" | Next premium due: {p['next_premium_due']}" if p.get("next_premium_due") else ""
-            lines.append(
-                f"  - {p.get('policy_type', 'Policy')} (ID: {p.get('policy_id', '')}) | "
-                f"Status: {p.get('status', '')} | "
-                f"Coverage: {_safe_amount(p.get('coverage_inr', 0))} | "
-                f"Premium: {_safe_amount(p.get('premium_inr', 0))}"
-                f"{maturity}{next_due}"
-            )
-    credit_cards = graph_ctx.get("credit_cards") or []
-    if credit_cards:
-        lines.append("Credit Cards:")
-        for cc in credit_cards:
-            lines.append(
-                f"  - {cc.get('card_network', 'Card')} {cc.get('card_variant', '')} "
-                f"(ID: {cc.get('card_id', '')}) | "
-                f"Credit limit: {_safe_amount(cc.get('credit_limit', 0))} | "
-                f"Balance due: {_safe_amount(cc.get('balance_due', 0))}"
-            )
-    accounts = graph_ctx.get("accounts") or []
-    if accounts:
-        lines.append("Accounts:")
-        for a in accounts:
-            lines.append(
-                f"  - {a.get('account_type', 'Account')} {a.get('account_sub_type', '')} "
-                f"(No: {a.get('account_number', '')}) | "
-                f"Status: {a.get('status', '')} | "
-                f"Avg monthly balance: {_safe_amount(a.get('avg_monthly_balance', 0))}"
-            )
-    fixed_deposits = graph_ctx.get("fixed_deposits") or []
-    if fixed_deposits:
-        lines.append("Fixed Deposits:")
-        for fd in fixed_deposits:
-            maturity = f" | Maturity: {fd['maturity_date']}" if fd.get("maturity_date") else ""
-            lines.append(
-                f"  - FD {fd.get('fd_id', '')} | "
-                f"Principal: {_safe_amount(fd.get('principal_amount', 0))} | "
-                f"Rate: {fd.get('interest_rate', 'N/A')}% | "
-                f"Tenure: {fd.get('tenure_months', 'N/A')} months | "
-                f"Status: {fd.get('status', '')}"
-                f"{maturity}"
-            )
+    # Every record the customer holds, every field. Six hand-written blocks used to sit
+    # here, each naming the 4-6 fields it printed - a SECOND whitelist stacked on top of
+    # the query's column list, and invisible from it. Between them, Fathima's emis_paid=53
+    # never reached the model on a question that asked for exactly that, her charges were
+    # absent entirely, and her :KYC node was not fetched at all.
+    #
+    # Rendering whatever is present means a property added to a node, or a new node type in
+    # the seed, appears with no code change here either.
+    if include_records:
+        for key, heading in _RECORD_SECTIONS:
+            records = graph_ctx.get(key) or []
+            if not records:
+                continue
+            lines.append(f"{heading}:")
+            for record in records:
+                lines.append("  - " + _format_record(record))
     # Open support cases. Conversation history is a fixed recent-turns window, so a case
     # raised earlier scrolls out of view and the model stops knowing it exists even while
     # the ticket is still open. Listing it here makes it a durable fact about the customer,
@@ -824,35 +959,42 @@ def _format_graph_context(graph_ctx: dict | None, current_intent: str | None = N
     open_cases = graph_ctx.get("open_cases") or []
     if open_cases:
         lines.append("Open support cases (already raised - do NOT treat as new):")
-        matched = []
         for case in open_cases:
             subject = case.get("title") or (case.get("intent") or "").replace("_", " ").title()
             scope = case.get("scope") or ""
             # "transaction_dispute:imps" -> "imps": the specific matter, without repeating the intent.
             detail = f" about {scope.split(':', 1)[1]}" if ":" in scope and scope.split(":", 1)[1] else ""
-            same = bool(current_intent) and case.get("intent") == current_intent
-            if same:
-                matched.append(str(case.get("ticket_id", "")))
             lines.append(
                 f"  - {case.get('ticket_id', '')} | {subject}{detail} | "
                 f"Status: {case.get('status', 'open')}"
-                + (" | SAME SUBJECT as this message" if same else "")
             )
         # Every case stays listed. The customer may reference any of them across channels,
         # and hiding one would cost exactly the continuity this block exists to give
-        # (Fix 75). What is added is the one fact the model was missing: what THIS message
-        # is about - so it can tell "continues that case" from "this is something new".
-        if current_intent:
-            readable = current_intent.replace("_", " ")
-            if matched:
-                lines.append(
-                    f"This message is about: {readable}. It continues {', '.join(matched)}."
-                )
-            else:
-                lines.append(
-                    f"This message is about: {readable}, which none of the cases above cover. "
-                    "It is a NEW matter: do NOT tell the customer it has been logged under any "
-                    "ticket id listed above. A reference number is appended automatically, so "
-                    "never write one yourself."
-                )
+        # (Fix 75).
+        #
+        # What is NOT stated is which case this message belongs to. That claim used to be
+        # made here three ways - "SAME SUBJECT as this message" and "same topic, different
+        # matter" on the case lines, and "It continues tkt_x" below - all from one
+        # comparison: does the intent LABEL match, and is this the ticket the conversation
+        # was last on. Neither supports the conclusion. A 2-3 word label cannot tell "the
+        # same card question" from "another card question", which is exactly why
+        # `ticket_referee` exists - and measured on a live message, the referee runs
+        # ~2 seconds AFTER this prompt is built (answer_generation 17:53:02,
+        # ticket_referee 17:53:04). So the answer asserted continuity from a guess while
+        # the mechanism built to decide it had not run yet, and got it wrong: two
+        # questions about the same credit card, both labelled general_inquiry.
+        #
+        # The warning below survives because it is the opposite kind of statement. Telling
+        # the model NOT to claim a case covers this matter is safe on weak evidence;
+        # telling it one DOES is what put a wrong ticket id in front of a customer. The
+        # intent label is dropped from it too - the model has the customer's actual message
+        # a few lines down and does not need a coarser restatement of it.
+        lines.append(
+            "None of the cases above is known to cover THIS matter. Do NOT tell the "
+            "customer it has been logged, tracked or referenced under any ticket id "
+            "listed above, even one on the same topic — a shared subject is not the same "
+            "case. You may still answer their question using the account facts above. A "
+            "reference number is appended automatically when one exists, so never write "
+            "one yourself."
+        )
     return "\n".join(lines)

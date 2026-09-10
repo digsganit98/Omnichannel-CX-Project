@@ -22,20 +22,44 @@ def _connect(db_path: str) -> sqlite3.Connection:
     return conn
 
 
+# Analytics counts WORK, so every "open" figure here means SERVICEABLE - a ticket a human
+# is on. Under the ticket-model redesign every customer query gets a LOGGED ticket purely
+# as a grouping id; counting those as open would inflate the headline queue by roughly 4x
+# and make "open tickets" mean "messages received". These are written as inclusion lists
+# because the previous form, `status <> 'closed'`, silently absorbs any new status.
+_SERVICEABLE_SQL = "status IN ('open','in_progress')"
+_CLOSED_SQL = "status = 'closed'"
+
+
 def get_overview(db_path: str) -> OverviewMetrics:
     with _connect(db_path) as conn:
         row = conn.execute(
             """
             SELECT
-                SUM(CASE WHEN status <> 'closed' THEN 1 ELSE 0 END) AS open_cnt,
+                SUM(CASE WHEN status IN ('open','in_progress') THEN 1 ELSE 0 END) AS open_cnt,
                 SUM(CASE WHEN status = 'closed' THEN 1 ELSE 0 END) AS resolved_cnt,
                 SUM(CASE WHEN escalation_reason IS NOT NULL AND escalation_reason != '' THEN 1 ELSE 0 END) AS escalated_cnt,
+                -- An SLA can only be breached on work someone owes: a logging ticket has
+                -- no promised response, so it cannot breach.
                 SUM(CASE WHEN sla_due_at IS NOT NULL AND sla_due_at < datetime('now')
-                              AND status <> 'closed' THEN 1 ELSE 0 END) AS sla_breach_cnt
+                              AND status IN ('open','in_progress') THEN 1 ELSE 0 END) AS sla_breach_cnt
             FROM tickets
             """
         ).fetchone()
 
+        # Average handling time over cases a human actually worked.
+        #
+        # `status = 'closed'` is the right filter and was never wrong - what changed is WHICH
+        # tickets reach closed. Under the ticket-model redesign every customer query gets a
+        # LOGGED ticket, and closing is a live pipeline path (the customer says "that's
+        # sorted" -> TicketAction.CLOSE), so a logging id created and closed within the same
+        # exchange would drop a ~0-minute sample into the same average as a multi-day dispute
+        # and drag this headline tile toward zero - while looking like an improvement.
+        #
+        # `escalation_reason IS NOT NULL` is the test for "a person was ever needed on this":
+        # it is written when the ticket opens OPEN, and promotion (logged -> open) writes it
+        # too, so a thread that started as a grouping id and later needed a human is still
+        # counted. A ticket that never left LOGGED has none, and is excluded.
         avg_row = conn.execute(
             """
             SELECT AVG(
@@ -43,6 +67,7 @@ def get_overview(db_path: str) -> OverviewMetrics:
             ) AS avg_mins
             FROM tickets
             WHERE status = 'closed'
+              AND escalation_reason IS NOT NULL AND escalation_reason != ''
             """
         ).fetchone()
 
@@ -158,6 +183,11 @@ def get_channel_metrics(db_path: str) -> ChannelMetrics:
         # (The old query joined tickets → channel_identities, which (a) surfaced internal identifier
         #  types like 'graph'/'portal' that are NOT contact channels, and (b) counted a ticket once
         #  per identity the customer had, inflating every channel to a flat identical number.)
+        #
+        # SERVICEABLE only. This query had NO status filter, which was correct while a ticket
+        # meant "a human is needed" - under the ticket-model redesign every customer query gets
+        # a LOGGED grouping id, so counting those would make ticket_count a second copy of
+        # message_count and the chart would stop comparing the two things it exists to compare.
         ticket_rows = conn.execute(
             """
             SELECT channel, COUNT(*) AS cnt
@@ -166,6 +196,7 @@ def get_channel_metrics(db_path: str) -> ChannelMetrics:
                 FROM tickets t
                 JOIN conversation_turns ct ON ct.ticket_id = t.ticket_id
                 WHERE ct.channel IS NOT NULL AND ct.channel != ''
+                  AND t.status IN ('open','in_progress')
                 GROUP BY t.ticket_id
             )
             GROUP BY channel
@@ -222,7 +253,7 @@ def get_solution_performance(db_path: str) -> SolutionPerformanceMetrics:
       - by_risk_band   = OPEN tickets bucketed by priority_score band.
       - by_escalation_reason = escalated tickets grouped by escalation_reason.
     """
-    _open = "status <> 'closed'"
+    _open = _SERVICEABLE_SQL
     _escalated = "escalation_reason IS NOT NULL AND escalation_reason != ''"
     with _connect(db_path) as conn:
         escalations = conn.execute(
@@ -293,6 +324,14 @@ def _pretty_reason(reason: str) -> str:
 
 
 def get_intent_metrics(db_path: str, top_n: int = 10) -> IntentMetrics:
+    """What customers are contacting us ABOUT, counted from conversation_turns.
+
+    Reads TURNS, not tickets - so it is unaffected by the ticket-model redesign, and no
+    status filter belongs here. It has always counted every classified customer message,
+    which is the right population for a demand chart. The title says "query intents" rather
+    than "ticket intents" so it is not read as a view of the agent queue, where every other
+    ticket figure on the dashboard means SERVICEABLE.
+    """
     with _connect(db_path) as conn:
         rows = conn.execute(
             """
@@ -334,16 +373,36 @@ def get_sentiment_metrics(db_path: str) -> SentimentMetrics:
 
 
 def get_agent_metrics(db_path: str) -> list[AgentMetrics]:
+    """Per-team workload. Every figure here counts WORK, so LOGGED is excluded.
+
+    This query had no status filter at all: it counted every ticket as "handled" and
+    averaged `updated_at - created_at` over all of them. Both were already imperfect
+    (the average is meaningless on a ticket that is still open — that difference is just
+    "time since the last administrative edit"), but they become WRONG under the
+    ticket-model redesign, where every customer query gets a LOGGED ticket. "Handled"
+    would quietly come to mean "messages received", inflated roughly 4x, on a dashboard.
+
+    So each column now says which population it means:
+      * handled     - SERVICEABLE: a human is on it, or was
+      * avg_mins    - CLOSED only: elapsed time is only meaningful once the case ended
+      * escalations - SERVICEABLE: a logging ticket has no escalation_reason anyway,
+                      but stating it keeps the three columns consistent
+    """
     with _connect(db_path) as conn:
         rows = conn.execute(
-            """
+            f"""
             SELECT
                 assigned_team AS agent,
-                COUNT(*) AS handled,
-                AVG((julianday(updated_at) - julianday(created_at)) * 1440) AS avg_mins,
-                SUM(CASE WHEN escalation_reason IS NOT NULL AND escalation_reason != '' THEN 1 ELSE 0 END) AS escalations
+                SUM(CASE WHEN {_SERVICEABLE_SQL} THEN 1 ELSE 0 END) AS handled,
+                AVG(CASE WHEN {_CLOSED_SQL}
+                         THEN (julianday(updated_at) - julianday(created_at)) * 1440
+                    END) AS avg_mins,
+                SUM(CASE WHEN {_SERVICEABLE_SQL}
+                          AND escalation_reason IS NOT NULL AND escalation_reason != ''
+                         THEN 1 ELSE 0 END) AS escalations
             FROM tickets
             GROUP BY assigned_team
+            HAVING handled > 0
             ORDER BY handled DESC
             """
         ).fetchall()
