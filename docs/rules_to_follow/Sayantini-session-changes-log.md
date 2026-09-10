@@ -34,6 +34,7 @@ aborts rather than inventing a merge commit if something unexpected has landed o
 |---|---|---|
 | 2026-09-09 23:06 | `2bda59f` | Everything through Fix 165 — the ticket-model redesign, the OmnichannelCX rebrand and UI redesign, the home page, the one-pager, and the EC2 operations doc. **Reconstructed from git, not recorded at the time**; the method and exact steps were not written down. |
 | 2026-09-10 | `936b993` | Fix 166 (`e40a508`) — the FinOps rate change — plus this log entry (`936b993`). Fast-forward. |
+| 2026-09-10 | `f7b6f71` | **Digvijay merged `digvijay-work-branch` into `main`** after the above — markdown-rendered replies, confidence pill labels, WhatsApp `**bold**`, and the home-page bands removed. Pulled into `Sayantini-phase2-ui-changes` (fast-forward, no conflicts) **before** the EC2 deploy, which would otherwise have overwritten his UI files with stale copies. |
 
 ## Summary (one line per change)
 
@@ -8933,3 +8934,88 @@ the rates remain a snapshot — nothing re-reads AWS pricing, so the next change
 user's pricing page shows Mumbai with both models priced. AWS added the region since. The
 consequence recorded there — that Indian data residency forces Claude Haiku rather than
 gpt-oss — no longer follows.
+
+---
+
+## EC2 deploy - 2026-09-10 (Fix 164-166 + Digvijay's merge; rebuild + fresh start)
+
+The box went from **Fix 163, UI-only, stale image** to **`f7b6f71` with the image rebuilt** -
+full parity with `main` for the first time since 2026-09-07.
+
+### What went across
+
+Five files by `scp`, backed up first to `~/backup_pre166`:
+
+| file | brings |
+|---|---|
+| `apps/admin-ui/index.html` | Fix 164/165 home page, as Digvijay left it |
+| `apps/admin-ui/style.css` | matching styles |
+| `apps/admin-ui/app.js` | replies render as markdown (`mdToHtml`, was `escH`); confidence pill labels |
+| `services/rag_service/groq_generator.py` | WhatsApp `*bold*` -> `**bold**` |
+| `shared/prompts/system.md` | the same |
+
+Verified by content before rebuilding, every count matching local: `20260910-headline2` 1,
+`mdToHtml(ex.reply.text` 2, `standard markdown` 1 and 1.
+
+**`docker-compose.yml` was NOT copied** (§ 7 - it diverges deliberately). The Fix 166 rates went in
+by `sed` on line 53 alone, leaving the Ollama and ngrok divergence untouched.
+
+### Caught before it did damage: main had moved
+
+The deploy was planned against a git diff from `1269aa4` and would have pushed **stale**
+`index.html` and `style.css`, wiping Digvijay's changes off the box. The user asked "wait, main has
+a few more recent changes" - `origin/main` was 4 commits ahead at `f7b6f71`, and his merge touched
+**the exact two files queued for `scp`**. Pulled first, then deployed. **The check that caught this
+was the user's, not mine.**
+
+### The rebuild belief was wrong, and it had cost days
+
+Two earlier deploys deferred Python fixes as "not worth image-build headroom at 95% disk". Measured
+this time: `COPY . .` is the last layer, both `pip install` layers cached, **2.5 seconds and
+~200 MB at 97% disk**. The deferred `main.py` / `email.py` strings from Fix 162 were picked up as a
+side effect. Recorded in § 2 of the EC2 doc so it is not re-derived.
+
+### Fresh start (§ 6), clean
+
+Payload copied off and verified at **26,418 / 48,094 / 12,109** bytes before anything was removed.
+`stop` + `rm` + `volume rm` on our two only - ngrok, opensearch and mailpit stayed up 5 days
+throughout. Reseed gave `bfsi_data_loaded` then `neo4j_seed_complete`; re-index `14/14 errors 0`
+and `holdings_linked 123`; graph Customer **5**, KBChunk **14**, Concept **18**.
+
+**One snag:** `/app/data/knowledge_base` and `resolution_kb` do not exist on a fresh `cx-data`, so
+the first `docker cp` of the PDF reported success into nowhere and the next failed. `mkdir -p`
+inside the container first, then both copies land. § 6 step 6 does not mention this.
+
+### Fix 166 verified live
+
+`_estimate_cost_usd('openai/gpt-oss-120b', 1e6, 1e6)` -> `{'cost_usd': 0.89, 'source':
+'env_config'}` - the Bedrock Mumbai rates, in the running container, on a database that held zero
+rows an hour earlier.
+
+### Found while testing: a 429 is cached as "no offers"
+
+Fathima's Suggested Offers card stayed empty and Refresh would not clear it.
+`opportunity_evaluations` showed `suppressed: None` - no gate fired - and `llm_usage_events` showed
+`opportunity_generation` **failed**: *429, TPM limit 8000, used 7482, requested 1113*. It runs last
+of the ~6 calls a message fires, so it is the one refused. The failed run still writes its cache
+row, and `routes/agent_assist.py:175` returns that on every later refresh **without retrying**.
+Both traps are now in § 8. Not fixed - the code change (do not cache a failed generation) is
+unwritten.
+
+### Three commands I gave the user that were wrong
+
+Recorded because the pattern matters more than any one of them:
+
+1. **`docker image prune -f`, called "safe under § 7".** It is **daemon-wide**, and it deleted
+   ~14 untagged `genai-demos/cam-automation` images - **5.94 GB of another team's** - which is the
+   precise thing § 7 forbids and which I had read aloud an hour earlier. Their tagged
+   `frontend-latest`/`backend-latest` survived and nothing was running, so nothing broke; the owner
+   was told. Now an explicit § 7 line.
+2. **`Neo4jClient.run(...)`** - the method is `query`. Guessed instead of reading the class.
+3. **A query naming columns `id`, `kind`, `product`** on `agent_assist_recommendations`, none of
+   which exist (`recommendation_id`, `action_type`, `metadata_json`). The user asked "are you sure?"
+   before running it - the schema check that followed showed it would have failed.
+
+By the third the user said they could not trust the commands, which was the correct read. The rule
+that would have prevented all three: **read the schema, the class or the flag's scope before
+handing over a command**, exactly as file contents are verified by grep rather than by prediction.

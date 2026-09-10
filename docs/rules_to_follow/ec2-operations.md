@@ -76,6 +76,14 @@ every customer as Unverified for months while looking healthy.
    Python change needs `docker compose build api`. `docker cp` works and is the wrong fix -
    it leaves the image stale and the container diverged from the repo, which is the exact
    condition behind Fix 146.
+
+   **A code-only rebuild is CHEAP - measured 2026-09-10, not assumed.** `COPY . .` is the LAST
+   layer in `infra/docker/Dockerfile.api`; both `pip install` layers (torch + deps, the ~2 GB
+   bulk) are cached and do NOT re-run when only application code changes. At **97% disk** the
+   rebuild took **2.5 seconds** and cost ~200 MB. Two earlier deploys deferred Python fixes on
+   the belief that a rebuild was too expensive at 95% disk - **that belief was wrong**, and it
+   left the box serving a stale image for days. Rebuild when Python changes; the cost is the
+   old image going dangling, not a 2 GB re-download.
 3. **`docker compose restart` also does not re-read `.env`.** It reuses the existing
    container and its original environment. Only `docker compose up -d api` recreates it.
    `RAG_BACKEND=neo4j` was set, the container was restarted, and the app still reported
@@ -118,41 +126,39 @@ every customer as Unverified for months while looking healthy.
 exists.** The procedure for changing it is § 5-6 below. Do NOT follow `fresh-start-runbook.md`
 on EC2 - it is written for local and its `cx-data` wipe destroys the seed payload.
 
-**As of 2026-09-07, after the Fix 153-162 UI deploy below.**
+**As of 2026-09-10, after the Fix 164-166 deploy + rebuild + fresh start below.**
 
 | | |
 |---|---|
-| code level | **Fix 163 (UI only)** - matches local for `apps/admin-ui/`; the two changed Python files from the Fix 162 deploy are ON the box but NOT yet in the image (see below) |
+| code level | **`f7b6f71`** - full parity with `main`, **image rebuilt** so Python matches too. Record the hash, never a status word |
 | host | `ip-172-31-38-51`, public **13.233.212.194**, repo `/home/ec2-user/Omnichannel-CX-Project` |
 | API port | **8889** (local is 8888) |
 | git | **none** - `scp` is the only route in |
-| `GROQ_MODEL` | **`openai/gpt-oss-120b`** - DIVERGED from local's `20b`, deliberately: probed 2026-09-07 at 999/1000 requests, healthy |
+| `GROQ_MODEL` | **`openai/gpt-oss-120b`** - DIVERGED from local's `20b`, deliberately |
 | Groq quota | **shared with local** - same `GROQ_API_KEY`; a probe from either machine answers for both |
-| `RAG_BACKEND` | `neo4j` - verified inside the container |
-| data | 0 conversations / 0 turns / 0 tickets; **5** seeded customers; KB **14/14**; `holdings_linked` 123 |
-| logins | **DESTROYED by the wipe** - portal + admin need re-signup (`sayantini.s.55@gmail.com` / `7890864700`) |
-| containers | all 5 up, **untouched by this deploy** (api + neo4j 17h, ngrok/opensearch/mailpit 2d); **ngrok holds the shared tunnel**; opensearch UNUSED (kept as rollback); Ollama commented out of compose |
-| disk | **8.5 GB free, 95%** (measured this deploy) - shared with ~30 other projects |
-| backups on box | `~/seed_backup_bfsi.xlsx`, `~/seed_backup_kb`, `~/seed_backup_rkb` (the irreplaceable payload), `~/backup_pre149` (8 files), `~/backup_pre162` (the 5 files that deploy overwrote), **`~/backup_pre_title`** (`index.html`, Fix 163) |
+| `RAG_BACKEND` | **`neo4j` by CODE DEFAULT - the variable is UNSET.** `printenv RAG_BACKEND` returns EMPTY; `config.py:47` (`os.getenv("RAG_BACKEND", "neo4j")`) supplies it. The earlier "verified inside the container" reading was of the default, not of a set value. Same outcome, different mechanism - do not "fix" the empty output |
+| data | **2 conversations / 9 turns** from post-deploy testing; **5** seeded customers; KB **14/14**; `holdings_linked` **123**; Concepts **18** |
+| logins | **DESTROYED by the 2026-09-10 wipe** - portal + admin need re-signup (`sayantini.s.55@gmail.com` / `7890864700`, must match the seeded record) |
+| containers | all 5 up; **ngrok holds the shared tunnel** (untouched, up 5 days); opensearch UNUSED (kept as rollback, untouched); Ollama commented out of compose |
+| disk | **~10 GB free, ~89%** - improved by a prune that should not have been run; see § 7 |
+| backups on box | `~/seed_backup_bfsi.xlsx`, `~/seed_backup_kb`, `~/seed_backup_rkb` (the irreplaceable payload, re-verified 2026-09-10 at 26,418 / 48,094 / 12,109 bytes), `~/backup_pre149`, `~/backup_pre162`, `~/backup_pre_title`, **`~/backup_pre166`** (6 files: the 3 UI files, `groq_generator.py`, `system.md`, `docker-compose.yml`) |
 
 **`/app/data` exists ONLY in the `cx-data` volume** - the api image has no such directory
 (measured). `bfsi.xlsx`, the KB PDF and the resolution examples were hand-copied in and exist
 nowhere else. **Any wipe must copy them off first.**
 
-**The UI is live; two Python strings are not.** `apps/admin-ui/` is bind-mounted, so the four
-UI files took effect the moment they landed - no rebuild, no restart, nothing else on the box
-disturbed. `apps/api/main.py` and `apps/api/routes/email.py` are also on the box but the image
-still holds the old copies, so `/` and the OpenAPI title still read **"Omnichannel CX
-Accelerator"** and the SMTP test body still names it. **Deliberately not rebuilt**: three strings
-nobody sees are not worth spending image-build headroom at 95% disk. They will correct themselves
-on the next rebuild anyone does for a real reason - no further action is needed to "finish" this
-deploy.
+**The 2026-09-10 rebuild closed the Python/UI split.** From Fix 162 to Fix 163 the box ran a
+bind-mounted UI against a stale image: `apps/api/main.py` and `routes/email.py` sat on disk but
+outside the image, so `/` and the OpenAPI title still said "Omnichannel CX Accelerator". That was
+deferred on the belief a rebuild was too expensive at 95% disk. **The rebuild has now happened and
+picked them up - nothing is outstanding.**
 
-**Verified after copying** (content, not disk presence): every grep count on the box matched
-local exactly - `homePage` 1, `rel="icon"` 1, `OmnichannelCX` 3, `an-tabs` 1, `1701d0` 1,
-`openLogin` 2, logo **2,889 bytes**. Then from inside the box: `/admin-ui` serves the home page,
-`/admin-ui/assets/ganit-logo.png` returns 200, and `/` still returns the old name - which is the
-expected split. The user opened `http://13.233.212.194:8889/admin-ui` and confirmed it renders.
+**Verified after copying** (content, not disk presence), 2026-09-10: `20260910-headline2` 1,
+`mdToHtml(ex.reply.text` 2, `standard markdown` 1 in `groq_generator.py` and 1 in `system.md` -
+every count matching the same grep run locally. Then from inside the container: the Bedrock rates
+resolve (`_estimate_cost_usd('openai/gpt-oss-120b',1e6,1e6)` -> `{'cost_usd': 0.89, 'source':
+'env_config'}`), and the graph reads Customer **5**, KBChunk **14**, Concept **18**. The user
+opened `http://13.233.212.194:8889/admin-ui`, signed in and ran a real query end to end.
 
 ### Known defects LIVE on this box
 
@@ -320,6 +326,13 @@ tickets all 0; ngrok + opensearch + mailpit still "Up N days"; disk unchanged.
 - **Never raise OpenSearch's disk watermark** to get an index built.
 - **Never `docker system prune --volumes`** - destroys `cx-data` (SQLite + seeded `data/`) and
   other teams' volumes.
+- **Never run `docker image prune` - not even without `-a`.** It is **daemon-wide, not
+  project-scoped**, and "dangling images are safe to clear" is a statement about Docker, not about
+  a shared box. Run on 2026-09-10 it deleted **~14 untagged `genai-demos/cam-automation` images,
+  5.94 GB**, belonging to another team. Their tagged `frontend-latest` / `backend-latest` survived
+  and nothing of theirs was running, so nothing broke - but those layers were not ours to reclaim
+  and the owner had to be told. **Disk pressure is § 4 rule 4: someone else has to do this.** If a
+  build genuinely needs headroom, ask the box's other owners; do not reclaim it unilaterally.
 - **Never remove OpenSearch** - nothing uses it now, but it is the rollback and re-pulling
   1.34 GB at 95% may fail.
 
@@ -348,6 +361,19 @@ tickets all 0; ngrok + opensearch + mailpit still "Up N days"; disk unchanged.
   the reply silently rejected by Meta - observed 2026-09-09 with a real customer whose number was
   then added. Auth is not the problem: a System User token (`Omnichannel_WhatsApp_Backend`) is in
   place and does not expire in hours.
+- **A Groq 429 is CACHED as "no offers".** `opportunity_generation` runs LAST of the ~6 LLM calls
+  a message fires, so it is the one refused when the per-minute ceiling is hit. The failed run
+  still writes an `opportunity_evaluations` row, and `apps/api/routes/agent_assist.py:175` returns
+  that cached result on every later Refresh **without retrying the LLM** - so a single rate-limited
+  call suppresses offers for that conversation until the input hash changes. The card reads "No
+  offers right now", identical to a genuine empty result. **Refresh cannot clear it; a new turn
+  can.** Observed 2026-09-10. Same family as the failed-send trap below: a failure rendering as a
+  normal result.
+- **One message on 120b costs ~12,000 tokens against an 8,000/minute ceiling.** Measured
+  2026-09-10 from `llm_usage_events`: intent 2,867 + answer 4,030 + resolution 1,299 + handoff 601
+  + case_summary 663 + customer_context 2,902. **Messages sent back-to-back WILL 429 on the last
+  call** - pace a demo at roughly one message per minute. This is the TPM limit, not the 1,000/day
+  request cap; § 4 warns about confusing the two.
 - **A failed outbound send still renders as "sent" in the admin UI.** All three failure paths in
   `services/channel_service/delivery.py` return a dict the UI treats as success, so a Meta
   rejection, a local-log fallback and a real delivery are indistinguishable on screen. The only
@@ -366,6 +392,7 @@ Dated narrative lives in `Sayantini-session-changes-log.md`; this is the index.
 | 2026-09-07 | Full wipe and reseed; the seed payload that exists in only one place | log section "EC2 fresh start - 2026-09-07" |
 | 2026-09-07 | Fix 152 to 162, UI only, no rebuild | log section "EC2 deploy 2026-09-07 (second)" |
 | 2026-09-07 | Fix 163 - the browser tab title | log section "EC2 deploy - Fix 163" |
+| 2026-09-10 | Fix 164-166 + Digvijay's merge; first **rebuild** and fresh start since 09-07; box reached parity with `main` at `f7b6f71` | log section "EC2 deploy - 2026-09-10" |
 
-**Not yet deployed:** Fix 164 and Fix 165 (the home page - bands, viewport tiers, Ganit colours)
-are committed locally but the box is still at Fix 163.
+**Everything committed to `main` is deployed.** The box is at `f7b6f71`, image included. Verify
+with the greps in § 3 rather than trusting this line - it decays the moment anyone commits.
