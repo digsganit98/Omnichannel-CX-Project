@@ -673,7 +673,7 @@ def _channel_format_rule(channel: str) -> str:
             "CHANNEL: WhatsApp\n"
             "Write the response BODY only — greeting and sign-off are added automatically by the system.\n"
             "Rules: max 3–4 lines · first line = one direct answer · "
-            "use *bold* (WhatsApp markdown) for ticket IDs, amounts, and status · "
+            "use **bold** (standard markdown) for ticket IDs, amounts, and status · "
             "bullets only for 3+ items · conversational, no formal salutations."
         )
     if channel == "email":

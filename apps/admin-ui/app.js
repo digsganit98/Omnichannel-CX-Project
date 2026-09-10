@@ -1084,7 +1084,7 @@ function renderCentre(conv) {
           +   '</div>'
           +   '<div class="det-r">'
           +     '<span class="det-lbl det-r-lbl">Offer Message</span>'
-          +     '<div class="det-r-text">' + escH(ex.reply.text || '') + '</div>'
+          +     '<div class="det-r-text">' + mdToHtml(ex.reply.text || '') + '</div>'
           +   '</div>'
           + '</div>';
         return;
@@ -1095,7 +1095,7 @@ function renderCentre(conv) {
       if (ex.reply) {
         var auto = ex.holdingText
           ? '<div class="det-auto">↳ Auto-sent: “' + escH(ex.holdingText.trim()) + '”</div>' : '';
-        replyInner = auto + '<div class="det-r-text">' + escH(ex.reply.text || '') + '</div>';
+        replyInner = auto + '<div class="det-r-text">' + mdToHtml(ex.reply.text || '') + '</div>';
       } else if (ex.holdingText) {
         replyInner = '<div class="det-auto">↳ Auto-sent: “' + escH(ex.holdingText.trim()) + '”</div>'
           + '<div class="det-r-text det-r-pending"><em>Awaiting agent reply…</em></div>';
@@ -1354,7 +1354,7 @@ function confPill(label, score) {
   if (score == null || isNaN(score)) return '';
   var pct = Math.round(Number(score) * 100);
   var cls = pct >= 70 ? 'conf-hi' : (pct >= 40 ? 'conf-mid' : 'conf-lo');
-  return '<span class="conf-pill ' + cls + '" title="' + escH(label) + ' confidence: ' + pct + '%">'
+  return '<span class="conf-pill ' + cls + '" title="' + escH(label) + ': ' + pct + '%">'
     + escH(label) + ' ' + pct + '%</span>';
 }
 
@@ -1404,8 +1404,8 @@ function renderDraftCard(conv, viewMode, shownInboundTurnIds) {
     + '<span class="draft-reason">Delivers via WhatsApp + Email</span>'
     : '<span>✋ Held for review — edit &amp; send manually</span>'
     + '<span class="draft-reason">' + escH(draft.hold_reason || 'Escalated') + '</span>'
-    + confPill('Retrieval', draft.retrieval_confidence)
-    + confPill('Intent', draft.intent_confidence);
+    + confPill('Retrieval confidence', draft.retrieval_confidence)
+    + confPill('Intent confidence', draft.intent_confidence);
   mount.innerHTML =
     '<div class="draft-card' + (isOffer ? ' draft-card--offer' : '') + '" data-draft-id="' + escH(draft.draft_id) + '">'
     + '<div class="draft-hdr">' + hdr + '</div>'
@@ -2776,7 +2776,7 @@ function renderPortalChatTurns(turns) {
     // belongs on the right (blue "you" bubble), and the AI reply (stored as
     // 'outbound') on the left. This is inverted vs. the admin inbox.
     var side = t.direction === 'inbound' ? 'outbound' : 'inbound';
-    return '<div class="portal-chat-msg ' + side + '">' + escH(t.text || '') + '</div>';
+    return '<div class="portal-chat-msg ' + side + '">' + mdToHtml(t.text || '') + '</div>';
   }).join('');
   el.scrollTop = el.scrollHeight;
 }
@@ -3559,6 +3559,15 @@ window.doChangePassword = async function() {
 // ── Utils ─────────────────────────────────────────────────────────────────────
 function escH(v) {
   return String(v == null ? '' : v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// Minimal markdown renderer for AI-generated reply text: escapes HTML first,
+// then turns **bold** into <strong> and *italic* into <em>. Bold is matched
+// before italic so "**x**" doesn't get eaten by the single-asterisk rule.
+function mdToHtml(v) {
+  return escH(v)
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*([^*]+)\*/g, '<em>$1</em>');
 }
 
 // ── Real-time polling (fallback — SSE is the primary driver) ─────────────────
