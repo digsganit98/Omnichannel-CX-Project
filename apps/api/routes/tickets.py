@@ -19,6 +19,23 @@ class TicketStatusUpdate(BaseModel):
     actor: str = "admin"
 
 
+class TicketAssign(BaseModel):
+    # None clears the owner and returns the ticket to triage.
+    assignee: str | None = None
+    actor: str = "admin"
+
+
+class TicketApproval(BaseModel):
+    approved: bool
+    actor: str = "admin"
+    note: str = ""
+
+
+class TicketClose(BaseModel):
+    reason: str
+    actor: str = "admin"
+
+
 @router.get("")
 def list_tickets() -> list[dict]:
     return get_repository().list_tickets()
@@ -62,6 +79,47 @@ def update_ticket_status(ticket_id: str, payload: TicketStatusUpdate) -> dict:
         # graph keeps the ticket 'open' and the model is still told about a closed case.
         return TicketManager(get_repository(), neo4j_client=_neo4j_client()).update_status(
             ticket_id, payload.status, payload.actor
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.patch("/{ticket_id}/assign")
+def assign_ticket(ticket_id: str, payload: TicketAssign) -> dict:
+    repository = get_repository()
+    # An unknown username would write a ticket nobody can see in any queue - it would not
+    # match a roster row, so the board would show an owner that does not exist. Validate
+    # against the roster rather than trusting the caller.
+    if payload.assignee is not None:
+        known = {a["username"] for a in repository.list_agents()}
+        if payload.assignee not in known:
+            raise HTTPException(status_code=400, detail=f"Unknown assignee: {payload.assignee}")
+    try:
+        return TicketManager(repository).assign(ticket_id, payload.assignee, payload.actor)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/{ticket_id}/approval")
+def decide_approval(ticket_id: str, payload: TicketApproval) -> dict:
+    try:
+        return TicketManager(get_repository()).set_approval(
+            ticket_id, payload.approved, payload.actor, payload.note
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/{ticket_id}/close")
+def close_ticket(ticket_id: str, payload: TicketClose) -> dict:
+    reason = (payload.reason or "").strip()
+    # A closure with no reason is the thing this endpoint exists to prevent: closing is a
+    # human judgement and the record has to say what it was.
+    if not reason:
+        raise HTTPException(status_code=400, detail="A closure reason is required")
+    try:
+        return TicketManager(get_repository(), neo4j_client=_neo4j_client()).close(
+            ticket_id, reason, payload.actor
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

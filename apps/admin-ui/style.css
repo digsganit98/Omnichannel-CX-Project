@@ -1561,7 +1561,174 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .sd-empty-t{font-size:13px;font-weight:600;color:var(--t2)}
 .sd-empty-s{font-size:12px;color:var(--t3);margin-top:5px}
 
+/* ── SERVICE DESK ───────────────────────────────────────────────────────────
+   TWO thin horizontal bands, then the list takes every remaining pixel.
+
+   No second sidebar: the app already has the 52px navy .leftnav, and a views
+   panel beside it would make the eye cross two vertical columns before reaching
+   any work. So the views are horizontal - which also absorbs the old metric
+   tiles, because those tiles and the worklist tabs were the same five numbers
+   rendered twice.
+
+   Colour is rationed the way the Analytics redesign rations it: Ganit blue for
+   selection and primary actions, Ganit orange for "a decision is needed", red
+   ONLY for a real SLA breach. Everything else is white, grey and black, which is
+   what makes the colour read as meaning rather than decoration. */
+.sd-shell{flex:1;display:flex;flex-direction:column;min-height:0;background:var(--bg)}
+
+/* Band 1 - identity, search, sort, bench, refresh. */
+.sd-top{height:56px;flex-shrink:0;display:flex;align-items:center;gap:12px;
+  padding:0 20px;background:var(--surf);border-bottom:1px solid var(--bdr);position:relative}
+.sd-top-id{display:flex;align-items:baseline;gap:10px;min-width:0}
+.sd-top-t{font-size:15px;font-weight:700;color:var(--t1);letter-spacing:-.2px;white-space:nowrap}
+.sd-top-s{font-size:11.5px;color:var(--t3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sd-srch{margin-left:auto;display:flex;align-items:center;gap:7px;border:1px solid var(--bdr);
+  background:var(--bg);border-radius:7px;padding:6px 11px;width:236px;flex-shrink:0}
+.sd-srch:focus-within{border-color:var(--blue);box-shadow:0 0 0 3px var(--blue-bg)}
+.sd-srch svg{width:13px;height:13px;fill:var(--t3);flex:0 0 auto}
+.sd-srch input{border:0;background:none;outline:none;font:400 11.5px inherit;color:var(--t1);width:100%}
+.sd-sort{border:1px solid var(--bdr);background:var(--surf);color:var(--t2);border-radius:7px;
+  padding:6px 9px;font:600 11.5px inherit;cursor:pointer;outline:none;flex-shrink:0}
+.sd-sort:focus{border-color:var(--blue)}
+.sd-benchbtn{border:1px solid var(--bdr);background:var(--surf);color:var(--t2);border-radius:7px;
+  padding:6px 11px;font:600 11.5px inherit;cursor:pointer;display:flex;align-items:center;gap:7px;flex-shrink:0}
+.sd-benchbtn:hover{border-color:var(--bdr2);color:var(--t1)}
+.sd-benchbtn.on{border-color:var(--blue);color:var(--blue-t);background:var(--blue-bg)}
+.sd-icobtn{width:30px;height:30px;border:1px solid var(--bdr);background:var(--surf);border-radius:7px;
+  display:flex;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0}
+.sd-icobtn svg{width:14px;height:14px;fill:var(--t2)}
+.sd-icobtn:hover{border-color:var(--bdr2)} .sd-icobtn:hover svg{fill:var(--t1)}
+
+/* Bench popover - the roster, on demand rather than as a permanent band. */
+.sd-benchpop{position:absolute;top:52px;right:56px;width:302px;max-height:392px;overflow-y:auto;
+  background:var(--surf);border:1px solid var(--bdr);border-radius:10px;
+  box-shadow:0 12px 32px rgba(16,24,40,.14);z-index:60;padding:6px}
+.sd-benchpop[hidden]{display:none!important}
+.sd-bp-k{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;
+  color:var(--t3);padding:8px 10px 5px}
+.sd-bp-a{display:flex;align-items:center;gap:9px;padding:6px 10px;border-radius:7px;cursor:pointer}
+.sd-bp-a:hover{background:var(--surf2)}
+.sd-bp-a.on{background:var(--blue-bg)}
+.sd-bp-n{flex:1;font-size:11.5px;font-weight:600;color:var(--t1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sd-bp-t{font-size:10px;color:var(--t3);font-weight:400}
+.sd-bp-b{width:46px;height:4px;border-radius:2px;background:var(--surf2);overflow:hidden;flex:0 0 auto}
+.sd-bp-b i{display:block;height:100%;border-radius:2px;background:var(--blue)}
+.sd-bp-b i.hot{background:var(--org)}
+.sd-bp-c{font-size:10px;color:var(--t3);width:28px;text-align:right;font-variant-numeric:tabular-nums;flex:0 0 auto}
+
+/* Band 2 - the views. Reuses the settled .an-tab treatment (brand-blue underline)
+   rather than inventing a second tab style. */
+.sd-views{flex-shrink:0;display:flex;align-items:center;gap:2px;padding:0 20px;
+  background:var(--surf);border-bottom:1px solid var(--bdr);overflow-x:auto}
+.sd-v{position:relative;border:0;background:none;padding:11px 12px 13px;cursor:pointer;
+  font:600 12px inherit;color:var(--t3);transition:color .12s;white-space:nowrap;display:flex;align-items:center;gap:7px}
+.sd-v:hover{color:var(--t1)}
+.sd-v.on{color:var(--blue)}
+.sd-v.on::after{content:"";position:absolute;left:8px;right:8px;bottom:-1px;height:2px;
+  border-radius:2px 2px 0 0;background:var(--blue)}
+.sd-v-n{font-size:10.5px;font-weight:700;color:var(--t3);font-variant-numeric:tabular-nums}
+.sd-v.on .sd-v-n{color:var(--blue)}
+.sd-v-n--hot{color:var(--red-t)}
+.sd-v-n--warn{color:var(--org-t)}
+.sd-v-sep{width:1px;height:18px;background:var(--bdr);margin:0 6px;flex:0 0 auto}
+
+/* The list. One grid template shared by the header and every row, so columns
+   cannot drift apart. */
+.sd-listwrap{flex:1;min-height:0;display:flex;flex-direction:column;overflow-y:auto;background:var(--bg)}
+.sd-lhd,.sd-row{display:grid;
+  grid-template-columns:32px 66px minmax(220px,1fr) 150px 116px 150px 132px 58px;gap:14px;align-items:center}
+.sd-lhd{position:sticky;top:0;z-index:2;padding:9px 20px;background:var(--surf);
+  border-bottom:1px solid var(--bdr);font-size:9.5px;font-weight:700;text-transform:uppercase;
+  letter-spacing:.5px;color:var(--t3)}
+.sd-r{text-align:right}
+.sd-row{padding:13px 20px;background:var(--surf);border-bottom:1px solid var(--bdr);
+  cursor:pointer;position:relative;transition:background .12s}
+.sd-row:hover{background:var(--surf2)}
+/* State on the left edge - one mark per row, instead of three badges competing. */
+.sd-row::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px}
+.sd-row--brch::before{background:var(--red)}
+.sd-row--act::before{background:var(--org)}
+
+/* Priority: a number over a proportional track, so the shape of the queue is
+   readable without parsing every digit. */
+.sd-pri{display:flex;flex-direction:column;gap:4px}
+.sd-pri-v{font-size:14px;font-weight:700;color:var(--t1);line-height:1;font-variant-numeric:tabular-nums}
+.sd-pri-t{height:3px;border-radius:2px;background:var(--surf2);overflow:hidden}
+.sd-pri-t i{display:block;height:100%;border-radius:2px;background:var(--bdr2)}
+.sd-pri-t i.hi{background:var(--red)}
+.sd-pri-t i.md{background:var(--org)}
+
+.sd-ttl{font-size:12.5px;font-weight:600;color:var(--t1);line-height:1.35}
+.sd-meta{display:flex;align-items:center;gap:7px;margin-top:4px;flex-wrap:wrap}
+.sd-id{font-family:ui-monospace,Menlo,monospace;font-size:9.5px;color:var(--t3)}
+.sd-tag{font-size:9px;font-weight:700;border-radius:4px;padding:1.5px 6px;letter-spacing:.2px;white-space:nowrap}
+.sd-tag--org{background:var(--org-bg);color:var(--org-t)}
+.sd-tag--red{background:var(--red-bg);color:var(--red-t)}
+.sd-tag--gry{background:var(--surf2);color:var(--t2);font-weight:600}
+
+.sd-cust{display:flex;align-items:center;gap:8px;min-width:0}
+.sd-cav{width:26px;height:26px;border-radius:50%;background:var(--surf2);color:var(--t2);
+  font:700 9.5px inherit;display:flex;align-items:center;justify-content:center;flex:0 0 auto}
+.sd-cn{font-size:11.5px;color:var(--t1);font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sd-ct{font-size:10px;color:var(--t3)}
+
+.sd-own{display:flex;align-items:center;gap:8px;min-width:0}
+.sd-av{width:26px;height:26px;border-radius:50%;background:var(--blue-bg);color:var(--blue-t);
+  font:700 9.5px inherit;display:flex;align-items:center;justify-content:center;flex:0 0 auto;position:relative}
+.sd-av--none{background:var(--surf2);color:var(--t3);border:1px dashed var(--bdr2);font-weight:500}
+.sd-dot{position:absolute;right:-1px;bottom:-1px;width:8px;height:8px;border-radius:50%;border:2px solid var(--surf)}
+.sd-dot--active{background:var(--grn)}
+.sd-dot--idle{background:var(--amb)}
+.sd-dot--away{background:var(--t3)}
+.sd-dot--unknown{background:var(--surf);border-color:var(--bdr2)}
+.sd-on{font-size:11.5px;font-weight:600;color:var(--t1);line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sd-ol{font-size:10px;color:var(--t3)}
+.sd-take{border:1px solid var(--blue);background:var(--blue);color:#fff;border-radius:6px;
+  padding:4px 12px;font:600 11px inherit;cursor:pointer;white-space:nowrap}
+.sd-take:hover{background:var(--blue-t)}
+.sd-sugg{font-size:10px;color:var(--t3);margin-top:3px;white-space:nowrap}
+/* OWNER is a fixed two-line block on EVERY row - identity above, action below - so no
+   variant is taller than another and the table keeps one baseline across all columns. */
+.sd-ownc{display:flex;flex-direction:column;align-items:flex-start;gap:6px;min-width:0}
+.sd-on--none{color:var(--t3);font-weight:500}
+.sd-team{font-size:11px;color:var(--t2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* SLA as a depletion bar - time is a quantity, so it is drawn as one. */
+.sd-sla-v{font-size:11px;font-weight:700;color:var(--t2);font-variant-numeric:tabular-nums}
+.sd-sla-v--b{color:var(--red-t)}
+.sd-sla-v--n{color:var(--t3);font-weight:400}
+/* Which clock this is. Recessive on purpose - the label classifies, the value is what the
+   eye is scanning for, so the kind must not compete with the number beside it. */
+.sd-sla-k{font-weight:600;color:var(--t3);text-transform:none;letter-spacing:0}
+.sd-sla-t{height:3px;border-radius:2px;background:var(--surf2);margin-top:5px;overflow:hidden}
+.sd-sla-t i{display:block;height:100%;border-radius:2px;background:var(--red)}
+.sd-sla-t i.ok{background:var(--grn)}
+.sd-sla-t i.soon{background:var(--org)}
+.sd-age{font-size:11px;color:var(--t3);text-align:right;font-variant-numeric:tabular-nums}
+
+.sd-empty{padding:52px 20px;text-align:center;background:var(--surf)}
+.sd-empty-t{font-size:13px;font-weight:600;color:var(--t2)}
+.sd-empty-s{font-size:12px;color:var(--t3);margin-top:5px}
+
+.sd-bulk{flex-shrink:0;display:flex;align-items:center;gap:10px;padding:10px 20px;
+  border-top:1px solid var(--bdr);background:var(--blue-bg);flex-wrap:wrap}
+.sd-bulk[hidden]{display:none!important}
+.sd-bulk-t{font-size:11.5px;font-weight:600;color:var(--blue-t);flex:1}
+.sd-bbtn{border:1px solid var(--blue-bd);background:var(--surf);color:var(--blue-t);border-radius:var(--rs);
+  padding:5px 11px;font:600 11px inherit;cursor:pointer}
+.sd-bbtn:hover{background:#fff;border-color:var(--blue)}
+.sd-bbtn:disabled{opacity:.5;cursor:not-allowed}
+
+@media (max-width:1240px){
+  .sd-lhd,.sd-row{grid-template-columns:32px 58px minmax(180px,1fr) 124px 96px 138px 118px 50px;gap:10px}
+  .sd-srch{width:170px}
+}
+
+
+@media (max-width:1180px){
+  .sd-metrics{grid-template-columns:repeat(3,1fr)}
+}
 @media (max-width:860px){
-  .sd-stats{grid-template-columns:repeat(2,1fr)}
+  .sd-stats,.sd-metrics{grid-template-columns:repeat(2,1fr)}
   .sd-select{margin-left:0}
 }

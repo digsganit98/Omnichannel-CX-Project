@@ -91,6 +91,11 @@ class NextBestActionEngine:
         sla_due_at = ticket.get("sla_due_at")
         if not sla_due_at:
             return None
+        # The response promise is already kept once a human has replied (019), so an
+        # answered ticket must not keep generating "escalate, it is overdue" suggestions
+        # for as long as it stays open. Same rule as the board and analytics.
+        if ticket.get("first_response_at"):
+            return None
         due = datetime.fromisoformat(sla_due_at)
         created = datetime.fromisoformat(ticket["created_at"])
         now = datetime.now(timezone.utc)

@@ -6,7 +6,7 @@
 <title>OmnichannelCX</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="icon" type="image/png" href="/admin-ui/assets/ganit-logo.png">
-<link rel="stylesheet" href="/admin-ui/assets/style.css?v=20260912-hub4">
+<link rel="stylesheet" href="/admin-ui/assets/style.css?v=20260913-sd15">
 </head>
 <body>
 
@@ -752,50 +752,58 @@
          assigned_to column, and a control that appears to assign but persists
          nothing would be a lie on screen. -->
     <div class="page" id="page-servicedesk">
-      <div class="sd-page">
+      <!-- TWO thin bands, then the list takes the rest of the height. There is no second
+           left sidebar: the app already has the 52px navy rail, and a views panel beside
+           it would make the eye cross two vertical columns before reaching any work. The
+           views are therefore horizontal, which also absorbs the old metric tiles - those
+           tiles and the worklist tabs were the same five numbers rendered twice. -->
+      <div class="sd-shell">
 
-        <div class="sd-header">
-          <div>
-            <div class="dash-title">Service Desk</div>
-            <div class="dash-sub">Every ticket in the system, ranked by priority and SLA</div>
+        <div class="sd-top">
+          <div class="sd-top-id">
+            <span class="sd-top-t">Service Desk</span>
+            <span class="sd-top-s" id="sdSummary"></span>
           </div>
-          <button class="sim-btn" onclick="loadServiceDesk()">Refresh</button>
-        </div>
-
-        <div class="sd-stats" id="sdStats"></div>
-
-        <div class="sd-filters">
-          <div class="sd-filter-group" id="sdStatusFilters">
-            <button class="sd-chip on" data-sdstatus="all" onclick="sdSetStatus('all',this)">All</button>
-            <button class="sd-chip" data-sdstatus="open" onclick="sdSetStatus('open',this)">Open</button>
-            <button class="sd-chip" data-sdstatus="logged" onclick="sdSetStatus('logged',this)">Logged</button>
-            <button class="sd-chip" data-sdstatus="closed" onclick="sdSetStatus('closed',this)">Closed</button>
-            <button class="sd-chip sd-chip--red" data-sdstatus="breached" onclick="sdSetStatus('breached',this)">SLA breached</button>
+          <div class="sd-srch">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0016 9.5 6.5 6.5 0 109.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5z"/></svg>
+            <input id="sdSearch" placeholder="Search cases, customers, IDs" oninput="sdSetSearch(this.value)">
           </div>
-          <select class="sd-select" id="sdTeamFilter" onchange="renderServiceDesk()">
-            <option value="all">All teams</option>
+          <select class="sd-sort" id="sdSort" onchange="renderServiceDesk()" aria-label="Sort">
+            <option value="priority">Sort: Priority</option>
+            <option value="sla">Sort: SLA</option>
+            <option value="age">Sort: Age</option>
           </select>
+          <!-- The bench is only needed while assigning, so it is a control rather than a
+               permanent band. Row-level hints ("or Rahul 3/8") carry the routing
+               suggestion where the decision actually happens. -->
+          <button class="sd-benchbtn" id="sdBenchBtn" onclick="sdToggleBench()"></button>
+          <button class="sd-icobtn" onclick="loadServiceDesk()" title="Refresh" aria-label="Refresh">
+            <svg viewBox="0 0 24 24"><path d="M17.65 6.35A7.96 7.96 0 0012 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 0112 18c-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
+          </button>
+          <div class="sd-benchpop" id="sdBenchPop" hidden></div>
         </div>
 
-        <div class="sd-tablewrap">
-          <table class="sd-table">
-            <thead>
-              <tr>
-                <th style="width:74px">Priority</th>
-                <th>Ticket</th>
-                <th style="width:150px">Customer</th>
-                <th style="width:150px">Team</th>
-                <th style="width:96px">Status</th>
-                <th style="width:132px">SLA</th>
-                <th style="width:118px">Last activity</th>
-              </tr>
-            </thead>
-            <tbody id="sdRows"></tbody>
-          </table>
+        <div class="sd-views" id="sdViews"></div>
+
+        <div class="sd-listwrap">
+          <div class="sd-lhd">
+            <span><input type="checkbox" id="sdAll" onclick="sdToggleAll(this)" aria-label="Select all"></span>
+            <span>Priority</span>
+            <span>Case</span>
+            <span>Customer</span>
+            <span>Team</span>
+            <span>Owner</span>
+            <span>Due</span>
+            <span class="sd-r">Age</span>
+          </div>
+          <div class="sd-rows" id="sdRows"></div>
           <div class="sd-empty" id="sdEmpty" hidden></div>
         </div>
+        <div class="sd-bulk" id="sdBulk" hidden></div>
 
       </div>
+
+      <!-- Detail drawer. Outside .sd-page so it can sit over the whole page. -->
     </div><!-- end #page-servicedesk -->
 
     <div class="page" id="page-profile">
@@ -873,6 +881,6 @@
 <!-- d3-force, vendored (15KB, tree-shaken to the 7 functions used). Local, not a CDN:
      the app has no other external JS and a demo must not depend on a network fetch. -->
 <script src="/admin-ui/assets/vendor-d3-force.js?v=20260902"></script>
-<script src="/admin-ui/assets/app.js?v=20260912-hub4"></script>
+<script src="/admin-ui/assets/app.js?v=20260913-sd15"></script>
 </body>
 </html>

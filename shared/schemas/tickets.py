@@ -73,3 +73,18 @@ class Ticket(BaseModel):
     # None means no message has attached since the column existed; readers fall back to
     # created_at rather than asserting an activity that never happened.
     last_activity_at: datetime | None = None
+    # --- Service Desk ownership and lifecycle (migration 019) ---
+    # These MUST be declared here even though nothing in the pipeline sets them: the model
+    # ignores unknown keys rather than rejecting them, so a repository row carrying
+    # assigned_to would be silently stripped by every Ticket(**row) call - the value would
+    # vanish with no error anywhere. Declared, they survive the round trip.
+    assigned_to: str | None = None        # admin_users.username, NULL while unassigned
+    assigned_at: datetime | None = None
+    # When a human first replied. This is what stops the RESPONSE SLA - see sdSla() in
+    # app.js and the breach query in analytics_service/aggregator.py, which must agree.
+    first_response_at: datetime | None = None
+    # Set when a reply commits us to coming back to the customer. Its own clock, separate
+    # from the response SLA, because the promise outlives the reply that made it.
+    follow_up_due_at: datetime | None = None
+    closed_by: str | None = None
+    closure_reason: str | None = None

@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import json
+import logging
 import re
 
 from services.crm_service.client import CRMClient
-from services.persistence_service.repository import CXRepository
+from services.persistence_service.repository import CXRepository, utc_now
 from services.pii_service.masker import mask_text
-from services.ticket_service.assignment import assign_team
+from services.ticket_service.assignment import assign_team, pick_agent
 from services.ticket_service.priority_scoring import score_priority
 from services.workflow_service.approvals import requires_approval
 from services.workflow_service.sla import sla_hours
@@ -15,6 +16,8 @@ from shared.schemas.intents import Intent, Urgency
 from shared.schemas.messages import InboundMessage
 from shared.schemas.tickets import SERVICEABLE_TICKET_STATUSES, Ticket, TicketStatus
 from shared.utils.ids import new_id
+
+logger = logging.getLogger(__name__)
 
 
 class TicketManager:
@@ -213,7 +216,35 @@ class TicketManager:
             "orchestration",
             {"intent": intent.value, "priority": priority.value, "escalation_reason": escalation_reason},
         )
+        self._auto_assign(ticket)
         return self.sync_ticket(ticket.ticket_id, customer=customer)
+
+    def _auto_assign(self, ticket: Ticket) -> None:
+        """Route a new OPEN case to the least-loaded available agent on its team.
+
+        Only OPEN tickets. A LOGGED ticket is a grouping id that no human was asked to
+        work (migration 017), so giving it an owner would put routine questions in
+        somebody's queue and make every load figure on the board meaningless.
+
+        pick_agent() returns None when nobody on the team has room or is around, and that
+        is left UNASSIGNED on purpose: the case then shows up in Needs triage, which is
+        the honest outcome. Assigning it anyway would hide the fact that the team is out
+        of capacity behind a name that cannot act on it.
+
+        Best-effort: a routing failure must never stop a ticket being created, so the
+        whole thing is wrapped. An unassigned ticket is recoverable by a human in one
+        click; a lost ticket is not.
+        """
+        if ticket.status != TicketStatus.OPEN:
+            return
+        try:
+            assignee = pick_agent(self.repository.list_agents(), ticket.assigned_team)
+            if not assignee:
+                return
+            # actor='auto' is what lets the timeline answer "did a person choose this?".
+            self.assign(ticket.ticket_id, assignee, actor="auto")
+        except Exception:
+            logger.warning("auto_assign_failed", extra={"ticket_id": ticket.ticket_id}, exc_info=True)
 
     def _refine_ticket_scope(self, ticket: Ticket, new_scope: str, message: InboundMessage) -> Ticket:
         """Upgrade an ':other'-scoped ticket to a specific scope when details arrive (any channel)."""
@@ -453,6 +484,62 @@ class TicketManager:
         except Exception:
             pass
         return ticket.customer_id
+
+    def assign(self, ticket_id: str, assignee: str | None, actor: str = "admin") -> dict:
+        """Give the ticket an owner, or clear it with assignee=None.
+
+        Not synced to the CRM. Jira's assignee is its own user directory and our usernames
+        are not Jira accounts, so a push would fail per ticket and fill the board with
+        sync errors for a field the CRM cannot hold. Ownership is ours; the CRM keeps the
+        case record.
+        """
+        ticket = self._ticket(ticket_id)
+        previous = ticket.assigned_to
+        updated = self.repository.update_ticket(
+            ticket_id,
+            assigned_to=assignee,
+            assigned_at=utc_now() if assignee else None,
+        )
+        details = {"assigned_to": assignee, "previous": previous}
+        # actor='auto' distinguishes a routing rule from a person, so the timeline can
+        # always answer "did a human choose this?".
+        self.repository.add_ticket_event(
+            ticket_id, "ticket_assigned" if assignee else "ticket_unassigned", actor, details
+        )
+        self._audit(ticket, "ticket_assigned", details)
+        return updated
+
+    def set_approval(self, ticket_id: str, approved: bool, actor: str = "admin",
+                     note: str = "") -> dict:
+        """Record a sign-off on a ticket that requires_approval() flagged at creation.
+
+        Approving does NOT send anything to the customer. It removes the block; the reply
+        is still written and sent by a person in Agent Workspace. Keeping those separate
+        is deliberate - an approval is permission to act, not the act itself.
+        """
+        ticket = self._ticket(ticket_id)
+        status = "approved" if approved else "rejected"
+        updated = self.repository.update_ticket(ticket_id, approval_status=status)
+        details = {"approval_status": status, "note": note}
+        self.repository.add_ticket_event(ticket_id, "approval_" + status, actor, details)
+        self._audit(ticket, "ticket_approval_decided", details)
+        return updated
+
+    def close(self, ticket_id: str, reason: str, actor: str = "admin") -> dict:
+        """Close a case and record WHO decided that and WHY.
+
+        update_status() already exists and syncs to the CRM, so this delegates to it
+        rather than writing a second closing path - two ways to close would drift, and one
+        of them would forget the graph mirror. This adds only the attribution the Service
+        Desk needs: before 019 nothing recorded who closed a ticket, and measured on the
+        live database no ticket had ever been closed by a human at all.
+        """
+        self.repository.update_ticket(ticket_id, closed_by=actor, closure_reason=reason)
+        updated = self.update_status(ticket_id, TicketStatus.CLOSED, actor)
+        self.repository.add_ticket_event(
+            ticket_id, "ticket_closed", actor, {"closure_reason": reason}
+        )
+        return updated
 
     def _ticket(self, ticket_id: str) -> Ticket:
         ticket = self.repository.get_ticket(ticket_id)

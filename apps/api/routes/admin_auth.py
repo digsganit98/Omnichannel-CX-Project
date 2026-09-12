@@ -109,6 +109,27 @@ def list_admin_users():
     return repo.list_admin_users()
 
 
+@router.get("/admin/agents", dependencies=[Depends(require_admin_auth)])
+def list_agents():
+    """The routing roster: who exists, what they hold, and whether they are around.
+
+    `open_count` and `breaching` are counted live rather than stored, and `availability`
+    is derived from the person's last recorded action - see assignment.availability().
+    Nothing here is self-reported, so nothing here can be a stale toggle.
+
+    A row with team=None is an OPERATOR (a real signed-in account, not a seeded agent):
+    they can take any ticket in any team and have no capacity ceiling, which is why the
+    UI groups them separately from the per-team bench.
+    """
+    from services.ticket_service.assignment import availability
+
+    agents = get_repository().list_agents()
+    for agent in agents:
+        agent["availability"] = availability(agent.get("last_action_at"))
+        agent["is_operator"] = agent.get("team") is None
+    return agents
+
+
 class ChangePasswordRequest(BaseModel):
     username: str
     new_password: str

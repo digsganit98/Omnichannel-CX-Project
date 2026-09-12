@@ -7,6 +7,7 @@ portal's history poll) and persists a normal outbound turn.
 """
 
 import logging
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -14,6 +15,7 @@ from pydantic import BaseModel
 from apps.api.dependencies.runtime import get_repository
 from apps.api.dependencies.security import require_admin_auth
 from services.channel_service.delivery import OutboundDeliveryService
+from services.persistence_service.repository import utc_now
 from shared.schemas.messages import Channel, InboundMessage
 
 logger = logging.getLogger(__name__)
@@ -116,6 +118,16 @@ def send_draft(draft_id: str, payload: SendDraftRequest) -> dict:
     # review was invisible and HUMAN_SR sat at zero interactions.
     _record_human_handling(draft, edited)
 
+    # Close the human-in-the-loop loop on the TICKET. Measured before this existed: all
+    # four sent drafts on the live database left their tickets untouched and still 'open',
+    # two of them critical L3 - a person had read the case, written the reply and sent it,
+    # and the ticket recorded none of it. The response SLA therefore ran forever and every
+    # answered case kept reporting as breached.
+    # `text` is passed explicitly, NOT read from `draft`: draft was loaded before the send
+    # and its sent_text is still None at this point, so reading it there would silently
+    # disable promise detection - the check would run on an empty string every time.
+    _mark_ticket_responded(repository, draft, text, payload.actor)
+
     repository.add_audit_event(
         "reply_draft_sent",
         draft_id,
@@ -138,6 +150,81 @@ def _neo4j_client():
         return Neo4jClient()
     except Exception:
         return None
+
+
+# Phrases that COMMIT us to coming back to the customer. Measured against the live fraud
+# reply, which said "is currently under investigation", "will update you on the status
+# shortly" and "will follow up with you" - four promises, none of them tracked anywhere.
+#
+# Deliberately a small, literal list rather than an LLM call: this runs on every sent
+# reply, requests are the binding Groq limit, and a missed promise costs a follow-up
+# reminder we did not schedule - not a wrong answer to a customer. A false positive is
+# cheap too (a follow-up flag a human clears).
+_PROMISE_PHRASES = (
+    "will update you",
+    "will get back to you",
+    "will follow up",
+    "will contact you",
+    "will reach out",
+    "under investigation",
+    "is being reviewed",
+    "is reviewing",
+    "we will inform you",
+    "keep you posted",
+    "keep you updated",
+)
+
+# How long before an unkept promise starts showing on the board. Deliberately not tied to
+# the priority SLA: that clock measured our FIRST response, this one measures a commitment
+# made after it, and a promise made on a low-priority case is no less of a promise.
+_FOLLOW_UP_HOURS = 24
+
+
+def _promised_follow_up(text: str) -> bool:
+    lowered = (text or "").lower()
+    return any(phrase in lowered for phrase in _PROMISE_PHRASES)
+
+
+def _mark_ticket_responded(repository, draft: dict, sent_text: str, actor: str) -> None:
+    """Record that a human answered, and whether the answer promised a follow-up.
+
+    Best-effort by design: the customer already has the reply by the time this runs, so a
+    failure here must never surface as a failed send. It is wrapped rather than allowed to
+    raise for that reason alone.
+    """
+    ticket_id = draft.get("ticket_id")
+    if not ticket_id:
+        return
+    try:
+        ticket = repository.get_ticket(ticket_id)
+        if not ticket:
+            return
+
+        updates = {}
+        # FIRST response only - never overwrite it. The field answers "when did we first
+        # reply", so a second reply on the same ticket must not reset the clock and make a
+        # late first answer look punctual.
+        if not ticket.get("first_response_at"):
+            updates["first_response_at"] = utc_now()
+
+        if _promised_follow_up(sent_text):
+            updates["follow_up_due_at"] = (
+                datetime.now(timezone.utc) + timedelta(hours=_FOLLOW_UP_HOURS)
+            ).isoformat()
+
+        # A logging ticket that a human has now answered is real work, so it stops being a
+        # grouping id. open -> in_progress records that someone is actually on it; the
+        # value has existed in TicketStatus since the redesign and has never been written.
+        if ticket.get("status") in ("logged", "open"):
+            updates["status"] = "in_progress"
+
+        if not updates:
+            return
+        repository.update_ticket(ticket_id, **updates)
+        repository.add_ticket_event(ticket_id, "customer_responded", actor, updates)
+    except Exception:
+        logger.warning("ticket_response_marking_failed",
+                       extra={"ticket_id": ticket_id}, exc_info=True)
 
 
 def _verify_resolution_memory(draft: dict, sent_text: str, edited: bool) -> dict | None:

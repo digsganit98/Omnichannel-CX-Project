@@ -98,6 +98,7 @@ class CXRepository(Protocol):
     def get_admin_user_by_username(self, username: str) -> dict | None: ...
     def get_admin_user_by_email(self, email: str) -> dict | None: ...
     def list_admin_users(self) -> list[dict]: ...
+    def list_agents(self) -> list[dict]: ...
     def create_customer_user(self, user_id: str, email: str, password_hash: str) -> dict: ...
     def get_customer_user_by_id(self, user_id: str) -> dict | None: ...
     def get_customer_user_by_email(self, email: str) -> dict | None: ...
@@ -570,10 +571,16 @@ class SQLiteCXRepository:
             )
 
     def update_ticket(self, ticket_id: str, **values) -> dict | None:
+        # Anything outside this set is dropped SILENTLY - a caller passing a misspelled or
+        # unlisted field gets a successful-looking write that changed nothing. The Service
+        # Desk's ownership and lifecycle fields (019) are listed here for that reason.
         allowed = {
             "status", "priority", "external_ticket_id", "external_ticket_url", "crm_sync_status", "crm_sync_error",
             "approval_status", "escalation_reason", "sla_due_at", "priority_score", "priority_breakdown_json",
             "metadata_json", "description",
+            # 019 - Service Desk ownership and lifecycle.
+            "assigned_to", "assigned_at", "first_response_at", "follow_up_due_at",
+            "closed_by", "closure_reason",
         }
         updates = {key: value for key, value in values.items() if key in allowed}
         if not updates:
@@ -1246,6 +1253,54 @@ class SQLiteCXRepository:
                 "SELECT id, username, email, created_at FROM admin_users ORDER BY created_at"
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def list_agents(self) -> list[dict]:
+        """The routing roster: every account, with the work it currently holds.
+
+        `open_count` and `breaching` are DERIVED per call rather than stored, because a
+        stored counter is a second source of truth that drifts the moment a ticket is
+        reassigned or closed by any path that forgets to decrement it.
+
+        `last_action_at` is the most recent thing this person actually did - a ticket
+        event they were the actor on, or a reply draft they decided. Availability is read
+        from that recency rather than from a status the person sets, so an agent who
+        forgets to mark themselves away still reads as away. Nothing here is self-reported.
+        """
+        with self.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    u.username,
+                    u.email,
+                    u.team,
+                    u.capacity,
+                    (SELECT COUNT(*) FROM tickets t
+                      WHERE t.assigned_to = u.username
+                        AND t.status IN ('open','in_progress'))            AS open_count,
+                    (SELECT COUNT(*) FROM tickets t
+                      WHERE t.assigned_to = u.username
+                        AND t.status IN ('open','in_progress')
+                        AND t.first_response_at IS NULL
+                        AND t.sla_due_at IS NOT NULL
+                        AND t.sla_due_at < ?)                              AS breaching,
+                    (SELECT MAX(created_at) FROM ticket_events e
+                      WHERE e.actor = u.username)                          AS last_event_at,
+                    (SELECT MAX(decided_at) FROM reply_drafts d
+                      WHERE d.decided_by = u.username)                     AS last_draft_at
+                FROM admin_users u
+                ORDER BY u.team, u.username
+                """,
+                (utc_now(),),
+            ).fetchall()
+
+        agents = []
+        for row in rows:
+            agent = dict(row)
+            # One "when did this person last do something" from whichever record is newer.
+            stamps = [agent.pop("last_event_at", None), agent.pop("last_draft_at", None)]
+            agent["last_action_at"] = max((s for s in stamps if s), default=None)
+            agents.append(agent)
+        return agents
 
     def create_customer_user(self, user_id: str, email: str, password_hash: str) -> dict:
         now = utc_now()

@@ -1,6 +1,8 @@
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
+from shared.constants.priority_weights import PRIORITY_THRESHOLDS
+
 from .metrics import (
     AgentMetrics,
     ChannelCount,
@@ -41,8 +43,15 @@ def get_overview(db_path: str) -> OverviewMetrics:
                 SUM(CASE WHEN escalation_reason IS NOT NULL AND escalation_reason != '' THEN 1 ELSE 0 END) AS escalated_cnt,
                 -- An SLA can only be breached on work someone owes: a logging ticket has
                 -- no promised response, so it cannot breach.
+                -- first_response_at (019) closes the other half: this is a RESPONSE SLA,
+                -- so once a human has replied the promise is kept and the row can never
+                -- breach afterwards. Without this test an answered ticket kept counting as
+                -- breached for as long as it stayed open, which is the case a supervisor
+                -- would have already dealt with. Must stay identical to sdSla() in app.js -
+                -- the two disagreeing (2 vs 7) is exactly what this phase fixed.
                 SUM(CASE WHEN sla_due_at IS NOT NULL AND sla_due_at < datetime('now')
-                              AND status IN ('open','in_progress') THEN 1 ELSE 0 END) AS sla_breach_cnt
+                              AND status IN ('open','in_progress')
+                              AND first_response_at IS NULL THEN 1 ELSE 0 END) AS sla_breach_cnt
             FROM tickets
             """
         ).fetchone()
@@ -229,12 +238,18 @@ def get_channel_metrics(db_path: str) -> ChannelMetrics:
 
 
 # Map a numeric priority_score (0-100) to a risk band for the "by risk band" chart.
+#
+# Reads PRIORITY_THRESHOLDS rather than carrying its own numbers. These used to be a
+# separate 80/50/25 scale, so a ticket stored priority='critical' (>= 70) charted as
+# "High" - one score, two disagreeing labels on two screens. Nothing lands in the gap on
+# today's data, which is exactly why it went unnoticed; sourcing both from one table is
+# what stops it coming back.
 def _risk_band(score: float) -> str:
-    if score >= 80:
+    if score >= PRIORITY_THRESHOLDS["critical"]:
         return "Critical"
-    if score >= 50:
+    if score >= PRIORITY_THRESHOLDS["high"]:
         return "High"
-    if score >= 25:
+    if score >= PRIORITY_THRESHOLDS["medium"]:
         return "Medium"
     return "Low"
 

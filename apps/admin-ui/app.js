@@ -2783,49 +2783,193 @@ window.goToConversation = function(conversationId, ticketId) {
 };
 
 // ── SERVICE DESK ──────────────────────────────────────────────────────────────
-// The supervisor's board: every ticket at once, ranked by the priority score the
-// system already computes on each one and never showed anybody. Agent Workspace is
-// one agent inside one conversation; this is cross-customer triage.
+// The operational board: every case at once, who owns it, and what it is waiting on.
+// Agent Workspace is one person inside one conversation; this is cross-customer triage
+// and routing, and the two hand off to each other (a row opens there via its drawer).
 //
-// It reads the EXISTING GET /admin/tickets - no new endpoint, no migration. Every
-// column is a real field: priority_score (007), sla_due_at / escalation_reason /
-// crm_sync_status (002), status (017), last_activity_at (018).
+// Not a second inbox and not a report. The test applied to everything here: a supervisor
+// must be able to ACT on it. Anything past-tense (attainment %, average handle time,
+// resolution rate) belongs on Performance & Cost, and deliberately is not duplicated.
 //
-// Deliberately absent: assignment to a named person. There is no assigned_to column
-// and admin_users carries no team membership, so a control that looked like it
-// assigned would persist nothing. Teams come from INTENT_TO_TEAM via assigned_team.
-var sdState = { tickets: [], status: 'all', convById: {} };
+// Data sources, all real fields:
+//   GET /admin/tickets       priority_score + priority_breakdown (007), sla_due_at /
+//                            escalation_reason / crm_sync_status / approval_status (002),
+//                            status (017), last_activity_at (018), assigned_to /
+//                            first_response_at / follow_up_due_at / closed_by (019)
+//   GET /admin/agents        roster with live open_count, breaching and availability
+//   GET /admin/reply-drafts  the held-for-review queue (hold_reason)
+//   GET /admin/tickets/{id}/events   the per-ticket timeline
+var sdState = {
+  tickets: [], agents: [], drafts: [], convById: {},
+  // Opens on EVERYTHING: the page is the operational view of all work, and "Unassigned" is an
+  // exception state - auto-assign routes on creation, so it is only non-empty when a team was
+  // full. Defaulting to it opened the board on the few cases nobody had picked up and hid
+  // every case that was actually being worked.
+  view: 'all', agent: null, selected: {}, search: '', benchOpen: false
+};
+
+// The worklists. Each is a QUESTION a supervisor asks, not a status filter - which is why
+// "triage" (unassigned AND serviceable) is not the same as status === 'open'.
+//
+// These replaced the metric tiles rather than sitting under them: the tiles and the tabs
+// were the same five numbers rendered twice, in two stacked bands, above a table that then
+// had no room left. `tone` is what the count colours itself with when non-zero.
+// Every view is SERVICEABLE-only. A `logged` ticket is a grouping id that no human was
+// asked to work, so putting one on a supervisor's board offers ownership and closure
+// actions on an internal record - and made a queue of 2 real cases read as 7.
+// "Not in CRM" was a view here too: a failed Jira sync is an integration fault, not
+// triage, and it belongs with the other connector health in System Configuration.
+// ORDER: the default first, then exception states in the order the page exists to prevent
+// them - nobody owns it, we are late, we promised and have not delivered - and the filter on
+// yourself last, behind the separator. "Everything" used to sit at the RIGHT-HAND END while
+// also being the view the page opened on, so the board loaded with the last tab selected.
+var SD_VIEWS = [
+  { id: 'all',      label: 'Everything',        tone: '',     test: function(t) { return isServiceable(t); } },
+  { id: 'triage',   label: 'Unassigned',        tone: '',     test: function(t) { return isServiceable(t) && !t.assigned_to; } },
+  { id: 'breach',   label: 'Breaching SLA',     tone: 'hot',  test: function(t) { return sdSla(t).breached; } },
+  // Counts every OUTSTANDING promise, not just broken ones: a view that stays 0 until we
+  // have already failed the customer cannot be used to avoid failing them.
+  { id: 'promised', label: 'Promised',          tone: 'warn', test: function(t) { return !!sdPromiseState(t); } },
+  // No approval view. `requires_approval()` flags 5 intents, but those same intents already
+  // escalate to L3 and the reply is HELD - a human sees the case before anything reaches the
+  // customer. Approval was a second block on top of a block that already works, which is why
+  // nothing ever read `approval_status`. "Held for review" is the real gate, and it comes
+  // after the three above because the AI already stopped it - it is safe, not slipping.
+  { id: 'held',     label: 'Held for review',   tone: 'warn', test: function(t) { return !!sdHeldDraft(t); } },
+  { id: 'mine',     label: 'My cases',          tone: '',     sep: true, test: function(t) { return t.assigned_to === sdActor(); } }
+];
 
 window.loadServiceDesk = async function() {
   try {
-    var results = await Promise.all([api('/admin/tickets'), api('/admin/conversations')]);
+    // Drafts and agents are additive: if either endpoint fails the board still renders
+    // from tickets alone rather than showing nothing.
+    var results = await Promise.all([
+      api('/admin/tickets'),
+      api('/admin/conversations'),
+      api('/admin/agents').catch(function() { return []; }),
+      api('/admin/reply-drafts?status=pending').catch(function() { return []; })
+    ]);
     sdState.tickets = results[0] || [];
     sdState.convById = {};
     (results[1] || []).forEach(function(c) { sdState.convById[c.conversation_id] = c; });
-    sdFillTeamFilter();
+    sdState.agents = results[2] || [];
+    sdState.drafts = results[3] || [];
     renderServiceDesk();
-  } catch(e) {
+  } catch (e) {
     document.getElementById('sdRows').innerHTML = '';
     var em = document.getElementById('sdEmpty');
     em.hidden = false;
-    em.innerHTML = '<div class="sd-empty-t">Could not load tickets</div><div class="sd-empty-s">' + escH(e.message) + '</div>';
+    em.innerHTML = '<div class="sd-empty-t">Could not load the board</div><div class="sd-empty-s">' + escH(e.message) + '</div>';
   }
 };
 
-// SLA state from sla_due_at alone. Only a ticket that is still being worked can breach:
-// a closed one missed its deadline in the past and nothing can be done about it now.
+// ── derived state ─────────────────────────────────────────────────────────────
+
+// SLA state. Three things stop the clock, and reading only the first is what made this
+// board report every ticket in the database as breached.
+//
+//   1. CLOSED  - the case ended; a deadline missed in the past cannot be acted on now.
+//   2. LOGGED  - a logging ticket is a GROUPING ID, not work. Nobody was asked to respond
+//      to it, so it has no promise to break. Every ticket is given an sla_due_at at
+//      creation regardless of status, so without this test the 5 logged threads on a
+//      7-ticket database all read as overdue - a wall of false red.
+//   3. ANSWERED - this is a RESPONSE SLA. Once first_response_at is set a human has
+//      replied and the response promise is kept; what we owe after that is tracked
+//      separately as follow_up_due_at.
+//
+// Must stay identical to the breach query in analytics_service/aggregator.py. The two
+// disagreeing (2 against 7) is exactly the defect this replaced.
 function sdSla(t) {
   if (!t.sla_due_at) return { cls: 'none', txt: '—', breached: false };
   var due = new Date(t.sla_due_at).getTime();
   if (isNaN(due)) return { cls: 'none', txt: '—', breached: false };
   if (t.status === 'closed') return { cls: 'none', txt: 'Met on close', breached: false };
+  if (t.status === 'logged') return { cls: 'none', txt: 'No SLA', breached: false };
+  if (t.first_response_at) {
+    var replied = new Date(t.first_response_at).getTime();
+    var met = !isNaN(replied) && replied <= due;
+    // Replying is not finishing. If that reply COMMITTED us to something ("under
+    // investigation", "we will update you"), the case is still owed work and the row must
+    // say so - a green "Responded" tick here read as done on a fraud case where nobody had
+    // started investigating. The response SLA is genuinely met; what is outstanding is the
+    // promise, so it is shown as its own clock rather than as a breach of this one.
+    var fu = sdPromiseState(t);
+    if (fu) {
+      return { cls: fu.overdue ? 'breach' : 'soon', kind: 'Follow-up',
+               txt: (fu.overdue ? 'overdue ' : 'due ') + sdDur(fu.mins),
+               breached: fu.overdue, replied: true };
+    }
+    return { cls: met ? 'ok' : 'none', kind: 'Response',
+             txt: met ? 'answered' : 'answered late', breached: false };
+  }
   var mins = Math.round((due - Date.now()) / 60000);
   if (mins < 0) {
     var over = Math.abs(mins);
-    return { cls: 'breach', txt: 'Overdue ' + (over >= 1440 ? Math.round(over/1440) + 'd' : over >= 60 ? Math.round(over/60) + 'h' : over + 'm'), breached: true };
+    return { cls: 'breach', kind: 'Response', txt: 'overdue ' + sdDur(over), breached: true };
   }
-  if (mins <= 120) return { cls: 'soon', txt: 'Due in ' + (mins >= 60 ? Math.round(mins/60) + 'h' : mins + 'm'), breached: false };
-  return { cls: 'ok', txt: 'Due in ' + (mins >= 1440 ? Math.round(mins/1440) + 'd' : Math.round(mins/60) + 'h'), breached: false };
+  if (mins <= 120) return { cls: 'soon', kind: 'Response', txt: 'due ' + sdDur(mins), breached: false };
+  return { cls: 'ok', kind: 'Response', txt: 'due ' + sdDur(mins), breached: false };
+}
+
+function sdDur(mins) {
+  if (mins >= 1440) return Math.round(mins / 1440) + 'd';
+  if (mins >= 60) return Math.round(mins / 60) + 'h';
+  return mins + 'm';
+}
+
+// An outstanding promise: follow_up_due_at is set when a sent reply committed us to coming
+// back ("we will update you", "under investigation") - see reply_drafts.py. Returns the
+// remaining time and whether it has already lapsed, or null when nothing is owed.
+//
+// This used to answer ONLY "is it already broken", so a promise was invisible for its whole
+// life and appeared on the board at the moment we had failed it. A commitment we can still
+// keep is the one worth showing.
+function sdPromiseState(t) {
+  if (!t.follow_up_due_at || t.status === 'closed') return null;
+  var due = new Date(t.follow_up_due_at).getTime();
+  if (isNaN(due)) return null;
+  var mins = Math.round((due - Date.now()) / 60000);
+  return { overdue: mins < 0, mins: Math.abs(mins) };
+}
+
+// A promise already broken. Kept as its own predicate because the breach count and the row
+// treatment mean different things - see sdPromiseState.
+function sdPromiseOverdue(t) {
+  var s = sdPromiseState(t);
+  return !!s && s.overdue;
+}
+
+function sdHeldDraft(t) {
+  for (var i = 0; i < sdState.drafts.length; i++) {
+    if (sdState.drafts[i].ticket_id === t.ticket_id) return sdState.drafts[i];
+  }
+  return null;
+}
+
+function sdAgent(username) {
+  for (var i = 0; i < sdState.agents.length; i++) {
+    if (sdState.agents[i].username === username) return sdState.agents[i];
+  }
+  return null;
+}
+
+// Who could take this ticket: least-loaded agent with room on the ticket's own team.
+// Mirrors pick_agent() in services/ticket_service/assignment.py so the hint the board
+// gives and the person auto-assign would choose are the same.
+function sdSuggested(team) {
+  var best = null;
+  sdState.agents.forEach(function(a) {
+    if (a.team !== team || a.is_operator) return;
+    if ((a.open_count || 0) >= (a.capacity || 0)) return;
+    if (a.availability === 'away') return;
+    if (!best || (a.open_count || 0) < (best.open_count || 0)) best = a;
+  });
+  return best;
+}
+
+function sdInitials(name) {
+  var parts = String(name || '').replace(/[_.]/g, ' ').trim().split(/\s+/);
+  return ((parts[0] || '?')[0] + (parts.length > 1 ? parts[parts.length - 1][0] : '')).toUpperCase();
 }
 
 function sdTeamLabel(team) {
@@ -2838,93 +2982,431 @@ function sdCustomerName(t) {
   return conv ? customerLabel(conv) : 'Unverified';
 }
 
-function sdFillTeamFilter() {
-  var sel = document.getElementById('sdTeamFilter');
-  var current = sel.value || 'all';
-  var teams = {};
-  sdState.tickets.forEach(function(t) { if (t.assigned_team) teams[t.assigned_team] = true; });
-  var names = Object.keys(teams).sort();
-  sel.innerHTML = '<option value="all">All teams</option>' + names.map(function(n) {
-    return '<option value="' + escH(n) + '">' + escH(sdTeamLabel(n)) + '</option>';
-  }).join('');
-  sel.value = teams[current] ? current : 'all';
+function sdAge(t) {
+  var from = new Date(t.created_at).getTime();
+  if (isNaN(from)) return '—';
+  return sdDur(Math.round((Date.now() - from) / 60000));
 }
 
-window.sdSetStatus = function(status, btn) {
-  sdState.status = status;
-  document.querySelectorAll('#sdStatusFilters .sd-chip').forEach(function(c) { c.classList.remove('on'); });
-  if (btn) btn.classList.add('on');
-  renderServiceDesk();
-};
+function sdAvatar(name, availability, extraClass) {
+  if (!name) return '<div class="sd-av sd-av--none">—</div>';
+  var dot = availability ? '<span class="sd-dot sd-dot--' + escH(availability) + '"></span>' : '';
+  return '<div class="sd-av ' + (extraClass || '') + '">' + escH(sdInitials(name)) + dot + '</div>';
+}
+
+// ── render ────────────────────────────────────────────────────────────────────
 
 window.renderServiceDesk = function() {
-  var team = document.getElementById('sdTeamFilter').value;
   var all = sdState.tickets;
 
-  // Counts are over EVERY ticket, not the filtered set - they are the "what is on fire"
-  // line, and a count that changed when you filtered would answer a different question.
-  var breached = all.filter(function(t) { return sdSla(t).breached; }).length;
-  var open = all.filter(isServiceable).length;
-  var logged = all.filter(function(t) { return t.status === 'logged'; }).length;
-  var unsynced = all.filter(function(t) { return t.crm_sync_status && t.crm_sync_status !== 'synced' && t.crm_sync_status !== 'not_configured'; }).length;
+  // Counts are over EVERY ticket, never the filtered set: they answer "what is on fire",
+  // and a count that moved when you changed view would be answering a different question.
+  var counts = {};
+  SD_VIEWS.forEach(function(v) { counts[v.id] = all.filter(v.test).length; });
 
-  document.getElementById('sdStats').innerHTML =
-    sdStat('SLA breached', breached, breached > 0 ? 'red' : 'neutral') +
-    sdStat('Open', open, 'blue') +
-    sdStat('Logged', logged, 'neutral') +
-    sdStat('CRM unsynced', unsynced, unsynced > 0 ? 'amb' : 'neutral');
+  var view = SD_VIEWS.filter(function(v) { return v.id === sdState.view; })[0] || SD_VIEWS[0];
 
-  var rows = all.filter(function(t) {
-    if (team !== 'all' && t.assigned_team !== team) return false;
-    if (sdState.status === 'all') return true;
-    if (sdState.status === 'breached') return sdSla(t).breached;
-    if (sdState.status === 'open') return isServiceable(t);
-    return t.status === sdState.status;
+  // Header summary line. Counts SERVICEABLE only, so it agrees with the board: `all` holds
+  // every logged grouping id too, and "7 cases" over a list showing 2 read as a broken
+  // filter rather than as two different populations.
+  var openN = all.filter(isServiceable).length;
+  document.getElementById('sdSummary').textContent =
+    openN + (openN === 1 ? ' case' : ' cases') + ' · ' + sdState.agents.length + ' agents';
+
+  // ── views band ──
+  document.getElementById('sdViews').innerHTML =
+    SD_VIEWS.map(function(v) {
+      var n = counts[v.id];
+      var tone = (n > 0 && v.tone) ? ' sd-v-n--' + v.tone : '';
+      return (v.sep ? '<span class="sd-v-sep"></span>' : '') +
+        '<button class="sd-v' + (sdState.view === v.id ? ' on' : '') + '" onclick="sdSetView(\'' + v.id + '\')">' +
+        escH(v.label) + '<span class="sd-v-n' + tone + '">' + n + '</span></button>';
+    }).join('');
+
+  renderSdBench();
+
+  // ── rows ──
+  var q = sdState.search.trim().toLowerCase();
+  var rows = all.filter(view.test).filter(function(t) {
+    if (sdState.agent && t.assigned_to !== sdState.agent) return false;
+    if (!q) return true;
+    return (t.title + ' ' + t.ticket_id + ' ' + sdCustomerName(t) + ' ' + (t.description || '') +
+            ' ' + sdTeamLabel(t.assigned_team)).toLowerCase().indexOf(q) !== -1;
   });
 
-  // Highest priority first; a breached ticket outranks its score because the deadline
-  // has already passed. Ties fall back to most recently active.
+  var sort = (document.getElementById('sdSort') || {}).value || 'priority';
   rows.sort(function(a, b) {
+    // A breach outranks everything under every sort: its deadline has already passed.
     var ab = sdSla(a).breached ? 1 : 0, bb = sdSla(b).breached ? 1 : 0;
     if (ab !== bb) return bb - ab;
+    if (sort === 'age') return new Date(a.created_at) - new Date(b.created_at);
+    if (sort === 'sla') {
+      var ad = a.sla_due_at ? new Date(a.sla_due_at).getTime() : Infinity;
+      var bd = b.sla_due_at ? new Date(b.sla_due_at).getTime() : Infinity;
+      return ad - bd;
+    }
     var d = (b.priority_score || 0) - (a.priority_score || 0);
     if (d !== 0) return d;
     return new Date(b.last_activity_at || b.created_at) - new Date(a.last_activity_at || a.created_at);
   });
 
-  var tbody = document.getElementById('sdRows');
+  var list = document.getElementById('sdRows');
   var empty = document.getElementById('sdEmpty');
   if (!rows.length) {
-    tbody.innerHTML = '';
+    list.innerHTML = '';
     empty.hidden = false;
     empty.innerHTML = all.length
-      ? '<div class="sd-empty-t">No tickets match these filters</div><div class="sd-empty-s">Clear the status or team filter to see the rest.</div>'
-      : '<div class="sd-empty-t">No tickets yet</div><div class="sd-empty-s">Tickets appear here as customer conversations come in.</div>';
+      ? '<div class="sd-empty-t">Nothing here</div><div class="sd-empty-s">' +
+        escH(view.label) + ' is clear' + (q ? ' for “' + escH(sdState.search) + '”' : '') + '.</div>'
+      : '<div class="sd-empty-t">No cases yet</div><div class="sd-empty-s">Cases appear as customer conversations come in.</div>';
+    renderSdBulk();
     return;
   }
   empty.hidden = true;
-
-  tbody.innerHTML = rows.map(function(t) {
-    var sla = sdSla(t);
-    var score = Math.round(t.priority_score || 0);
-    var band = score >= 70 ? 'hi' : score >= 40 ? 'md' : 'lo';
-    var esc = t.escalation_reason ? '<span class="sd-esc">' + escH(String(t.escalation_reason).replace(/_/g, ' ')) + '</span>' : '';
-    var jump = "goToConversation('" + escH(t.conversation_id) + "','" + escH(t.ticket_id) + "')";
-    return '<tr class="sd-row" onclick="' + jump + '">' +
-      '<td><span class="sd-score sd-score--' + band + '">' + score + '</span></td>' +
-      '<td><div class="sd-ttl">' + escH(t.title || '—') + '</div><div class="sd-sub">' + escH(t.ticket_id) + esc + '</div></td>' +
-      '<td>' + escH(sdCustomerName(t)) + '</td>' +
-      '<td>' + escH(sdTeamLabel(t.assigned_team)) + '</td>' +
-      '<td><span class="sd-pill sd-pill--' + escH(t.status) + '">' + escH(statusLabel(t.status)) + '</span></td>' +
-      '<td><span class="sd-sla sd-sla--' + sla.cls + '">' + escH(sla.txt) + '</span></td>' +
-      '<td class="sd-when">' + escH(formatTime(t.last_activity_at || t.created_at)) + '</td>' +
-    '</tr>';
-  }).join('');
+  list.innerHTML = rows.map(sdRowHtml).join('');
+  renderSdBulk();
 };
 
-function sdStat(label, value, tone) {
-  return '<div class="sd-stat sd-stat--' + tone + '"><div class="sd-stat-v">' + value + '</div><div class="sd-stat-l">' + escH(label) + '</div></div>';
+function renderSdBench() {
+  var btn = document.getElementById('sdBenchBtn');
+  var pop = document.getElementById('sdBenchPop');
+  var agents = sdState.agents;
+  if (!agents.length) {
+    btn.innerHTML = 'Bench · 0';
+    pop.hidden = true;
+    return;
+  }
+  var free = agents.filter(function(a) {
+    return !a.is_operator && (a.open_count || 0) < (a.capacity || 0) && a.availability !== 'away';
+  }).length;
+  btn.className = 'sd-benchbtn' + (sdState.benchOpen || sdState.agent ? ' on' : '');
+  btn.innerHTML = (sdState.agent
+    ? escH(sdState.agent.replace(/_/g, ' ')) + ' ✕'
+    : 'Bench · ' + agents.length + (free ? ' · <span style="color:var(--grn)">' + free + ' free</span>' : ''));
+
+  pop.hidden = !sdState.benchOpen;
+  if (!sdState.benchOpen) return;
+
+  // Operators first and labelled: a real signed-in account has no team, can take any
+  // ticket and has no capacity ceiling. Seeded agents are team-bound.
+  var ops = agents.filter(function(a) { return a.is_operator; });
+  var bench = agents.filter(function(a) { return !a.is_operator; });
+  var rank = { active: 0, idle: 1, unknown: 2, away: 3 };
+  bench.sort(function(a, b) {
+    var ar = rank[a.availability] != null ? rank[a.availability] : 3;
+    var br = rank[b.availability] != null ? rank[b.availability] : 3;
+    if (ar !== br) return ar - br;
+    return (b.open_count || 0) - (a.open_count || 0);
+  });
+
+  pop.innerHTML =
+    (ops.length ? '<div class="sd-bp-k">You</div>' + ops.map(sdBenchRow).join('') : '') +
+    '<div class="sd-bp-k">Agents · click to filter</div>' + bench.map(sdBenchRow).join('');
 }
+
+function sdBenchRow(a) {
+  var open = a.open_count || 0, cap = a.capacity || 0;
+  var pct = cap ? Math.min(100, Math.round(open / cap * 100)) : 0;
+  var hot = cap && open / cap >= 0.75 ? ' hot' : '';
+  var sub = a.is_operator ? 'any team · no limit' : sdTeamLabel(a.team) + ' · ' + a.availability;
+  return '<div class="sd-bp-a' + (sdState.agent === a.username ? ' on' : '') +
+    '" onclick="sdFilterAgent(\'' + escH(a.username) + '\')">' +
+    sdAvatar(a.username, a.availability) +
+    '<span class="sd-bp-n">' + escH(a.username.replace(/_/g, ' ')) +
+    '<span class="sd-bp-t"> · ' + escH(sub) + '</span></span>' +
+    (a.is_operator ? '' : '<span class="sd-bp-b"><i class="' + hot + '" style="width:' + pct + '%"></i></span>') +
+    '<span class="sd-bp-c">' + (a.is_operator ? open : open + '/' + cap) + '</span></div>';
+}
+
+function sdRowHtml(t) {
+  var sla = sdSla(t);
+  var score = Math.round(t.priority_score || 0);
+  var held = sdHeldDraft(t);
+  var needsDecision = !!held;
+
+  // Tags, in the order a supervisor triages by: what blocks it, then where it came from.
+  var tags = '';
+  if (held) tags += '<span class="sd-tag sd-tag--org">HELD FOR REVIEW</span>';
+  if (sdPromiseOverdue(t)) tags += '<span class="sd-tag sd-tag--org">FOLLOW-UP DUE</span>';
+  // No CRM tag. A failed Jira sync is an integration fault with no action a supervisor can
+  // take on the row, and it sat on every case here as permanent red noise. Connector health
+  // belongs with the other connectors, in System Configuration.
+  if (t.metadata && t.metadata.channel) tags += '<span class="sd-tag sd-tag--gry">' + escH(chLabel(t.metadata.channel)) + '</span>';
+  var forked = (t.metadata && t.metadata.forked_from) || [];
+  if (forked.length) tags += '<span class="sd-tag sd-tag--gry">Forked from ' + forked.length + '</span>';
+  // "Answered" only when nothing is still owed. It used to render on first_response_at
+  // alone, so a case whose reply promised an investigation carried a done-looking tag
+  // beside a live follow-up clock - two opposite claims on one row.
+  if (t.first_response_at && !sdPromiseState(t)) tags += '<span class="sd-tag sd-tag--gry">Answered</span>';
+
+  // The customer's own words beat the generated title ("Fraud Report request"), which is
+  // an intent label wearing a sentence. A supervisor scans for the ISSUE.
+  var title = (t.description || '').trim().split('\n')[0];
+  if (!title || title.length < 12) title = t.title || '—';
+  if (title.length > 92) title = title.slice(0, 92) + '…';
+
+  var conv = sdState.convById[t.conversation_id];
+  var cname = sdCustomerName(t);
+
+  // OWNER is one shape on every row: who holds it (or "Unassigned") on the first line, the
+  // action on the second. It used to be a bare button when unassigned and a person PLUS a
+  // stacked button when assigned - three different shapes under one header, and the taller
+  // variant made that row misalign with every other cell in the table.
+  var owner;
+  if (t.assigned_to) {
+    var a = sdAgent(t.assigned_to);
+    var sub = a ? (a.is_operator ? 'any team' : a.open_count + '/' + a.capacity +
+      (a.breaching ? ' · ' + a.breaching + ' breaching' : ' · ' + a.availability)) : '';
+    // An assigned row still needs a way to take it. The seeded agents CANNOT log in
+    // (`password_hash: 'seeded:no-login'`) - there is one real account, and the approved
+    // demo flow is: see the board -> assign a case TO YOURSELF -> work it in Agent
+    // Workspace -> the timeline says Admin_SS did it. Without this, auto-assign put the
+    // only live case under a name nobody can sign in as and left no way to pick it up,
+    // which killed that flow on exactly the case that matters.
+    //
+    // Owner and button live in ONE wrapper, mirroring the unassigned branch below. They
+    // were siblings at first: .sd-own is display:flex and the row is a grid, so a button
+    // appended after it became a THIRD grid item and pushed the SLA and age columns out
+    // of place - the button landed under RESPONSE SLA and the age dropped onto its own line.
+    owner = '<div class="sd-ownc">' +
+      '<div class="sd-own">' + sdAvatar(t.assigned_to, a && a.availability) +
+        '<div style="min-width:0"><div class="sd-on">' + escH(t.assigned_to.replace(/_/g, ' ')) + '</div>' +
+        (sub ? '<div class="sd-ol">' + escH(sub) + '</div>' : '') + '</div>' +
+      '</div>' +
+      (t.assigned_to !== sdActor()
+        ? '<button class="sd-take" onclick="event.stopPropagation();sdTakeIt(\'' +
+          escH(t.ticket_id) + '\')">Take it</button>'
+        : '<span class="sd-ol">yours</span>') +
+      '</div>';
+  } else {
+    // No "next: <agent>" hint. It answered a question nobody is asking at that moment -
+    // who auto-assign WOULD pick - when auto-assign has already run and declined to place
+    // it. Three pieces of information in one cell; the speculative one goes.
+    owner = '<div class="sd-ownc">' +
+      '<div class="sd-own">' + sdAvatar('', null) +
+        '<div style="min-width:0"><div class="sd-on sd-on--none">Unassigned</div></div>' +
+      '</div>' +
+      '<button class="sd-take" onclick="event.stopPropagation();sdTakeIt(\'' + escH(t.ticket_id) + '\')">Take it</button>' +
+      '</div>';
+  }
+
+  var edge = sla.breached ? ' sd-row--brch' : (needsDecision ? ' sd-row--act' : '');
+  var checked = sdState.selected[t.ticket_id] ? ' checked' : '';
+  // The row opens the case where the work actually is. The drawer used to intercept this
+  // click to show a summary of the row you had just clicked, plus internals.
+  return '<div class="sd-row' + edge + '" onclick="sdGoWorkspace(\'' + escH(t.conversation_id) + '\',\'' + escH(t.ticket_id) + '\')">' +
+    '<span onclick="event.stopPropagation()"><input type="checkbox"' + checked +
+      ' onclick="sdToggleOne(\'' + escH(t.ticket_id) + '\',this)"></span>' +
+    '<div class="sd-pri"><div class="sd-pri-v">' + score + '</div>' +
+      '<div class="sd-pri-t"><i class="' + (score >= 70 ? 'hi' : score >= 40 ? 'md' : '') + '" style="width:' +
+      Math.max(4, Math.min(100, score)) + '%"></i></div></div>' +
+    '<div><div class="sd-ttl">' + escH(title) + '</div>' +
+      '<div class="sd-meta"><span class="sd-id">' + escH(t.ticket_id) + '</span>' + tags + '</div></div>' +
+    // CUSTOMER holds the customer and nothing else. The team was rendered as a subtitle
+    // here, which put routing data under a header that means "who is this person".
+    '<div class="sd-cust">' + sdAvatar(cname, null, 'sd-cav-x') +
+      '<div style="min-width:0"><div class="sd-cn">' + escH(cname) + '</div></div></div>' +
+    '<div class="sd-team">' + escH(sdTeamLabel(t.assigned_team)) + '</div>' +
+    owner +
+    sdSlaCell(t, sla) +
+    '<div class="sd-age">' + escH(sdAge(t)) + '</div>' +
+  '</div>';
+}
+
+// SLA cell: the words plus a depletion bar, because "how much of the window is gone" is a
+// quantity and reads faster as a length than as a date.
+function sdSlaCell(t, sla) {
+  var bar = '';
+  if (t.sla_due_at && t.status !== 'logged') {
+    var due = new Date(t.sla_due_at).getTime();
+    var from = new Date(t.created_at).getTime();
+    if (!isNaN(due) && !isNaN(from) && due > from) {
+      if (sla.breached) bar = '<div class="sd-sla-t"><i style="width:100%"></i></div>';
+      else if (t.first_response_at) {
+        // Answered, but the bar must track whatever is still OWED. A flat green 34% here
+        // sat directly under a "Follow-up due" label and said the opposite of the words -
+        // the reassuring half of the same defect. With a promise outstanding the bar
+        // depletes against the FOLLOW-UP clock; with nothing owed it is the short green
+        // "done" mark it always was.
+        var fu = sdPromiseState(t);
+        if (fu) {
+          var fFrom = new Date(t.first_response_at).getTime();
+          var fDue = new Date(t.follow_up_due_at).getTime();
+          var fUsed = (!isNaN(fFrom) && !isNaN(fDue) && fDue > fFrom)
+            ? Math.max(0, Math.min(100, Math.round((Date.now() - fFrom) / (fDue - fFrom) * 100)))
+            : 100;
+          bar = '<div class="sd-sla-t"><i class="soon" style="width:' + fUsed + '%"></i></div>';
+        } else {
+          bar = '<div class="sd-sla-t"><i class="ok" style="width:34%"></i></div>';
+        }
+      }
+      else {
+        var used = Math.max(0, Math.min(100, Math.round((Date.now() - from) / (due - from) * 100)));
+        bar = '<div class="sd-sla-t"><i class="' + (sla.cls === 'soon' ? 'soon' : 'ok') + '" style="width:' + used + '%"></i></div>';
+      }
+    }
+  }
+  // The column carries TWO different clocks - the first-reply deadline, and a promise made
+  // inside that reply - so each value names which one it is. Unlabelled, a supervisor was
+  // comparing "overdue 6d" against "due 24h" as though they measured the same thing.
+  var cls = sla.breached ? ' sd-sla-v--b' : (sla.cls === 'none' ? ' sd-sla-v--n' : '');
+  var kind = sla.kind ? '<span class="sd-sla-k">' + escH(sla.kind) + '</span> · ' : '';
+  return '<div><div class="sd-sla-v' + cls + '">' + kind + escH(sla.txt) + '</div>' + bar + '</div>';
+}
+
+function chLabel(ch) {
+  return String(ch).replace(/_/g, ' ').replace(/\b\w/g, function(c) { return c.toUpperCase(); });
+}
+
+window.sdSetSearch = function(v) { sdState.search = v || ''; renderServiceDesk(); };
+
+window.sdToggleBench = function() {
+  // The button doubles as the "clear agent filter" control once one is applied.
+  if (sdState.agent) { sdState.agent = null; sdState.benchOpen = false; renderServiceDesk(); return; }
+  sdState.benchOpen = !sdState.benchOpen;
+  renderSdBench();
+};
+
+window.sdAutoAssignAll = async function() {
+  var ids = sdState.tickets.filter(function(t) {
+    return isServiceable(t) && !t.assigned_to && sdSuggested(t.assigned_team);
+  }).map(function(t) { return t.ticket_id; });
+  if (!ids.length) return;
+  await sdAssignMany(ids, function(t) {
+    var s = sdSuggested(t.assigned_team);
+    return s ? s.username : null;
+  }, 'auto');
+};
+
+// ── selection + bulk ──────────────────────────────────────────────────────────
+
+window.sdSetView = function(view) { sdState.view = view; renderServiceDesk(); };
+
+window.sdFilterAgent = function(username) {
+  sdState.agent = sdState.agent === username ? null : username;
+  // Filtering to a person is only useful against the whole board, not inside "unassigned"
+  // (which by definition has no owner) - so widen the view rather than show nothing.
+  if (sdState.agent && sdState.view === 'triage') sdState.view = 'all';
+  renderServiceDesk();
+};
+
+window.sdToggleOne = function(id, box) {
+  if (box.checked) sdState.selected[id] = true; else delete sdState.selected[id];
+  renderSdBulk();
+};
+
+window.sdToggleAll = function(box) {
+  var view = SD_VIEWS.filter(function(v) { return v.id === sdState.view; })[0] || SD_VIEWS[0];
+  sdState.selected = {};
+  if (box.checked) {
+    sdState.tickets.filter(view.test).forEach(function(t) {
+      if (!sdState.agent || t.assigned_to === sdState.agent) sdState.selected[t.ticket_id] = true;
+    });
+  }
+  renderServiceDesk();
+};
+
+function sdSelectedIds() { return Object.keys(sdState.selected); }
+
+function renderSdBulk() {
+  var bar = document.getElementById('sdBulk');
+  var ids = sdSelectedIds();
+  if (!ids.length) { bar.hidden = true; bar.innerHTML = ''; return; }
+  bar.hidden = false;
+  var options = sdState.agents.map(function(a) {
+    return '<option value="' + escH(a.username) + '">' + escH(a.username.replace(/_/g, ' ')) +
+      (a.is_operator ? ' (operator)' : ' · ' + a.open_count + '/' + a.capacity) + '</option>';
+  }).join('');
+  bar.innerHTML = '<span class="sd-bulk-t">' + ids.length + ' selected</span>' +
+    '<select class="sd-dsel" style="width:auto" id="sdBulkAssignee"><option value="">Assign to…</option>' + options + '</select>' +
+    '<button class="sd-bbtn" onclick="sdBulkAssign()">Assign</button>' +
+    '<button class="sd-bbtn" onclick="sdBulkAuto()">Auto-assign</button>' +
+    '<button class="sd-bbtn" onclick="sdClearSelection()">Clear</button>';
+}
+
+window.sdClearSelection = function() { sdState.selected = {}; renderServiceDesk(); };
+
+function sdActor() { return (currentUser && currentUser.username) || 'admin'; }
+
+window.sdBulkAssign = async function() {
+  var who = document.getElementById('sdBulkAssignee').value;
+  if (!who) return;
+  await sdAssignMany(sdSelectedIds(), function() { return who; }, sdActor());
+};
+
+// Auto-assign uses the SAME rule as the backend: least-loaded agent with room on the
+// ticket's own team. Tickets whose team has nobody free are left alone and reported,
+// rather than being pushed onto someone who is full - an honest refusal.
+window.sdBulkAuto = async function() {
+  var skipped = 0;
+  await sdAssignMany(sdSelectedIds(), function(t) {
+    var sug = sdSuggested(t.assigned_team);
+    if (!sug) { skipped++; return null; }
+    return sug.username;
+  }, 'auto');
+  if (skipped) alert(skipped + ' ticket(s) left unassigned — no one free on their team.');
+};
+
+async function sdAssignMany(ids, pick, actor) {
+  var byId = {};
+  sdState.tickets.forEach(function(t) { byId[t.ticket_id] = t; });
+  for (var i = 0; i < ids.length; i++) {
+    var t = byId[ids[i]];
+    if (!t) continue;
+    var who = pick(t);
+    if (!who) continue;
+    try {
+      await api('/admin/tickets/' + encodeURIComponent(ids[i]) + '/assign', {
+        method: 'PATCH', body: JSON.stringify({ assignee: who, actor: actor })
+      });
+    } catch (e) { alert('Could not assign ' + ids[i] + ': ' + e.message); }
+  }
+  sdState.selected = {};
+  await loadServiceDesk();
+}
+
+// ── row actions ────────────────────────────────────────────────────────────
+
+window.sdGoWorkspace = function(conversationId, ticketId) {
+  goToConversation(conversationId, ticketId);
+};
+
+// "Take it" - assign to whoever is signed in. Works from any team because a real account
+// is an operator with no team of its own (see the seed script), so there is nothing to
+// check here: if you can see the ticket you can take it.
+window.sdTakeIt = async function(ticketId) {
+  await sdAssignOne(ticketId, sdActor());
+};
+
+window.sdAssignOne = async function(ticketId, who) {
+  try {
+    await api('/admin/tickets/' + encodeURIComponent(ticketId) + '/assign', {
+      method: 'PATCH', body: JSON.stringify({ assignee: who || null, actor: sdActor() })
+    });
+    await loadServiceDesk();
+  } catch (e) { alert('Could not assign: ' + e.message); }
+};
+
+window.sdClose = async function(ticketId) {
+  // A reason is required by the endpoint too - closing is a human judgement and the
+  // record has to say what it was.
+  var reason = prompt('Why is this case being closed?');
+  if (reason === null) return;
+  if (!reason.trim()) { alert('A closure reason is required.'); return; }
+  try {
+    await api('/admin/tickets/' + encodeURIComponent(ticketId) + '/close', {
+      method: 'POST', body: JSON.stringify({ reason: reason.trim(), actor: sdActor() })
+    });
+    await loadServiceDesk();
+  } catch (e) { alert('Could not close: ' + e.message); }
+};
+
+window.sdRetrySync = async function(ticketId) {
+  try {
+    await api('/admin/tickets/' + encodeURIComponent(ticketId) + '/sync', { method: 'POST' });
+    await loadServiceDesk();
+  } catch (e) { alert('Sync failed: ' + e.message); }
+};
 
 // ── SETTINGS (admin account) ──────────────────────────────────────────────────
 function userHeaders() {
