@@ -1434,3 +1434,134 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .det-head .fns-logged{color:var(--t3)}
 /* Sentiment and status are bare text, the other three are padded - 10px reads evenly. */
 .det-head{gap:10px}
+
+/* ── CONTROL CENTRE ─────────────────────────────────────────────────────────────
+   The hub between the four sections. Ganit's palette is saturated and belongs in
+   small bounded shapes, so the page ground stays off-white and the brand blue is
+   carried by the header bar, the icon tiles and the hover edge - not by a wash. */
+.hub{height:100vh;display:flex;flex-direction:column;background:var(--bg);overflow-y:auto}
+.hub-top{height:52px;flex-shrink:0;background:var(--navy);display:flex;align-items:center;padding:0 20px;gap:12px}
+.hub-brand{display:flex;align-items:center;gap:8px}
+.hub-logo{width:28px;height:28px;border-radius:7px;background:#fff;padding:3px;object-fit:contain;display:block;flex-shrink:0}
+.hub-brand-name{font-size:13px;font-weight:600;color:#fff;letter-spacing:-.1px}
+.hub-brand-name span{color:var(--blue-bg);font-weight:700}
+.hub-top-user{margin-left:auto;display:flex;align-items:center;gap:8px}
+.hub-profile{display:flex;align-items:center;gap:9px;background:transparent;border:1px solid rgba(255,255,255,.14);border-radius:8px;padding:4px 10px 4px 5px;cursor:pointer;font-family:inherit;transition:background .15s,border-color .15s}
+.hub-profile:hover{background:rgba(255,255,255,.09);border-color:rgba(255,255,255,.28)}
+.hub-av{width:28px;height:28px;border-radius:50%;background:var(--blue);display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:600;color:#fff;flex-shrink:0}
+.hub-profile-txt{display:flex;flex-direction:column;align-items:flex-start;line-height:1.25}
+.hub-profile-nm{font-size:12px;font-weight:500;color:#fff}
+.hub-profile-sub{font-size:10px;color:#94a3b8}
+.hub-logout{width:30px;height:30px;border-radius:7px;border:1px solid rgba(255,255,255,.12);background:transparent;color:#94a3b8;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:all .15s}
+.hub-logout:hover{background:rgba(220,38,38,.2);color:#fca5a5;border-color:rgba(220,38,38,.4)}
+.hub-logout svg{width:15px;height:15px;fill:currentColor}
+
+/* Optically centred, not top-pinned and not mathematically centred either. Top-padding
+   alone left the lower third of a 950px viewport dead; true centring then pushed the
+   title to y=260 and made the page read bottom-heavy. Measured on screen both times.
+   center + a smaller top pad than bottom sits the block slightly high, which is where
+   the eye expects it. */
+.hub-main{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:32px 24px 88px}
+.hub-head{width:100%;max-width:920px;margin-bottom:26px}
+.hub-title{font-size:26px;font-weight:700;color:var(--t1);letter-spacing:-.5px}
+.hub-sub{font-size:13px;color:var(--t2);margin-top:6px;max-width:560px}
+
+.hub-grid{width:100%;max-width:920px;display:grid;grid-template-columns:repeat(2,1fr);gap:16px}
+.hub-card{background:var(--surf);border:1px solid var(--bdr);border-radius:12px;padding:22px;cursor:pointer;display:flex;flex-direction:column;gap:10px;transition:border-color .15s,box-shadow .15s,transform .15s}
+.hub-card:hover{border-color:var(--blue-bd);box-shadow:0 8px 24px rgba(23,1,208,.09);transform:translateY(-2px)}
+.hub-card:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+.hub-card h3{font-size:15px;font-weight:650;color:var(--t1);letter-spacing:-.2px}
+.hub-card p{font-size:12.5px;color:var(--t2);line-height:1.55;flex:1}
+.hub-ic{width:38px;height:38px;border-radius:9px;display:flex;align-items:center;justify-content:center}
+.hub-ic svg{width:20px;height:20px}
+/* Tile colouring is INHERITED from the home page's .ic-blue rule above - pale ground,
+   brand-coloured glyph. These cards had solid saturated fills with white glyphs, which
+   was a second treatment invented for the same component. Only .ic-org is declared here,
+   because the home page reaches its orange through .ic-pur/.ic-grn; the values are that
+   rule's, copied unchanged. Orange marks Service Desk alone - the triage surface, the
+   one page about what is breaching. */
+.ic-org{background:var(--org-bg)}
+.ic-org svg{fill:var(--org-t);color:var(--org-t)}
+.hub-go{font-size:12px;font-weight:600;color:var(--blue);display:inline-flex;align-items:center;gap:5px}
+.hub-go::after{content:'→';transition:transform .15s;display:inline-block}
+.hub-card:hover .hub-go::after{transform:translateX(3px)}
+
+@media (max-width:760px){
+  .hub-grid{grid-template-columns:1fr}
+  .hub-main{padding:32px 16px 40px}
+  .hub-title{font-size:22px}
+}
+
+/* The ribbon brand is the way back to the Control Centre from any section. A logo
+   alone does not read as a control, so it carries a visible label beside it. */
+.ribbon-logo--link{cursor:pointer;border-radius:8px;padding:4px 8px 4px 4px;margin-left:-4px;transition:background .15s}
+.ribbon-logo--link:hover{background:rgba(255,255,255,.08)}
+.ribbon-home{font-size:10px;font-weight:600;color:#94a3b8;border-left:1px solid rgba(255,255,255,.16);padding-left:9px;margin-left:2px;white-space:nowrap}
+.ribbon-logo--link:hover .ribbon-home{color:var(--blue-bg)}
+.ribbon-user-av--link,.ribbon-user-info--link{cursor:pointer}
+.ribbon-user-info--link:hover .ribbon-user-name{color:var(--blue-bg)}
+.ribbon-user-av--link:hover{box-shadow:0 0 0 2px rgba(213,224,246,.5)}
+.nav-hub{color:#94a3b8}
+.nav-hub:hover{background:rgba(255,255,255,.1);color:#fff}
+
+/* ── SERVICE DESK ───────────────────────────────────────────────────────────────
+   Supervisor triage. Colour here ENCODES state (priority band, SLA, status) and is
+   deliberately left polychrome - a dense board cannot be strongly branded and stay
+   readable. */
+.sd-page{flex:1;overflow-y:auto;padding:22px 24px 32px;display:flex;flex-direction:column;gap:16px}
+.sd-header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
+.sd-stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+.sd-stat{background:var(--surf);border:1px solid var(--bdr);border-radius:10px;padding:14px 16px}
+.sd-stat-v{font-size:22px;font-weight:700;color:var(--t1);line-height:1.1}
+.sd-stat-l{font-size:11px;color:var(--t2);margin-top:4px;font-weight:500}
+.sd-stat--red .sd-stat-v{color:var(--red-t)}
+.sd-stat--red{border-color:var(--red-bd);background:var(--red-bg)}
+.sd-stat--blue .sd-stat-v{color:var(--blue)}
+.sd-stat--amb .sd-stat-v{color:var(--amb-t)}
+.sd-stat--amb{border-color:var(--amb-bd);background:var(--amb-bg)}
+
+.sd-filters{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.sd-filter-group{display:flex;gap:6px;flex-wrap:wrap}
+.sd-chip{border:1px solid var(--bdr);background:var(--surf);color:var(--t2);border-radius:20px;padding:5px 12px;font:600 11px inherit;cursor:pointer;transition:all .12s}
+.sd-chip:hover{border-color:var(--bdr2);color:var(--t1)}
+.sd-chip.on{background:var(--blue);border-color:var(--blue);color:#fff}
+.sd-chip--red.on{background:var(--red);border-color:var(--red)}
+.sd-select{margin-left:auto;border:1px solid var(--bdr);background:var(--surf);color:var(--t1);border-radius:var(--rs);padding:6px 10px;font:500 12px inherit;cursor:pointer;outline:none}
+.sd-select:focus{border-color:var(--blue)}
+
+.sd-tablewrap{background:var(--surf);border:1px solid var(--bdr);border-radius:10px;overflow-x:auto}
+.sd-table{width:100%;border-collapse:collapse;font-size:12px;min-width:860px}
+.sd-table thead th{text-align:left;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.4px;color:var(--t3);padding:11px 14px;border-bottom:1px solid var(--bdr);white-space:nowrap}
+.sd-table td{padding:11px 14px;border-bottom:1px solid var(--bdr);vertical-align:middle;color:var(--t2)}
+.sd-table tbody tr:last-child td{border-bottom:none}
+.sd-row{cursor:pointer;transition:background .12s}
+.sd-row:hover{background:var(--surf2)}
+.sd-ttl{font-size:12.5px;font-weight:600;color:var(--t1);line-height:1.35}
+.sd-sub{font-size:10px;color:var(--t3);margin-top:3px;font-family:ui-monospace,Menlo,monospace;display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+.sd-esc{font-family:'Inter',sans-serif;background:var(--org-bg);border:1px solid var(--org-bd);color:var(--org-t);border-radius:20px;padding:1px 7px;font-size:9px;font-weight:600;text-transform:capitalize}
+.sd-when{font-size:11px;color:var(--t3);white-space:nowrap}
+
+.sd-score{display:inline-flex;align-items:center;justify-content:center;min-width:34px;height:24px;border-radius:6px;font-size:12px;font-weight:700;padding:0 7px}
+.sd-score--hi{background:var(--red-bg);border:1px solid var(--red-bd);color:var(--red-t)}
+.sd-score--md{background:var(--amb-bg);border:1px solid var(--amb-bd);color:var(--amb-t)}
+.sd-score--lo{background:var(--surf2);border:1px solid var(--bdr);color:var(--t2)}
+
+.sd-pill{font-size:10px;font-weight:600;padding:2px 9px;border-radius:20px;white-space:nowrap}
+.sd-pill--open,.sd-pill--in_progress{background:var(--blue-bg);border:1px solid var(--blue-bd);color:var(--blue-t)}
+.sd-pill--logged{background:var(--surf2);border:1px solid var(--bdr);color:var(--t2)}
+.sd-pill--closed{background:var(--grn-bg);border:1px solid var(--grn-bd);color:var(--grn-t)}
+
+.sd-sla{font-size:11px;font-weight:600;white-space:nowrap}
+.sd-sla--breach{color:var(--red-t)}
+.sd-sla--soon{color:var(--amb-t)}
+.sd-sla--ok{color:var(--t2);font-weight:500}
+.sd-sla--none{color:var(--t3);font-weight:400}
+
+.sd-empty{padding:44px 20px;text-align:center}
+.sd-empty-t{font-size:13px;font-weight:600;color:var(--t2)}
+.sd-empty-s{font-size:12px;color:var(--t3);margin-top:5px}
+
+@media (max-width:860px){
+  .sd-stats{grid-template-columns:repeat(2,1fr)}
+  .sd-select{margin-left:0}
+}

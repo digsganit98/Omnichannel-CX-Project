@@ -6,7 +6,7 @@
 <title>OmnichannelCX</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="icon" type="image/png" href="/admin-ui/assets/ganit-logo.png">
-<link rel="stylesheet" href="/admin-ui/assets/style.css?v=20260910-headline2">
+<link rel="stylesheet" href="/admin-ui/assets/style.css?v=20260912-hub4">
 </head>
 <body>
 
@@ -333,23 +333,102 @@
   </div>
 </div>
 
-<!-- STAGE 3: MAIN SHELL -->
+<!-- STAGE 3: CONTROL CENTRE ────────────────────────────────────────────────────
+     The first screen after sign-in, and the only page that routes to every section.
+     A STAGE, not a .page inside the shell: the shell carries the left nav rail, and a
+     rail beside four large boxes competes with them. Inside a section the rail is the
+     fast path; here the boxes are the whole point. -->
+<div class="hub" id="hubPage" style="display:none">
+
+  <header class="hub-top">
+    <div class="hub-brand">
+      <img src="/admin-ui/assets/ganit-logo.png?v=1" class="hub-logo" alt="Ganit">
+      <span class="hub-brand-name">Omnichannel<span>CX</span></span>
+    </div>
+    <div class="hub-top-user">
+      <button class="hub-profile" type="button" onclick="enterSection('profile')" title="My Profile">
+        <span class="hub-av" id="hubUserAv">AD</span>
+        <span class="hub-profile-txt">
+          <span class="hub-profile-nm" id="hubUserName">Admin</span>
+          <span class="hub-profile-sub" id="hubUserEmail">My Profile</span>
+        </span>
+      </button>
+      <button class="hub-logout" type="button" onclick="doLogout()" title="Log out">
+        <svg viewBox="0 0 24 24"><path d="M17 7l-1.41 1.41L18.17 11H8v2h10.17l-2.58 2.58L17 17l5-5-5-5zM4 5h8V3H4c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h8v-2H4V5z"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <main class="hub-main">
+    <div class="hub-head">
+      <h1 class="hub-title">Control Centre</h1>
+      <p class="hub-sub">Everything the support desk does, in four places. Pick where you are working today.</p>
+    </div>
+
+    <div class="hub-grid">
+
+      <article class="hub-card" onclick="enterSection('inbox')" tabindex="0" role="button">
+        <div class="hub-ic ic-blue">
+          <svg viewBox="0 0 24 24"><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/></svg>
+        </div>
+        <h3>Agent Workspace</h3>
+        <p>Handle live customer conversations across WhatsApp, email and web chat, with the
+          drafted reply and the customer's full context in one view.</p>
+        <span class="hub-go">Open workspace</span>
+      </article>
+
+      <article class="hub-card" onclick="enterSection('servicedesk')" tabindex="0" role="button">
+        <div class="hub-ic ic-org">
+          <svg viewBox="0 0 24 24"><path d="M3 5h18v2H3V5zm0 6h12v2H3v-2zm0 6h18v2H3v-2zm14-6h4v2h-4v-2z"/><circle cx="19" cy="12" r="2.6"/></svg>
+        </div>
+        <h3>Service Desk</h3>
+        <p>Every ticket in one board, ranked by priority and SLA. Triage what is breaching
+          and route it to the team that owns it.</p>
+        <span class="hub-go">Open service desk</span>
+      </article>
+
+      <article class="hub-card" onclick="enterSection('connectors')" tabindex="0" role="button">
+        <div class="hub-ic ic-blue">
+          <svg viewBox="0 0 24 24"><path d="M17 7H7C4.24 7 2 9.24 2 12s2.24 5 5 5h10c2.76 0 5-2.24 5-5s-2.24-5-5-5zM7 15c-1.66 0-3-1.34-3-3s1.34-3 3-3 3 1.34 3 3-1.34 3-3 3z"/></svg>
+        </div>
+        <h3>System Configuration</h3>
+        <p>Channel connectors, CRM synchronisation and the model and runtime configuration
+          the pipeline is currently running on.</p>
+        <span class="hub-go">Open configuration</span>
+      </article>
+
+      <article class="hub-card" onclick="enterSection('analytics')" tabindex="0" role="button">
+        <div class="hub-ic ic-blue">
+          <svg viewBox="0 0 24 24"><path d="M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z"/></svg>
+        </div>
+        <h3>Performance &amp; Cost</h3>
+        <p>Volumes, resolution and sentiment across every channel, alongside the measured
+          cost of running the system.</p>
+        <span class="hub-go">Open performance &amp; cost</span>
+      </article>
+
+    </div>
+  </main>
+</div>
+
+<!-- STAGE 4: MAIN SHELL -->
 <div class="shell" id="mainShell" style="display:none">
 
   <!-- RIBBON -->
   <div class="ribbon">
-    <div class="ribbon-logo">
+    <div class="ribbon-logo ribbon-logo--link" onclick="goToHub()" title="Back to Control Centre" role="button" tabindex="0">
       <img src="/admin-ui/assets/ganit-logo.png?v=1" class="ribbon-icon" alt="Ganit">
       <span class="ribbon-name">Omnichannel<span>CX</span></span>
+      <span class="ribbon-home">Control Centre</span>
     </div>
     <div class="ribbon-spacer"></div>
     <div class="ribbon-user">
       <button class="ribbon-switch" type="button" onclick="backToPortalSelection()">Switch portal</button>
-      <div class="ribbon-user-info">
+      <div class="ribbon-user-info ribbon-user-info--link" onclick="switchPage('profile')" title="My Profile" role="button" tabindex="0">
         <span class="ribbon-user-name" id="ribbonUserName">Admin</span>
         <span class="ribbon-user-role" id="ribbonUserRole">CX Operations</span>
       </div>
-      <div class="ribbon-user-av" id="ribbonUserAv">CX</div>
+      <div class="ribbon-user-av ribbon-user-av--link" id="ribbonUserAv" onclick="switchPage('profile')" title="My Profile" role="button" tabindex="0">CX</div>
       <button class="ribbon-logout" id="ribbonLogout" onclick="doLogout()" title="Logout">
         <svg viewBox="0 0 24 24"><path d="M17 7l-1.41 1.41L18.17 11H8v2h10.17l-2.58 2.58L17 17l5-5-5-5zM4 5h8V3H4c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h8v-2H4V5z"/></svg>
       </button>
@@ -361,17 +440,31 @@
 
     <!-- LEFT NAV -->
     <div class="leftnav">
+      <div class="nav-item nav-hub" id="nav-hub" onclick="goToHub()">
+        <svg viewBox="0 0 24 24"><path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/></svg>
+        <span class="nav-tooltip">Control Centre</span>
+      </div>
+      <div class="nav-divider"></div>
       <div class="nav-item active" id="nav-inbox" onclick="switchPage('inbox')">
         <svg viewBox="0 0 24 24"><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/></svg>
-        <span class="nav-tooltip">Inbox</span>
+        <span class="nav-tooltip">Agent Workspace</span>
+      </div>
+      <div class="nav-item" id="nav-servicedesk" onclick="switchPage('servicedesk')">
+        <svg viewBox="0 0 24 24"><path d="M3 5h18v2H3V5zm0 6h12v2H3v-2zm0 6h18v2H3v-2z"/><circle cx="19" cy="12" r="2.6"/></svg>
+        <span class="nav-tooltip">Service Desk</span>
+      </div>
+      <!-- Rail order and labels mirror the Control Centre boxes EXACTLY: Agent Workspace,
+           Service Desk, System Configuration, Performance & Cost. Connectors sits above
+           Analytics here for that reason - the two surfaces must never disagree, on
+           either name or sequence. Renaming a section means changing all five surfaces
+           listed in docs/rules_to_follow/section-rename-checklist.md - not just this one. -->
+      <div class="nav-item" id="nav-connectors" onclick="switchPage('connectors')">
+        <svg viewBox="0 0 24 24"><path d="M17 7H7C4.24 7 2 9.24 2 12s2.24 5 5 5h10c2.76 0 5-2.24 5-5s-2.24-5-5-5zM7 15c-1.66 0-3-1.34-3-3s1.34-3 3-3 3 1.34 3 3-1.34 3-3 3z"/></svg>
+        <span class="nav-tooltip">System Configuration</span>
       </div>
       <div class="nav-item" id="nav-analytics" onclick="switchPage('analytics')">
         <svg viewBox="0 0 24 24"><path d="M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z"/></svg>
-        <span class="nav-tooltip">Analytics</span>
-      </div>
-      <div class="nav-item" id="nav-connectors" onclick="switchPage('connectors')">
-        <svg viewBox="0 0 24 24"><path d="M17 7H7C4.24 7 2 9.24 2 12s2.24 5 5 5h10c2.76 0 5-2.24 5-5s-2.24-5-5-5zM7 15c-1.66 0-3-1.34-3-3s1.34-3 3-3 3 1.34 3 3-1.34 3-3 3z"/></svg>
-        <span class="nav-tooltip">Connectors</span>
+        <span class="nav-tooltip">Performance &amp; Cost</span>
       </div>
       <!-- Channel Testing: hidden from the nav, page markup left in place. It is a
            developer tool - one WhatsApp form that duplicates what the customer portal
@@ -387,11 +480,6 @@
       <div class="nav-item" id="nav-workflow" onclick="openFlowModal()">
         <svg viewBox="0 0 24 24"><path d="M4 8h4v8H4V8zm12 0h4v8h-4V8zM9.5 11h3.2V9l3 3-3 3v-2H9.5v-2z"/></svg>
         <span class="nav-tooltip">Workflow</span>
-      </div>
-      <div class="nav-divider"></div>
-      <div class="nav-item" id="nav-settings" onclick="switchPage('settings')" style="margin-top:auto">
-        <svg viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.56-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.07.63-.07.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
-        <span class="nav-tooltip">Settings</span>
       </div>
     </div>
 
@@ -476,7 +564,7 @@
       <div class="dash">
         <div class="dash-header">
           <div>
-            <div class="dash-title">Analytics Dashboard</div>
+            <div class="dash-title">Performance &amp; Cost</div>
           </div>
           <div style="display:flex;align-items:center;gap:10px">
             <span class="sse-badge" id="sseStatus">Connecting…</span>
@@ -567,8 +655,8 @@
     <div class="page" id="page-connectors">
       <div class="conn-page">
         <div>
-          <div class="dash-title">Connectors</div>
-          <div class="dash-sub">Channel integrations for this OmnichannelCX workspace</div>
+          <div class="dash-title">System Configuration</div>
+          <div class="dash-sub">Channels, integrations and the runtime this workspace is running on</div>
         </div>
         <div class="conn-grid" id="connGrid">
           <div style="color:var(--t3);font-size:12px;padding:20px 0">Loading connector status…</div>
@@ -583,7 +671,7 @@
           <div class="dash-title">Channel Testing</div>
           <div class="dash-sub" style="margin-top:4px">
             <strong>Email</strong> customer queries arrive automatically via Gmail IMAP polling (digvijayyadav48@gmail.com).
-            Use <em>Connectors → Email Inbox → Poll now</em> to manually fetch new emails.
+            Use <em>System Configuration → Email Inbox → Poll now</em> to manually fetch new emails.
             Use the WhatsApp simulator below to inject test WhatsApp messages.
           </div>
         </div>
@@ -632,8 +720,8 @@
             <div class="sim-field" style="margin-top:10px">
               <p style="font-size:12px;color:var(--t2);line-height:1.6;margin:0">
                 Customer emails sent to <strong>digvijayyadav48@gmail.com</strong> are fetched automatically every <strong>30 seconds</strong> via Gmail IMAP.<br><br>
-                Each new email is normalised by the channel adapter and routed through the agentic pipeline — intent classification, RAG resolution, optional Jira ticket creation — and the AI-generated response appears in the <strong>Inbox</strong> for your review before sending.<br><br>
-                To manually trigger a poll go to <strong>Connectors → Email Inbox (IMAP) → Poll now</strong>.
+                Each new email is normalised by the channel adapter and routed through the agentic pipeline — intent classification, RAG resolution, optional Jira ticket creation — and the AI-generated response appears in the <strong>Agent Workspace</strong> for your review before sending.<br><br>
+                To manually trigger a poll go to <strong>System Configuration → Email Inbox (IMAP) → Poll now</strong>.
               </p>
             </div>
             <div class="sim-field" style="display:none">
@@ -655,11 +743,66 @@
     </div><!-- end #page-sim -->
 
     <!-- ── SETTINGS PAGE ── -->
-    <div class="page" id="page-settings">
+    <!-- ── SERVICE DESK PAGE ──────────────────────────────────────────────────
+         The supervisor's board. Agent Workspace answers "what do I say to this
+         person?"; this answers "what is about to breach, and who owns it?".
+         Reads the EXISTING GET /admin/tickets — every field below is a real column
+         (priority_score, sla_due_at, escalation_reason, crm_sync_status,
+         last_activity_at). Nothing here is assigned to a named human: there is no
+         assigned_to column, and a control that appears to assign but persists
+         nothing would be a lie on screen. -->
+    <div class="page" id="page-servicedesk">
+      <div class="sd-page">
+
+        <div class="sd-header">
+          <div>
+            <div class="dash-title">Service Desk</div>
+            <div class="dash-sub">Every ticket in the system, ranked by priority and SLA</div>
+          </div>
+          <button class="sim-btn" onclick="loadServiceDesk()">Refresh</button>
+        </div>
+
+        <div class="sd-stats" id="sdStats"></div>
+
+        <div class="sd-filters">
+          <div class="sd-filter-group" id="sdStatusFilters">
+            <button class="sd-chip on" data-sdstatus="all" onclick="sdSetStatus('all',this)">All</button>
+            <button class="sd-chip" data-sdstatus="open" onclick="sdSetStatus('open',this)">Open</button>
+            <button class="sd-chip" data-sdstatus="logged" onclick="sdSetStatus('logged',this)">Logged</button>
+            <button class="sd-chip" data-sdstatus="closed" onclick="sdSetStatus('closed',this)">Closed</button>
+            <button class="sd-chip sd-chip--red" data-sdstatus="breached" onclick="sdSetStatus('breached',this)">SLA breached</button>
+          </div>
+          <select class="sd-select" id="sdTeamFilter" onchange="renderServiceDesk()">
+            <option value="all">All teams</option>
+          </select>
+        </div>
+
+        <div class="sd-tablewrap">
+          <table class="sd-table">
+            <thead>
+              <tr>
+                <th style="width:74px">Priority</th>
+                <th>Ticket</th>
+                <th style="width:150px">Customer</th>
+                <th style="width:150px">Team</th>
+                <th style="width:96px">Status</th>
+                <th style="width:132px">SLA</th>
+                <th style="width:118px">Last activity</th>
+              </tr>
+            </thead>
+            <tbody id="sdRows"></tbody>
+          </table>
+          <div class="sd-empty" id="sdEmpty" hidden></div>
+        </div>
+
+      </div>
+    </div><!-- end #page-servicedesk -->
+
+    <div class="page" id="page-profile">
       <div class="acct-page">
         <div class="acct-header">
-          <div class="dash-title">Settings</div>
-          <div class="dash-sub">Manage your admin account and workspace members</div>
+          <div class="dash-title">My Profile</div>
+          <div class="dash-sub">Your account, password and the other admins on this workspace</div>
         </div>
         <div class="acct-grid">
 
@@ -705,7 +848,7 @@
 
         </div>
       </div>
-    </div><!-- end #page-settings -->
+    </div><!-- end #page-profile -->
 
   </div><!-- end .body-row -->
 </div><!-- end #mainShell -->
@@ -730,6 +873,6 @@
 <!-- d3-force, vendored (15KB, tree-shaken to the 7 functions used). Local, not a CDN:
      the app has no other external JS and a demo must not depend on a network fetch. -->
 <script src="/admin-ui/assets/vendor-d3-force.js?v=20260902"></script>
-<script src="/admin-ui/assets/app.js?v=20260907-hide1"></script>
+<script src="/admin-ui/assets/app.js?v=20260912-hub4"></script>
 </body>
 </html>

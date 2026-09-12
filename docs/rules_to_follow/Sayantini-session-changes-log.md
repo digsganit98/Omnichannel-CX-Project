@@ -254,6 +254,7 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 164 — the home page listed specifications instead of arguing a case:** the hero's four-number stat strip (led by a price) became two bands — what we remove set against what we deliver — plus a `WHAT WE BUILT` label over the capability cards.
 - **Fix 165 — the home page clipped on a real laptop and spaced itself three different ways:** the bottom card row sat behind the footer below a ~640px viewport; fixed with a four-tier ladder, one single-sourced section gap, Ganit orange and blue throughout, and title-case in the headline.
 - **Fix 166 — FinOps cost rates moved to AWS Bedrock Mumbai:** repriced both gpt-oss models to the Bedrock standard-tier rates across all three rate sites, closing the "rates are unverified" open item; existing rows keep their Groq costs.
+- **Fix 167 — a Control Centre in front of the console, and a Service Desk that shows priority:** a four-box landing page after sign-in, plus a new supervisor triage page that surfaces `priority_score` — computed on every ticket and shown nowhere until now.
 - **EC2 deploy 2026-09-07 (second) — Fix 152 to Fix 162, UI only:** four bind-mounted files took effect on landing with no rebuild and no container restarted; the two changed Python files are on the box but deliberately not built into the image.
 - **OPEN - Fix 149 turned three escalation gates into constants (NOT FIXED, measured):** moving the KB into the graph made retrieval EXHAUSTIVE - all 14 chunks, every message - and three gates that read `contexts` to judge relevance silently became no-ops. Measured on all 11 messages sent through the UI today, with contexts rebuilt from `retrieval_evidence`: **`_is_strong_l1_knowledge_answer` TRUE 11/11**, `knowledge_not_found` fired **0/11**, KB chunks per turn **min 14 max 14**. The third gate is the damaging one - returning True SKIPS the handoff check entirely, the rule that reads the customer's own words. Live consequence: the FD question, for which the KB has zero guidance, auto-sent as a confident L1 knowledge answer and volunteered a penalty rule from the model's own general knowledge. Today's real escalations (fraud, claim dispute) were caught earlier by intent-label rules, which MASKS this for the intents that have their own rules and exposes it for everything else. `confidence=0.95` is hardcoded in Priority 2, so `confidence < 0.3` cannot fire either. **Fix 149 verified the PROVENANCE consumers of contexts and never enumerated the DECISION consumers.** This gate has now broken twice in opposite directions (Fix 143 inverted it) because it reads a property of RETRIEVAL to answer a question about RELEVANCE - so the fix is not a patched condition. Fix 150 already supplies the raw material (`customer_holds`, each chunk's `concept`); probe it on real messages before designing the gate.
 - **Reference - local vs the hosted instance:** the two are NOT meant to match. Application code must; `docker-compose.yml` deliberately must not (Ollama commented out on EC2, and ngrok has **no** `profiles: ["tunnel"]` there - copying the local file over means the next `up` starts no tunnel and **WhatsApp goes silent with nothing to say why**). EC2 is the sole holder of the shared WhatsApp number, mailbox and ngrok domain, which is why local ships with those off. Three deploy traps, all already bitten: **no git on EC2** (scp only), `restart` runs **old code** (rebuild), and `restart` does **not re-read `.env`** (`up -d`). Plus what must never be done there - other teams' containers, the disk watermark, removing OpenSearch, `prune --volumes`.
@@ -9019,3 +9020,52 @@ Recorded because the pattern matters more than any one of them:
 By the third the user said they could not trust the commands, which was the correct read. The rule
 that would have prevented all three: **read the schema, the class or the flag's scope before
 handing over a command**, exactly as file contents are verified by grep rather than by prediction.
+
+---
+
+## Fix 167 — Control Centre landing page, and a Service Desk for triage
+
+A four-box landing page (`#hubPage`) now sits between sign-in and the console; login and
+session-restore both land there. **Agent Workspace** opens the Inbox, **System Configuration**
+the Connectors, **Performance & Cost** the Analytics, and **Service Desk** a new page. The
+nav rail is unchanged and still the fast path — the hub is the deliberate way between
+sections, not a replacement for it. The gear icon is gone: the avatar is the one route to
+My Profile, and `#page-settings` became `#page-profile`, since it was never a settings page.
+
+**Service Desk** (`#page-servicedesk`) is the only new page. It reads the existing
+`GET /admin/tickets` and uses real columns only — `priority_score` (mig 007), `sla_due_at` /
+`escalation_reason` / `crm_sync_status` (002), `status` (017), `last_activity_at` (018). It
+exists to surface **`priority_score`, computed on every ticket and displayed nowhere before
+this page**. No `assigned_to`, no roster, no migration — routing to a named human is the
+deferred next step.
+
+**`activePage` is not just a nav highlight — four fallback timers and the SSE handler read
+it** (inbox 10s, conversation 12s, connectors 20s, analytics 90s). `showStage` now sets
+`activePage = stage` for any non-`'app'` stage so the hub matches none of them; otherwise the
+browser polls behind a static page. Measured: 0 API calls in 25s on the hub, 13 on the Inbox.
+
+**A section name lives in five places** — hub box `<h3>`, nav tooltip, page `dash-title`, hub
+`hub-go` link text, and cross-references in body copy ("go to **System Configuration → Email
+Inbox → Poll now**"). Two boxes were renamed mid-session and **the rail silently disagreed
+with the hub on three names and on the order**; `verify_ui.py` check 2b now fails if they
+ever diverge again.
+
+**Hub cards are the same component as the home page's feature cards** and must inherit their
+tile treatment at `style.css:1283-1286` — pale ground, brand-coloured glyph. Only `.ic-org`
+is declared locally, because the home page reaches orange through `.ic-pur`/`.ic-grn`; **do
+not redefine those two**, they mean pale orange there. Orange marks Service Desk alone, the
+triage surface.
+
+21 browser checks pass. Service Desk renders 7 tickets scoring 100/63/27/27/25/25/25; the
+stat tiles match the API (7 breached, 2 open, 5 logged, 2 CRM-unsynced — they count different
+dimensions and do not sum to 7).
+
+**Still open:** System Configuration shows only channel connectors, roughly 40% of its stated
+purpose — **the model and runtime config sits on the Analytics FinOps tab instead**, and RAG
+backend, Neo4j/OpenSearch health and IMAP state appear nowhere. Performance & Cost has no SLA
+attainment KPI despite SLA data already driving the Service Desk breach count. Both are
+content gaps, deferred to a planned pass.
+
+Pre-existing and untouched: three boot 401s from `loadSystemDiagrams` firing before a token
+exists (each has a `.catch()`, identical in HEAD), and "Member since —" blank on My Profile
+because the JWT `currentUser` carries no `created_at`.

@@ -207,13 +207,26 @@ function toast(msg) {
 
 // ── Stage management ──────────────────────────────────────────────────────────
 function showStage(stage) {
-  // Four stages: 'home' the unauthenticated landing page, 'apikey' the combined sign-in
-  // card (it kept its id), 'app' the console, 'user' the customer portal. The separate
-  // 'auth' page that sat behind the API-key prompt is gone, along with the prompt itself.
+  // Five stages: 'home' the unauthenticated landing page, 'apikey' the combined sign-in
+  // card (it kept its id), 'hub' the Control Centre, 'app' the console, 'user' the
+  // customer portal. The separate 'auth' page that sat behind the API-key prompt is
+  // gone, along with the prompt itself.
+  //
+  // The Control Centre is a STAGE and not a .page inside the shell, because the shell
+  // carries the left nav rail. Inside a section that rail is the fast path between
+  // pages; beside four large boxes it competes with them for the same job.
   document.getElementById('homePage').style.display = stage === 'home' ? 'flex' : 'none';
   document.getElementById('connectModal').classList.toggle('hidden', stage !== 'apikey');
+  document.getElementById('hubPage').style.display = stage === 'hub' ? 'flex' : 'none';
   document.getElementById('mainShell').style.display = stage === 'app' ? 'flex' : 'none';
   document.getElementById('userPortal').style.display = stage === 'user' ? 'flex' : 'none';
+
+  // activePage is not only a highlight - four fallback timers and the SSE handler read
+  // it to decide whether to refetch (inbox 10s, selected conversation 12s, connectors
+  // 20s, analytics 90s). On any stage that is not the console it must therefore hold a
+  // value NONE of those gates match, or the browser polls the API behind a page that is
+  // not showing any of that data. Measured with a request counter, not reasoned about.
+  if (stage !== 'app') activePage = stage;
 }
 
 // ── Home page entry points ────────────────────────────────────────────────────
@@ -235,6 +248,30 @@ window.openSignup = function() {
 window.goHome = function() {
   showStage('home');
 };
+
+// ── Control Centre ────────────────────────────────────────────────────────────
+// The hub is the one screen that routes to every section, and the ribbon brand is the
+// way back to it from anywhere in the console.
+window.goToHub = function() {
+  updateHubUser();
+  showStage('hub');
+};
+
+// Entering a section from a hub box: show the console shell, then switch to the page.
+// switchPage does the highlighting, the lazy data load and sets activePage - reusing it
+// means a box and its nav item take exactly the same route.
+window.enterSection = function(page) {
+  showStage('app');
+  switchPage(page);
+};
+
+function updateHubUser() {
+  if (!currentUser) return;
+  var nm = currentUser.username || 'Admin';
+  document.getElementById('hubUserAv').textContent = nm.slice(0, 2).toUpperCase();
+  document.getElementById('hubUserName').textContent = nm;
+  document.getElementById('hubUserEmail').textContent = currentUser.email || 'My Profile';
+}
 
 // Analytics view switch. Every section stays in the DOM and keeps its ids - only
 // visibility changes - so the render functions need no knowledge of which tab is open,
@@ -328,7 +365,8 @@ async function submitAdminAuth(path, body, btn, busyLabel, idleLabel) {
     currentUser = data.user || null;
     sessionStorage.setItem('cx-admin-jwt', adminToken);
     if (currentUser) sessionStorage.setItem('cx-admin-user', JSON.stringify(currentUser));
-    showStage('app');
+    updateHubUser();
+    showStage('hub');
     bootApp();
   } catch(e) {
     adminToken = '';
@@ -491,7 +529,8 @@ window.switchPage = function(name) {
   if (name === 'analytics') loadAnalytics();
   if (name === 'connectors') loadConnectors();
   if (name === 'sim') loadAudit();
-  if (name === 'settings') loadSettings();
+  if (name === 'servicedesk') loadServiceDesk();
+  if (name === 'profile') loadProfile();
 };
 
 // ── INBOX ─────────────────────────────────────────────────────────────────────
@@ -2743,6 +2782,150 @@ window.goToConversation = function(conversationId, ticketId) {
   selectConv(conversationId);
 };
 
+// ── SERVICE DESK ──────────────────────────────────────────────────────────────
+// The supervisor's board: every ticket at once, ranked by the priority score the
+// system already computes on each one and never showed anybody. Agent Workspace is
+// one agent inside one conversation; this is cross-customer triage.
+//
+// It reads the EXISTING GET /admin/tickets - no new endpoint, no migration. Every
+// column is a real field: priority_score (007), sla_due_at / escalation_reason /
+// crm_sync_status (002), status (017), last_activity_at (018).
+//
+// Deliberately absent: assignment to a named person. There is no assigned_to column
+// and admin_users carries no team membership, so a control that looked like it
+// assigned would persist nothing. Teams come from INTENT_TO_TEAM via assigned_team.
+var sdState = { tickets: [], status: 'all', convById: {} };
+
+window.loadServiceDesk = async function() {
+  try {
+    var results = await Promise.all([api('/admin/tickets'), api('/admin/conversations')]);
+    sdState.tickets = results[0] || [];
+    sdState.convById = {};
+    (results[1] || []).forEach(function(c) { sdState.convById[c.conversation_id] = c; });
+    sdFillTeamFilter();
+    renderServiceDesk();
+  } catch(e) {
+    document.getElementById('sdRows').innerHTML = '';
+    var em = document.getElementById('sdEmpty');
+    em.hidden = false;
+    em.innerHTML = '<div class="sd-empty-t">Could not load tickets</div><div class="sd-empty-s">' + escH(e.message) + '</div>';
+  }
+};
+
+// SLA state from sla_due_at alone. Only a ticket that is still being worked can breach:
+// a closed one missed its deadline in the past and nothing can be done about it now.
+function sdSla(t) {
+  if (!t.sla_due_at) return { cls: 'none', txt: '—', breached: false };
+  var due = new Date(t.sla_due_at).getTime();
+  if (isNaN(due)) return { cls: 'none', txt: '—', breached: false };
+  if (t.status === 'closed') return { cls: 'none', txt: 'Met on close', breached: false };
+  var mins = Math.round((due - Date.now()) / 60000);
+  if (mins < 0) {
+    var over = Math.abs(mins);
+    return { cls: 'breach', txt: 'Overdue ' + (over >= 1440 ? Math.round(over/1440) + 'd' : over >= 60 ? Math.round(over/60) + 'h' : over + 'm'), breached: true };
+  }
+  if (mins <= 120) return { cls: 'soon', txt: 'Due in ' + (mins >= 60 ? Math.round(mins/60) + 'h' : mins + 'm'), breached: false };
+  return { cls: 'ok', txt: 'Due in ' + (mins >= 1440 ? Math.round(mins/1440) + 'd' : Math.round(mins/60) + 'h'), breached: false };
+}
+
+function sdTeamLabel(team) {
+  if (!team) return '—';
+  return team.replace(/_/g, ' ').replace(/\b\w/g, function(c) { return c.toUpperCase(); });
+}
+
+function sdCustomerName(t) {
+  var conv = sdState.convById[t.conversation_id];
+  return conv ? customerLabel(conv) : 'Unverified';
+}
+
+function sdFillTeamFilter() {
+  var sel = document.getElementById('sdTeamFilter');
+  var current = sel.value || 'all';
+  var teams = {};
+  sdState.tickets.forEach(function(t) { if (t.assigned_team) teams[t.assigned_team] = true; });
+  var names = Object.keys(teams).sort();
+  sel.innerHTML = '<option value="all">All teams</option>' + names.map(function(n) {
+    return '<option value="' + escH(n) + '">' + escH(sdTeamLabel(n)) + '</option>';
+  }).join('');
+  sel.value = teams[current] ? current : 'all';
+}
+
+window.sdSetStatus = function(status, btn) {
+  sdState.status = status;
+  document.querySelectorAll('#sdStatusFilters .sd-chip').forEach(function(c) { c.classList.remove('on'); });
+  if (btn) btn.classList.add('on');
+  renderServiceDesk();
+};
+
+window.renderServiceDesk = function() {
+  var team = document.getElementById('sdTeamFilter').value;
+  var all = sdState.tickets;
+
+  // Counts are over EVERY ticket, not the filtered set - they are the "what is on fire"
+  // line, and a count that changed when you filtered would answer a different question.
+  var breached = all.filter(function(t) { return sdSla(t).breached; }).length;
+  var open = all.filter(isServiceable).length;
+  var logged = all.filter(function(t) { return t.status === 'logged'; }).length;
+  var unsynced = all.filter(function(t) { return t.crm_sync_status && t.crm_sync_status !== 'synced' && t.crm_sync_status !== 'not_configured'; }).length;
+
+  document.getElementById('sdStats').innerHTML =
+    sdStat('SLA breached', breached, breached > 0 ? 'red' : 'neutral') +
+    sdStat('Open', open, 'blue') +
+    sdStat('Logged', logged, 'neutral') +
+    sdStat('CRM unsynced', unsynced, unsynced > 0 ? 'amb' : 'neutral');
+
+  var rows = all.filter(function(t) {
+    if (team !== 'all' && t.assigned_team !== team) return false;
+    if (sdState.status === 'all') return true;
+    if (sdState.status === 'breached') return sdSla(t).breached;
+    if (sdState.status === 'open') return isServiceable(t);
+    return t.status === sdState.status;
+  });
+
+  // Highest priority first; a breached ticket outranks its score because the deadline
+  // has already passed. Ties fall back to most recently active.
+  rows.sort(function(a, b) {
+    var ab = sdSla(a).breached ? 1 : 0, bb = sdSla(b).breached ? 1 : 0;
+    if (ab !== bb) return bb - ab;
+    var d = (b.priority_score || 0) - (a.priority_score || 0);
+    if (d !== 0) return d;
+    return new Date(b.last_activity_at || b.created_at) - new Date(a.last_activity_at || a.created_at);
+  });
+
+  var tbody = document.getElementById('sdRows');
+  var empty = document.getElementById('sdEmpty');
+  if (!rows.length) {
+    tbody.innerHTML = '';
+    empty.hidden = false;
+    empty.innerHTML = all.length
+      ? '<div class="sd-empty-t">No tickets match these filters</div><div class="sd-empty-s">Clear the status or team filter to see the rest.</div>'
+      : '<div class="sd-empty-t">No tickets yet</div><div class="sd-empty-s">Tickets appear here as customer conversations come in.</div>';
+    return;
+  }
+  empty.hidden = true;
+
+  tbody.innerHTML = rows.map(function(t) {
+    var sla = sdSla(t);
+    var score = Math.round(t.priority_score || 0);
+    var band = score >= 70 ? 'hi' : score >= 40 ? 'md' : 'lo';
+    var esc = t.escalation_reason ? '<span class="sd-esc">' + escH(String(t.escalation_reason).replace(/_/g, ' ')) + '</span>' : '';
+    var jump = "goToConversation('" + escH(t.conversation_id) + "','" + escH(t.ticket_id) + "')";
+    return '<tr class="sd-row" onclick="' + jump + '">' +
+      '<td><span class="sd-score sd-score--' + band + '">' + score + '</span></td>' +
+      '<td><div class="sd-ttl">' + escH(t.title || '—') + '</div><div class="sd-sub">' + escH(t.ticket_id) + esc + '</div></td>' +
+      '<td>' + escH(sdCustomerName(t)) + '</td>' +
+      '<td>' + escH(sdTeamLabel(t.assigned_team)) + '</td>' +
+      '<td><span class="sd-pill sd-pill--' + escH(t.status) + '">' + escH(statusLabel(t.status)) + '</span></td>' +
+      '<td><span class="sd-sla sd-sla--' + sla.cls + '">' + escH(sla.txt) + '</span></td>' +
+      '<td class="sd-when">' + escH(formatTime(t.last_activity_at || t.created_at)) + '</td>' +
+    '</tr>';
+  }).join('');
+};
+
+function sdStat(label, value, tone) {
+  return '<div class="sd-stat sd-stat--' + tone + '"><div class="sd-stat-v">' + value + '</div><div class="sd-stat-l">' + escH(label) + '</div></div>';
+}
+
 // ── SETTINGS (admin account) ──────────────────────────────────────────────────
 function userHeaders() {
   return { 'Authorization': 'Bearer ' + userToken };
@@ -3483,7 +3666,7 @@ function bootUserPortal() {
   }, 8000);
 }
 
-function loadSettings() {
+function loadProfile() {
   if (currentUser) {
     var nm = currentUser.username || '—';
     var av = nm.slice(0, 2).toUpperCase();
@@ -3615,7 +3798,8 @@ if (userToken && portalUser && !isTokenExpired(userToken)) {
   showStage('user');
   bootUserPortal();
 } else if (adminToken && !isTokenExpired(adminToken)) {
-  showStage('app');
+  updateHubUser();
+  showStage('hub');
   bootApp();
 } else {
   // First arrival with no session: the home page. The sign-in card ('apikey') is one
