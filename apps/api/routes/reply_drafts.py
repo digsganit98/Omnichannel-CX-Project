@@ -126,7 +126,8 @@ def send_draft(draft_id: str, payload: SendDraftRequest) -> dict:
     # `text` is passed explicitly, NOT read from `draft`: draft was loaded before the send
     # and its sent_text is still None at this point, so reading it there would silently
     # disable promise detection - the check would run on an empty string every time.
-    _mark_ticket_responded(repository, draft, text, payload.actor)
+    _mark_ticket_responded(repository, draft.get("ticket_id"), text, payload.actor,
+                           turn_id=turn["turn_id"])
 
     repository.add_audit_event(
         "reply_draft_sent",
@@ -134,7 +135,11 @@ def send_draft(draft_id: str, payload: SendDraftRequest) -> dict:
         customer_id=draft.get("customer_id"),
         conversation_id=draft.get("conversation_id"),
         ticket_id=draft.get("ticket_id"),
+        # delivery_mode in the PERMANENT record too, not just the toast: "delivery_status
+        # sent" in an audit row is the same three-way ambiguity, read back later by someone
+        # with no container log to check it against.
         details={"actor": payload.actor, "delivery_status": delivery.get("status"),
+                 "delivery_mode": delivery.get("delivery_mode"),
                  "edited": edited,
                  "memory_id": (memory or {}).get("memory_id"),
                  "memory_verified": (memory or {}).get("verified")},
@@ -185,14 +190,29 @@ def _promised_follow_up(text: str) -> bool:
     return any(phrase in lowered for phrase in _PROMISE_PHRASES)
 
 
-def _mark_ticket_responded(repository, draft: dict, sent_text: str, actor: str) -> None:
+def _mark_ticket_responded(repository, ticket_id: str | None, sent_text: str, actor: str,
+                           turn_id: str | None = None) -> None:
     """Record that a human answered, and whether the answer promised a follow-up.
+
+    Takes a ticket_id, NOT a draft: an agent can also reply from the conversation composer,
+    where no draft row exists (see apps/api/routes/conversations.py). Both send paths must
+    apply the same rules - first-response clock, logged/open -> in_progress, and the
+    promise clock - or the two would drift and one would forget something.
+
+    `turn_id` is the outbound turn this reply just created, and it becomes the ANCHOR for
+    the promise (migration 020). Every reply re-decides the promise state:
+
+      * it promises      -> new deadline, anchor moves to THIS turn, so the nudge asks
+                            "anything since here?" and the loop continues for as long as
+                            the case does.
+      * it promises not  -> BOTH fields cleared. The promise was answered and nothing new
+                            was undertaken. Without this the board kept counting down
+                            "due in 13h" after a reply that said the dispute was resolved.
 
     Best-effort by design: the customer already has the reply by the time this runs, so a
     failure here must never surface as a failed send. It is wrapped rather than allowed to
     raise for that reason alone.
     """
-    ticket_id = draft.get("ticket_id")
     if not ticket_id:
         return
     try:
@@ -211,6 +231,13 @@ def _mark_ticket_responded(repository, draft: dict, sent_text: str, actor: str) 
             updates["follow_up_due_at"] = (
                 datetime.now(timezone.utc) + timedelta(hours=_FOLLOW_UP_HOURS)
             ).isoformat()
+            updates["follow_up_turn_id"] = turn_id
+        elif ticket.get("follow_up_due_at"):
+            # A promise was outstanding and this reply did not renew it - so it was kept.
+            # Cleared rather than left to expire, because an expired clock reads as a
+            # BROKEN promise on the board and in analytics.
+            updates["follow_up_due_at"] = None
+            updates["follow_up_turn_id"] = None
 
         # A logging ticket that a human has now answered is real work, so it stops being a
         # grouping id. open -> in_progress records that someone is actually on it; the
@@ -395,9 +422,14 @@ def _send_offer_draft(repository, draft: dict, draft_id: str, text: str, actor: 
             delivery_status=delivery.get("status", "sent"),
             metadata=offer_metadata,
         )
+        # delivery_mode, not just status: an offer that only reached the container log
+        # reports status "sent" exactly like one a provider accepted. Carried per channel
+        # because an offer fans out to WhatsApp AND email - one can be delivered while the
+        # other is logged_only, and a single summary status would hide that.
         deliveries.append({"channel": identity["channel"],
                            "identifier": identity["identifier"],
-                           "status": delivery.get("status", "sent")})
+                           "status": delivery.get("status", "sent"),
+                           "delivery_mode": delivery.get("delivery_mode")})
         turn_ids.append(turn["turn_id"])
 
     updated = repository.update_reply_draft(draft_id, status="sent", actor=actor, sent_text=text)

@@ -1457,6 +1457,21 @@ function renderDraftCard(conv, viewMode, shownInboundTurnIds) {
     + '</div></div></div>';
 }
 
+// What to tell the agent after a send. `delivery_mode` comes from delivery.py and is the
+// only field that distinguishes the four real outcomes; `status` cannot, because three of
+// them report "sent". Falls back to the old wording when the field is absent, so a stale
+// API (the container image lags the host until it is rebuilt) still reads sensibly.
+function deliveryToast(delivery) {
+  switch ((delivery || {}).delivery_mode) {
+    case 'delivered':   return 'Reply delivered to customer';
+    case 'portal':      return 'Reply posted — customer sees it in the portal';
+    // The important one: it went to a log file. Nobody received it.
+    case 'logged_only': return '⚠ Not sent — logged locally only, the customer did not receive this';
+    case 'failed':      return '⚠ Delivery failed — the provider rejected it';
+    default:            return 'Reply sent to customer';
+  }
+}
+
 window.sendDraft = function(btn) {
   var card = btn.closest('.draft-card');
   var draftId = card && card.getAttribute('data-draft-id');
@@ -1466,8 +1481,14 @@ window.sendDraft = function(btn) {
   api('/admin/reply-drafts/' + encodeURIComponent(draftId) + '/send', {
     method: 'POST',
     body: JSON.stringify({ text: text }),
-  }).then(function() {
-    toast('Reply sent to customer');
+  }).then(function(res) {
+    // Say what ACTUALLY happened. This used to read "Reply sent to customer" for every
+    // outcome, including the one where nothing left the building: delivery.py returns
+    // status "sent" for a real provider send, for the web portal, AND for a local-log
+    // fallback that writes to the container log and stops there. Three different fates,
+    // one reassuring message - the trap recorded in ec2-operations.md § 8, where the only
+    // way to tell them apart was the container log or the recipient's phone.
+    toast(deliveryToast(res && res.delivery));
     if (state.convDetail) {
       delete state.pendingDrafts[state.convDetail.conversation_id];
       renderCentre(state.convDetail);  // clears the card + restores the compose box
@@ -1659,6 +1680,21 @@ function renderRight(conv, tickets) {
       + '<div class="tkt-scroll">' + tktHtml + '</div></div>';
   }
 
+  // SUGGESTED ACTIONS. The rules behind this have existed since the agent-assist service
+  // was written - an overdue SLA, a run of angry messages, a stalled KYC - and NOTHING in
+  // the UI ever called /next-best-actions, so every one of them has been invisible since
+  // the day it was built. The follow-up rule is new; the card is what makes all four
+  // reachable. Operational actions only - cross-sell/up-sell render in their own card
+  // below, because those are a sales judgement and these are work that is slipping.
+  body.innerHTML += '<div class="rpcard" id="rpNbaCard"><div class="rplbl rplbl-tickets">Suggested Actions</div>'
+    + '<div id="rpNbaBody" style="font-size:11px;color:var(--t3)">Checking…</div></div>';
+  api('/admin/agent-assist/next-best-actions?conversation_id=' + encodeURIComponent(conv.conversation_id))
+    .then(function(result) { renderNbaActions(result); })
+    .catch(function() {
+      var el = document.getElementById('rpNbaBody');
+      if (el) el.textContent = 'Unavailable';
+    });
+
   // Cross-sell / up-sell opportunities (LLM-selected, code-gated; admin
   // approves → editable offer draft → sent to WhatsApp + email).
   body.innerHTML += '<div class="rpcard" id="rpOppCard"><div class="rplbl rplbl-offers">Suggested Offers</div>'
@@ -1670,6 +1706,130 @@ function renderRight(conv, tickets) {
       if (el) el.textContent = 'Unavailable';
     });
 }
+
+// Operational suggestions. Offers are excluded: /next-best-actions returns every pending
+// recommendation including cross-sell rows, and rendering them here would put the same
+// card on screen twice.
+// Every label names a reason to WRITE to the customer - the card's whole purpose. The old
+// vocabulary (escalate_to_senior, request_document, proactive_outreach) described internal
+// chores and is gone; the two legacy keys are kept only so rows written before the change
+// still render with words rather than a raw enum value.
+var NBA_LABELS = {
+  promised_update:    'Follow-up due',
+  information_needed: 'Waiting on customer',
+  proactive_warning:  'They should know',
+  acknowledgement:    'Customer upset',
+  draft_follow_up:    'Follow-up due'   // superseded by promised_update
+};
+// Approving one of these writes an editable draft; anything else only records the
+// decision. Mirrors DRAFTABLE_ACTION_TYPES in shared/schemas/agent_assist.py - if the two
+// disagree the button promises a draft the API will not create.
+var NBA_DRAFTABLE = { promised_update: 1, draft_follow_up: 1 };
+
+function renderNbaActions(result) {
+  var el = document.getElementById('rpNbaBody');
+  if (!el) return;
+
+  // THREE states, never two. A failed LLM call used to render exactly like a clean case -
+  // an empty list - so a broken check looked like "nothing to do" on a case that might be
+  // on fire. Retry re-calls for real; the endpoint does not cache a failure.
+  if (result.llm_error) {
+    el.innerHTML = '<div class="opp-suppressed">⚠ Couldn\'t check this case. '
+      + '<a href="#" onclick="reloadNbaActions(event)">Retry</a></div>';
+    return;
+  }
+  if (result.suppressed) {
+    el.innerHTML = '<span class="opp-suppressed">Not suggesting — '
+      + escH(result.suppressed) + '.</span>';
+    return;
+  }
+
+  var acts = (result.actions || []).filter(function(a) {
+    return a.action_type !== 'cross_sell' && a.action_type !== 'up_sell';
+  });
+  if (!acts.length) {
+    el.textContent = 'Nothing needs chasing.';
+    return;
+  }
+  el.innerHTML = acts.map(function(a) {
+    var meta = a.metadata || {};
+    // The COUNTDOWN is computed here, every render, never stored. The reason sentence
+    // holds the absolute date ("13 Sep, 10:21pm") because it is written once and read
+    // whenever the agent next opens the case - a stored "8h left" is a lie by morning.
+    // Same split the Service Desk board uses: the deadline is data, the time left is
+    // derived. Reuses sdPromiseState so the two surfaces cannot disagree.
+    var clock = meta.follow_up_due_at
+      ? sdPromiseState({ follow_up_due_at: meta.follow_up_due_at, status: 'open' })
+      : null;
+    var overdue = !!(clock && clock.overdue);
+    var clockTxt = clock
+      ? (overdue ? sdDur(clock.mins) + ' overdue' : sdDur(clock.mins) + ' left')
+      : '';
+    // A promise already BROKEN is the one thing here that means we have already failed the
+    // customer, so only that gets the alarm colour - not every follow-up.
+    var hot = overdue;
+    var label = NBA_LABELS[a.action_type] || a.action_type;
+    var okLabel = NBA_DRAFTABLE[a.action_type] ? 'Draft reply' : 'Acknowledge';
+    // `basis` is the record the model says it read this from - shown so an agent can check
+    // the suggestion against the case instead of taking it on trust.
+    var basis = meta.basis
+      ? '<div class="opp-basis">Why: ' + escH(meta.basis) + '</div>' : '';
+    return '<div class="nba-item opp-item" data-rec-id="' + escH(a.recommendation_id) + '">'
+      + '<span class="nba-badge' + (hot ? ' nba-badge-upsell' : ' nba-badge-crosssell') + '">'
+      + escH(label) + '</span>'
+      + (clockTxt ? '<span class="nba-clock' + (overdue ? ' nba-clock--over' : '') + '">'
+                    + escH(clockTxt) + '</span>' : '')
+      + '<div class="nba-reason">' + escH(a.reason) + '</div>'
+      + basis
+      + '<div class="nba-actions">'
+      + '<button class="nba-approve-btn" onclick="decideNbaAction(this,\'approved\')">' + escH(okLabel) + '</button>'
+      + '<button class="nba-dismiss-btn" onclick="decideNbaAction(this,\'dismissed\')">Dismiss</button>'
+      + '</div></div>';
+  }).join('');
+}
+
+// Retry after a failed check. Re-requests rather than re-rendering what is already held,
+// because the point is to make the call again.
+window.reloadNbaActions = function(ev) {
+  if (ev) ev.preventDefault();
+  if (!state.convDetail) return;
+  var el = document.getElementById('rpNbaBody');
+  if (el) el.textContent = 'Checking…';
+  api('/admin/agent-assist/next-best-actions?conversation_id='
+      + encodeURIComponent(state.convDetail.conversation_id))
+    .then(renderNbaActions)
+    .catch(function() {
+      if (el) el.textContent = 'Unavailable';
+    });
+};
+
+// Same endpoint as an offer decision, different consequence: approving a follow-up creates
+// an editable draft in this conversation, so the centre pane has to re-render for the
+// draft card to appear.
+window.decideNbaAction = function(btn, status) {
+  var item = btn.closest('.opp-item');
+  var recId = item ? item.getAttribute('data-rec-id') : null;
+  if (!recId) return;
+  btn.parentElement.querySelectorAll('button').forEach(function(b) { b.disabled = true; });
+  api('/admin/agent-assist/recommendations/' + encodeURIComponent(recId) + '/decision', {
+    method: 'POST',
+    body: JSON.stringify({ status: status }),
+  }).then(function(res) {
+    if (res && res.draft_id) {
+      toast('Follow-up drafted — edit & send');
+      loadPendingDrafts().then(function() {
+        if (state.convDetail) renderCentre(state.convDetail);
+        renderQueue();
+      });
+    } else {
+      toast(status === 'approved' ? 'Acknowledged' : 'Dismissed');
+    }
+    if (state.convDetail) renderRight(state.convDetail, allTickets());
+  }).catch(function(err) {
+    toast('Failed: ' + err.message);
+    btn.parentElement.querySelectorAll('button').forEach(function(b) { b.disabled = false; });
+  });
+};
 
 function renderOpportunities(result) {
   var el = document.getElementById('rpOppBody');
@@ -1743,11 +1903,33 @@ window.decideOpportunity = function(btn, status) {
 // Approve recorded a decision without executing anything). The backend NBA
 // engine/endpoint remain for API consumers.
 
+// The composer used to be a decoration: it showed "Reply queued (simulation mode)",
+// cleared the box and called NOTHING. No message, no turn, no ticket update - so once a
+// case's held draft had been sent, an agent could never write to that customer again.
+// Every answered ticket on the board was in that state, including the fraud case whose
+// reply promised a follow-up that could not then be delivered.
 window.doSend = function() {
-  var txt = document.getElementById('cinput').value.trim();
+  var box = document.getElementById('cinput');
+  var txt = (box.value || '').trim();
   if (!txt || !state.convDetail) return;
-  toast('Reply queued (simulation mode) · ' + txt.slice(0,30));
-  document.getElementById('cinput').value = '';
+  var convId = state.convDetail.conversation_id;
+  box.disabled = true;
+  api('/admin/conversations/' + encodeURIComponent(convId) + '/reply', {
+    method: 'POST',
+    body: JSON.stringify({ text: txt, actor: (currentUser && currentUser.username) || 'admin' }),
+  }).then(function(res) {
+    // Same honest wording as a draft send - three outcomes report status "sent" and only
+    // delivery_mode separates a real delivery from one that reached a log file.
+    toast(deliveryToast(res && res.delivery));
+    box.value = '';
+    refreshSelectedConv();
+    loadConversations();
+  }).catch(function(err) {
+    toast('Failed: ' + err.message);
+  }).then(function() {
+    box.disabled = false;
+    box.focus();
+  });
 };
 
 // ── Confirmation modal ────────────────────────────────────────────────────────
@@ -1790,13 +1972,26 @@ window.confirmOk = async function() {
 
 // Resolve a single ticket from the Tickets panel, then refresh so the conversation-resolved
 // state is re-derived (a conversation is done only when it has no open tickets left).
+// Closing is the one act that ends a case, so it records WHO decided and WHY. This used
+// to PATCH /status with {status:'closed'}, which closes the ticket correctly but writes
+// neither field - measured on a throwaway ticket: status became 'closed' while closed_by
+// and closure_reason both stayed NULL. Migration 019 added those columns for this button;
+// a second closing path (POST /close) was built to fill them and was never wired to
+// anything. There is one closing path, and it is this one - /close delegates to
+// update_status internally, so the CRM sync and the graph mirror are unchanged.
 window.resolveTicket = function(btn, ticketId) {
   if (!ticketId) return;
   var adminUser = currentUser ? currentUser.username : 'admin';
+  // The endpoint rejects an empty reason (400). Asking here keeps that a single decision
+  // rather than a failed request the agent has to interpret.
+  var reason = prompt('Why is this case being closed?');
+  if (reason === null) return;
+  reason = reason.trim();
+  if (!reason) { toast('A closure reason is required.'); return; }
   btn.disabled = true;
-  api('/admin/tickets/' + encodeURIComponent(ticketId) + '/status', {
-    method: 'PATCH',
-    body: JSON.stringify({ status: 'closed', actor: adminUser })
+  api('/admin/tickets/' + encodeURIComponent(ticketId) + '/close', {
+    method: 'POST',
+    body: JSON.stringify({ reason: reason, actor: adminUser })
   }).then(function() {
     toast('Ticket ' + ticketId.slice(0,16) + ' resolved ✓');
     // Re-derive: loadConversations refreshes the _allTickets cache too.
@@ -2805,11 +3000,11 @@ var sdState = {
   // exception state - auto-assign routes on creation, so it is only non-empty when a team was
   // full. Defaulting to it opened the board on the few cases nobody had picked up and hid
   // every case that was actually being worked.
-  view: 'all', agent: null, selected: {}, search: '', benchOpen: false
+  view: 'all', agent: null, search: '', benchOpen: false
 };
 
 // The worklists. Each is a QUESTION a supervisor asks, not a status filter - which is why
-// "triage" (unassigned AND serviceable) is not the same as status === 'open'.
+// "breach" and "promised" cut across status rather than restating it.
 //
 // These replaced the metric tiles rather than sitting under them: the tiles and the tabs
 // were the same five numbers rendered twice, in two stacked bands, above a table that then
@@ -2819,23 +3014,28 @@ var sdState = {
 // actions on an internal record - and made a queue of 2 real cases read as 7.
 // "Not in CRM" was a view here too: a failed Jira sync is an integration fault, not
 // triage, and it belongs with the other connector health in System Configuration.
+// "Unassigned" was one too, and was REMOVED: the owner is already its own column on every
+// row, so the tab re-answered a question the board answers at a glance. It was justified
+// here as an exception state that auto-assign keeps near zero - but it read 2 of 3 because
+// those tickets predate 019 and auto-assign only fires on CREATION, so the tab was showing
+// a backfill gap as if it were a workflow. The honest fix for that gap is Auto-assign.
 // ORDER: the default first, then exception states in the order the page exists to prevent
-// them - nobody owns it, we are late, we promised and have not delivered - and the filter on
-// yourself last, behind the separator. "Everything" used to sit at the RIGHT-HAND END while
-// also being the view the page opened on, so the board loaded with the last tab selected.
+// them - we are late, we promised and have not delivered - and the filter on yourself last,
+// behind the separator. "All" used to sit at the RIGHT-HAND END while also being the view
+// the page opened on, so the board loaded with the last tab selected.
+// Only TWO filters survive, and neither is a stage. Every sequential step a case passes
+// through is now a COLUMN, so a tab repeating one would be the board saying the same thing
+// twice - "Promised" was the Follow-up column and "Held for review" was the First Response
+// column, each wearing a filter costume. "Unassigned" went for a different reason: being
+// unowned is not a stage a case rests in, it is auto-assign having failed, and a tab made
+// a defect look like a queue.
+//
+// What is left answers the two questions a column cannot: "is anything on fire right now?"
+// (a count you read WITHOUT scanning - a 0 is information and a 2 is an interrupt) and
+// "what is mine?" (ownership, not progress).
 var SD_VIEWS = [
-  { id: 'all',      label: 'Everything',        tone: '',     test: function(t) { return isServiceable(t); } },
-  { id: 'triage',   label: 'Unassigned',        tone: '',     test: function(t) { return isServiceable(t) && !t.assigned_to; } },
+  { id: 'all',      label: 'All',               tone: '',     test: function(t) { return isServiceable(t); } },
   { id: 'breach',   label: 'Breaching SLA',     tone: 'hot',  test: function(t) { return sdSla(t).breached; } },
-  // Counts every OUTSTANDING promise, not just broken ones: a view that stays 0 until we
-  // have already failed the customer cannot be used to avoid failing them.
-  { id: 'promised', label: 'Promised',          tone: 'warn', test: function(t) { return !!sdPromiseState(t); } },
-  // No approval view. `requires_approval()` flags 5 intents, but those same intents already
-  // escalate to L3 and the reply is HELD - a human sees the case before anything reaches the
-  // customer. Approval was a second block on top of a block that already works, which is why
-  // nothing ever read `approval_status`. "Held for review" is the real gate, and it comes
-  // after the three above because the AI already stopped it - it is safe, not slipping.
-  { id: 'held',     label: 'Held for review',   tone: 'warn', test: function(t) { return !!sdHeldDraft(t); } },
   { id: 'mine',     label: 'My cases',          tone: '',     sep: true, test: function(t) { return t.assigned_to === sdActor(); } }
 ];
 
@@ -3059,12 +3259,10 @@ window.renderServiceDesk = function() {
       ? '<div class="sd-empty-t">Nothing here</div><div class="sd-empty-s">' +
         escH(view.label) + ' is clear' + (q ? ' for “' + escH(sdState.search) + '”' : '') + '.</div>'
       : '<div class="sd-empty-t">No cases yet</div><div class="sd-empty-s">Cases appear as customer conversations come in.</div>';
-    renderSdBulk();
     return;
   }
   empty.hidden = true;
   list.innerHTML = rows.map(sdRowHtml).join('');
-  renderSdBulk();
 };
 
 function renderSdBench() {
@@ -3124,13 +3322,20 @@ function sdRowHtml(t) {
   var held = sdHeldDraft(t);
   var needsDecision = !!held;
 
-  // Tags, in the order a supervisor triages by: what blocks it, then where it came from.
+  // Tags, in the order a supervisor triages by: what BLOCKS it, then where it came from.
+  //
+  // A blocker stops this ONE case and a person can act on it. No "Not in CRM" tag: it was
+  // added, removed, and added again on the argument that a fraud case missing from Jira is
+  // a real blocker. Measured, that argument fails - crm_sync_status is 'failed' on ALL
+  // THREE serviceable tickets because one Jira project is misconfigured, so the tag was on
+  // every row at once. A mark that is always lit carries no information and spent the
+  // loudest colour in the row on it. One broken connector is ONE fact, and it belongs with
+  // the other connector health in System Configuration, not stamped on each case.
   var tags = '';
-  if (held) tags += '<span class="sd-tag sd-tag--org">HELD FOR REVIEW</span>';
-  if (sdPromiseOverdue(t)) tags += '<span class="sd-tag sd-tag--org">FOLLOW-UP DUE</span>';
-  // No CRM tag. A failed Jira sync is an integration fault with no action a supervisor can
-  // take on the row, and it sat on every case here as permanent red noise. Connector health
-  // belongs with the other connectors, in System Configuration.
+  if (t.approval_status === 'pending') tags += '<span class="sd-blk sd-blk--amb">Approval pending</span>';
+  // HELD and FOLLOW-UP DUE are no longer tags: both are STAGES now, and each is shown in
+  // its own column with the action that advances it. A tag saying the same thing would be
+  // the row claiming it twice.
   if (t.metadata && t.metadata.channel) tags += '<span class="sd-tag sd-tag--gry">' + escH(chLabel(t.metadata.channel)) + '</span>';
   var forked = (t.metadata && t.metadata.forked_from) || [];
   if (forked.length) tags += '<span class="sd-tag sd-tag--gry">Forked from ' + forked.length + '</span>';
@@ -3148,55 +3353,46 @@ function sdRowHtml(t) {
   var conv = sdState.convById[t.conversation_id];
   var cname = sdCustomerName(t);
 
-  // OWNER is one shape on every row: who holds it (or "Unassigned") on the first line, the
-  // action on the second. It used to be a bare button when unassigned and a person PLUS a
-  // stacked button when assigned - three different shapes under one header, and the taller
-  // variant made that row misalign with every other cell in the table.
+  // OWNER is identity and nothing else - one line, no button. The action lives in its own
+  // Reassign cell now. Two reasons: cramming the action in here forced a fixed two-line
+  // block on EVERY row purely so heights would match (alignment driving content), and it
+  // put a button on all three rows that read louder than the customer's problem.
+  //
+  // Capacity and availability ("1/8 · unknown") are gone from the row: they are ROSTER
+  // facts, they change nothing about this case, and the bench popover already shows them
+  // where an assignment decision is actually made.
   var owner;
   if (t.assigned_to) {
     var a = sdAgent(t.assigned_to);
-    var sub = a ? (a.is_operator ? 'any team' : a.open_count + '/' + a.capacity +
-      (a.breaching ? ' · ' + a.breaching + ' breaching' : ' · ' + a.availability)) : '';
-    // An assigned row still needs a way to take it. The seeded agents CANNOT log in
-    // (`password_hash: 'seeded:no-login'`) - there is one real account, and the approved
-    // demo flow is: see the board -> assign a case TO YOURSELF -> work it in Agent
-    // Workspace -> the timeline says Admin_SS did it. Without this, auto-assign put the
-    // only live case under a name nobody can sign in as and left no way to pick it up,
-    // which killed that flow on exactly the case that matters.
-    //
-    // Owner and button live in ONE wrapper, mirroring the unassigned branch below. They
-    // were siblings at first: .sd-own is display:flex and the row is a grid, so a button
-    // appended after it became a THIRD grid item and pushed the SLA and age columns out
-    // of place - the button landed under RESPONSE SLA and the age dropped onto its own line.
-    owner = '<div class="sd-ownc">' +
-      '<div class="sd-own">' + sdAvatar(t.assigned_to, a && a.availability) +
-        '<div style="min-width:0"><div class="sd-on">' + escH(t.assigned_to.replace(/_/g, ' ')) + '</div>' +
-        (sub ? '<div class="sd-ol">' + escH(sub) + '</div>' : '') + '</div>' +
-      '</div>' +
-      (t.assigned_to !== sdActor()
-        ? '<button class="sd-take" onclick="event.stopPropagation();sdTakeIt(\'' +
-          escH(t.ticket_id) + '\')">Take it</button>'
-        : '<span class="sd-ol">yours</span>') +
+    owner = '<div class="sd-own2">' + sdAvatar(t.assigned_to, a && a.availability) +
+      '<div style="min-width:0"><div class="sd-on">' + escH(t.assigned_to.replace(/_/g, ' ')) + '</div></div>' +
       '</div>';
   } else {
-    // No "next: <agent>" hint. It answered a question nobody is asking at that moment -
-    // who auto-assign WOULD pick - when auto-assign has already run and declined to place
-    // it. Three pieces of information in one cell; the speculative one goes.
-    owner = '<div class="sd-ownc">' +
-      '<div class="sd-own">' + sdAvatar('', null) +
-        '<div style="min-width:0"><div class="sd-on sd-on--none">Unassigned</div></div>' +
-      '</div>' +
-      '<button class="sd-take" onclick="event.stopPropagation();sdTakeIt(\'' + escH(t.ticket_id) + '\')">Take it</button>' +
+    owner = '<div class="sd-own2">' + sdAvatar('', null) +
+      '<div style="min-width:0"><div class="sd-on sd-on--none">Unassigned</div></div>' +
       '</div>';
   }
 
+  // REASSIGN: claim it when it is not yours (the seeded agents cannot log in - there is
+  // one real account, and the approved demo flow is to assign a case TO YOURSELF, work it
+  // in Agent Workspace, and see the timeline say Admin_SS did it). When it IS yours the
+  // only remaining move is handing it over, so the label becomes a quiet swap glyph
+  // rather than a second "Take it" on a case you already hold.
+  // Text, not a glyph. The swap arrow was compact and meant nothing without hovering it.
+  var reassign = (t.assigned_to === sdActor())
+    ? '<button class="sd-take" onclick="event.stopPropagation();sdHandOver(\'' +
+      escH(t.ticket_id) + '\')">Hand over</button>'
+    : '<button class="sd-take" onclick="event.stopPropagation();sdTakeIt(\'' +
+      escH(t.ticket_id) + '\')">Take it</button>';
+
   var edge = sla.breached ? ' sd-row--brch' : (needsDecision ? ' sd-row--act' : '');
-  var checked = sdState.selected[t.ticket_id] ? ' checked' : '';
   // The row opens the case where the work actually is. The drawer used to intercept this
   // click to show a summary of the row you had just clicked, plus internals.
+  // No selection checkbox. It existed only to feed a bulk bar whose Assign/Auto-assign
+  // buttons duplicated the Reassign column on every row - and auto-assign is not a human
+  // action at all: it already runs at ticket CREATION (_auto_assign in ticket_manager),
+  // so offering it as a button re-opened a decision the machine had already made.
   return '<div class="sd-row' + edge + '" onclick="sdGoWorkspace(\'' + escH(t.conversation_id) + '\',\'' + escH(t.ticket_id) + '\')">' +
-    '<span onclick="event.stopPropagation()"><input type="checkbox"' + checked +
-      ' onclick="sdToggleOne(\'' + escH(t.ticket_id) + '\',this)"></span>' +
     '<div class="sd-pri"><div class="sd-pri-v">' + score + '</div>' +
       '<div class="sd-pri-t"><i class="' + (score >= 70 ? 'hi' : score >= 40 ? 'md' : '') + '" style="width:' +
       Math.max(4, Math.min(100, score)) + '%"></i></div></div>' +
@@ -3208,50 +3404,72 @@ function sdRowHtml(t) {
       '<div style="min-width:0"><div class="sd-cn">' + escH(cname) + '</div></div></div>' +
     '<div class="sd-team">' + escH(sdTeamLabel(t.assigned_team)) + '</div>' +
     owner +
-    sdSlaCell(t, sla) +
-    '<div class="sd-age">' + escH(sdAge(t)) + '</div>' +
+    '<div>' + reassign + '</div>' +
+    sdRespCell(t, sla) +
+    sdFollowCell(t) +
+    sdClosedCell(t) +
   '</div>';
 }
 
-// SLA cell: the words plus a depletion bar, because "how much of the window is gone" is a
-// quantity and reads faster as a length than as a date.
-function sdSlaCell(t, sla) {
-  var bar = '';
-  if (t.sla_due_at && t.status !== 'logged') {
-    var due = new Date(t.sla_due_at).getTime();
-    var from = new Date(t.created_at).getTime();
-    if (!isNaN(due) && !isNaN(from) && due > from) {
-      if (sla.breached) bar = '<div class="sd-sla-t"><i style="width:100%"></i></div>';
-      else if (t.first_response_at) {
-        // Answered, but the bar must track whatever is still OWED. A flat green 34% here
-        // sat directly under a "Follow-up due" label and said the opposite of the words -
-        // the reassuring half of the same defect. With a promise outstanding the bar
-        // depletes against the FOLLOW-UP clock; with nothing owed it is the short green
-        // "done" mark it always was.
-        var fu = sdPromiseState(t);
-        if (fu) {
-          var fFrom = new Date(t.first_response_at).getTime();
-          var fDue = new Date(t.follow_up_due_at).getTime();
-          var fUsed = (!isNaN(fFrom) && !isNaN(fDue) && fDue > fFrom)
-            ? Math.max(0, Math.min(100, Math.round((Date.now() - fFrom) / (fDue - fFrom) * 100)))
-            : 100;
-          bar = '<div class="sd-sla-t"><i class="soon" style="width:' + fUsed + '%"></i></div>';
-        } else {
-          bar = '<div class="sd-sla-t"><i class="ok" style="width:34%"></i></div>';
-        }
-      }
-      else {
-        var used = Math.max(0, Math.min(100, Math.round((Date.now() - from) / (due - from) * 100)));
-        bar = '<div class="sd-sla-t"><i class="' + (sla.cls === 'soon' ? 'soon' : 'ok') + '" style="width:' + used + '%"></i></div>';
-      }
-    }
+// Wall-clock time of day. The board is a TODAY surface - a case that has sat for days
+// carries its age in the stage subtitle, not in a date nobody scans.
+function sdTime(iso) {
+  var d = new Date(iso);
+  if (isNaN(d.getTime())) return '—';
+  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+// FIRST RESPONSE: when we answered, or the action that answers it. A held draft is not a
+// separate queue - it IS this stage, unfinished: the AI wrote a reply and nobody has sent
+// it, which is why "Held for review" stopped being a tab.
+function sdRespCell(t, sla) {
+  if (t.first_response_at) {
+    var due = t.sla_due_at ? new Date(t.sla_due_at).getTime() : NaN;
+    var at = new Date(t.first_response_at).getTime();
+    var late = !isNaN(due) && at > due;
+    var mins = Math.round((at - new Date(t.created_at).getTime()) / 60000);
+    return '<div class="sd-stg"><div class="sd-stg-t">' + escH(sdTime(t.first_response_at)) + '</div>' +
+      '<div class="sd-stg-s' + (late ? ' sd-stg-late' : '') + '">' +
+      escH(sdDur(mins)) + ' · ' + (late ? 'late' : 'on time') + '</div></div>';
   }
-  // The column carries TWO different clocks - the first-reply deadline, and a promise made
-  // inside that reply - so each value names which one it is. Unlabelled, a supervisor was
-  // comparing "overdue 6d" against "due 24h" as though they measured the same thing.
-  var cls = sla.breached ? ' sd-sla-v--b' : (sla.cls === 'none' ? ' sd-sla-v--n' : '');
-  var kind = sla.kind ? '<span class="sd-sla-k">' + escH(sla.kind) + '</span> · ' : '';
-  return '<div><div class="sd-sla-v' + cls + '">' + kind + escH(sla.txt) + '</div>' + bar + '</div>';
+  if (t.status === 'logged') return '<div class="sd-stg sd-stg-none">—</div>';
+  var overdue = sla.breached
+    ? '<div class="sd-stg-s sd-stg-late">' + escH(sla.txt) + '</div>' : '';
+  return '<div class="sd-stg"><button class="sd-act" onclick="event.stopPropagation();sdGoWorkspace(\'' +
+    escH(t.conversation_id) + '\',\'' + escH(t.ticket_id) + '\')">Send reply →</button>' + overdue + '</div>';
+}
+
+// FOLLOW-UP: what we still owe after answering. A closed case reads "kept" when it was
+// closed before the clock ran out - closing in time IS the promise kept, so nothing extra
+// has to be recorded to say so.
+function sdFollowCell(t) {
+  if (!t.follow_up_due_at) return '<div class="sd-stg sd-stg-none">—</div>';
+  if (t.status === 'closed') {
+    var kept = new Date(t.updated_at || t.follow_up_due_at).getTime() <= new Date(t.follow_up_due_at).getTime();
+    return '<div class="sd-stg"><div class="sd-stg-t' + (kept ? ' sd-stg-kept' : ' sd-stg-late') + '">' +
+      (kept ? 'kept' : 'missed') + '</div>' +
+      '<div class="sd-stg-s">' + (kept ? 'closed before it was due' : 'closed after it was due') + '</div></div>';
+  }
+  var fu = sdPromiseState(t);
+  if (!fu) return '<div class="sd-stg sd-stg-none">—</div>';
+  return '<div class="sd-stg"><div class="sd-clk ' + (fu.overdue ? 'sd-clk--over' : 'sd-clk--soon') + '">' +
+    (fu.overdue ? 'overdue ' : 'due in ') + escH(sdDur(fu.mins)) + '</div>' +
+    '<div class="sd-stg-s">promised an update</div></div>';
+}
+
+// CLOSED: a RECORD, never a control. Closing is a judgement about whether the customer's
+// problem is actually solved, and that cannot be made from a truncated sentence in a
+// table row - so the act stays in Agent Workspace, inside the conversation, where
+// resolveTicket() already lives. This cell only reports what it decided.
+function sdClosedCell(t) {
+  if (t.status !== 'closed') return '<div class="sd-stg sd-stg-none">—</div>';
+  var who = t.closed_by ? t.closed_by.replace(/_/g, ' ') : 'Customer confirmed';
+  var when = t.updated_at
+    ? new Date(t.updated_at).toLocaleDateString([], { day: 'numeric', month: 'short' }) + ' · ' + sdTime(t.updated_at)
+    : '';
+  return '<div class="sd-stg"' + (t.closure_reason ? ' title="' + escH(t.closure_reason) + '"' : '') + '>' +
+    '<div class="sd-stg-t">' + escH(who) + '</div>' +
+    (when ? '<div class="sd-stg-s">' + escH(when) + '</div>' : '') + '</div>';
 }
 
 function chLabel(ch) {
@@ -3284,67 +3502,39 @@ window.sdSetView = function(view) { sdState.view = view; renderServiceDesk(); };
 
 window.sdFilterAgent = function(username) {
   sdState.agent = sdState.agent === username ? null : username;
-  // Filtering to a person is only useful against the whole board, not inside "unassigned"
-  // (which by definition has no owner) - so widen the view rather than show nothing.
-  if (sdState.agent && sdState.view === 'triage') sdState.view = 'all';
+  // Filtering to a person is only useful against the whole board, not inside "My cases"
+  // (which is already filtered to YOU) - picking anyone else there shows nothing, so widen
+  // the view instead. Guarded "Unassigned" before that view was removed; same reason.
+  if (sdState.agent && sdState.view === 'mine') sdState.view = 'all';
   renderServiceDesk();
 };
 
-window.sdToggleOne = function(id, box) {
-  if (box.checked) sdState.selected[id] = true; else delete sdState.selected[id];
-  renderSdBulk();
-};
-
-window.sdToggleAll = function(box) {
-  var view = SD_VIEWS.filter(function(v) { return v.id === sdState.view; })[0] || SD_VIEWS[0];
-  sdState.selected = {};
-  if (box.checked) {
-    sdState.tickets.filter(view.test).forEach(function(t) {
-      if (!sdState.agent || t.assigned_to === sdState.agent) sdState.selected[t.ticket_id] = true;
-    });
-  }
-  renderServiceDesk();
-};
-
-function sdSelectedIds() { return Object.keys(sdState.selected); }
-
-function renderSdBulk() {
-  var bar = document.getElementById('sdBulk');
-  var ids = sdSelectedIds();
-  if (!ids.length) { bar.hidden = true; bar.innerHTML = ''; return; }
-  bar.hidden = false;
-  var options = sdState.agents.map(function(a) {
-    return '<option value="' + escH(a.username) + '">' + escH(a.username.replace(/_/g, ' ')) +
-      (a.is_operator ? ' (operator)' : ' · ' + a.open_count + '/' + a.capacity) + '</option>';
-  }).join('');
-  bar.innerHTML = '<span class="sd-bulk-t">' + ids.length + ' selected</span>' +
-    '<select class="sd-dsel" style="width:auto" id="sdBulkAssignee"><option value="">Assign to…</option>' + options + '</select>' +
-    '<button class="sd-bbtn" onclick="sdBulkAssign()">Assign</button>' +
-    '<button class="sd-bbtn" onclick="sdBulkAuto()">Auto-assign</button>' +
-    '<button class="sd-bbtn" onclick="sdClearSelection()">Clear</button>';
-}
-
-window.sdClearSelection = function() { sdState.selected = {}; renderServiceDesk(); };
+// No bulk selection. The checkbox column, the "N selected" bar and its Assign /
+// Auto-assign / Clear buttons are gone: the Reassign column assigns one case at a time,
+// which is how Stage A is actually worked, and the bar was a SECOND way to do the same
+// thing that only existed because the old layout had no per-row control.
+//
+// "Auto-assign" as a button was the worse half. Auto-assign is not a human action at all:
+// _auto_assign() runs at ticket CREATION and routes to the least-loaded agent with room
+// on the ticket's team. Offering it on the board re-opened a decision the machine had
+// already made, and broke the sequence - a Stage 4 machine step re-served as Stage A
+// human work. The two tickets that looked like it had failed were created 2026-09-06,
+// six days before the feature existed; that was a one-time backfill, not a button.
 
 function sdActor() { return (currentUser && currentUser.username) || 'admin'; }
 
-window.sdBulkAssign = async function() {
-  var who = document.getElementById('sdBulkAssignee').value;
-  if (!who) return;
-  await sdAssignMany(sdSelectedIds(), function() { return who; }, sdActor());
-};
-
-// Auto-assign uses the SAME rule as the backend: least-loaded agent with room on the
-// ticket's own team. Tickets whose team has nobody free are left alone and reported,
-// rather than being pushed onto someone who is full - an honest refusal.
-window.sdBulkAuto = async function() {
-  var skipped = 0;
-  await sdAssignMany(sdSelectedIds(), function(t) {
-    var sug = sdSuggested(t.assigned_team);
-    if (!sug) { skipped++; return null; }
-    return sug.username;
-  }, 'auto');
-  if (skipped) alert(skipped + ' ticket(s) left unassigned — no one free on their team.');
+// Give a case back to the team. The only real account is the signed-in one - the 12
+// seeded agents carry `password_hash: 'seeded:no-login'` and can never open a case - so
+// there is no agent picker here: handing over means returning it to whoever auto-assign
+// would choose on this team, which is the same rule that placed it originally. If nobody
+// on the team has room the case is left UNASSIGNED rather than parked on someone full.
+window.sdHandOver = async function(ticketId) {
+  var t = null;
+  for (var i = 0; i < sdState.tickets.length; i++) {
+    if (sdState.tickets[i].ticket_id === ticketId) { t = sdState.tickets[i]; break; }
+  }
+  var sug = t ? sdSuggested(t.assigned_team) : null;
+  await sdAssignOne(ticketId, sug ? sug.username : null);
 };
 
 async function sdAssignMany(ids, pick, actor) {
@@ -3387,19 +3577,13 @@ window.sdAssignOne = async function(ticketId, who) {
   } catch (e) { alert('Could not assign: ' + e.message); }
 };
 
-window.sdClose = async function(ticketId) {
-  // A reason is required by the endpoint too - closing is a human judgement and the
-  // record has to say what it was.
-  var reason = prompt('Why is this case being closed?');
-  if (reason === null) return;
-  if (!reason.trim()) { alert('A closure reason is required.'); return; }
-  try {
-    await api('/admin/tickets/' + encodeURIComponent(ticketId) + '/close', {
-      method: 'POST', body: JSON.stringify({ reason: reason.trim(), actor: sdActor() })
-    });
-    await loadServiceDesk();
-  } catch (e) { alert('Could not close: ' + e.message); }
-};
+// No sdClose. A case is closed from Agent Workspace, inside the conversation, where the
+// agent has read it - closing is a judgement about whether the customer's problem is
+// actually solved, which cannot be made from a truncated sentence in a table row. This
+// was a SECOND closing path built beside the real one in resolveTicket; two paths drift
+// and one forgets something, which is exactly what happened - the live button wrote no
+// attribution while this one, wired to nothing, wrote it correctly. The Service Desk's
+// Closed column is a RECORD of that decision, not a control that makes it.
 
 window.sdRetrySync = async function(ticketId) {
   try {

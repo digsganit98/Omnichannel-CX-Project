@@ -581,6 +581,11 @@ class SQLiteCXRepository:
             # 019 - Service Desk ownership and lifecycle.
             "assigned_to", "assigned_at", "first_response_at", "follow_up_due_at",
             "closed_by", "closure_reason",
+            # 020 - the turn that MADE the outstanding promise. Without this key the anchor
+            # write is dropped by the filter below and _mark_ticket_responded reports
+            # success having changed nothing, so the follow-up nudge silently falls back to
+            # one-shot behaviour. Exactly what the note at the top of this set warns about.
+            "follow_up_turn_id",
         }
         updates = {key: value for key, value in values.items() if key in allowed}
         if not updates:

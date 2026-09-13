@@ -97,6 +97,26 @@ def test_kyc_rule_does_not_fire_for_resolved_ticket():
 
 # ── Engine + persistence integration ────────────────────────────────────────
 
+class _FakeAdviceGenerator:
+    """Stands in for GroqGenerator in the Suggested Actions route.
+
+    Duck-typed on the one method case_advisor calls. The text is what the real model is
+    asked to produce, so parse_and_validate exercises its real path - a stub returning
+    pre-parsed dicts would skip the validation this route depends on.
+    """
+
+    def _generate(self, system_prompt, user_prompt, **kwargs):
+        return {
+            "llm_used": True,
+            "text": (
+                '{"actions":[{"type":"acknowledgement",'
+                '"reason":"Customer has sent two negative messages and nobody has replied.",'
+                '"basis":"SENTIMENT: negative on the last 2 inbound turns",'
+                '"confidence":0.8}]}'
+            ),
+        }
+
+
 class _FakeNeo4jForGraphContext:
     """Keyed by Neo4j-side graph_customer_id ('CRN...'), never by the SQLite customer_id —
     this is what caught the real bug: _load_graph_context() must resolve through the
@@ -194,6 +214,11 @@ def test_route_persists_and_dedupes_recommendations(monkeypatch):
     )
     monkeypatch.setattr(agent_assist, "get_repository", lambda: repo)
     monkeypatch.setattr(agent_assist, "_try_neo4j", lambda: None)
+    # The card is LLM-driven (services/agent_assist_service/case_advisor.py), so stub the
+    # model rather than letting the route reach for a real Groq call: CI has no API key,
+    # the call would fail, llm_error would be set and nothing would persist - a test
+    # failure caused entirely by the environment. Returns the shape case_advisor validates.
+    monkeypatch.setattr(agent_assist, "_advice_generator", lambda: _FakeAdviceGenerator())
 
     client = TestClient(app)
     headers = {"x-admin-key": "agent-assist-test-key"}

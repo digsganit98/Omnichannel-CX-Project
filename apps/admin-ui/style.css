@@ -399,6 +399,10 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 /* Offer touchpoint in the Lineage mini-timeline: amber ring on the channel dot */
 .tl-ex--offer .tl-dot{box-shadow:0 0 0 2.5px var(--amb-bd)}
 .tl-ex--offer .tl-ch{color:var(--amb-t);font-weight:700}
+/* Live countdown beside the badge - recomputed on every render, never stored. */
+.nba-clock{font-size:10px;font-weight:700;color:var(--t3);margin-left:6px;
+  font-variant-numeric:tabular-nums;white-space:nowrap}
+.nba-clock--over{color:var(--red-t)}
 .nba-reason{font-size:11px;color:var(--t2);line-height:1.5;margin-top:6px}
 .nba-actions{display:flex;gap:6px;margin-top:8px}
 .nba-approve-btn,.nba-dismiss-btn{font-size:10px;font-weight:600;padding:4px 10px;border-radius:var(--rs);border:1px solid var(--bdr);background:var(--surf2);color:var(--t2);cursor:pointer}
@@ -1635,8 +1639,13 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 /* The list. One grid template shared by the header and every row, so columns
    cannot drift apart. */
 .sd-listwrap{flex:1;min-height:0;display:flex;flex-direction:column;overflow-y:auto;background:var(--bg)}
+/* The columns ARE the lifecycle, read left to right: who it belongs to, then each stage
+   a case passes through. How far right a row reaches is how far the work has got, so a
+   stalled case is one that stops early - which is why the old "Breaching SLA"/"Promised"
+   tabs became columns: they were stages wearing filter costumes. */
 .sd-lhd,.sd-row{display:grid;
-  grid-template-columns:32px 66px minmax(220px,1fr) 150px 116px 150px 132px 58px;gap:14px;align-items:center}
+  grid-template-columns:58px minmax(200px,1fr) 132px 116px 124px 96px 140px 132px 118px;
+  gap:14px;align-items:center}
 .sd-lhd{position:sticky;top:0;z-index:2;padding:9px 20px;background:var(--surf);
   border-bottom:1px solid var(--bdr);font-size:9.5px;font-weight:700;text-transform:uppercase;
   letter-spacing:.5px;color:var(--t3)}
@@ -1683,9 +1692,43 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .sd-dot--unknown{background:var(--surf);border-color:var(--bdr2)}
 .sd-on{font-size:11.5px;font-weight:600;color:var(--t1);line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .sd-ol{font-size:10px;color:var(--t3)}
-.sd-take{border:1px solid var(--blue);background:var(--blue);color:#fff;border-radius:6px;
-  padding:4px 12px;font:600 11px inherit;cursor:pointer;white-space:nowrap}
-.sd-take:hover{background:var(--blue-t)}
+/* Claiming a case is a routine action that repeats on EVERY row, so it uses the app's
+   settled quiet treatment (.tkt-resolve-btn, style.css:384): pale ground, coloured text,
+   fills on hover. It was solid var(--blue) with white text - the loudest thing in the
+   stylesheet, stamped down the whole column, out-shouting the customer's problem. */
+.sd-take{border:1px solid var(--blue-bd);background:var(--blue-bg);color:var(--blue-t);
+  border-radius:6px;padding:4px 9px;font:600 10.5px inherit;cursor:pointer;white-space:nowrap}
+.sd-take:hover{background:var(--blue);color:#fff;border-color:var(--blue)}
+.sd-take--icon{padding:4px 8px;font-size:12px;line-height:1}
+
+/* OWNER is identity only, one line. The action moved to its own Reassign cell, so this
+   cell no longer needs a permanent button just to keep every row the same height. */
+.sd-own2{display:flex;align-items:center;gap:8px;min-width:0}
+
+/* A STAGE cell: a timestamp once the stage is done, an action when it is the next thing
+   to do, an em dash when it does not apply. Never a control for a decision that cannot be
+   made from a table row - closing is a judgement about the customer's problem, so Closed
+   is a RECORD and the act itself stays in Agent Workspace. */
+.sd-stg{font-size:11px;line-height:1.35;min-width:0}
+.sd-stg-t{color:var(--t1);font-weight:600;font-variant-numeric:tabular-nums;white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis}
+.sd-stg-s{color:var(--t3);font-size:10px;margin-top:2px;white-space:nowrap;overflow:hidden;
+  text-overflow:ellipsis}
+.sd-stg-none{color:var(--t3)}
+.sd-stg-kept{color:var(--grn-t);font-weight:700}
+.sd-stg-late{color:var(--red-t);font-weight:600}
+.sd-act{border:1px solid var(--org-bd);background:var(--org-bg);color:var(--org-t);
+  border-radius:6px;padding:4px 10px;font:600 10.5px inherit;cursor:pointer;white-space:nowrap}
+.sd-act:hover{background:var(--org);color:#fff;border-color:var(--org)}
+.sd-clk{font-size:11px;font-weight:700;font-variant-numeric:tabular-nums;white-space:nowrap}
+.sd-clk--soon{color:var(--org-t)}
+.sd-clk--over{color:var(--red-t)}
+
+/* A BLOCKER stops the whole case, not one stage, so it marks the Case cell. */
+.sd-blk{display:inline-flex;align-items:center;font-size:9px;font-weight:700;
+  text-transform:uppercase;letter-spacing:.3px;padding:2px 7px;border-radius:20px;
+  background:var(--red-bg);border:1px solid var(--red-bd);color:var(--red-t)}
+.sd-blk--amb{background:var(--amb-bg);border-color:var(--amb-bd);color:var(--amb-t)}
 .sd-sugg{font-size:10px;color:var(--t3);margin-top:3px;white-space:nowrap}
 /* OWNER is a fixed two-line block on EVERY row - identity above, action below - so no
    variant is taller than another and the table keeps one baseline across all columns. */
@@ -1710,17 +1753,11 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .sd-empty-t{font-size:13px;font-weight:600;color:var(--t2)}
 .sd-empty-s{font-size:12px;color:var(--t3);margin-top:5px}
 
-.sd-bulk{flex-shrink:0;display:flex;align-items:center;gap:10px;padding:10px 20px;
-  border-top:1px solid var(--bdr);background:var(--blue-bg);flex-wrap:wrap}
-.sd-bulk[hidden]{display:none!important}
-.sd-bulk-t{font-size:11.5px;font-weight:600;color:var(--blue-t);flex:1}
-.sd-bbtn{border:1px solid var(--blue-bd);background:var(--surf);color:var(--blue-t);border-radius:var(--rs);
-  padding:5px 11px;font:600 11px inherit;cursor:pointer}
-.sd-bbtn:hover{background:#fff;border-color:var(--blue)}
-.sd-bbtn:disabled{opacity:.5;cursor:not-allowed}
+/* The bulk bar (.sd-bulk / .sd-bulk-t / .sd-bbtn) is gone with the selection checkbox it
+   served - see the note in app.js above sdHandOver. */
 
 @media (max-width:1240px){
-  .sd-lhd,.sd-row{grid-template-columns:32px 58px minmax(180px,1fr) 124px 96px 138px 118px 50px;gap:10px}
+  .sd-lhd,.sd-row{grid-template-columns:52px minmax(170px,1fr) 112px 92px 104px 84px 118px 110px 100px;gap:10px}
   .sd-srch{width:170px}
 }
 

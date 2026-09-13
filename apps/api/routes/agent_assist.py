@@ -8,14 +8,19 @@ import hashlib
 import json
 import logging
 import os
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 
 from apps.api.dependencies.runtime import get_repository
 from apps.api.dependencies.security import require_admin_auth
+# NextBestActionEngine's four `if` rules no longer drive the card - case_advisor does -
+# but the class stays imported and on disk: tests/test_agent_assist.py exercises each rule
+# directly, and deleting it would break a passing suite for no gain.
 from services.agent_assist_service.next_best_action import NextBestActionEngine
-from services.agent_assist_service import opportunity_engine
-from shared.schemas.agent_assist import NBADecisionUpdate
+from services.agent_assist_service import case_advisor, opportunity_engine
+from services.rag_service.groq_generator import GroqGenerator
+from shared.schemas.agent_assist import ActionType, DRAFTABLE_ACTION_TYPES, NBADecisionUpdate
 from shared.schemas.tickets import SERVICEABLE_TICKET_STATUSES
 
 logger = logging.getLogger(__name__)
@@ -31,6 +36,11 @@ OFFER_DRAFT_CHANNEL = "offer"
 router = APIRouter(prefix="/admin/agent-assist", tags=["admin"], dependencies=[Depends(require_admin_auth)])
 
 
+def _advice_generator():
+    """The model behind the Suggested Actions card. A seam, so tests can replace it."""
+    return GroqGenerator()
+
+
 def _try_neo4j():
     """Best-effort Neo4j client — recommendations degrade gracefully without one."""
     try:
@@ -44,25 +54,107 @@ def _try_neo4j():
 
 @router.get("/next-best-actions")
 def get_next_best_actions(conversation_id: str, ticket_id: str | None = None) -> dict:
+    """What needs saying to this customer, decided by the LLM (see case_advisor).
+
+    Replaces four hardcoded `if` rules that only ever fired on situations somebody had
+    anticipated in advance. Those rules also had no UI for their whole life, so none of
+    them was ever seen by anyone.
+    """
     repository = get_repository()
-    engine = NextBestActionEngine(repository, neo4j_client=_try_neo4j())
-    result = engine.recommend(conversation_id, ticket_id=ticket_id)
+    conversation = repository.get_conversation(conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    customer_id = conversation.get("customer_id") or ""
+
+    ticket = repository.get_ticket(ticket_id) if ticket_id else None
+    if ticket is None:
+        active = repository.find_active_ticket(conversation_id)
+        ticket = active.model_dump(mode="json") if active else None
+
+    turns = repository.list_conversation_turns(conversation_id)
+    pending_drafts = repository.list_reply_drafts(
+        conversation_id=conversation_id, status="pending")
+
+    # Same degrade-gracefully graph lookup the offers route uses: no Neo4j means no
+    # customer records in the prompt, not an error.
+    graph_context = _graph_context_for(repository, customer_id)
+    sentiment = _recent_sentiment(turns)
+    promise = {
+        "due_at": (ticket or {}).get("follow_up_due_at"),
+        "overdue": _promise_overdue(ticket),
+    }
+
+    # Injectable so a test can stub the model instead of reaching for a real Groq call.
+    # Without this seam the route reached GroqGenerator() directly and every test of it
+    # depended on an API key being present - which in CI it is not, so the call failed,
+    # llm_error was set, and no rows were persisted. The test was right and the route was
+    # untestable; the fix belongs here rather than in a weakened assertion.
+    advice = case_advisor.advise(
+        generator=_advice_generator(),
+        ticket=ticket,
+        turns=turns,
+        graph_context=graph_context,
+        promise=promise,
+        sentiment=sentiment,
+        pending_drafts=pending_drafts,
+    )
+    llm_error = advice.get("llm_error")
+    suppressed = advice.get("suppressed")
 
     pending = repository.list_agent_assist_recommendations(conversation_id=conversation_id, status="pending")
     existing_types = {row["action_type"] for row in pending}
-    for action in result.actions:
-        if action.action_type.value in existing_types:
+    for action in advice.get("actions", []):
+        if action["action_type"] in existing_types:
             continue
         pending.append(repository.add_agent_assist_recommendation(
-            conversation_id=result.conversation_id,
-            customer_id=result.customer_id,
-            ticket_id=result.ticket_id,
-            action_type=action.action_type.value,
-            reason=action.reason,
-            confidence=action.confidence,
-            priority=action.priority,
-            metadata=action.metadata,
+            conversation_id=conversation_id,
+            customer_id=customer_id,
+            ticket_id=(ticket or {}).get("ticket_id"),
+            action_type=action["action_type"],
+            reason=action["reason"],
+            confidence=action["confidence"],
+            priority=0,
+            # follow_up_due_at travels with the row so the CARD can compute the countdown
+            # live on every render. The reason sentence carries the absolute date only
+            # ("13 Sep, 10:21pm") because it is written once and read later - a stored
+            # "8h left" is wrong by morning. Deadline is data; time remaining is derived.
+            #
+            # ONLY on a promise action. Attached to every action it rendered "7h left"
+            # beside "CUSTOMER UPSET", which has no deadline of its own - a countdown
+            # borrowed from a different fact, which is worse than no countdown at all.
+            metadata=_action_metadata(action, ticket),
         ))
+
+    # RETIRE what the rules no longer produce. The loop above only ever ADDED, so a row
+    # outlived the condition that created it: measured on the live board, the follow-up
+    # nudge was still on screen after the follow-up had been sent, because the rule had
+    # correctly stopped firing while the row it wrote minutes earlier sat in the table
+    # forever. The card reads the table, not the rules.
+    #
+    # Scoped to the action types THIS engine owns. /next-best-actions returns every pending
+    # row for the conversation, offers included, and the NBA engine does not produce offers
+    # - so an unscoped sweep would retire live cross-sell rows that nothing had decided.
+    #
+    # Only ever runs on a SUCCESSFUL engine pass. recommend() raising would leave `result`
+    # unbound and this block unreached; an engine that returns nothing because it FAILED
+    # must never be read as "nothing is outstanding" and erase the queue - the same failure
+    # mode as a 429 cached as "no offers".
+    #
+    # SKIPPED ENTIRELY when the call failed or was gated. An engine that returned nothing
+    # because it FAILED must never be read as "nothing is outstanding" - that would let one
+    # rate-limited call silently empty a queue of real work, which is the trap recorded in
+    # ec2-operations.md where a 429 cached as "no offers" and Refresh could not clear it.
+    if not llm_error and not suppressed:
+        still_current = {a["action_type"] for a in advice.get("actions", [])}
+        for row in pending:
+            action_type = row["action_type"]
+            if action_type in _OFFER_ACTION_TYPES or action_type in still_current:
+                continue
+            repository.update_agent_assist_recommendation(
+                row["recommendation_id"], status="superseded", actor="system",
+            )
+            row["status"] = "superseded"
+    pending = [row for row in pending if row.get("status") == "pending"]
 
     # Do not surface recommendations tied to a ticket that is no longer active (resolved/
     # closed). A previously-saved 'pending' row lingers after its ticket is resolved; a done
@@ -82,12 +174,79 @@ def get_next_best_actions(conversation_id: str, ticket_id: str | None = None) ->
     pending = [row for row in pending if _is_active(row.get("ticket_id"))]
 
     return {
-        "conversation_id": result.conversation_id,
-        "customer_id": result.customer_id,
-        "ticket_id": result.ticket_id,
-        "generated_at": result.generated_at.isoformat(),
-        "actions": pending,
+        "conversation_id": conversation_id,
+        "customer_id": customer_id,
+        "ticket_id": (ticket or {}).get("ticket_id"),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        # Three distinct states, so the card can say which: items, deliberate silence, or
+        # a failure. Rendering a failure as an empty list is what makes a broken check look
+        # like a clean case.
+        "suppressed": suppressed,
+        "llm_error": llm_error,
+        "actions": [r for r in pending if r.get("action_type") not in _OFFER_ACTION_TYPES],
     }
+
+
+def _action_metadata(action: dict, ticket: dict | None) -> dict:
+    """What travels with a recommendation row.
+
+    The promise deadline goes ONLY on the action that is about the promise. Everything
+    else gets `basis` alone, so the card shows a countdown exactly where one applies.
+    """
+    metadata = {"basis": action.get("basis")}
+    if action["action_type"] in DRAFTABLE_ACTION_TYPES and (ticket or {}).get("follow_up_due_at"):
+        metadata["follow_up_due_at"] = ticket["follow_up_due_at"]
+    return metadata
+
+
+def _graph_context_for(repository, customer_id: str) -> dict:
+    """The customer's BFSI records, or {} when the graph is unreachable."""
+    if not customer_id:
+        return {}
+    client = _try_neo4j()
+    if not client:
+        return {}
+    try:
+        from services.neo4j_service.queries import (
+            get_customer_by_id, get_customer_by_identifier, get_customer_context_by_id,
+        )
+        for row in repository.list_customer_identifiers(customer_id):
+            found = (get_customer_by_id(client, row["identifier"])
+                     if row["channel"] == "graph"
+                     else get_customer_by_identifier(client, row["identifier"]))
+            if found:
+                return get_customer_context_by_id(client, found["customer_id"]) or {}
+    except Exception as exc:
+        logger.warning("case_advice_graph_lookup_failed customer=%s: %s", customer_id, exc)
+    return {}
+
+
+def _recent_sentiment(turns: list[dict]) -> str | None:
+    """Sentiment over the last five inbound turns, as the right panel reports it.
+
+    Read from the sentiment already stored on each turn by the intent classifier - not
+    re-derived here, so the card and the panel beside it cannot disagree.
+    """
+    inbound = [t for t in turns if t.get("direction") == "inbound"][-5:]
+    if not inbound:
+        return None
+    negative = sum(1 for t in inbound
+                   if ((t.get("metadata") or {}).get("sentiment") or "").lower() == "negative")
+    if not negative:
+        return "neutral or positive"
+    pct = round(negative / len(inbound) * 100)
+    label = "very frustrated" if pct >= 60 else "some frustration"
+    return f"{label} ({pct}% negative across the last {len(inbound)} messages)"
+
+
+def _promise_overdue(ticket: dict | None) -> bool:
+    due_at = (ticket or {}).get("follow_up_due_at")
+    if not due_at:
+        return False
+    try:
+        return datetime.now(timezone.utc) > datetime.fromisoformat(due_at)
+    except (TypeError, ValueError):
+        return False
 
 
 @router.get("/opportunities")
@@ -232,6 +391,47 @@ def list_recommendations(ticket_id: str | None = None, conversation_id: str | No
     )
 
 
+def _build_follow_up_draft(repository, recommendation: dict) -> dict:
+    """Create an editable follow-up draft grounded in what we actually promised.
+
+    The text is assembled from the record rather than generated: the promise itself is in
+    the reply we already sent, the ticket carries the case, and an LLM call here would cost
+    requests against the binding Groq limit to restate facts we hold. The agent edits it in
+    the same draft card they already use, so the wording is theirs before it is sent.
+    """
+    conversation_id = recommendation.get("conversation_id") or ""
+    ticket_id = recommendation.get("ticket_id")
+    ticket = repository.get_ticket(ticket_id) if ticket_id else None
+
+    # Reply on the channel the customer used, threaded onto their last inbound message.
+    turns = repository.list_conversation_turns(conversation_id)
+    inbound = [t for t in turns if t.get("direction") == "inbound"]
+    last_inbound = inbound[-1] if inbound else None
+    channel = (last_inbound or {}).get("channel") or "web_chat"
+
+    subject = (ticket or {}).get("title") or "your request"
+    reference = ticket_id or conversation_id
+    draft_text = (
+        "Hello,\n\n"
+        f"I am following up on {subject.lower()} (reference {reference}), which we told you "
+        "we would come back to you about.\n\n"
+        "[Add the update here before sending.]\n\n"
+        "Thank you for your patience."
+    )
+    return repository.add_reply_draft(
+        conversation_id=conversation_id,
+        customer_id=recommendation.get("customer_id") or "",
+        channel=channel,
+        draft_text=draft_text,
+        ticket_id=ticket_id,
+        inbound_turn_id=(last_inbound or {}).get("turn_id"),
+        hold_reason="Promised follow-up — edit & send",
+        reason_code=recommendation.get("action_type") or ActionType.PROMISED_UPDATE.value,
+        channel_identifier=None,
+        provider="follow_up_nudge",
+    )
+
+
 @router.post("/recommendations/{recommendation_id}/decision")
 def decide_recommendation(recommendation_id: str, payload: NBADecisionUpdate) -> dict:
     repository = get_repository()
@@ -274,6 +474,20 @@ def decide_recommendation(recommendation_id: str, payload: NBADecisionUpdate) ->
             provider="opportunity_engine",
             offer_product=offer_product,
         )
+
+    # Approving a FOLLOW-UP also executes something: an editable draft in the conversation's
+    # OWN thread. Deliberately not the offer path - an offer fans out to every push channel
+    # on record, whereas a follow-up belongs in the thread where the promise was made, on
+    # the channel the customer used.
+    if payload.status == "approved" and existing.get("action_type") in DRAFTABLE_ACTION_TYPES:
+        conversation_id = existing.get("conversation_id") or ""
+        pending_drafts = repository.list_reply_drafts(
+            conversation_id=conversation_id, status="pending")
+        if pending_drafts:
+            raise HTTPException(
+                status_code=409,
+                detail="A pending reply draft already exists — send or discard it first.")
+        draft = _build_follow_up_draft(repository, existing)
 
     updated = repository.update_agent_assist_recommendation(
         recommendation_id, status=payload.status, actor=payload.actor,

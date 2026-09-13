@@ -39,6 +39,7 @@ class NextBestActionEngine:
         # code-built candidate set; see opportunity_engine.py) — operational
         # actions only here.
         candidates = [
+            self._rule_promise_outstanding(ticket, turns),
             self._rule_escalate_aging_high_priority(ticket),
             self._rule_repeat_negative_sentiment(turns),
             self._rule_kyc_pending(ticket),
@@ -77,6 +78,91 @@ class NextBestActionEngine:
             return {}
 
     # ── Rule providers ───────────────────────────────────────────────────
+
+    @staticmethod
+    def _rule_promise_outstanding(ticket: dict | None, turns: list[dict]) -> NextBestAction | None:
+        """We COMMITTED to coming back to this customer and have not done it yet.
+
+        `follow_up_due_at` is written when a sent reply contains a promise phrase ("we will
+        update you", "under investigation") - see apps/api/routes/reply_drafts.py. Until
+        now nothing read it except a countdown on the Service Desk board, so the one moment
+        where the bank owes something and a clock is running produced no suggested action
+        at all.
+
+        Fires while the promise is still KEEPABLE, not only once broken: a nudge that waits
+        for the deadline to pass can only ever report a failure. Confidence rises once it is
+        overdue so it sorts above the other rules at the point it matters most.
+
+        The second condition is the real test - has anything gone OUT since we answered? A
+        promise made and then followed up needs no nudge, and the follow-up is an outbound
+        turn on the same conversation, so the turns themselves answer it. No new field.
+        """
+        if not ticket or ticket.get("status") == TicketStatus.CLOSED.value:
+            return None
+        due_at = ticket.get("follow_up_due_at")
+        if not due_at:
+            return None
+        try:
+            due = datetime.fromisoformat(due_at)
+        except (TypeError, ValueError):
+            return None
+
+        # The anchor is the turn that MADE the promise (020), not the first response.
+        # Anchoring to first_response_at made this a one-shot: the first update silenced
+        # the nudge permanently, because an outbound turn after the first response exists
+        # from then on and always will. A case needing four updates got one nudge.
+        anchor_turn_id = ticket.get("follow_up_turn_id")
+        anchor_at = None
+        for turn in turns:
+            if turn.get("turn_id") == anchor_turn_id:
+                anchor_at = turn.get("created_at")
+                break
+        # Pre-020 tickets have a promise but no anchor. Fall back to the first response so
+        # they still nudge once rather than going silent - degraded, not broken.
+        if anchor_at is None:
+            anchor_at = ticket.get("first_response_at")
+        if not anchor_at:
+            return None
+        try:
+            anchored = datetime.fromisoformat(anchor_at)
+        except (TypeError, ValueError):
+            return None
+
+        # Anything outbound AFTER the promising turn is the follow-up that answers it.
+        for turn in turns:
+            if turn.get("direction") != "outbound":
+                continue
+            created = turn.get("created_at")
+            if not created:
+                continue
+            try:
+                if datetime.fromisoformat(created) > anchored:
+                    return None
+            except (TypeError, ValueError):
+                continue
+
+        now = datetime.now(timezone.utc)
+        overdue = now > due
+        hours_left = int((due - now).total_seconds() // 3600)
+        when = (
+            f"{abs(hours_left)}h overdue" if overdue
+            else f"{hours_left}h left" if hours_left >= 1
+            else "due within the hour"
+        )
+        return NextBestAction(
+            action_type=ActionType.DRAFT_FOLLOW_UP,
+            reason=(
+                f"We promised {ticket.get('customer_id') and 'this customer' or 'the customer'} "
+                f"an update and have not sent one — {when}."
+            ),
+            confidence=0.98 if overdue else 0.85,
+            priority=0,
+            metadata={
+                "ticket_id": ticket.get("ticket_id"),
+                "follow_up_due_at": due_at,
+                "overdue": overdue,
+            },
+        )
 
     @staticmethod
     def _rule_escalate_aging_high_priority(ticket: dict | None) -> NextBestAction | None:

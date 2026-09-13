@@ -2,12 +2,18 @@ import json
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 
 from apps.api.dependencies.runtime import get_repository
 from apps.api.dependencies.security import require_admin_auth
+# The ticket side-effects of a reply live with the draft path and are REUSED here rather
+# than reimplemented - see the note on send_agent_reply below.
+from apps.api.routes.reply_drafts import _mark_ticket_responded
+from services.channel_service.delivery import OutboundDeliveryService
 from services.neo4j_service.queries import TRANSACTIONAL_INTENTS
 from services.orchestration_service.graph import HOLDING_MESSAGE
 from services.rag_service.groq_generator import GroqGenerator
+from shared.schemas.messages import Channel, InboundMessage
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +35,118 @@ INTENT_GRAPH_TYPES = {
     "account_balance_inquiry": ["Account", "FixedDeposit"],
     "transaction_dispute": ["Transaction"],
 }
+
+
+class AgentReplyRequest(BaseModel):
+    text: str
+    actor: str = "admin"
+
+
+@router.post("/{conversation_id}/reply")
+def send_agent_reply(conversation_id: str, payload: AgentReplyRequest) -> dict:
+    """Send an agent-composed reply on a conversation that has no pending AI draft.
+
+    Before this, the composer under every conversation was a decoration: doSend() showed a
+    "simulation mode" toast, cleared the box and called nothing. The ONLY way to reply was
+    to send a held AI draft, so once that draft was sent the agent could never write to the
+    customer again - which is the case for every answered ticket on the board, including
+    the fraud case whose reply promised a follow-up nobody could then deliver.
+
+    Deliberately NOT a second delivery path. It resolves the destination, then hands off to
+    exactly what send_draft uses: OutboundDeliveryService().send(), append_turn(), and
+    _mark_ticket_responded() - so the first-response clock, the logged/open -> in_progress
+    transition and the promise clock behave identically however the reply was written.
+    """
+    repository = get_repository()
+    conversation = repository.get_conversation(conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    text = (payload.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Reply text is required")
+
+    # A pending draft IS the reply surface - the UI hides the composer while one exists.
+    # If one is somehow open, refuse rather than send alongside it: the customer would get
+    # two messages and the draft would sit pending forever, exactly the drift send_draft
+    # already guards against with its own 409.
+    pending = repository.list_reply_drafts(conversation_id=conversation_id, status="pending")
+    if pending:
+        raise HTTPException(
+            status_code=409,
+            detail="A reply is held for review on this conversation — send or discard it instead.")
+
+    # Channel comes from the LAST INBOUND turn, never from the customer's identity list.
+    # Measured trap: this customer's `web_chat` identity is stored as their email address
+    # and their `email` identity is the SAME address, so choosing a destination by identity
+    # would put a real email in a real inbox for a web-chat conversation.
+    turns = repository.list_conversation_turns(conversation_id)
+    inbound = [t for t in turns if t.get("direction") == "inbound"]
+    if not inbound:
+        raise HTTPException(status_code=400, detail="Nothing inbound on this conversation to reply to")
+    last_inbound = inbound[-1]
+
+    try:
+        channel = Channel(last_inbound.get("channel") or "")
+    except ValueError:
+        channel = Channel.WEB_CHAT
+
+    # Web chat has no push provider - the customer reads the persisted turn on the portal's
+    # next poll - so the identifier is unused there. For email/whatsapp it must be a real
+    # destination, and the channel_identities row for THAT channel is the only source.
+    identifier = ""
+    if channel is not Channel.WEB_CHAT:
+        identities = repository.list_customer_identifiers(conversation.get("customer_id") or "")
+        match = next((i for i in identities if i.get("channel") == channel.value), None)
+        if not match:
+            raise HTTPException(
+                status_code=400,
+                detail=f"No {channel.value} address on record for this customer.")
+        identifier = match["identifier"]
+
+    # Threading: carry the original inbound mail's real Message-ID and subject so the reply
+    # lands in the same Gmail thread rather than as a separate message.
+    outbound_message = InboundMessage(
+        channel=channel,
+        channel_identifier=identifier,
+        text="",
+        provider="agent_composed_reply",
+        subject=last_inbound.get("subject"),
+        correlation_id=conversation_id,
+        external_message_id=last_inbound.get("external_message_id"),
+    )
+    delivery = OutboundDeliveryService().send(outbound_message, text)
+
+    ticket_id = last_inbound.get("ticket_id")
+    turn = repository.append_turn(
+        conversation_id=conversation_id,
+        customer_id=conversation.get("customer_id"),
+        channel=channel.value,
+        direction="outbound",
+        text=text,
+        ticket_id=ticket_id,
+        delivery_status=delivery.get("status", "sent"),
+        metadata={"source": "agent_composed_reply", "actor": payload.actor},
+    )
+
+    # Same ticket side-effects as a draft send - one implementation, two callers. The turn
+    # id anchors the promise (020): a reply that promises again restarts the follow-up loop
+    # from HERE rather than from the first response.
+    _mark_ticket_responded(repository, ticket_id, text, payload.actor,
+                           turn_id=turn["turn_id"])
+
+    repository.add_audit_event(
+        "agent_reply_sent",
+        turn["turn_id"],
+        customer_id=conversation.get("customer_id"),
+        conversation_id=conversation_id,
+        ticket_id=ticket_id,
+        details={"actor": payload.actor,
+                 "delivery_status": delivery.get("status"),
+                 "delivery_mode": delivery.get("delivery_mode"),
+                 "channel": channel.value},
+    )
+    return {"turn_id": turn["turn_id"], "delivery": delivery, "ticket_id": ticket_id}
 
 
 @router.get("/{conversation_id}/case-summary")

@@ -86,5 +86,10 @@ class Ticket(BaseModel):
     # Set when a reply commits us to coming back to the customer. Its own clock, separate
     # from the response SLA, because the promise outlives the reply that made it.
     follow_up_due_at: datetime | None = None
+    # The outbound turn that MADE the promise (020). Declared here because Ticket(**row)
+    # silently DROPS undeclared fields - pydantic ignores them with no error - which is how
+    # assigned_to vanished when 019 landed. A missing anchor would make the follow-up nudge
+    # fall back to one-shot behaviour with nothing to indicate why.
+    follow_up_turn_id: str | None = None
     closed_by: str | None = None
     closure_reason: str | None = None

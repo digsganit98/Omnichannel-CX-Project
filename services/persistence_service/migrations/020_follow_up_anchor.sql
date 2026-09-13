@@ -1,0 +1,36 @@
+-- 020: anchor a promise to the turn that made it.
+--
+-- WHY
+--
+-- 019 gave a ticket `follow_up_due_at` - a deadline - and the nudge that reads it asked
+-- "has anything gone out since first_response_at?". That is the wrong anchor, and it makes
+-- the follow-up a ONE-SHOT: the first update silences the nudge permanently, because there
+-- is now an outbound turn after the first response and there always will be.
+--
+-- Real cases do not work that way. A fraud dispute runs for days and several updates, each
+-- one promising the next ("we have received it", "it is with the disputes team", "the
+-- amount is credited"). Measured on the live board: the fraud ticket was followed up once
+-- and the nudge went quiet, with the case still open and still owed work.
+--
+-- The unit is therefore not "the first reply" but "the LATEST PROMISE". Storing which turn
+-- made it turns the question into "has anything gone out since THAT turn?" - so a
+-- follow-up that promises again moves the anchor forward and the loop continues for as
+-- long as the case does.
+--
+-- WHY A COLUMN AND NOT A STATUS VALUE
+--
+-- Same reasoning 019 recorded and the same evidence: status is enumerated at 11 sites
+-- across Python and JS, and a new value is absent from every one of those lists, so a
+-- ticket carrying it silently vanishes from analytics, the graph, lineage and the inbox
+-- while still existing in the table. A turn id is inert - nothing branches on it.
+--
+-- NULL is correct for every existing row: it means "no promise outstanding", which is true
+-- of every ticket that has not promised anything, and of every ticket whose promise has
+-- since been kept. Backfilling it from first_response_at would assert a promise that was
+-- never made.
+--
+-- Paired with B2 in the same change: a reply that promises NOTHING now clears both
+-- follow_up_due_at and this column, so a kept promise stops counting down. Before that,
+-- the board kept reading "due in 13h" after a reply that said the dispute was resolved.
+
+ALTER TABLE tickets ADD COLUMN follow_up_turn_id TEXT;
