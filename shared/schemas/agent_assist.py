@@ -28,12 +28,26 @@ class ActionType(StrEnum):
     # Superseded by PROMISED_UPDATE. Retained so historic rows do not become unreadable.
     DRAFT_FOLLOW_UP = "draft_follow_up"
     NO_ACTION = "no_action"
+    # The customer's own words suggested their case is finished. NOT part of the
+    # case_advisor vocabulary above: the model never produces this one and must never be
+    # able to, because inventing "they sound done" is precisely the failure that let a
+    # "thank you" close a live fraud dispute. It is raised by the pipeline from what the
+    # customer actually said (graph.py _propose_close writes the permanent record to
+    # ticket_events) and this row is the work-item the agent decides on.
+    READY_TO_CLOSE = "ready_to_close"
 
 
 # Approving one of these creates an editable reply draft; approving anything else only
 # records the decision. Kept as a set so both the decision route and the UI agree on which
 # button to offer.
 DRAFTABLE_ACTION_TYPES = {ActionType.PROMISED_UPDATE.value, ActionType.DRAFT_FOLLOW_UP.value}
+
+# Raised by the PIPELINE, not by case_advisor. The Suggested Actions route retires any
+# pending row the advisor no longer returns - which is correct for advice, and fatal for
+# anything the advisor never produces: the LLM cannot name `ready_to_close`, so without
+# this exemption every proposal would be superseded by the very next card refresh, seconds
+# after the customer raised it. Same escape hatch the offer types already use.
+PIPELINE_ACTION_TYPES = {ActionType.READY_TO_CLOSE.value}
 
 
 class NextBestAction(BaseModel):

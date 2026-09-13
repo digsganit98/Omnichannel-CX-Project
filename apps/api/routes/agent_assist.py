@@ -20,7 +20,12 @@ from apps.api.dependencies.security import require_admin_auth
 from services.agent_assist_service.next_best_action import NextBestActionEngine
 from services.agent_assist_service import case_advisor, opportunity_engine
 from services.rag_service.groq_generator import GroqGenerator
-from shared.schemas.agent_assist import ActionType, DRAFTABLE_ACTION_TYPES, NBADecisionUpdate
+from shared.schemas.agent_assist import (
+    ActionType,
+    DRAFTABLE_ACTION_TYPES,
+    NBADecisionUpdate,
+    PIPELINE_ACTION_TYPES,
+)
 from shared.schemas.tickets import SERVICEABLE_TICKET_STATUSES
 
 logger = logging.getLogger(__name__)
@@ -148,7 +153,9 @@ def get_next_best_actions(conversation_id: str, ticket_id: str | None = None) ->
         still_current = {a["action_type"] for a in advice.get("actions", [])}
         for row in pending:
             action_type = row["action_type"]
-            if action_type in _OFFER_ACTION_TYPES or action_type in still_current:
+            if (action_type in _OFFER_ACTION_TYPES
+                    or action_type in PIPELINE_ACTION_TYPES
+                    or action_type in still_current):
                 continue
             repository.update_agent_assist_recommendation(
                 row["recommendation_id"], status="superseded", actor="system",
@@ -160,6 +167,12 @@ def get_next_best_actions(conversation_id: str, ticket_id: str | None = None) ->
     # closed). A previously-saved 'pending' row lingers after its ticket is resolved; a done
     # ticket has no live action to take, so hide it. Conversation-level rows (no ticket_id)
     # are unaffected.
+    # A close PROPOSAL the customer's own words raised. Written into the same table as the
+    # advisor's nudges so it inherits the card, the decision route, the status column and
+    # the audit trail; the permanent record of what the customer said lives on the ticket
+    # itself (ticket_events, written by graph.py _propose_close) and is never rewritten.
+    _sync_close_proposals(repository, conversation_id, customer_id, ticket, pending)
+
     _terminal = {"closed"}
     _ticket_status: dict[str, str | None] = {}
 
@@ -185,6 +198,81 @@ def get_next_best_actions(conversation_id: str, ticket_id: str | None = None) ->
         "llm_error": llm_error,
         "actions": [r for r in pending if r.get("action_type") not in _OFFER_ACTION_TYPES],
     }
+
+
+def _sync_close_proposals(repository, conversation_id: str, customer_id: str,
+                          ticket: dict | None, pending: list[dict]) -> None:
+    """Surface a customer-raised close proposal as a decidable work item.
+
+    The customer's words are recorded permanently on the ticket (ticket_events, written by
+    graph.py _propose_close) and that record is never rewritten. This creates the matching
+    work item in agent_assist_recommendations, which is what the card renders and the
+    decision route acts on - the table that already has a status column, an audit trail and
+    a decision endpoint. The event log has none of those: nothing in this codebase reads it
+    to decide state, so a proposal living only there could never be marked handled and
+    would reappear on every refresh forever.
+
+    ONE row per proposing message. A second "thanks" on a case an agent already said "not
+    yet" to must not resurrect the card: any decided row for this ticket whose proposal is
+    no older than the decision means the agent has already answered this question.
+    """
+    if not ticket:
+        return
+    ticket_id = ticket.get("ticket_id")
+    # Serviceable only. A `logged` ticket is a grouping id - closing it is a no-op, so
+    # proposing a close on one is work nobody asked for. _propose_close applies the same
+    # rule, but the card must not depend on that having held.
+    if not ticket_id or ticket.get("status") not in SERVICEABLE_TICKET_STATUSES:
+        return
+
+    events = [e for e in repository.list_ticket_events(ticket_id)
+              if e.get("event_type") == "close_proposed"]
+    if not events:
+        return
+    latest = events[-1]
+
+    existing = repository.list_agent_assist_recommendations(ticket_id=ticket_id)
+    for row in existing:
+        if row.get("action_type") != ActionType.READY_TO_CLOSE.value:
+            continue
+        # Still open on the card - nothing to add.
+        if row.get("status") == "pending":
+            return
+        # Already answered. Only a proposal NEWER than that answer reopens the question,
+        # which is what lets a customer confirm again after an agent said "not yet".
+        decided_at = row.get("decided_at") or ""
+        if (latest.get("created_at") or "") <= decided_at:
+            return
+
+    details = latest.get("details") or {}
+    quoted = (details.get("customer_message") or "").strip()
+    reason = (f'Customer replied "{quoted[:160]}" — their case may be finished.'
+              if quoted else "The customer's last message suggests their case is finished.")
+
+    created = repository.add_agent_assist_recommendation(
+        conversation_id=conversation_id,
+        customer_id=customer_id,
+        ticket_id=ticket_id,
+        action_type=ActionType.READY_TO_CLOSE.value,
+        reason=reason,
+        # Not a model's confidence: the detector's, and it is not a probability. Held below
+        # the advisor's own scores so a proposal never outranks a promise we have broken.
+        confidence=0.6,
+        priority=0,
+        # No CRM or approval state travels with this row, deliberately. A failed CRM sync is
+        # connector health and belongs in System Configuration - the closing agent cannot
+        # fix Jira and it says nothing about whether the customer's problem is solved. And
+        # `approval_status` is dormant: it is written once at ticket creation for five
+        # intents, the only thing that can change it (POST /tickets/{id}/approval) is called
+        # by nothing in the UI, and no gate anywhere reads it. Showing "approval pending"
+        # would assert a sign-off process that does not exist - the same defect as telling a
+        # customer "the fraud team is reviewing" when no case had been created.
+        metadata={
+            "basis": f"Customer message on {latest.get('created_at', '')[:10]}",
+            "proposed_at": latest.get("created_at"),
+        },
+    )
+    pending.append(created)
 
 
 def _action_metadata(action: dict, ticket: dict | None) -> dict:
@@ -488,6 +576,31 @@ def decide_recommendation(recommendation_id: str, payload: NBADecisionUpdate) ->
                 status_code=409,
                 detail="A pending reply draft already exists — send or discard it first.")
         draft = _build_follow_up_draft(repository, existing)
+
+    # Approving a CLOSE PROPOSAL ends the case. This is the only place a customer-raised
+    # proposal turns into a closed ticket, and it goes through the same POST /close path a
+    # human uses from the ticket panel - so closed_by and closure_reason are written, the
+    # CRM sync runs and the graph mirror updates. The customer's words propose; this line
+    # is where a person decides.
+    if payload.status == "approved" and existing.get("action_type") == ActionType.READY_TO_CLOSE.value:
+        close_ticket_id = existing.get("ticket_id")
+        if not close_ticket_id:
+            raise HTTPException(status_code=400, detail="This proposal has no ticket to close.")
+        current = repository.get_ticket(close_ticket_id)
+        if current is None:
+            raise HTTPException(status_code=404, detail="Ticket not found")
+        if current.get("status") == "closed":
+            raise HTTPException(status_code=409, detail="That case is already closed.")
+        from services.ticket_service.ticket_manager import TicketManager
+        TicketManager(repository, neo4j_client=_try_neo4j()).close(
+            close_ticket_id,
+            # The agent is closing on the strength of the customer's own words, so those
+            # words ARE the reason. No model writes this sentence: the one thing a customer
+            # wants recorded is why their case ended, and inventing that is the failure
+            # this flow exists to prevent.
+            existing.get("reason") or "Customer confirmed their case is resolved.",
+            payload.actor,
+        )
 
     updated = repository.update_agent_assist_recommendation(
         recommendation_id, status=payload.status, actor=payload.actor,

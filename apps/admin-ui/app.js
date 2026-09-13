@@ -1719,12 +1719,17 @@ var NBA_LABELS = {
   information_needed: 'Waiting on customer',
   proactive_warning:  'They should know',
   acknowledgement:    'Customer upset',
+  ready_to_close:     'Ready to close',
   draft_follow_up:    'Follow-up due'   // superseded by promised_update
 };
 // Approving one of these writes an editable draft; anything else only records the
 // decision. Mirrors DRAFTABLE_ACTION_TYPES in shared/schemas/agent_assist.py - if the two
 // disagree the button promises a draft the API will not create.
 var NBA_DRAFTABLE = { promised_update: 1, draft_follow_up: 1 };
+// Approving THIS one closes the case, so it gets its own words on both buttons. The
+// customer's message only ever proposes - a person decides here, which is the whole point
+// of the flow: a "thank you" used to close a live fraud dispute with nobody looking.
+var NBA_CLOSING = { ready_to_close: 1 };
 
 function renderNbaActions(result) {
   var el = document.getElementById('rpNbaBody');
@@ -1769,12 +1774,17 @@ function renderNbaActions(result) {
     // customer, so only that gets the alarm colour - not every follow-up.
     var hot = overdue;
     var label = NBA_LABELS[a.action_type] || a.action_type;
-    var okLabel = NBA_DRAFTABLE[a.action_type] ? 'Draft reply' : 'Acknowledge';
+    var closing = !!NBA_CLOSING[a.action_type];
+    var okLabel = closing ? 'Close it'
+                : NBA_DRAFTABLE[a.action_type] ? 'Draft reply' : 'Acknowledge';
+    var noLabel = closing ? 'Not yet' : 'Dismiss';
     // `basis` is the record the model says it read this from - shown so an agent can check
     // the suggestion against the case instead of taking it on trust.
     var basis = meta.basis
       ? '<div class="opp-basis">Why: ' + escH(meta.basis) + '</div>' : '';
-    return '<div class="nba-item opp-item" data-rec-id="' + escH(a.recommendation_id) + '">'
+    return '<div class="nba-item opp-item" data-rec-id="' + escH(a.recommendation_id) + '"'
+      + (closing ? ' data-closing="1"' : '')
+      + '>'
       + '<span class="nba-badge' + (hot ? ' nba-badge-upsell' : ' nba-badge-crosssell') + '">'
       + escH(label) + '</span>'
       + (clockTxt ? '<span class="nba-clock' + (overdue ? ' nba-clock--over' : '') + '">'
@@ -1783,7 +1793,7 @@ function renderNbaActions(result) {
       + basis
       + '<div class="nba-actions">'
       + '<button class="nba-approve-btn" onclick="decideNbaAction(this,\'approved\')">' + escH(okLabel) + '</button>'
-      + '<button class="nba-dismiss-btn" onclick="decideNbaAction(this,\'dismissed\')">Dismiss</button>'
+      + '<button class="nba-dismiss-btn" onclick="decideNbaAction(this,\'dismissed\')">' + escH(noLabel) + '</button>'
       + '</div></div>';
   }).join('');
 }
@@ -1810,6 +1820,24 @@ window.decideNbaAction = function(btn, status) {
   var item = btn.closest('.opp-item');
   var recId = item ? item.getAttribute('data-rec-id') : null;
   if (!recId) return;
+  // Closing a case is the one irreversible act on this card, and on a regulated matter it
+  // is the one that most needs a second look - so it asks, and it repeats the blocking
+  // state in the question rather than relying on the agent having read the card.
+  if (status === 'approved' && item.getAttribute('data-closing') === '1') {
+    showConfirm({
+      icon: '⚠',
+      title: 'Close this case?',
+      msg: 'The customer will not be told separately. This records who closed it and why.',
+      okLabel: 'Close the case',
+      okColor: 'var(--grn-t)',
+      onConfirm: function() { _sendNbaDecision(btn, recId, status); },
+    });
+    return;
+  }
+  _sendNbaDecision(btn, recId, status);
+};
+
+function _sendNbaDecision(btn, recId, status) {
   btn.parentElement.querySelectorAll('button').forEach(function(b) { b.disabled = true; });
   api('/admin/agent-assist/recommendations/' + encodeURIComponent(recId) + '/decision', {
     method: 'POST',
@@ -1821,6 +1849,18 @@ window.decideNbaAction = function(btn, status) {
         if (state.convDetail) renderCentre(state.convDetail);
         renderQueue();
       });
+    } else if (res && res.action_type === 'ready_to_close' && status === 'approved') {
+      // The case actually ended here, so the board, the queue and the ticket panel are all
+      // stale. loadConversations refreshes the _allTickets cache the panels read.
+      toast('Case closed ✓');
+      loadConversations().then(function() {
+        if (state.convDetail) {
+          renderCentre(state.convDetail);
+          renderRight(state.convDetail, allTickets());
+        }
+        renderQueue();
+      });
+      return;
     } else {
       toast(status === 'approved' ? 'Acknowledged' : 'Dismissed');
     }
@@ -1829,7 +1869,7 @@ window.decideNbaAction = function(btn, status) {
     toast('Failed: ' + err.message);
     btn.parentElement.querySelectorAll('button').forEach(function(b) { b.disabled = false; });
   });
-};
+}
 
 function renderOpportunities(result) {
   var el = document.getElementById('rpOppBody');
@@ -5028,9 +5068,9 @@ var FLOW_MAP = {
   'detect_ticket_action':        { x: 2110, y:  40, w: FL_W, h: 102, kind: 'agent', owner: 'Ticket Creation', llm: 'closure?',
                                    note: 'is this turn about closing?' },
   'select_ticket_to_close':      { x: 2600, y:  40, w: FL_W, h: 102, kind: 'gate', owner: 'Ticket Creation',
-                                   note: 'WHICH ticket?' },
-  'close_ticket':                { x: 3090, y:  40, w: FL_W, h: 102, kind: 'step', owner: 'Ticket Creation',
-                                   note: 'mark the selected ticket closed' },
+                                   note: 'WHICH ticket(s)?' },
+  'propose_close':               { x: 3090, y:  40, w: FL_W, h: 102, kind: 'step', owner: 'Ticket Creation',
+                                   note: 'PROPOSE a close, never perform one|a human decides|serviceable tickets only' },
 
   'classify_intent':             { x: 2110, y: 470, w: FL_W, h: 150, kind: 'agent', owner: 'Intent Classification', llm: 'intent',
                                    note: 'ONE LLM call returns intent +|urgency + sentiment + language|reads the last 5 turns, both sides|written onto the turn (sql)' },
@@ -5063,9 +5103,8 @@ var FLOW_EDGES = [
 
   { f: 'detect_ticket_action', t: 'select_ticket_to_close', fs: 'r', ts: 'l', cond: 'CLOSE' },
   { f: 'detect_ticket_action', t: 'classify_intent', fs: 'b', ts: 't', cond: 'anything else' },
-  { f: 'select_ticket_to_close', t: 'close_ticket', fs: 'r', ts: 'l', cond: 'clear' },
-  { f: 'select_ticket_to_close', t: 'send_outbound_reply', fs: 'b', ts: 'l', cond: 'ambiguous - ask which' },
-  { f: 'close_ticket', t: 'send_outbound_reply', fs: 'r', ts: 't' },
+  { f: 'select_ticket_to_close', t: 'propose_close', fs: 'r', ts: 'l' },
+  { f: 'propose_close', t: 'send_outbound_reply', fs: 'r', ts: 't' },
 
   { f: 'classify_intent', t: 'validate_customer', fs: 'r', ts: 'l' },
   { f: 'validate_customer', t: 'resolve_query', fs: 'r', ts: 'l', cond: 'registered' },

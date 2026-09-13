@@ -711,7 +711,7 @@ def test_multi_turn_context_is_persisted():
     assert "EMI" in conversation["summary"]
 
 
-def test_customer_message_can_resolve_active_ticket_without_rag():
+def test_customer_message_proposes_closure_without_rag_and_closes_nothing():
     repo = SQLiteCXRepository(":memory:")
     sender = Recorder()
     workflow = graph(repo, whatsapp=sender)
@@ -725,15 +725,29 @@ def test_customer_message_can_resolve_active_ticket_without_rag():
     assert opened.ticket_id
     assert closed.ticket_id == opened.ticket_id
     assert closed.intent == "ticket_closure"
-    assert closed.resolved is True
-    assert closed.workflow_status == "ticket_closed"
     assert closed.retrieval_backend == "not_required"
     assert closed.rag_contexts == []
-    assert repo.get_ticket(opened.ticket_id)["status"] == TicketStatus.CLOSED.value
-    assert "has been closed" in closed.message
+
+    # THE TICKET IS NOT CLOSED. The customer's words propose; a human decides. This
+    # assertion is the inverse of what it used to be, deliberately: a "thank you" closing a
+    # regulated case with nobody reviewing it is the defect this path exists to remove.
+    assert repo.get_ticket(opened.ticket_id)["status"] != TicketStatus.CLOSED.value
+    assert closed.resolved is False
+    assert closed.workflow_status == "close_proposed"
+    # And we do not TELL them it is closed, because it is not.
+    assert "has been closed" not in closed.message
+    assert "passed this to the team" in closed.message
+
+    # The proposal is recorded against the ticket, carrying what triggered it, so the agent
+    # deciding later can see the customer's own words rather than take the detector on trust.
+    proposals = [e for e in repo.list_ticket_events(opened.ticket_id)
+                 if e["event_type"] == "close_proposed"]
+    assert len(proposals) == 1
+    assert proposals[0]["details"]["customer_message"] == "close the ticket as query is resolved, thanks"
+
     # The customer has an open case, so check_has_open_case routes into the ticket
-    # branch; detect_ticket_action then finds a close request and select_ticket_to_close
-    # picks which one (only one candidate here, so no clarification is needed).
+    # branch; detect_ticket_action finds a close request, select_ticket_to_close decides
+    # which ticket(s) it is about, and propose_close records it without closing anything.
     assert [entry["step"] for entry in closed.workflow_trace] == [
         "receive_message",
         "resolve_identity",
@@ -741,7 +755,7 @@ def test_customer_message_can_resolve_active_ticket_without_rag():
         "check_has_open_case",
         "detect_ticket_action",
         "select_ticket_to_close",
-        "close_ticket",
+        "propose_close",
         "send_outbound_reply",
         "persist_audit_events",
     ]
@@ -778,7 +792,12 @@ def test_has_open_case_gate_routes_on_customer_state_not_message_content():
     # ordinary question — and detect_ticket_action correctly declines to close anything.
     assert gate2["details"]["has_open_case"] == 1
     assert "detect_ticket_action" in steps2
-    assert "close_ticket" not in steps2
+    # An ordinary question must not reach the closure branch at all. Note this pins the
+    # ROUTING only: `resolved` is False for every turn on this path now, because the
+    # customer's words no longer resolve anything, so it would read False even if the
+    # branch had been taken by mistake.
+    assert "propose_close" not in steps2
+    assert "select_ticket_to_close" not in steps2
     assert second.resolved is False
 
 

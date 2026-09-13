@@ -253,6 +253,121 @@ def test_route_persists_and_dedupes_recommendations(monkeypatch):
     assert any(e["event_type"] == "nba_recommendation_approved" for e in audit)
 
 
+def _close_proposal_client(monkeypatch, repo):
+    """A live conversation + open ticket + a close proposal the customer raised."""
+    from fastapi.testclient import TestClient
+
+    from apps.api.main import app
+    from apps.api.routes import agent_assist
+
+    monkeypatch.setenv("ADMIN_API_KEY", "close-flow-test-key")
+    customer_id = _make_customer(repo, identifier="+919888877777")
+    conv = repo.get_or_create_conversation(customer_id)
+    repo.append_turn(
+        conversation_id=conv["conversation_id"], customer_id=customer_id, channel="whatsapp",
+        direction="inbound", text="thanks, all sorted", intent="complaint", urgency="low",
+        metadata={},
+    )
+    ticket = repo.create_ticket(Ticket(
+        ticket_id=new_id("tkt"),
+        conversation_id=conv["conversation_id"],
+        customer_id=customer_id,
+        title="Disputed ATM withdrawal",
+        description="Disputed ATM withdrawal",
+        intent="fraud_report",
+        priority=TicketPriority.CRITICAL,
+        assigned_team="fraud",
+        status=TicketStatus.OPEN,
+        crm_sync_status="failed",
+        approval_status="pending",
+    ))
+    ticket_id = ticket["ticket_id"] if isinstance(ticket, dict) else ticket.ticket_id
+    # What graph.py _propose_close writes when the customer's words look like a resolution.
+    repo.add_ticket_event(ticket_id, "close_proposed", "customer_message", {
+        "detector_reason": "customer_confirmed_closure",
+        "customer_message": "thanks, all sorted",
+        "channel": "whatsapp",
+    })
+
+    monkeypatch.setattr(agent_assist, "get_repository", lambda: repo)
+    monkeypatch.setattr(agent_assist, "_try_neo4j", lambda: None)
+    monkeypatch.setattr(agent_assist, "_advice_generator", lambda: _FakeAdviceGenerator())
+    return TestClient(app), {"x-admin-key": "close-flow-test-key"}, conv, ticket_id
+
+
+def test_customer_close_proposal_surfaces_and_only_a_human_closes(monkeypatch):
+    """The spine of the close flow: the customer's words propose, a person decides.
+
+    A "thank you" used to run an LLM YES/NO and close the ticket outright - here on a
+    critical fraud case whose CRM sync had FAILED, so no case existed in the external
+    system, with approval still unsigned and nobody reviewing it.
+    """
+    repo = SQLiteCXRepository(":memory:")
+    client, headers, conv, ticket_id = _close_proposal_client(monkeypatch, repo)
+
+    first = client.get("/admin/agent-assist/next-best-actions",
+                       params={"conversation_id": conv["conversation_id"]}, headers=headers)
+    assert first.status_code == 200
+    proposals = [a for a in first.json()["actions"] if a["action_type"] == "ready_to_close"]
+    assert len(proposals) == 1
+    proposal = proposals[0]
+    # It quotes the customer rather than paraphrasing them: no model writes this sentence.
+    assert "thanks, all sorted" in proposal["reason"]
+    # Connector health and the dormant approval flag do NOT travel with this row. A failed
+    # CRM sync belongs in System Configuration and the closing agent cannot act on it, and
+    # nothing anywhere reads approval_status as a gate - surfacing it would assert a
+    # sign-off process the product does not have.
+    assert "crm_sync_failed" not in proposal["metadata"]
+    assert "approval_pending" not in proposal["metadata"]
+
+    # The proposal alone changes NOTHING. This is the assertion the whole flow exists for.
+    assert repo.get_ticket(ticket_id)["status"] == TicketStatus.OPEN.value
+
+    # Refreshing must not stack duplicates, and must not retire it either - the advisor
+    # never returns `ready_to_close`, so an unexempted sweep would supersede it instantly.
+    second = client.get("/admin/agent-assist/next-best-actions",
+                        params={"conversation_id": conv["conversation_id"]}, headers=headers)
+    still = [a for a in second.json()["actions"] if a["action_type"] == "ready_to_close"]
+    assert len(still) == 1
+    assert still[0]["recommendation_id"] == proposal["recommendation_id"]
+
+    decision = client.post(
+        f"/admin/agent-assist/recommendations/{proposal['recommendation_id']}/decision",
+        json={"status": "approved", "actor": "Admin_SS"}, headers=headers,
+    )
+    assert decision.status_code == 200
+
+    # NOW it is closed - by a named person, with a reason, through the same path the ticket
+    # panel uses. Before 019 nothing recorded who closed a ticket; a customer-triggered
+    # close recorded nothing at all.
+    closed = repo.get_ticket(ticket_id)
+    assert closed["status"] == TicketStatus.CLOSED.value
+    assert closed["closed_by"] == "Admin_SS"
+    assert "thanks, all sorted" in closed["closure_reason"]
+
+
+def test_not_yet_leaves_the_case_open_and_does_not_re_ask(monkeypatch):
+    """Declining a proposal must stick: the card cannot keep asking the same question."""
+    repo = SQLiteCXRepository(":memory:")
+    client, headers, conv, ticket_id = _close_proposal_client(monkeypatch, repo)
+
+    first = client.get("/admin/agent-assist/next-best-actions",
+                       params={"conversation_id": conv["conversation_id"]}, headers=headers)
+    proposal = [a for a in first.json()["actions"] if a["action_type"] == "ready_to_close"][0]
+
+    declined = client.post(
+        f"/admin/agent-assist/recommendations/{proposal['recommendation_id']}/decision",
+        json={"status": "dismissed", "actor": "Admin_SS"}, headers=headers,
+    )
+    assert declined.status_code == 200
+    assert repo.get_ticket(ticket_id)["status"] == TicketStatus.OPEN.value
+
+    # The same proposal must not come back on the next refresh.
+    again = client.get("/admin/agent-assist/next-best-actions",
+                       params={"conversation_id": conv["conversation_id"]}, headers=headers)
+    assert not [a for a in again.json()["actions"] if a["action_type"] == "ready_to_close"]
+
+
 def test_agent_assist_routes_require_admin_key(monkeypatch):
     from fastapi.testclient import TestClient
 

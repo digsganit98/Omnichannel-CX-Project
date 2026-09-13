@@ -256,6 +256,7 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 166 — FinOps cost rates moved to AWS Bedrock Mumbai:** repriced both gpt-oss models to the Bedrock standard-tier rates across all three rate sites, closing the "rates are unverified" open item; existing rows keep their Groq costs.
 - **Fix 167 — a Control Centre in front of the console, and a Service Desk that shows priority:** a four-box landing page after sign-in, plus a new supervisor triage page that surfaces `priority_score` — computed on every ticket and shown nowhere until now.
 - **Fix 168 — the desk stopped losing track of what it promised, and a human can reply again:** delivery now reports whether a message actually reached anyone, the conversation composer sends instead of faking it, a promise is anchored to the turn that made it so follow-ups repeat as long as a case runs, and Suggested Actions became an LLM reading the whole case rather than four `if` rules that had never been shown to anyone.
+- **Fix 169 — a customer's "thanks" proposes a close instead of performing one:** the pipeline now records a proposal on the ticket and a named person decides it from the Suggested Actions card, so no case ends without a human, a reason and an attribution.
 - **EC2 deploy 2026-09-07 (second) — Fix 152 to Fix 162, UI only:** four bind-mounted files took effect on landing with no rebuild and no container restarted; the two changed Python files are on the box but deliberately not built into the image.
 - **OPEN - Fix 149 turned three escalation gates into constants (NOT FIXED, measured):** moving the KB into the graph made retrieval EXHAUSTIVE - all 14 chunks, every message - and three gates that read `contexts` to judge relevance silently became no-ops. Measured on all 11 messages sent through the UI today, with contexts rebuilt from `retrieval_evidence`: **`_is_strong_l1_knowledge_answer` TRUE 11/11**, `knowledge_not_found` fired **0/11**, KB chunks per turn **min 14 max 14**. The third gate is the damaging one - returning True SKIPS the handoff check entirely, the rule that reads the customer's own words. Live consequence: the FD question, for which the KB has zero guidance, auto-sent as a confident L1 knowledge answer and volunteered a penalty rule from the model's own general knowledge. Today's real escalations (fraud, claim dispute) were caught earlier by intent-label rules, which MASKS this for the intents that have their own rules and exposes it for everything else. `confidence=0.95` is hardcoded in Priority 2, so `confidence < 0.3` cannot fire either. **Fix 149 verified the PROVENANCE consumers of contexts and never enumerated the DECISION consumers.** This gate has now broken twice in opposite directions (Fix 143 inverted it) because it reads a property of RETRIEVAL to answer a question about RELEVANCE - so the fix is not a patched condition. Fix 150 already supplies the raw material (`customer_holds`, each chunk's `concept`); probe it on real messages before designing the gate.
 - **Reference - local vs the hosted instance:** the two are NOT meant to match. Application code must; `docker-compose.yml` deliberately must not (Ollama commented out on EC2, and ngrok has **no** `profiles: ["tunnel"]` there - copying the local file over means the next `up` starts no tunnel and **WhatsApp goes silent with nothing to say why**). EC2 is the sole holder of the shared WhatsApp number, mailbox and ngrok domain, which is why local ships with those off. Three deploy traps, all already bitten: **no git on EC2** (scp only), `restart` runs **old code** (rebuild), and `restart` does **not re-read `.env`** (`up -d`). Plus what must never be done there - other teams' containers, the disk watermark, removing OpenSearch, `prune --volumes`.
@@ -9173,3 +9174,57 @@ change in this fix and re-running — identical five names, 5 failed / 147 passe
 The conversation view was checked and is **not** broken: `buildUnits` keys on `ticket_id` and
 merges every step of a ticket into one unit by design, so the original exchange had not
 vanished, and nothing was changed there.
+
+---
+
+## Fix 169 — the customer's words propose a close; a person decides it
+
+A customer saying "thank you" closed their own ticket. `TicketAgent.detect_action` ran a
+keyword pass and then an LLM YES/NO, and a YES went straight through `select_ticket` to
+`close_ticket`. Nobody reviewed it and nothing recorded who closed it — on the live fraud
+case, a disputed ₹15,000 whose CRM sync had failed so no case existed in Jira at all. The
+system was acting on WORDS rather than on STATE, which is the same defect as the reply that
+promised an investigation nobody had started.
+
+The close node now proposes. `propose_close` writes a `close_proposed` event carrying the
+customer's own message, the detector's reason and the channel, and leaves the status
+untouched; `ticket_events` already stores this kind of thing, so there is no migration. The
+reply changed with it — "Your support ticket … has been closed" would now be false, and it
+says we have passed the case to the team instead. `_closed()` returns False unconditionally
+on this path: a turn that resolves nothing must not report a resolution.
+
+**The customer is no longer asked which ticket to close.** That question existed because
+their answer performed the close; a proposal needs no such question, and it put our internal
+ticket admin in front of someone who had simply said thanks. Every candidate is proposed and
+the agent picks — one conditional edge deleted rather than rewired.
+
+The proposal surfaces as a `ready_to_close` row in Suggested Actions, created from the event
+by the card's own route. The permanent record stays on the ticket and is never rewritten;
+the recommendation is the work item, because that table already has a status column, a
+decision endpoint and an audit trail, and the event log has none of those — nothing in this
+codebase reads `ticket_events` to decide state, so a proposal living only there could never
+be marked handled and would reappear on every refresh forever. It is exempt from the
+supersede sweep for the same reason offers are: the advisor never returns this type, so an
+unexempted sweep would retire it seconds after the customer raised it. Approving calls the
+existing `POST /close`, so `closed_by` and `closure_reason` are written, the CRM syncs and
+the graph mirrors; declining sticks, and only a newer message reopens the question.
+
+**Nothing about CRM sync or approval state appears on the card**, and both were built and
+then removed in the same session after the user asked what either was for. A failed CRM sync
+is connector health, belongs in System Configuration, and the closing agent cannot act on
+it. `approval_status` is worse: it is written once at ticket creation for five intents, the
+only thing that can change it is a route nothing in the UI calls, and no gate anywhere reads
+it — so "approval pending" would have asserted a sign-off process the product does not have,
+which is the very defect this fix removes. The protection is the confirmation step and the
+named human behind it.
+
+**Still open:** the agent's own Close button is still two clicks deep in a collapsed card
+behind a browser `prompt()`. Moving it into the conversation needs a ticket badge the centre
+pane does not have (`tkt-id` lives in the right panel), so it was left alone rather than
+half-done. And cases that used to close themselves now stay open until someone clicks — the
+intended consequence, but it changes what the board looks like.
+
+Tests: 5 failed / 149 passed, the same five pre-existing failures, proven by stashing every
+change and re-running. Two tests rewritten to the propose contract and two added: one that a
+proposal changes nothing until approved and then closes with attribution, one that declining
+sticks across a refresh.

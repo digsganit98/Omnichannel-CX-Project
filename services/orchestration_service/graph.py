@@ -24,6 +24,7 @@ from services.ticket_service.ticket_manager import TicketManager
 from services.workflow_service.review_gate import should_hold_for_review
 from shared.schemas.messages import InboundMessage
 from shared.schemas.responses import ChannelResponse
+from shared.schemas.tickets import SERVICEABLE_TICKET_STATUSES, Ticket
 
 try:
     from services.neo4j_service import writer as neo4j_writer
@@ -46,8 +47,8 @@ WORKFLOW_EDGES = [
     ("load_conversation_context", "check_has_open_case"),
     ("check_has_open_case", "detect_ticket_action | classify_intent [Agent 1]"),
     ("detect_ticket_action", "select_ticket_to_close | classify_intent [Agent 1]"),
-    ("select_ticket_to_close", "close_ticket | send_outbound_reply (ask which ticket)"),
-    ("close_ticket", "send_outbound_reply"),
+    ("select_ticket_to_close", "propose_close"),
+    ("propose_close", "send_outbound_reply"),
     ("classify_intent [Agent 1]", "validate_customer"),
     ("validate_customer", "resolve_query [Agent 2] | reject_unregistered_customer"),
     ("reject_unregistered_customer", "send_outbound_reply"),
@@ -188,7 +189,7 @@ class OrchestrationGraph:
         workflow.add_node("check_has_open_case", self._check_has_open_case)
         workflow.add_node("detect_ticket_action", self._detect_ticket_action)
         workflow.add_node("select_ticket_to_close", self._select_ticket_to_close)
-        workflow.add_node("close_ticket", self._close_ticket)
+        workflow.add_node("propose_close", self._propose_close)
 
         # Agent 1
         workflow.add_node("classify_intent", self._classify_intent)
@@ -224,12 +225,11 @@ class OrchestrationGraph:
             self._route_ticket_action,
             {"select_ticket_to_close": "select_ticket_to_close", "classify_intent": "classify_intent"},
         )
-        workflow.add_conditional_edges(
-            "select_ticket_to_close",
-            self._route_ticket_selection,
-            {"close_ticket": "close_ticket", "ask_which_ticket": "send_outbound_reply"},
-        )
-        workflow.add_edge("close_ticket", "send_outbound_reply")
+        # No conditional edge here any more. The customer used to be asked WHICH ticket to
+        # close when several matched, because their answer performed the close; a proposal
+        # needs no such question, so every candidate is proposed and the agent picks.
+        workflow.add_edge("select_ticket_to_close", "propose_close")
+        workflow.add_edge("propose_close", "send_outbound_reply")
         # Agent chain
         workflow.add_edge("classify_intent", "validate_customer")
         workflow.add_conditional_edges(
@@ -484,46 +484,94 @@ class OrchestrationGraph:
         )
 
     def _select_ticket_to_close(self, graph_state: GraphState) -> dict:
-        """Disambiguation only — decide WHICH ticket, kept separate from close_ticket
-        (which just performs the resolution) so the two concerns don't blur together."""
+        """Decide WHICH ticket(s) the customer's words are about.
+
+        Kept separate from propose_close (which records the proposal) so the two concerns
+        don't blur together. The customer is no longer ASKED to disambiguate: their answer
+        used to perform the close, so the question had an effect; under the propose flow it
+        would decide nothing, and it put our internal ticket admin in front of a customer
+        who had simply said thank you. Every candidate is proposed instead and the agent
+        picks - which is the same hand-off as every other case on the board.
+        """
         state = graph_state["runtime"]
         selection: TicketSelection = self.ticket_agent.select_ticket(state.message, state.context)
         state.target_ticket_id = selection.target_ticket_id
         state.ticket_clarification_needed = selection.needs_clarification
         state.matching_open_tickets = selection.candidates
-        if selection.needs_clarification:
-            options = ", ".join(
-                f"{t['ticket_id']} ({(t.get('title') or t.get('intent') or 'request')})"
-                for t in selection.candidates
-            )
-            state.answer = (
-                "You have more than one open ticket for this kind of request: "
-                f"{options}. Could you tell me which ticket ID you'd like to close?"
-            )
-            self._audit("ticket_closure_clarification_requested", state,
-                        details={"candidates": [t["ticket_id"] for t in selection.candidates]})
         self._complete(state, WorkflowStep.SELECT_TICKET_TO_CLOSE, self.ticket_agent.name,
                        target_ticket_id=state.target_ticket_id,
-                       needs_clarification=state.ticket_clarification_needed,
+                       candidate_count=len(selection.candidates),
+                       ambiguous=selection.needs_clarification,
                        reason=selection.reason)
         return {"runtime": state}
 
-    @staticmethod
-    def _route_ticket_selection(graph_state: GraphState) -> Literal["close_ticket", "ask_which_ticket"]:
-        return "ask_which_ticket" if graph_state["runtime"].ticket_clarification_needed else "close_ticket"
+    def _propose_close(self, graph_state: GraphState) -> dict:
+        """Record that the customer's words LOOK like a resolution. Close nothing.
 
-    def _close_ticket(self, graph_state: GraphState) -> dict:
-        """Pure resolution: mark the already-selected target ticket resolved."""
+        The defect this replaces: a customer saying "thanks" ran an LLM YES/NO and closed
+        their ticket outright - on the live fraud case, a disputed INR 15,000 where the CRM
+        sync had failed (so no case existed in the external system) and approval was still
+        pending. Nobody reviewed it and nothing recorded who closed it. The system was
+        acting on WORDS rather than on STATE, which is the same defect as the reply that
+        promised an investigation nobody had started.
+
+        A proposal is written to ticket_events - which already stores this kind of thing,
+        so there is no migration - carrying the detector's reason and the message that
+        triggered it. The agent sees it in Suggested Actions and decides.
+
+        SERVICEABLE TICKETS ONLY. A `logged` ticket is a grouping id: no promise, no owner,
+        no SLA, and it never reaches the board, so a proposal on one would be work nobody
+        asked for. Closing one is a no-op, so we skip it rather than raise a card about it.
+        """
         state = graph_state["runtime"]
-        state.ticket = self.ticket_agent.close_ticket(state.target_ticket_id)
+        candidates = state.matching_open_tickets or []
+        if not candidates and state.target_ticket_id:
+            candidates = [{"ticket_id": state.target_ticket_id}]
+
+        proposed: list[str] = []
+        skipped: list[str] = []
+        for candidate in candidates:
+            ticket_id = candidate.get("ticket_id")
+            if not ticket_id:
+                continue
+            # Read the stored status rather than trusting the candidate dict: the ticket may
+            # have been promoted or closed since the context was loaded for this turn.
+            stored = self.repository.get_ticket(ticket_id) or {}
+            if stored.get("status") not in SERVICEABLE_TICKET_STATUSES:
+                skipped.append(ticket_id)
+                continue
+            # The response still has to carry WHICH case this turn was about: _response
+            # reads state.ticket for ticket_id, and the old close path set it as a side
+            # effect of closing. A proposal closes nothing, so it is set from the row
+            # already read above - without it every resolution turn returned ticket_id=None.
+            if state.ticket is None:
+                state.ticket = Ticket(**stored)
+            self.repository.add_ticket_event(
+                ticket_id,
+                "close_proposed",
+                "customer_message",
+                {
+                    "detector_reason": state.ticket_action.reason,
+                    "customer_message": (state.message.text or "")[:500],
+                    "channel": state.message.channel.value,
+                    "conversation_id": state.conversation_id,
+                    "ambiguous": state.ticket_clarification_needed,
+                    "candidate_count": len(candidates),
+                },
+            )
+            proposed.append(ticket_id)
+
+        state.close_proposed_ticket_ids = proposed
+        # Deliberately says nothing about the case being closed, because it is not. The old
+        # line ("Your support ticket ... has been closed") would now be false.
         state.answer = (
-            f"Your support ticket {state.ticket.ticket_id} has been closed. "
-            "Thank you for confirming."
+            "Thanks for confirming — I've passed this to the team to close off."
         )
-        self._audit("ticket_closed_by_customer", state, ticket_id=state.ticket.ticket_id,
-                    details={"reason": state.ticket_action.reason})
-        self._complete(state, WorkflowStep.CLOSE_TICKET, self.ticket_agent.name,
-                       ticket_id=state.ticket.ticket_id, status=state.ticket.status.value)
+        self._audit("ticket_close_proposed_by_customer", state,
+                    details={"proposed": proposed, "skipped_not_serviceable": skipped,
+                             "reason": state.ticket_action.reason})
+        self._complete(state, WorkflowStep.PROPOSE_CLOSE, self.ticket_agent.name,
+                       proposed_ticket_ids=proposed, skipped_not_serviceable=skipped)
         return {"runtime": state}
 
     # ── Agent 1: Intent Classification ───────────────────────────────────
@@ -905,8 +953,12 @@ class OrchestrationGraph:
             confidence=state.resolution.confidence if state.resolution else 1.0,
             ticket_id=state.ticket.ticket_id if state.ticket else None,
             workflow_status=(
-                "ticket_closure_clarification_needed" if state.ticket_clarification_needed else
-                "ticket_closed" if state.ticket_action.action == TicketAction.CLOSE else
+                # A proposal is NOT a closure. The old value said "ticket_closed" the moment
+                # the detector fired, which is now false: the ticket stays open until a
+                # human closes it, and reporting otherwise would put the same false
+                # statement into the API that Part E exists to take out of the reply.
+                "close_proposed" if state.close_proposed_ticket_ids else
+                "close_proposed_none_serviceable" if state.ticket_action.action == TicketAction.CLOSE else
                 "customer_validation_required" if (
                     state.customer_validation.validation_required and not state.customer_validation.is_registered
                 ) else
@@ -979,10 +1031,13 @@ class OrchestrationGraph:
 
     @staticmethod
     def _closed(state: OrchestrationState) -> bool:
-        # Only mark the conversation resolved when the customer explicitly confirms it AND
-        # a specific ticket was actually resolved. When they have multiple open tickets of
-        # the same kind, we've only asked which one — nothing is resolved yet.
-        return state.ticket_action.action == TicketAction.CLOSE and not state.ticket_clarification_needed
+        # ALWAYS False on the propose path, and that is the point of Part E: the customer's
+        # words no longer resolve anything, so nothing here may report a resolution. This
+        # used to return True as soon as the detector said CLOSE - before any human had
+        # looked, on a case whose CRM sync may have failed. A ticket becomes resolved when
+        # an agent closes it through POST /admin/tickets/{id}/close, which is a different
+        # path entirely and never reaches this function.
+        return False
 
     def _audit(self, event_type: str, state: OrchestrationState, **values) -> None:
         self.repository.add_audit_event(event_type, **self._common(state), **values)

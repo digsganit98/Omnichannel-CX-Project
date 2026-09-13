@@ -20,6 +20,11 @@ class WorkflowStep(StrEnum):
     CHECK_HAS_OPEN_CASE = "check_has_open_case"
     DETECT_TICKET_ACTION = "detect_ticket_action"
     SELECT_TICKET_TO_CLOSE = "select_ticket_to_close"
+    # The customer's words PROPOSE a close; they no longer perform one. A "thank you" is
+    # politeness, not a resolution decision - and on the live fraud case it fired YES while
+    # the CRM sync had failed and approval was still pending, closing a regulated matter
+    # nobody had looked at. This step records the proposal; a human decides.
+    PROPOSE_CLOSE = "propose_close"
     CLASSIFY_INTENT = "classify_intent"
     VALIDATE_CUSTOMER = "validate_customer"
     REJECT_UNREGISTERED_CUSTOMER = "reject_unregistered_customer"
@@ -53,13 +58,18 @@ class OrchestrationState(BaseModel):
     # customer used to fall past `if tickets:` into RAG and be handed a ticket they never
     # asked for).
     has_open_case: int = 0
-    # Set by select_ticket_to_close once the target ticket is unambiguous (either the
-    # customer named it explicitly, or it's the only open ticket of that kind).
+    # Set by select_ticket_to_close when the target ticket is unambiguous (either the
+    # customer named it explicitly, or it's the only open ticket of that kind). When the
+    # customer has several of the same kind this stays None and every candidate is
+    # proposed instead - see matching_open_tickets.
     target_ticket_id: str | None = None
-    # True when the customer has 2+ open tickets of the same kind and didn't name one —
-    # close_ticket is skipped and the customer is asked to specify which ticket.
+    # Retained for historic traces and the audit record. Nothing routes on it any more:
+    # the customer used to be asked WHICH ticket to close, because their answer performed
+    # the close. Under the propose flow their answer would decide nothing, so the question
+    # is no longer asked and every candidate is proposed to the agent instead.
     ticket_clarification_needed: bool = False
-    # Candidate tickets considered during disambiguation, for audit/trace visibility.
+    # The tickets a proposal applies to. One when unambiguous; several when the customer
+    # has multiple open cases of the same kind and the agent picks between them.
     matching_open_tickets: list[dict] = Field(default_factory=list)
     customer_validation: CustomerValidationResult = Field(default_factory=CustomerValidationResult)
     analysis: IntentResult | None = None
@@ -72,6 +82,10 @@ class OrchestrationState(BaseModel):
     # for its whole life, so reading that told a customer "this looks like a separate
     # issue" on every later message of a thread they were plainly continuing.
     ticket_forked_now: bool = False
+    # Tickets this turn raised a close PROPOSAL on. Empty when the customer's words were
+    # not a resolution, and also when every candidate was a `logged` grouping id (nothing
+    # to close). Never means "closed" - a human decides that.
+    close_proposed_ticket_ids: list[str] = Field(default_factory=list)
     answer: str | None = None
     delivery: dict = Field(default_factory=dict)
     workflow_trace: list[WorkflowTraceEntry] = Field(default_factory=list)
