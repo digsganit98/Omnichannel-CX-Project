@@ -255,6 +255,7 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 165 — the home page clipped on a real laptop and spaced itself three different ways:** the bottom card row sat behind the footer below a ~640px viewport; fixed with a four-tier ladder, one single-sourced section gap, Ganit orange and blue throughout, and title-case in the headline.
 - **Fix 166 — FinOps cost rates moved to AWS Bedrock Mumbai:** repriced both gpt-oss models to the Bedrock standard-tier rates across all three rate sites, closing the "rates are unverified" open item; existing rows keep their Groq costs.
 - **Fix 167 — a Control Centre in front of the console, and a Service Desk that shows priority:** a four-box landing page after sign-in, plus a new supervisor triage page that surfaces `priority_score` — computed on every ticket and shown nowhere until now.
+- **Fix 168 — the desk stopped losing track of what it promised, and a human can reply again:** delivery now reports whether a message actually reached anyone, the conversation composer sends instead of faking it, a promise is anchored to the turn that made it so follow-ups repeat as long as a case runs, and Suggested Actions became an LLM reading the whole case rather than four `if` rules that had never been shown to anyone.
 - **EC2 deploy 2026-09-07 (second) — Fix 152 to Fix 162, UI only:** four bind-mounted files took effect on landing with no rebuild and no container restarted; the two changed Python files are on the box but deliberately not built into the image.
 - **OPEN - Fix 149 turned three escalation gates into constants (NOT FIXED, measured):** moving the KB into the graph made retrieval EXHAUSTIVE - all 14 chunks, every message - and three gates that read `contexts` to judge relevance silently became no-ops. Measured on all 11 messages sent through the UI today, with contexts rebuilt from `retrieval_evidence`: **`_is_strong_l1_knowledge_answer` TRUE 11/11**, `knowledge_not_found` fired **0/11**, KB chunks per turn **min 14 max 14**. The third gate is the damaging one - returning True SKIPS the handoff check entirely, the rule that reads the customer's own words. Live consequence: the FD question, for which the KB has zero guidance, auto-sent as a confident L1 knowledge answer and volunteered a penalty rule from the model's own general knowledge. Today's real escalations (fraud, claim dispute) were caught earlier by intent-label rules, which MASKS this for the intents that have their own rules and exposes it for everything else. `confidence=0.95` is hardcoded in Priority 2, so `confidence < 0.3` cannot fire either. **Fix 149 verified the PROVENANCE consumers of contexts and never enumerated the DECISION consumers.** This gate has now broken twice in opposite directions (Fix 143 inverted it) because it reads a property of RETRIEVAL to answer a question about RELEVANCE - so the fix is not a patched condition. Fix 150 already supplies the raw material (`customer_holds`, each chunk's `concept`); probe it on real messages before designing the gate.
 - **Reference - local vs the hosted instance:** the two are NOT meant to match. Application code must; `docker-compose.yml` deliberately must not (Ollama commented out on EC2, and ngrok has **no** `profiles: ["tunnel"]` there - copying the local file over means the next `up` starts no tunnel and **WhatsApp goes silent with nothing to say why**). EC2 is the sole holder of the shared WhatsApp number, mailbox and ngrok domain, which is why local ships with those off. Three deploy traps, all already bitten: **no git on EC2** (scp only), `restart` runs **old code** (rebuild), and `restart` does **not re-read `.env`** (`up -d`). Plus what must never be done there - other teams' containers, the disk watermark, removing OpenSearch, `prune --volumes`.
@@ -9069,3 +9070,106 @@ content gaps, deferred to a planned pass.
 Pre-existing and untouched: three boot 401s from `loadSystemDiagrams` firing before a token
 exists (each has a `.catch()`, identical in HEAD), and "Member since —" blank on My Profile
 because the JWT `currentUser` carries no `created_at`.
+
+---
+
+## Fix 168 — the desk stopped losing track of what it promised, and a human can reply again
+
+Committed `6d7977d`. Four related gaps: the product answered customers well and then forgot
+what it had committed to them.
+
+**Delivery reported "sent" for three different fates.** `OutboundDeliveryService.send()`
+returned `status: "sent"` for a real provider send, for the web portal, and for a local-log
+fallback that wrote to the container log and stopped there — so a Meta rejection, a message
+nobody received, and a genuine delivery were indistinguishable on screen. This is the trap
+recorded in `ec2-operations.md` § 8, where the only way to know was the container log or the
+recipient's phone. `delivery_mode` (`delivered` / `portal` / `logged_only` / `failed`) is now
+returned beside `status` and the toast says which. **`status` deliberately keeps its value**:
+eleven test assertions and six production readers compare it to `"sent"`, and `graph.py:793`
+audits anything else as `outbound_failed`, so redefining it would have marked every real
+delivery a failure.
+
+**The composer was a decoration.** `doSend()` showed "Reply queued (simulation mode)",
+cleared the box and called nothing — no message, no turn, no ticket update. Once a case's
+held draft had been sent, an agent could never write to that customer again, which was true
+of every answered ticket on the board. `POST /admin/conversations/{id}/reply` now reuses the
+draft path's `OutboundDeliveryService().send()`, `append_turn` and `_mark_ticket_responded`
+rather than forking a second delivery path; it 409s if a pending draft exists, because the
+draft is the reply surface and two messages would reach the customer. **Channel comes from
+the last inbound turn, never from the customer's identity list** — this customer's `web_chat`
+identity is stored as their email address, so choosing a destination by identity would have
+put real mail in a real inbox for a web-chat conversation.
+
+**A promise was anchored to the wrong thing.** 019 gave a ticket `follow_up_due_at`, and the
+nudge asked "has anything gone out since `first_response_at`?" — which makes the follow-up a
+one-shot, because an outbound turn after the first response exists from then on and always
+will. A fraud dispute runs for days and several updates, each promising the next. Migration
+020 adds `follow_up_turn_id`, so the question becomes "anything since the turn that made the
+promise?": a reply that promises again moves the anchor and the loop continues, and a reply
+that promises nothing clears both fields, so a kept promise stops counting down instead of
+expiring into a false breach.
+
+**Suggested Actions is an LLM now, and reachable at all.** Four hardcoded `if` rules drove it
+— an aging SLA, a run of negative messages, a stalled KYC — and **nothing in the UI had ever
+called `/next-best-actions`**, so none of them had been seen by anyone since the day they
+were written. `case_advisor.advise()` reads the whole case (conversation, promise state,
+ticket, the customer's BFSI records, sentiment) and returns what needs saying and why, with
+the record it read it from. Vocabulary is four things you would write to a customer —
+`promised_update`, `information_needed`, `proactive_warning`, `acknowledgement`; internal
+chores like "chase the CRM sync" are deliberately absent, because connector health belongs in
+System Configuration. Code owns the guardrails: gates, vocabulary validation, PII masking.
+~2,030 tokens and 1.6s per call, against 3,845 for `answer_generation`.
+
+**It does not draft the customer's message, and that was measured, not assumed.** The original
+design had each nudge carry a ready-written reply. Probed against the live fraud case, the
+model wrote *"I've escalated your fraud report … and have blocked your debit card
+immediately"* — we had told the **customer** to block the card, and the CRM sync had failed so
+there was no case to escalate. Hard anti-fabrication rules stopped the invention and produced
+hollow text instead, with agent-facing placeholders leaking into customer-facing copy. The
+cause is structural: the only thing the customer wants is the investigation outcome, and
+nothing in this system knows it. Nudges therefore carry a reason, and approving one opens a
+short skeleton the agent completes.
+
+**Stale rows outlived the rules that made them.** The route only ever added, so after a
+follow-up was sent the rule correctly went quiet while the row it had written minutes earlier
+stayed on screen — the card reads the table, not the rules. Pending rows are now marked
+`superseded` when the advisor no longer returns them, **scoped to the action types this engine
+owns** so live offer rows are untouched, and **skipped entirely when the call failed**: an
+engine returning nothing because it errored must never read as "nothing is outstanding" and
+empty a queue of real work. The card renders three states rather than two — items, "Nothing
+needs chasing", or a "couldn't check" line with a Retry that genuinely re-calls.
+
+**Dates are absolute in stored text and relative only at render.** The model was being fed raw
+DB values and faithfully copied them back, so a nudge read "we promised an update by
+2026-09-13T22:21:27.137919Z". The stored sentence now says "13 Sep, 10:21pm" and the countdown
+("7h left") is computed on every render from `follow_up_due_at`, reusing the board's own
+`sdPromiseState`. A stored countdown is wrong by morning.
+
+**Closing finally records who and why.** `resolveTicket` called `PATCH /status`, which closes
+the ticket correctly but writes neither `closed_by` nor `closure_reason` — measured on a
+throwaway ticket: status became `closed`, both fields stayed NULL. It now calls `POST /close`
+with a required reason. A second, unreachable closing path (`sdClose`) was deleted; two ways
+to close is how the attribution was lost in the first place.
+
+Two bugs introduced and fixed within the session. The countdown was attached to every action's
+metadata, so "CUSTOMER UPSET" rendered "7h left" borrowed from a deadline that was not its
+own; `_action_metadata()` now attaches it only to promise actions. And the rewired route
+called `GroqGenerator()` directly, which broke
+`test_route_persists_and_dedupes_recommendations` because CI has no API key —
+`_advice_generator()` is now an injectable seam the test stubs, so the fix is in the route
+rather than in a weakened assertion.
+
+**Still open:** the close flow itself — a customer's "thank you" still auto-closes a case
+through `detect_action`'s LLM with nobody reviewing it and no `closed_by` written, and the
+agent's Close is two clicks deep inside a collapsed card behind a browser `prompt()`. The
+agreed design is that customer words propose and a human decides, on serviceable tickets only;
+not built. The offers LLM call has not been merged into `case_advisor` — one call would reason
+about both and cost half, but `/opportunities` works and is demo-relevant, so actions-first
+was deliberate. Nothing here is on EC2: the box is at `f7b6f71`, three commits behind, and
+needs `scp` plus a rebuild.
+
+Pre-existing and untouched: the same five `test_phase1.py` failures, proven by stashing every
+change in this fix and re-running — identical five names, 5 failed / 147 passed either way.
+The conversation view was checked and is **not** broken: `buildUnits` keys on `ticket_id` and
+merges every step of a ticket into one unit by design, so the original exchange had not
+vanished, and nothing was changed there.
