@@ -560,6 +560,40 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .det-auto{font-size:10.5px;color:var(--t3);font-style:italic;line-height:1.5;margin-bottom:7px;padding-bottom:7px;
   border-bottom:1px dashed var(--bdr2);word-break:break-word}
 
+/* ── CASE BAR (Detailed view) ── */
+/* The Detailed view shows one case at a time, so the case's identity and the single
+   action that ends it sit here once, pinned, instead of repeating on every exchange
+   row inside it. Sticky, because #msgs is the scrolling area - the exchanges move
+   under the bar rather than carrying it away.
+   Nothing here is a new treatment: the id pill is .lin-tkt's (neutral ground, status
+   tints the TEXT so the row keeps one colour), the status is .flow-node-status's dot
+   plus text, and the button is the app's settled quiet action (.tkt-resolve-btn,
+   .sd-take) - pale ground, coloured text, fills on hover. */
+.casebar{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:8px;
+  margin:0 0 12px;padding:8px 12px;background:var(--surf);border:1px solid var(--bdr);
+  border-radius:var(--r);box-shadow:var(--shadow)}
+/* The bare .fns-* classes (style.css:431) carry a background AND a border, so both
+   children below must strip them or the status arrives as an amber chip and the id
+   gets an amber ground under its intended neutral one. Same override the two existing
+   users of these classes already apply (.det-head/.lin-meta .flow-node-status). */
+.casebar-id{font-size:11px;font-weight:600;letter-spacing:.02em;background:#fafbfc!important;
+  border:1px solid #ecedf0!important;border-radius:5px;padding:3px 8px}
+.casebar-id.fns-active{color:var(--amb-t)}
+.casebar-id.fns-done{color:var(--grn-t)}
+.casebar-id.fns-logged{color:var(--t3)}
+.casebar-st{background:none!important;border:0!important;padding:0;
+  font-size:10.5px;font-weight:500;display:inline-flex;align-items:center;gap:5px}
+.casebar-st::before{content:"";width:5px;height:5px;border-radius:50%;background:currentColor;flex:0 0 auto}
+.casebar-st.fns-active{color:var(--amb-t)}
+.casebar-st.fns-done{color:var(--grn-t)}
+.casebar-st.fns-logged{color:var(--t3)}
+/* Pushed to the far end: the bar reads identity first, action last. */
+.casebar-close{margin-left:auto;font-size:11px;font-weight:600;padding:5px 12px;
+  border-radius:6px;border:1px solid var(--grn-bd);background:var(--grn-bg);
+  color:var(--grn-t);cursor:pointer;font-family:inherit}
+.casebar-close:hover{background:var(--grn);color:#fff;border-color:var(--grn)}
+.casebar-close:disabled{opacity:.5;cursor:default}
+
 /* ── SPINE TIMELINE (conversation view) ── */
 /* A vertical thread: one node per request (a ticket's turns merged into one,
    or a single unticketed turn). Replaces the old 3-column flow-step grid. */

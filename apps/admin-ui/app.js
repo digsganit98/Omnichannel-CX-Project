@@ -1167,8 +1167,12 @@ function renderCentre(conv) {
         +     '<span class="cp ' + chn.pill + '" style="font-size:10px">' + chn.svg + chn.label + '</span>'
         +     '<span class="flow-emotion ' + exEmotionCls + '">' + escH(exEmotion) + '</span>'
         +     (exIntent ? '<span class="det-intent">' + escH(exIntent) + '</span>' : '')
-        +     (u.ticket ? '<span class="lin-tkt ' + statusCls + '">' + escH(u.ticket) + '</span>' : '<span class="lin-tkt lin-tkt--none">no ticket</span>')
-        +     '<span class="flow-node-status ' + statusCls + '">' + escH(statusLabel(nodeStatus)) + '</span>'
+              // The ticket id and its status are properties of the CASE, not of this
+              // exchange - identical on every row of the unit, so a four-exchange case
+              // printed them four times. They now live once on the case bar above, which
+              // is also where the action that changes them sits. What stays here is only
+              // what actually varies exchange to exchange: how it arrived, how they
+              // sounded, what they wanted, and when.
         +     (timeStr ? '<span class="lin-time">' + escH(timeStr) + '</span>' : '')
         +   '</div>'
         +   '<div class="det-q">'
@@ -1323,6 +1327,43 @@ function renderCentre(conv) {
   // draft belongs to one specific question, so its card is only shown when that
   // question is the one being displayed.
   var shownInboundTurnIds = {};
+
+  // ── CASE BAR ────────────────────────────────────────────────────────────
+  // The Detailed view shows ONE case at a time (see focusKey above), so the case's
+  // identity and the one action that ends it belong here - once, pinned - rather than
+  // repeated on every exchange row inside it. A case with four exchanges was drawing
+  // its ticket id and status four times, and closing meant leaving the conversation,
+  // expanding the right panel's collapsed Open Tickets card and picking the right id
+  // out of several that look alike. The agent has just read this case; the button
+  // closes THIS one, with nothing to look up.
+  //
+  // Sticky rather than fixed: #msgs is the scrolling area, so the bar stays pinned
+  // while the exchanges move under it without new markup in the page shell.
+  if (viewMode !== 'lineage' && focusKey) {
+    var barTicketId = /^u\d+$/.test(focusKey) ? null : focusKey;
+    var barStatus = barTicketId ? tktStatusMap[barTicketId] : null;
+    if (barTicketId) {
+      var barServiceable = barStatus === 'open' || barStatus === 'in_progress';
+      var barCls = barStatus === 'logged' ? 'fns-logged' : barServiceable ? 'fns-active' : 'fns-done';
+      var bar = document.createElement('div');
+      bar.className = 'casebar';
+      bar.innerHTML =
+          '<span class="casebar-id ' + barCls + '">' + escH(barTicketId.toUpperCase()) + '</span>'
+        + '<span class="casebar-st ' + barCls + '">' + escH(statusLabel(barStatus || 'active')) + '</span>'
+        // Only a serviceable case can be closed. A logged thread is a grouping id with
+        // nothing to end, and a closed one is already over - both state the fact and
+        // offer no button, so the bar never shows an action that would do nothing.
+        + (barServiceable
+            ? '<button class="casebar-close" type="button">Close case</button>'
+            : '');
+      if (barServiceable) {
+        bar.querySelector('.casebar-close').onclick = function() {
+          resolveTicket(this, barTicketId);
+        };
+      }
+      box.appendChild(bar);
+    }
+  }
 
   // ── Render theme groups with foldable headers ───────────────────────────
   groups.forEach(function(g, gi) {
@@ -1665,7 +1706,12 @@ function renderRight(conv, tickets) {
         + '<span class="tkt-st" style="' + stBg + '">' + escH(statusLabel(t.status)) + '</span>'
         + '</div><div class="tkt-desc">' + escH((t.title||t.intent||'').slice(0,60)) + '</div>'
         + '<div class="tkt-created">Created: ' + escH(fmtDateTime(t.created_at)) + '</div>'
-        + (isOpen ? '<button class="tkt-resolve-btn" onclick="event.stopPropagation();resolveTicket(this,\'' + escH(t.ticket_id) + '\')">Close ticket</button>' : '')
+        // No Close button here any more. Closing happens on the CASE BAR in the
+        // conversation, above the exchanges of the case being read - one button, on the
+        // case the agent has actually just read, with no ids to tell apart. This card
+        // stayed a list: it is the way to REACH the customer's other open cases (clicking
+        // a row focuses that case in the conversation, where its own bar closes it), which
+        // matters because the Detailed view shows one case at a time.
         + '</div>';
     }).join('');
     // Collapsed by default: the COUNT is the at-a-glance signal an agent needs, and
@@ -2022,8 +2068,10 @@ window.confirmOk = async function() {
 window.resolveTicket = function(btn, ticketId) {
   if (!ticketId) return;
   var adminUser = currentUser ? currentUser.username : 'admin';
-  // The endpoint rejects an empty reason (400). Asking here keeps that a single decision
-  // rather than a failed request the agent has to interpret.
+  // Still a prompt(), deliberately. The app's own showConfirm has a title, a message and
+  // two buttons - nowhere to TYPE - and closure_reason is the permanent record of why a
+  // regulated case ended. Swapping to the nicer dialog meant replacing the agent's own
+  // words with a generated sentence, which is a worse record in a prettier box.
   var reason = prompt('Why is this case being closed?');
   if (reason === null) return;
   reason = reason.trim();
