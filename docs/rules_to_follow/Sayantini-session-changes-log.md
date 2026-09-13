@@ -257,6 +257,8 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 167 — a Control Centre in front of the console, and a Service Desk that shows priority:** a four-box landing page after sign-in, plus a new supervisor triage page that surfaces `priority_score` — computed on every ticket and shown nowhere until now.
 - **Fix 168 — the desk stopped losing track of what it promised, and a human can reply again:** delivery now reports whether a message actually reached anyone, the conversation composer sends instead of faking it, a promise is anchored to the turn that made it so follow-ups repeat as long as a case runs, and Suggested Actions became an LLM reading the whole case rather than four `if` rules that had never been shown to anyone.
 - **Fix 169 — a customer's "thanks" proposes a close instead of performing one:** the pipeline now records a proposal on the ticket and a named person decides it from the Suggested Actions card, so no case ends without a human, a reason and an attribution.
+- **Fix 170 — close a case from the case you are reading:** a sticky bar above the exchanges carries the ticket id, its status and the one Close button, the per-ticket Close buttons left the right panel, and the closing reason arrives written from the case summary instead of being typed into a browser prompt.
+- **Fix 171 — one LLM review per case instead of three per conversation:** case_summary, case_advice and opportunity_generation became a single `case_review` call scoped to one ticket's turns and cached per ticket, measured at 2,062 tokens against 2,821, and the three right-panel cards now follow whichever case the Detailed view is showing.
 - **EC2 deploy 2026-09-07 (second) — Fix 152 to Fix 162, UI only:** four bind-mounted files took effect on landing with no rebuild and no container restarted; the two changed Python files are on the box but deliberately not built into the image.
 - **OPEN - Fix 149 turned three escalation gates into constants (NOT FIXED, measured):** moving the KB into the graph made retrieval EXHAUSTIVE - all 14 chunks, every message - and three gates that read `contexts` to judge relevance silently became no-ops. Measured on all 11 messages sent through the UI today, with contexts rebuilt from `retrieval_evidence`: **`_is_strong_l1_knowledge_answer` TRUE 11/11**, `knowledge_not_found` fired **0/11**, KB chunks per turn **min 14 max 14**. The third gate is the damaging one - returning True SKIPS the handoff check entirely, the rule that reads the customer's own words. Live consequence: the FD question, for which the KB has zero guidance, auto-sent as a confident L1 knowledge answer and volunteered a penalty rule from the model's own general knowledge. Today's real escalations (fraud, claim dispute) were caught earlier by intent-label rules, which MASKS this for the intents that have their own rules and exposes it for everything else. `confidence=0.95` is hardcoded in Priority 2, so `confidence < 0.3` cannot fire either. **Fix 149 verified the PROVENANCE consumers of contexts and never enumerated the DECISION consumers.** This gate has now broken twice in opposite directions (Fix 143 inverted it) because it reads a property of RETRIEVAL to answer a question about RELEVANCE - so the fix is not a patched condition. Fix 150 already supplies the raw material (`customer_holds`, each chunk's `concept`); probe it on real messages before designing the gate.
 - **Reference - local vs the hosted instance:** the two are NOT meant to match. Application code must; `docker-compose.yml` deliberately must not (Ollama commented out on EC2, and ngrok has **no** `profiles: ["tunnel"]` there - copying the local file over means the next `up` starts no tunnel and **WhatsApp goes silent with nothing to say why**). EC2 is the sole holder of the shared WhatsApp number, mailbox and ngrok domain, which is why local ships with those off. Three deploy traps, all already bitten: **no git on EC2** (scp only), `restart` runs **old code** (rebuild), and `restart` does **not re-read `.env`** (`up -d`). Plus what must never be done there - other teams' containers, the disk watermark, removing OpenSearch, `prune --volumes`.
@@ -9228,3 +9230,85 @@ Tests: 5 failed / 149 passed, the same five pre-existing failures, proven by sta
 change and re-running. Two tests rewritten to the propose contract and two added: one that a
 proposal changes nothing until approved and then closes with attribution, one that declining
 sticks across a refresh.
+
+---
+
+## Fix 170 — close a case from the case you are reading
+
+Committed `b51d760`. Closing meant leaving the conversation, expanding a collapsed Open
+Tickets card and picking the right id out of three that look alike — immediately after
+reading the case on screen. The Detailed view shows ONE case at a time (`app.js:1302`,
+`focusKey`), so the case's identity and the act that ends it now sit in a sticky bar above
+its exchanges: `TKT_FE80B8474C95 · Open · [Close case]`.
+
+The ticket id and status came OFF the exchange rows with it. They are properties of the
+case, identical on every row of the unit, so a four-exchange case printed them four times;
+the rows keep only what varies — channel, sentiment, intent, time. The right panel's
+per-ticket Close buttons are gone: one Close, on the case being read. **The Open Tickets
+card stays** as the list, because the conversation shows one case at a time and that card
+is how the customer's other cases are reached.
+
+**The closing reason arrives written.** It used to come from a browser `prompt()` — a raw
+system box for a permanent regulated record. Swapping it for the app's own `showConfirm`
+was tried first and reverted: that dialog has a title, a message and two buttons and
+nowhere to type, so the agent's words were being replaced by a generated sentence, which
+is a worse record in a prettier box. The dialog gained an optional field instead, prefilled
+from the case summary already on screen beside it. No new LLM call, and an empty field
+keeps the dialog open rather than closing a case with no reason.
+
+Two mistakes worth not repeating, both caught by the user. A button in the exchange row's
+header would have rendered once per exchange — four Close buttons on one ticket. And the
+premise inherited from `close-flow-design` — "the centre pane has no ticket badge" — was
+FALSE: `lin-tkt` had been rendering one on every row since the redesign. It was repeated
+three times as the reason this was expensive before anyone checked.
+
+Verified on the running page: one bar, zero ticket pills on rows, zero panel Close buttons,
+three tickets still listed and reachable. Tests 5 failed / 149 passed, unchanged.
+
+---
+
+## Fix 171 — one LLM review per case, not three per conversation
+
+Committed `099130f`, with migration 021. Opening a conversation fired three calls —
+`case_summary`, `case_advice`, `opportunity_generation` — and each re-sent the same case.
+Measured on the live fraud case: **2,821 tokens for the three against 2,062 for one**, a 26%
+saving that comes almost entirely from assembling the context once. The earlier claims for
+this work ("half the cost", then "~1,200 tokens") were both invented; 26% came off a usage
+row.
+
+**Scoping it to the case matters more than merging it.** The three calls were handed the
+whole CONVERSATION: 30 turns across 8 tickets on the live customer, of which 4 belong to the
+case on screen. The model reasoned about a loan enquiry while advising on a fraud dispute,
+and the summary needed a redaction hack because our own quoted status emails let a
+since-resolved ticket id outnumber the authoritative block 4:1. One case carries none of
+that, and the 8-turn window and 180-char truncation went with it.
+
+**Cached per case (`case_reviews`, keyed by ticket_id), which is what makes it cheaper
+rather than merely tidier.** `case_summaries` holds one row per conversation, so a message
+on a fraud dispute invalidated an unrelated loan query's summary and re-ran all three calls.
+Now a message on case A leaves every other case serving its stored review for nothing.
+
+The three cards follow the focused case — switching in Lineage moves the bar, the summary,
+the actions and the offers together. The gates stay in code and stay opposite: offers are
+suppressed on negative sentiment, actions deliberately are not, because an angry customer is
+the wrong person to sell to and the right person to chase what we owe them. One failed call
+now feeds three cards, so `llm_error` is reported distinctly and a gated or failed review is
+never written to the cache — a stored empty review cannot be told apart from "this case needs
+nothing", which is the 429-cached-as-no-offers trap.
+
+**`max_tokens` is 4,000, measured.** At 2,500 the call fails with a hard 400 and an EMPTY
+`failed_generation`: the model bills reasoning tokens before emitting anything and json_mode
+rejects a truncated object. The same trap cost `case_advisor` a rebuild at 900 → 2,000, and
+this response carries three sections instead of one.
+
+Three bugs, all found by running it rather than reading it. A ticketless conversation was
+refused, silently dropping the nudges the old engine made for a customer two angry messages
+in — caught by its own test. The summary card stuck on "Summarising…" because `renderRight`
+re-mounts that placeholder and nothing refetched on a case switch. And `/case-summary` kept
+its conversation-keyed cache guard ABOVE the new call, so it returned before the rewiring ran
+and every case rendered the fraud dispute's text — the route's own sha matched disk, so this
+was live code short-circuiting itself, not a stale file.
+
+Verified end to end: the FD case and the fraud case return their own summaries, a second
+visit fires no call, and zero calls to the three old operations since the restart. Tests
+5 failed / 149 passed — the same five pre-existing.
