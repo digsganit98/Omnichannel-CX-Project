@@ -33,6 +33,13 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .modal-field label{font-size:11px;font-weight:600;color:var(--t2)}
 .modal-field input{padding:8px 10px;border:1px solid var(--bdr);border-radius:var(--rs);font-family:inherit;font-size:13px;color:var(--t1);background:var(--surf2);outline:none;transition:border-color .15s}
 .modal-field input:focus{border-color:var(--blue);background:var(--surf)}
+/* Optional editable field in the confirm dialog (closure reason). Same treatment as the
+   reply draft's textarea, which is the app's settled "edit this before it is committed"
+   surface - neutral border here rather than amber, since this dialog is not a hold. */
+.modal-input{width:100%;min-height:68px;resize:vertical;font-family:inherit;font-size:12.5px;
+  line-height:1.5;padding:9px 11px;border:1px solid var(--bdr2);border-radius:8px;
+  background:#fff;color:var(--t1);box-sizing:border-box}
+.modal-input:focus{outline:none;border-color:var(--blue-bd)}
 .modal-btn{padding:9px;border-radius:var(--rs);border:none;background:var(--blue);color:#fff;font-family:inherit;font-size:13px;font-weight:600;cursor:pointer;transition:background .12s}
 .modal-btn:hover{background:var(--blue-t)}
 .confirm-icon{display:flex;justify-content:center;padding:4px 0 2px}

@@ -98,21 +98,28 @@ def test_kyc_rule_does_not_fire_for_resolved_ticket():
 # ── Engine + persistence integration ────────────────────────────────────────
 
 class _FakeAdviceGenerator:
-    """Stands in for GroqGenerator in the Suggested Actions route.
+    """Stands in for GroqGenerator behind the merged case review.
 
-    Duck-typed on the one method case_advisor calls. The text is what the real model is
-    asked to produce, so parse_and_validate exercises its real path - a stub returning
-    pre-parsed dicts would skip the validation this route depends on.
+    Duck-typed on the one method case_reviewer calls. The text is what the real model is
+    asked to produce - all THREE sections, since one call now feeds the Case Summary,
+    Suggested Actions and Suggested Offers cards - so parse_and_validate exercises its real
+    path. A stub returning pre-parsed dicts would skip the validation this route depends on.
+
+    `offers` is empty here on purpose: this customer's last two messages are negative, so
+    the sentiment gate closes the offers section before the model is even asked. Returning
+    an offer would test a path the code does not take.
     """
 
     def _generate(self, system_prompt, user_prompt, **kwargs):
         return {
             "llm_used": True,
             "text": (
-                '{"actions":[{"type":"acknowledgement",'
+                '{"situation":"Customer has complained twice and nobody has replied.",'
+                '"actions":[{"type":"acknowledgement",'
                 '"reason":"Customer has sent two negative messages and nobody has replied.",'
                 '"basis":"SENTIMENT: negative on the last 2 inbound turns",'
-                '"confidence":0.8}]}'
+                '"confidence":0.8}],'
+                '"offers":[]}'
             ),
         }
 
@@ -214,11 +221,12 @@ def test_route_persists_and_dedupes_recommendations(monkeypatch):
     )
     monkeypatch.setattr(agent_assist, "get_repository", lambda: repo)
     monkeypatch.setattr(agent_assist, "_try_neo4j", lambda: None)
-    # The card is LLM-driven (services/agent_assist_service/case_advisor.py), so stub the
-    # model rather than letting the route reach for a real Groq call: CI has no API key,
-    # the call would fail, llm_error would be set and nothing would persist - a test
-    # failure caused entirely by the environment. Returns the shape case_advisor validates.
-    monkeypatch.setattr(agent_assist, "_advice_generator", lambda: _FakeAdviceGenerator())
+    # All three cards are fed by ONE LLM call (services/agent_assist_service/case_reviewer.py),
+    # so stub the model rather than letting the route reach for a real Groq call: CI has no
+    # API key, the call would fail, llm_error would be set and nothing would persist - a test
+    # failure caused entirely by the environment. The seam is _review_generator; patching the
+    # old _advice_generator here silently stubbed nothing once the routes were merged.
+    monkeypatch.setattr(agent_assist, "_review_generator", lambda: _FakeAdviceGenerator())
 
     client = TestClient(app)
     headers = {"x-admin-key": "agent-assist-test-key"}
@@ -291,7 +299,7 @@ def _close_proposal_client(monkeypatch, repo):
 
     monkeypatch.setattr(agent_assist, "get_repository", lambda: repo)
     monkeypatch.setattr(agent_assist, "_try_neo4j", lambda: None)
-    monkeypatch.setattr(agent_assist, "_advice_generator", lambda: _FakeAdviceGenerator())
+    monkeypatch.setattr(agent_assist, "_review_generator", lambda: _FakeAdviceGenerator())
     return TestClient(app), {"x-admin-key": "close-flow-test-key"}, conv, ticket_id
 
 

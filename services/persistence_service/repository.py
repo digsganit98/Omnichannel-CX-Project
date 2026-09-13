@@ -65,6 +65,9 @@ class CXRepository(Protocol):
     def update_conversation_summary(self, conversation_id: str, summary: str) -> None: ...
     def get_case_summary(self, conversation_id: str) -> dict | None: ...
     def save_case_summary(self, conversation_id: str, latest_turn_id: str, summary: dict) -> None: ...
+    def get_case_review(self, ticket_id: str) -> dict | None: ...
+    def save_case_review(self, ticket_id: str, conversation_id: str, latest_turn_id: str,
+                         review: dict) -> None: ...
     def get_customer_context(self, customer_id: str) -> dict | None: ...
     def save_customer_context(self, customer_id: str, record_hash: str, categories: dict, model: str | None) -> None: ...
     def get_opportunity_evaluation(self, conversation_id: str) -> dict | None: ...
@@ -462,6 +465,51 @@ class SQLiteCXRepository:
         # so no table rebuild is needed, but nothing reads it.
         record.pop("open_items_json", None)
         return record
+
+    def get_case_review(self, ticket_id: str) -> dict | None:
+        """The cached review for ONE case, or None.
+
+        Callers compare latest_turn_id against that CASE's newest turn - not the
+        conversation's, which is what made the old per-conversation summary regenerate
+        whenever any unrelated case received a message.
+        """
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM case_reviews WHERE ticket_id = ?", (ticket_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        return self._json_fields(dict(row), "actions_json", "offers_json")
+
+    def save_case_review(self, ticket_id: str, conversation_id: str, latest_turn_id: str,
+                         review: dict) -> None:
+        """Upsert one review per case. All three sections together, from one response.
+
+        Only a SUCCESSFUL review reaches here. A gated or failed one must never be stored:
+        a stored empty review is indistinguishable from "this case needs nothing", which is
+        precisely the trap that let a 429 cache as "no offers" with no way to clear it.
+        """
+        with self.connection() as conn:
+            conn.execute(
+                "INSERT INTO case_reviews(ticket_id, conversation_id, latest_turn_id, situation, "
+                "actions_json, offers_json, offers_suppressed, model, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(ticket_id) DO UPDATE SET "
+                "conversation_id = excluded.conversation_id, "
+                "latest_turn_id = excluded.latest_turn_id, situation = excluded.situation, "
+                "actions_json = excluded.actions_json, offers_json = excluded.offers_json, "
+                "offers_suppressed = excluded.offers_suppressed, model = excluded.model, "
+                "created_at = excluded.created_at",
+                (
+                    ticket_id, conversation_id, latest_turn_id,
+                    review.get("situation") or "",
+                    json_text(review.get("actions") or []),
+                    json_text(review.get("offers") or []),
+                    review.get("offers_suppressed"),
+                    review.get("model"),
+                    utc_now(),
+                ),
+            )
 
     def save_case_summary(self, conversation_id: str, latest_turn_id: str, summary: dict) -> None:
         """Upsert: one summary per conversation, replaced whenever it is regenerated."""

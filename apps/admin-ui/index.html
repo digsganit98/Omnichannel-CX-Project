@@ -6,7 +6,7 @@
 <title>OmnichannelCX</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="icon" type="image/png" href="/admin-ui/assets/ganit-logo.png">
-<link rel="stylesheet" href="/admin-ui/assets/style.css?v=20260913-case3">
+<link rel="stylesheet" href="/admin-ui/assets/style.css?v=20260914-merge1">
 </head>
 <body>
 
@@ -871,6 +871,10 @@
       <div class="modal-title" id="confirmTitle">Confirm action</div>
       <div class="modal-sub" id="confirmMsg"></div>
     </div>
+    <!-- Optional editable field, hidden unless showConfirm is given `input`. Closing a
+         case needs a reason recorded, and the agent should not have to write what the
+         app already knows - the field arrives filled from the case summary. -->
+    <textarea class="modal-input hidden" id="confirmInput" rows="3"></textarea>
     <div style="display:flex;gap:10px">
       <button class="modal-btn" style="background:var(--surf2);color:var(--t2);border:1px solid var(--bdr);flex:1" id="confirmCancelBtn" onclick="closeConfirm()">Cancel</button>
       <button class="modal-btn" style="flex:1" id="confirmOkBtn" onclick="confirmOk()">Confirm</button>
@@ -881,6 +885,6 @@
 <!-- d3-force, vendored (15KB, tree-shaken to the 7 functions used). Local, not a CDN:
      the app has no other external JS and a demo must not depend on a network fetch. -->
 <script src="/admin-ui/assets/vendor-d3-force.js?v=20260902"></script>
-<script src="/admin-ui/assets/app.js?v=20260913-case3"></script>
+<script src="/admin-ui/assets/app.js?v=20260914-merge2"></script>
 </body>
 </html>

@@ -1292,6 +1292,16 @@ function renderCentre(conv) {
       state.detailFocus[convViewKey] = u.ticket || ('u' + u.idx);
       state.convView[convViewKey] = 'detailed';
       renderCentre(conv);
+      // The right panel follows the case. Its three cards are one per-case LLM review, so
+      // leaving them on the previous case would put a summary, nudges and offers about a
+      // loan query beside a fraud dispute.
+      //
+      // loadCaseSummary must come WITH it: renderRight re-mounts #csum-body as the literal
+      // "Summarising..." placeholder, and nothing else refetches on a case switch, so the
+      // card sat on that placeholder forever. The other two cards fetch inside renderRight;
+      // the summary is the one that does not.
+      renderRight(conv, allTickets());
+      loadCaseSummary(conv.conversation_id, false);
     };
     el.addEventListener('click', drill);
     el.addEventListener('keydown', function(e) {
@@ -1734,7 +1744,8 @@ function renderRight(conv, tickets) {
   // below, because those are a sales judgement and these are work that is slipping.
   body.innerHTML += '<div class="rpcard" id="rpNbaCard"><div class="rplbl rplbl-tickets">Suggested Actions</div>'
     + '<div id="rpNbaBody" style="font-size:11px;color:var(--t3)">Checking…</div></div>';
-  api('/admin/agent-assist/next-best-actions?conversation_id=' + encodeURIComponent(conv.conversation_id))
+  api('/admin/agent-assist/next-best-actions?conversation_id=' + encodeURIComponent(conv.conversation_id)
+      + focusedCaseParam(conv))
     .then(function(result) { renderNbaActions(result); })
     .catch(function() {
       var el = document.getElementById('rpNbaBody');
@@ -1745,7 +1756,8 @@ function renderRight(conv, tickets) {
   // approves → editable offer draft → sent to WhatsApp + email).
   body.innerHTML += '<div class="rpcard" id="rpOppCard"><div class="rplbl rplbl-offers">Suggested Offers</div>'
     + '<div id="rpOppBody" style="font-size:11px;color:var(--t3)">Checking…</div></div>';
-  api('/admin/agent-assist/opportunities?conversation_id=' + encodeURIComponent(conv.conversation_id))
+  api('/admin/agent-assist/opportunities?conversation_id=' + encodeURIComponent(conv.conversation_id)
+      + focusedCaseParam(conv))
     .then(function(result) { renderOpportunities(result); })
     .catch(function() {
       var el = document.getElementById('rpOppBody');
@@ -1852,7 +1864,8 @@ window.reloadNbaActions = function(ev) {
   var el = document.getElementById('rpNbaBody');
   if (el) el.textContent = 'Checking…';
   api('/admin/agent-assist/next-best-actions?conversation_id='
-      + encodeURIComponent(state.convDetail.conversation_id))
+      + encodeURIComponent(state.convDetail.conversation_id)
+      + focusedCaseParam(state.convDetail))
     .then(renderNbaActions)
     .catch(function() {
       if (el) el.textContent = 'Unavailable';
@@ -2031,6 +2044,18 @@ function showConfirm(opts) {
   document.getElementById('confirmIcon').innerHTML = icon;
   document.getElementById('confirmTitle').textContent = title;
   document.getElementById('confirmMsg').textContent = msg;
+  // Optional editable field. `input` is {value, placeholder}: shown prefilled, and its
+  // text is handed to onConfirm. Absent for every other caller, which keeps the dialog
+  // exactly as it was.
+  var inputEl = document.getElementById('confirmInput');
+  if (opts.input) {
+    inputEl.value = opts.input.value || '';
+    inputEl.placeholder = opts.input.placeholder || '';
+    inputEl.classList.remove('hidden');
+  } else {
+    inputEl.value = '';
+    inputEl.classList.add('hidden');
+  }
   var okBtn = document.getElementById('confirmOkBtn');
   okBtn.textContent = okLabel;
   okBtn.style.background = okColor;
@@ -2044,11 +2069,17 @@ window.closeConfirm = function() {
 };
 
 window.confirmOk = async function() {
+  var inputEl = document.getElementById('confirmInput');
+  var typed = inputEl.classList.contains('hidden') ? null : (inputEl.value || '').trim();
+  // A dialog with a REQUIRED field must not close empty and silently do nothing. Kept
+  // open with the field focused instead, because the alternative is a close that looks
+  // like it worked and left no record of why the case ended.
+  if (typed === '') { inputEl.focus(); return; }
   document.getElementById('confirmModal').classList.add('hidden');
   if (_confirmCallback) {
     var cb = _confirmCallback;
     _confirmCallback = null;
-    await cb();
+    await cb(typed);
   }
 };
 
@@ -2068,16 +2099,44 @@ window.confirmOk = async function() {
 window.resolveTicket = function(btn, ticketId) {
   if (!ticketId) return;
   var adminUser = currentUser ? currentUser.username : 'admin';
-  // Still a prompt(), deliberately. The app's own showConfirm has a title, a message and
-  // two buttons - nowhere to TYPE - and closure_reason is the permanent record of why a
-  // regulated case ended. Swapping to the nicer dialog meant replacing the agent's own
-  // words with a generated sentence, which is a worse record in a prettier box.
-  var reason = prompt('Why is this case being closed?');
-  if (reason === null) return;
-  reason = reason.trim();
-  if (!reason) { toast('A closure reason is required.'); return; }
-  btn.disabled = true;
-  api('/admin/tickets/' + encodeURIComponent(ticketId) + '/close', {
+  // The reason arrives WRITTEN. The app has already read this case - the Case Summary
+  // card beside the conversation holds a generated account of where it stands, cached
+  // against the newest turn - so asking the agent to retype it as homework is the app
+  // failing to use what it knows. They confirm it, or edit it if it is wrong.
+  //
+  // No new LLM call: this is the same cached text already on screen. When it is
+  // unavailable the field opens empty and confirmOk refuses to submit, so a case can
+  // still never close without a recorded reason.
+  var proposed = _csumPlain(state.convDetail && state.convDetail.conversation_id);
+  showConfirm({
+    icon: '⚠',
+    title: 'Close ' + ticketId.toUpperCase() + '?',
+    msg: 'This ends the case and records who closed it and why. The customer is not notified.',
+    okLabel: 'Close the case',
+    okColor: 'var(--grn)',
+    input: { value: proposed, placeholder: 'Why is this case being closed?' },
+    onConfirm: function(reason) { _closeCase(btn, ticketId, adminUser, reason); },
+  });
+};
+
+// The cached case summary as plain text, for prefilling the closure reason. Reads the
+// same cache the right-panel card renders from, so the two can never disagree; returns
+// '' when there is none, which leaves the field empty rather than inventing a reason.
+function _csumPlain(conversationId) {
+  // Same composite key loadCaseSummary stores under - conversation + focused case. Reading
+  // the bare conversation id here returned undefined once summaries became per-case, which
+  // would have silently emptied the prefilled closure reason.
+  var html = conversationId
+    ? _csumCache[conversationId + '|' + (state.detailFocus[conversationId] || '')] : '';
+  if (!html) return '';
+  var tmp = document.createElement('div');
+  tmp.innerHTML = html;
+  return (tmp.textContent || '').trim();
+}
+
+function _closeCase(btn, ticketId, adminUser, reason) {
+  if (btn) btn.disabled = true;
+  return api('/admin/tickets/' + encodeURIComponent(ticketId) + '/close', {
     method: 'POST',
     body: JSON.stringify({ reason: reason, actor: adminUser })
   }).then(function() {
@@ -3043,6 +3102,22 @@ function isServiceable(t) {
   return !!t && (t.status === 'open' || t.status === 'in_progress');
 }
 
+// The case the Detailed view is showing, as a query-string fragment for the three
+// right-panel endpoints. They are all fed by ONE per-case LLM review now, so the cards
+// must ask about the SAME case the conversation is showing - otherwise the agent reads a
+// fraud dispute while the panel beside it summarises a loan query.
+//
+// state.detailFocus holds renderCentre's focusKey, which is `u.ticket` for a ticketed unit
+// and a synthetic 'u<idx>' for one without a ticket. Only a real ticket id is sent; for
+// anything else the routes fall back to the conversation's active case, which is what they
+// did before this change.
+function focusedCaseParam(conv) {
+  if (!conv) return '';
+  var key = state.detailFocus[conv.conversation_id];
+  return (key && key.indexOf('tkt_') === 0)
+    ? '&ticket_id=' + encodeURIComponent(key) : '';
+}
+
 function fmtDateTime(iso) {
   if (!iso) return '—';
   var d = new Date(iso);
@@ -3874,19 +3949,30 @@ function applyCaseSummary(conversationId) {
 
 async function loadCaseSummary(conversationId, force) {
   if (!conversationId) return;
+  // The summary is now PER CASE, like the two cards below it, so every cache and in-flight
+  // guard here must key on the case as well as the conversation. Keyed on the conversation
+  // alone they served case A's summary while the agent was reading case B.
+  var _focusKey = (state.detailFocus[conversationId] || '');
+  var csumKey = conversationId + '|' + _focusKey;
   // A re-render wiped the card back to the placeholder: refill it from the cache. This runs
   // even when the fetch is skipped below, which is exactly the case the old guard broke.
-  if (!force && applyCaseSummary(conversationId)) return;
-  if (!force && _csumFor === conversationId) return;   // fetch already in flight for this one
-  _csumFor = conversationId;
+  if (!force && applyCaseSummary(csumKey)) return;
+  if (!force && _csumFor === csumKey) return;   // fetch already in flight for this one
+  _csumFor = csumKey;
   var bodyEl = document.getElementById('csum-body');
   if (!bodyEl) return;
   if (force) bodyEl.innerHTML = '<span class="csum-muted">Summarising…</span>';
   try {
+    // ticket_id names WHICH case to summarise, so this card matches the two below it and
+    // the case bar above. Absent, the route falls back to the conversation's active case.
+    var _tkt = (_focusKey.indexOf('tkt_') === 0)
+      ? '&ticket_id=' + encodeURIComponent(_focusKey) : '';
     var p = await api('/admin/conversations/' + encodeURIComponent(conversationId)
-      + '/case-summary' + (force ? '?refresh=true' : ''));
-    // The panel may have moved to another conversation while this was in flight.
-    if (_csumFor !== conversationId) return;
+      + '/case-summary?refresh=' + (force ? 'true' : 'false') + _tkt);
+    // The panel may have moved to another conversation OR another case while this was in
+    // flight - both change the key, and comparing against the conversation alone let a
+    // slow response for case A overwrite the card showing case B.
+    if (_csumFor !== csumKey) return;
     bodyEl = document.getElementById('csum-body');
     if (!bodyEl) return;
     if (!p.summary) {
@@ -3905,10 +3991,10 @@ async function loadCaseSummary(conversationId, force) {
     // produced was an echo or empty, through three prompt rules written to stop it.
     // Open work is in the Open Tickets card directly below, with status and Resolve.
     var html = (p.summary.situation ? '<div class="csum-sit">' + escH(p.summary.situation) + '</div>' : '');
-    _csumCache[conversationId] = html;   // survives the next renderRight
+    _csumCache[csumKey] = html;   // survives the next renderRight, per case
     bodyEl.innerHTML = html;
   } catch (e) {
-    if (_csumFor !== conversationId) return;
+    if (_csumFor !== csumKey) return;
     var el = document.getElementById('csum-body');
     if (el) el.innerHTML = '<span class="csum-muted">Summary unavailable right now.</span>';
   }

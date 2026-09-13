@@ -18,7 +18,7 @@ from apps.api.dependencies.security import require_admin_auth
 # but the class stays imported and on disk: tests/test_agent_assist.py exercises each rule
 # directly, and deleting it would break a passing suite for no gain.
 from services.agent_assist_service.next_best_action import NextBestActionEngine
-from services.agent_assist_service import case_advisor, opportunity_engine
+from services.agent_assist_service import case_advisor, case_reviewer, opportunity_engine
 from services.rag_service.groq_generator import GroqGenerator
 from shared.schemas.agent_assist import (
     ActionType,
@@ -57,6 +57,92 @@ def _try_neo4j():
         return None
 
 
+def _review_generator():
+    """The model behind the merged case review. A seam, so tests can replace it."""
+    return GroqGenerator()
+
+
+def case_review(repository, conversation_id: str, ticket_id: str | None) -> dict:
+    """ONE review of ONE case, cached against that case's own newest turn.
+
+    The single LLM call behind all three right-panel cards. It replaces three calls -
+    case_summary, case_advice and opportunity_generation - that each re-sent the same
+    case: measured 2,821 tokens against 2,062 for this one, a 26% saving that comes almost
+    entirely from assembling the context once instead of three times.
+
+    Cached per CASE, which is what makes it cheaper rather than merely tidier. The old
+    summary cache was keyed by conversation, so a message on a fraud dispute invalidated
+    the summary of an unrelated loan query and re-ran all three calls; here a message on
+    case A leaves every other case serving its stored review for nothing.
+
+    Returns the three sections plus, distinctly, WHY a section is empty:
+      suppressed   - deliberately silent (a draft is held, or the case is closed)
+      llm_error    - the call FAILED. Never to be rendered as "nothing to do".
+    A gated or failed review is never written to the cache: a stored empty review cannot
+    be told apart from "this case needs nothing", which is the trap that let a 429 cache
+    as "no offers" with no way to clear it.
+    """
+    conversation = repository.get_conversation(conversation_id)
+    customer_id = (conversation or {}).get("customer_id") or ""
+
+    ticket = repository.get_ticket(ticket_id) if ticket_id else None
+    if ticket is None:
+        # Same fallback the route has always used, so a caller that does not know which
+        # case it means still gets the conversation's active one.
+        active = repository.find_active_ticket(conversation_id)
+        ticket = active.model_dump(mode="json") if active else None
+    # A conversation with no ticket is still reviewed. It has turns, a customer and a
+    # sentiment, and the engine this replaces advised on it; refusing here would silently
+    # drop the acknowledgement nudge for anyone who has not been ticketed yet.
+    tid = ticket["ticket_id"] if ticket else None
+    all_turns = repository.list_conversation_turns(conversation_id)
+    # THIS case's turns. The old calls were handed the whole conversation - 30 turns across
+    # 8 tickets on the live customer - so the model reasoned about a loan enquiry while
+    # advising on a fraud dispute.
+    # With no ticket there is nothing to scope BY, so the conversation's own turns are the
+    # case - which is what they are at that point.
+    case_turns = [t for t in all_turns if t.get("ticket_id") == tid] if tid else all_turns
+    latest_turn_id = case_turns[-1]["turn_id"] if case_turns else ""
+
+    # The cache is keyed by ticket_id, so a ticketless conversation cannot be cached. It is
+    # reviewed every time, which is correct and cheap: it has no case history to re-read.
+    cached = repository.get_case_review(tid) if tid else None
+    if cached and cached.get("latest_turn_id") == latest_turn_id and latest_turn_id:
+        return {
+            "situation": cached.get("situation") or "",
+            "actions": cached.get("actions") or [],
+            "offers": cached.get("offers") or [],
+            "offers_suppressed": cached.get("offers_suppressed"),
+            "ticket_id": tid,
+            "cached": True,
+        }
+
+    pending_drafts = repository.list_reply_drafts(
+        conversation_id=conversation_id, status="pending")
+    graph_context = _graph_context_for(repository, customer_id)
+    # Sentiment stays CUSTOMER-wide, read from the whole conversation: how someone feels is
+    # not compartmentalised by case, and the right panel reports it the same way.
+    sentiment = _recent_sentiment(all_turns)
+
+    result = case_reviewer.review(
+        generator=_review_generator(),
+        ticket=ticket,
+        turns=case_turns,
+        graph_context=graph_context,
+        sentiment=sentiment,
+        pending_drafts=pending_drafts,
+        charges=graph_context.get("charges"),
+        all_turns=all_turns,
+    )
+    result["ticket_id"] = tid
+    # Only a successful review of a real case is stored. `tid` is None for a conversation
+    # with no ticket yet, and case_reviews is keyed by ticket_id with a foreign key to
+    # tickets, so writing that row would raise rather than cache anything.
+    if tid and not result.get("llm_error") and not result.get("suppressed"):
+        repository.save_case_review(tid, conversation_id, latest_turn_id, result)
+    return result
+
+
 @router.get("/next-best-actions")
 def get_next_best_actions(conversation_id: str, ticket_id: str | None = None) -> dict:
     """What needs saying to this customer, decided by the LLM (see case_advisor).
@@ -89,20 +175,15 @@ def get_next_best_actions(conversation_id: str, ticket_id: str | None = None) ->
         "overdue": _promise_overdue(ticket),
     }
 
-    # Injectable so a test can stub the model instead of reaching for a real Groq call.
-    # Without this seam the route reached GroqGenerator() directly and every test of it
-    # depended on an API key being present - which in CI it is not, so the call failed,
-    # llm_error was set, and no rows were persisted. The test was right and the route was
-    # untestable; the fix belongs here rather than in a weakened assertion.
-    advice = case_advisor.advise(
-        generator=_advice_generator(),
-        ticket=ticket,
-        turns=turns,
-        graph_context=graph_context,
-        promise=promise,
-        sentiment=sentiment,
-        pending_drafts=pending_drafts,
-    )
+    # ONE review of this case now feeds all three right-panel cards - the situation, these
+    # actions, and the offers below. It replaces three separate calls that each re-sent the
+    # same case (2,821 tokens against 2,062, measured), and it is cached per CASE, so a
+    # message on one of the customer's cases no longer regenerates the others.
+    #
+    # The generator seam lives inside case_review (_review_generator) for the same reason it
+    # lived here before: CI has no API key, and a route that reaches GroqGenerator() directly
+    # is untestable. The fix belongs in the route, not in a weakened assertion.
+    advice = case_review(repository, conversation_id, (ticket or {}).get("ticket_id"))
     llm_error = advice.get("llm_error")
     suppressed = advice.get("suppressed")
 
@@ -428,16 +509,26 @@ def get_opportunities(conversation_id: str) -> dict:
         return {"conversation_id": conversation_id, "customer_id": customer_id,
                 "suppressed": None, "opportunities": _pending_offers()}
 
-    from services.rag_service.groq_generator import GroqGenerator
-    result = opportunity_engine.generate_opportunities(
-        generator=GroqGenerator(),
-        customer=customer,
-        graph_context=graph_context,
-        tickets=tickets,
-        turns=turns,
-        already_suggested=already_suggested,
-        charges=charges,
-    )
+    # Offers come from the SAME review that produced this case's summary and actions -
+    # one call, not a second one on the same conversation. The fingerprint cache above is
+    # kept: it answers "have these inputs already been evaluated", which is a different
+    # question from the per-case cache inside case_review, and removing it would change
+    # when offers refresh for reasons that have nothing to do with this merge.
+    #
+    # The offers section carries its own suppression reason (negative sentiment gates
+    # selling, while actions deliberately still fire), so it is mapped onto the shape this
+    # route has always returned.
+    review = case_review(repository, conversation_id, None)
+    result = {
+        "opportunities": review.get("offers") or [],
+        "suppressed": review.get("offers_suppressed") or review.get("suppressed"),
+    }
+    if review.get("llm_error"):
+        # A failed review must never read as "no offers worth making" - that is the trap
+        # recorded in ec2-operations.md, where a 429 cached as empty and Refresh could not
+        # clear it. Serve whatever is already pending and record nothing.
+        return {"conversation_id": conversation_id, "customer_id": customer_id,
+                "suppressed": None, "opportunities": _pending_offers()}
 
     # Record that this evaluation ran, whatever it produced — including nothing. Without
     # this the no-offer case leaves no trace and re-runs on every render forever.

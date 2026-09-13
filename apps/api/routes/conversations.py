@@ -12,7 +12,6 @@ from apps.api.routes.reply_drafts import _mark_ticket_responded
 from services.channel_service.delivery import OutboundDeliveryService
 from services.neo4j_service.queries import TRANSACTIONAL_INTENTS
 from services.orchestration_service.graph import HOLDING_MESSAGE
-from services.rag_service.groq_generator import GroqGenerator
 from shared.schemas.messages import Channel, InboundMessage
 
 logger = logging.getLogger(__name__)
@@ -150,7 +149,7 @@ def send_agent_reply(conversation_id: str, payload: AgentReplyRequest) -> dict:
 
 
 @router.get("/{conversation_id}/case-summary")
-def case_summary(conversation_id: str, refresh: bool = False) -> dict:
+def case_summary(conversation_id: str, refresh: bool = False, ticket_id: str | None = None) -> dict:
     """An agent-facing summary of where this conversation stands.
 
     Generated on demand rather than per message. An agent reads a summary when they
@@ -169,39 +168,41 @@ def case_summary(conversation_id: str, refresh: bool = False) -> dict:
         return {"conversation_id": conversation_id, "status": "empty", "summary": None}
     latest_turn_id = turns[-1]["turn_id"]
 
-    if not refresh:
-        cached = repo.get_case_summary(conversation_id)
-        if cached and cached.get("latest_turn_id") == latest_turn_id:
-            return {
-                "conversation_id": conversation_id,
-                "status": "cached",
-                "generated_at": cached.get("created_at"),
-                "summary": {"situation": cached.get("situation", "")},
-            }
+    # NO conversation-keyed cache here any more, and its absence is the point. This route
+    # used to short-circuit on case_summaries, which holds ONE row per conversation: with
+    # per-case summaries that returned the same text for every ticket on the conversation,
+    # and it returned BEFORE the call below ever ran - so the rewiring underneath it was
+    # dead code and both cases rendered the fraud dispute's summary.
+    #
+    # Caching now lives in case_review, keyed by ticket_id, which is the only key that can
+    # tell two of a customer's cases apart.
+    #
+    # `open_cases` went with it: case_review assembles its own context from the case's own
+    # turns, ticket and records, so the lookup fed nothing.
 
-    # Open tickets read from SQLite, the system of record for ticket status — the same
-    # source the right-panel Open Tickets card uses, so the summary can never disagree
-    # with the card sitting beside it.
-    open_cases = []
-    try:
-        open_cases = repo.find_open_tickets_for_customer(conversation["customer_id"], limit=5) or []
-    except Exception:
-        logger.exception("case_summary_open_tickets_failed")
-
-    generator = GroqGenerator()
-    summary = generator.summarize_case(
-        turns,
-        {"open_cases": open_cases, "graph_context": {"name": conversation.get("display_name")}},
-    )
+    # The situation comes from the SAME per-case review that produces Suggested Actions and
+    # Suggested Offers - one LLM call behind all three cards instead of three that each
+    # re-sent this case. Scoped to the case as well as merged: the old call was handed the
+    # whole conversation, which on the live customer is 30 turns across 8 tickets, and it
+    # needed a redaction hack because our own quoted status emails let a since-resolved
+    # ticket id outnumber the authoritative block 4:1. A single case carries none of that.
+    # ticket_id names WHICH case to summarise, so the card matches the one the Detailed
+    # view is showing. Absent, the route falls back to the conversation's active case,
+    # which is what it did before the cards became per-case.
+    from apps.api.routes.agent_assist import case_review
+    review = case_review(repo, conversation_id, ticket_id)
+    summary = None
+    if not review.get("llm_error") and not review.get("suppressed") and review.get("situation"):
+        summary = {"situation": review["situation"], "model": None}
     if summary is None:
         # No LLM (quota, outage, no key). Say so rather than showing the agent a
         # fabricated or stale-but-unlabelled summary.
         return {"conversation_id": conversation_id, "status": "unavailable", "summary": None}
 
-    try:
-        repo.save_case_summary(conversation_id, latest_turn_id, summary)
-    except Exception:
-        logger.exception("case_summary_save_failed")  # serve it anyway; caching is best-effort
+    # Nothing is written here. case_review already stored this review against its TICKET;
+    # writing it again to case_summaries would file a per-case situation under a
+    # conversation-wide key, which is the exact confusion that made every case on this
+    # conversation report the fraud dispute's summary.
 
     return {
         "conversation_id": conversation_id,
