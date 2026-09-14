@@ -54,6 +54,9 @@ from datetime import datetime, timezone
 from services.agent_assist_service import opportunity_engine
 from services.agent_assist_service.case_advisor import ACTION_TYPES, _when
 from services.pii_service.masker import mask_text, unmask_text
+# The shared graph-context renderer. answer_generation and classify_message already use it;
+# reusing it here is what stopped this prompt carrying counts where the others carry facts.
+from services.rag_service.groq_generator import _format_graph_context
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +96,8 @@ _SYSTEM_PROMPT = (
     "1. Do NOT write a message to the customer. You are briefing the agent.\n"
     "2. NEVER suggest an internal check, lookup, escalation or system fix. If the only next\n"
     "   step is something the agent does internally, return no action for it.\n"
-    "3. State only what the CASE FACTS support. Never assert that an action was completed,\n"
+    "3. State only what the CASE FACTS or CUSTOMER RECORDS support. Never assert that an\n"
+    "   action was completed,\n"
     "   or that a deadline has passed, unless a fact says so explicitly.\n"
     "4. `confidence` is 0 to 1 and must MEAN something. Reserve above 0.9 for what the\n"
     "   record states outright; use 0.5-0.7 where you are inferring. Never 1.0 for all.\n"
@@ -161,29 +165,20 @@ def build_user_prompt(*, ticket: dict | None, turns: list[dict], graph_context: 
     else:
         facts.append("- No case has been opened for this conversation yet")
 
-    # KEY NAMES ARE MEASURED, NOT GUESSED. get_customer_context_by_id returns exactly:
-    # accounts, charges, city, claims, credit_cards, customer_id, email, fixed_deposits,
-    # kyc, loans, name, open_cases, phone, policies, segment, transactions. An earlier
-    # draft of case_advisor read "pending_transactions" and "rejected_claims" - neither
-    # exists, so the records block rendered "none on record" while the Customer Context
-    # panel beside it showed the two facts that made the case worth writing about.
-    records: list[str] = []
-    if graph_context.get("segment"):
-        records.append(f"- Segment: {graph_context['segment']}")
-    for label, key in (("Accounts", "accounts"), ("Credit cards", "credit_cards"),
-                       ("Loans", "loans"), ("Policies", "policies"),
-                       ("Fixed deposits", "fixed_deposits")):
-        if graph_context.get(key):
-            records.append(f"- {label}: {len(graph_context[key])}")
-    for claim in (graph_context.get("claims") or [])[:3]:
-        records.append(
-            f"- Claim {claim.get('claim_id')}: {claim.get('status')}, "
-            f"claimed INR {claim.get('amount_claimed_inr')}"
-        )
-    for txn in (graph_context.get("transactions") or [])[:3]:
-        records.append(
-            f"- Txn {txn.get('txn_id')}: {txn.get('status')}, INR {txn.get('amount')}"
-        )
+    # The SHARED renderer, the one answer_generation and classify_message already use. It
+    # prints whatever the node carries, so a field added to the graph appears here with no
+    # code change - and nothing can be silently omitted.
+    #
+    # This block used to be hand-written: segment, then a COUNT of each holding
+    # ("Credit cards: 1"), then three claims and three transactions. Measured against the
+    # same payload, that dropped DPD 45, the Rs.1,258 late-payment penalty, the Rs.1,284
+    # LateFee charge and the Rs.91,821 due - every fact a proactive_warning is defined
+    # against, so that action type could not fire on any case.
+    #
+    # _format_graph_context's own docstring records this exact bug being fixed once before:
+    # "six hand-written blocks used to sit here, each naming the 4-6 fields it printed...
+    # her charges were absent entirely". A seventh was written here anyway.
+    records_text = _format_graph_context(graph_context)
 
     # THIS case's turns, whole. No 8-turn window and no 180-char truncation: those existed
     # because the old prompt carried a 30-turn conversation spanning every ticket.
@@ -196,7 +191,7 @@ def build_user_prompt(*, ticket: dict | None, turns: list[dict], graph_context: 
     blocks = [
         "CASE FACTS\n" + "\n".join(facts),
         "THIS CASE'S CONVERSATION\n" + convo,
-        "CUSTOMER RECORDS\n" + ("\n".join(records) or "- none on record"),
+        "CUSTOMER RECORDS\n" + (records_text or "- none on record"),
         f"SENTIMENT: {sentiment or 'not assessed'}",
     ]
     if candidates:

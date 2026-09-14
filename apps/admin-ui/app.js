@@ -644,7 +644,6 @@ async function refreshSelectedConv() {
       state.convDetail = detail;
       renderCentre(detail);
       renderRight(detail, allTickets());
-      loadCaseSummary(detail.conversation_id, false);
     }
   } catch(e) {}
 }
@@ -701,7 +700,6 @@ async function selectConv(convId) {
     state.convDetail = detail;
     renderCentre(detail);
     renderRight(detail, tickets);
-    loadCaseSummary(detail.conversation_id, false);
   } catch(e) {
     msgsEl.className = 'msgs';
     msgsEl.innerHTML = '<div style="padding:20px;text-align:center;color:var(--red-t);font-size:12px">' + escH(e.message) + '</div>';
@@ -1037,6 +1035,13 @@ function renderCentre(conv) {
           // the previous exchange's reply, and nothing pairs with it.
           if (it.offer) startExchange(null);
           else if (!cur) startExchange(null);  // reply with no preceding inbound in this unit
+          // A SECOND substantive reply with no customer message between them is its own
+          // contact, not an overwrite. `cur.reply = ...` used to replace the first one, so
+          // a case we wrote to three times (reply, then an update, then a chased follow-up)
+          // rendered as ONE box showing only the newest - the earlier messages were built,
+          // then discarded, and the case could not be read as a sequence. A HIL case is
+          // almost never a single exchange; every contact gets its own row and its own time.
+          else if (cur.reply && !isHolding(it.step.outbound.text)) startExchange(null);
           if (isHolding(it.step.outbound.text)) cur.holdingText = it.step.outbound.text;
           else cur.reply = it.step.outbound;   // latest substantive reply for this exchange
           cur.ref = it.step.outbound;          // latest turn in this exchange
@@ -1165,7 +1170,12 @@ function renderCentre(conv) {
           // about its follow-up looked identical.
         +   '<div class="det-head">'
         +     '<span class="cp ' + chn.pill + '" style="font-size:10px">' + chn.svg + chn.label + '</span>'
-        +     '<span class="flow-emotion ' + exEmotionCls + '">' + escH(exEmotion) + '</span>'
+              // Sentiment belongs to the CUSTOMER's message. On an exchange we started there
+              // is no inbound turn, and turnSentiment(null) falls back to 'Neutral' - which
+              // asserts how the customer felt about a message they never sent. Drawn only
+              // when there is something of theirs to have a feeling about, the same way
+              // det-intent is already omitted when the classifier never labelled the turn.
+        +     (ex.inbound ? '<span class="flow-emotion ' + exEmotionCls + '">' + escH(exEmotion) + '</span>' : '')
         +     (exIntent ? '<span class="det-intent">' + escH(exIntent) + '</span>' : '')
               // The ticket id and its status are properties of the CASE, not of this
               // exchange - identical on every row of the unit, so a four-exchange case
@@ -1175,9 +1185,15 @@ function renderCentre(conv) {
               // sounded, what they wanted, and when.
         +     (timeStr ? '<span class="lin-time">' + escH(timeStr) + '</span>' : '')
         +   '</div>'
+          // An exchange with NO customer message is one WE started - a promised update, a
+          // chased follow-up. Labelling it "Customer Query —" put an em-dash under a header
+          // promising a question, which reads as data we failed to load rather than as a
+          // contact we deliberately made. Say which it is.
         +   '<div class="det-q">'
-        +     '<span class="det-lbl">Customer Query</span>'
-        +     '<div class="det-q-text">' + escH(query || '—') + '</div>'
+        +     '<span class="det-lbl">' + (ex.inbound ? 'Customer Query' : 'We contacted them') + '</span>'
+        +     (ex.inbound
+                ? '<div class="det-q-text">' + escH(query || '—') + '</div>'
+                : '<div class="det-q-text det-q-text--ours"><em>No customer message &mdash; we wrote to them</em></div>')
         +   '</div>'
         +   '<div class="det-r">'
         +     '<span class="det-lbl det-r-lbl">AI Agent Reply</span>'
@@ -1296,12 +1312,9 @@ function renderCentre(conv) {
       // leaving them on the previous case would put a summary, nudges and offers about a
       // loan query beside a fraud dispute.
       //
-      // loadCaseSummary must come WITH it: renderRight re-mounts #csum-body as the literal
-      // "Summarising..." placeholder, and nothing else refetches on a case switch, so the
-      // card sat on that placeholder forever. The other two cards fetch inside renderRight;
-      // the summary is the one that does not.
+      // All three cards fetch inside renderRight now, so switching case refetches every one
+      // of them together - the summary included.
       renderRight(conv, allTickets());
-      loadCaseSummary(conv.conversation_id, false);
     };
     el.addEventListener('click', drill);
     el.addEventListener('keydown', function(e) {
@@ -1644,6 +1657,20 @@ function renderRight(conv, tickets) {
     + '<button class="csum-refresh" id="csum-refresh" type="button" title="Regenerate this summary">Refresh</button></div>'
     + '<div class="csum-body" id="csum-body"><span class="csum-muted">Summarising…</span></div>'
     + '</div>';
+
+  // CASE SUMMARY - fetched here, exactly like Suggested Actions and Suggested Offers below.
+  //
+  // It used to be fetched by its own function outside renderRight, guarded by an in-flight
+  // flag and an HTML cache, so a caller had to remember to pass force=true to get fresh
+  // text. doSend never did, and the card showed a stale situation for the rest of the
+  // session - the second bug from that machinery in one day.
+  //
+  // The separate path existed so a slow summary LLM could not delay the panel. Fix 171
+  // ended that: all three cards come from ONE case_review call and one row cached server
+  // side against the newest turn, so a refetch on an unchanged case returns the stored row
+  // without an LLM call. There is no slow call left to isolate, so the isolation - and both
+  // of its caches - is gone.
+  renderCaseSummary(conv);
 
   // Async: fetch loans/claims count from Neo4j via customer graph endpoint
   var _snapCustId = conv_meta.customer_id;
@@ -2107,7 +2134,7 @@ window.resolveTicket = function(btn, ticketId) {
   // No new LLM call: this is the same cached text already on screen. When it is
   // unavailable the field opens empty and confirmOk refuses to submit, so a case can
   // still never close without a recorded reason.
-  var proposed = _csumPlain(state.convDetail && state.convDetail.conversation_id);
+  var proposed = _csumPlain();
   showConfirm({
     icon: '⚠',
     title: 'Close ' + ticketId.toUpperCase() + '?',
@@ -2119,19 +2146,14 @@ window.resolveTicket = function(btn, ticketId) {
   });
 };
 
-// The cached case summary as plain text, for prefilling the closure reason. Reads the
-// same cache the right-panel card renders from, so the two can never disagree; returns
-// '' when there is none, which leaves the field empty rather than inventing a reason.
-function _csumPlain(conversationId) {
-  // Same composite key loadCaseSummary stores under - conversation + focused case. Reading
-  // the bare conversation id here returned undefined once summaries became per-case, which
-  // would have silently emptied the prefilled closure reason.
-  var html = conversationId
-    ? _csumCache[conversationId + '|' + (state.detailFocus[conversationId] || '')] : '';
-  if (!html) return '';
-  var tmp = document.createElement('div');
-  tmp.innerHTML = html;
-  return (tmp.textContent || '').trim();
+// The case summary as plain text, for prefilling the closure reason. Reads the card itself
+// rather than a cache: it is the text the agent can see on screen beside the dialog, so the
+// two cannot disagree, and there is no key to get wrong. Returns '' when the card is empty
+// or still loading, which leaves the field blank rather than inventing a reason.
+function _csumPlain() {
+  var el = document.getElementById('csum-body');
+  if (!el || el.querySelector('.csum-muted')) return '';
+  return (el.textContent || '').trim();
 }
 
 function _closeCase(btn, ticketId, adminUser, reason) {
@@ -2161,7 +2183,7 @@ function _closeCase(btn, ticketId, adminUser, reason) {
       // Resolving a ticket is not a new TURN, and the case summary is cached against
       // the newest turn id -- so without forcing it here the summary keeps listing the
       // ticket just resolved as open, contradicting the Open Tickets card beside it.
-      loadCaseSummary(state.convDetail.conversation_id, true);
+      renderCaseSummary(state.convDetail, true);
     }
   }).catch(function(e) {
     toast('Error: ' + e.message);
@@ -3102,6 +3124,16 @@ function isServiceable(t) {
   return !!t && (t.status === 'open' || t.status === 'in_progress');
 }
 
+// The board's two column sets. A working view asks "what needs doing"; the Closed view asks
+// "what happened", and the three action columns have no answer on a finished case - they
+// were rendering "Chase customer · silent 7d · Us" on cases that had been closed for days.
+var SD_COLS_OPEN = ['Priority', 'Case', 'Customer', 'Team', 'Assigned agent', 'Reassign',
+                    'Opened', 'HIL contact history', 'Next action', 'Waiting on'];
+var SD_COLS_CLOSED = ['Priority', 'Case', 'Customer', 'Team', 'Assigned agent',
+                      'Opened', 'HIL contact history', 'Closed'];
+
+function sdIsClosedView() { return sdState.view === 'closed'; }
+
 // The case the Detailed view is showing, as a query-string fragment for the three
 // right-panel endpoints. They are all fed by ONE per-case LLM review now, so the cards
 // must ask about the SAME case the conversation is showing - otherwise the agent reads a
@@ -3199,7 +3231,20 @@ var sdState = {
 var SD_VIEWS = [
   { id: 'all',      label: 'All',               tone: '',     test: function(t) { return isServiceable(t); } },
   { id: 'breach',   label: 'Breaching SLA',     tone: 'hot',  test: function(t) { return sdSla(t).breached; } },
-  { id: 'mine',     label: 'My cases',          tone: '',     sep: true, test: function(t) { return t.assigned_to === sdActor(); } }
+  // SERVICEABLE-only, like every other working view. Without that guard this listed closed
+  // cases too - "My cases 2" counted work that had been finished days earlier, so the one
+  // view an agent uses to find their own outstanding work was the view least able to say
+  // what was outstanding.
+  //
+  // No `sep` divider. It grouped "the queues" against "mine", a split that stopped being
+  // true the moment Closed joined the row: the line then sat between two working views and
+  // implied a boundary that is not there.
+  { id: 'mine',     label: 'My cases',          test: function(t) { return isServiceable(t) && t.assigned_to === sdActor(); } },
+  // Closed cases leave the working views - the board is present tense, and a finished case
+  // needs nothing from anyone. They stay REACHABLE here rather than vanishing, because the
+  // closing record (who decided, and why) is a permanent answer someone will come looking
+  // for. This is the only view that is not serviceable-only.
+  { id: 'closed',   label: 'Closed',            tone: '',     test: function(t) { return t.status === 'closed'; } }
 ];
 
 window.loadServiceDesk = async function() {
@@ -3330,11 +3375,6 @@ function sdSuggested(team) {
   return best;
 }
 
-function sdInitials(name) {
-  var parts = String(name || '').replace(/[_.]/g, ' ').trim().split(/\s+/);
-  return ((parts[0] || '?')[0] + (parts.length > 1 ? parts[parts.length - 1][0] : '')).toUpperCase();
-}
-
 function sdTeamLabel(team) {
   if (!team) return '—';
   return team.replace(/_/g, ' ').replace(/\b\w/g, function(c) { return c.toUpperCase(); });
@@ -3351,12 +3391,6 @@ function sdAge(t) {
   return sdDur(Math.round((Date.now() - from) / 60000));
 }
 
-function sdAvatar(name, availability, extraClass) {
-  if (!name) return '<div class="sd-av sd-av--none">—</div>';
-  var dot = availability ? '<span class="sd-dot sd-dot--' + escH(availability) + '"></span>' : '';
-  return '<div class="sd-av ' + (extraClass || '') + '">' + escH(sdInitials(name)) + dot + '</div>';
-}
-
 // ── render ────────────────────────────────────────────────────────────────────
 
 window.renderServiceDesk = function() {
@@ -3368,6 +3402,22 @@ window.renderServiceDesk = function() {
   SD_VIEWS.forEach(function(v) { counts[v.id] = all.filter(v.test).length; });
 
   var view = SD_VIEWS.filter(function(v) { return v.id === sdState.view; })[0] || SD_VIEWS[0];
+
+  // The Closed view is a RECORD, not a worklist, so it does not carry the working columns.
+  // Reassign, Next action and Waiting on were all rendering on closed rows and every one of
+  // them lied: a finished case was telling a reader to "Chase customer · silent 7d" with the
+  // ball marked as ours. Dead columns on a view are exactly what this board keeps being
+  // rebuilt to remove, so the view swaps its column set rather than filling three cells with
+  // an em dash. What replaces them is the one thing a closed case is asked: when, and by whom.
+  var closedView = sdIsClosedView();
+  var head = document.getElementById('sdLhd');
+  if (head) {
+    head.innerHTML = (closedView ? SD_COLS_CLOSED : SD_COLS_OPEN)
+      .map(function(c) { return '<span>' + escH(c) + '</span>'; }).join('');
+    head.classList.toggle('sd-lhd--closed', closedView);
+  }
+  var listWrap = document.getElementById('sdRows');
+  if (listWrap) listWrap.classList.toggle('sd-rows--closed', closedView);
 
   // Header summary line. Counts SERVICEABLE only, so it agrees with the board: `all` holds
   // every logged grouping id too, and "7 cases" over a list showing 2 read as a broken
@@ -3381,8 +3431,7 @@ window.renderServiceDesk = function() {
     SD_VIEWS.map(function(v) {
       var n = counts[v.id];
       var tone = (n > 0 && v.tone) ? ' sd-v-n--' + v.tone : '';
-      return (v.sep ? '<span class="sd-v-sep"></span>' : '') +
-        '<button class="sd-v' + (sdState.view === v.id ? ' on' : '') + '" onclick="sdSetView(\'' + v.id + '\')">' +
+      return '<button class="sd-v' + (sdState.view === v.id ? ' on' : '') + '" onclick="sdSetView(\'' + v.id + '\')">' +
         escH(v.label) + '<span class="sd-v-n' + tone + '">' + n + '</span></button>';
     }).join('');
 
@@ -3397,20 +3446,13 @@ window.renderServiceDesk = function() {
             ' ' + sdTeamLabel(t.assigned_team)).toLowerCase().indexOf(q) !== -1;
   });
 
-  var sort = (document.getElementById('sdSort') || {}).value || 'priority';
+  // ALWAYS newest case first, and no sort control. Three sort modes (priority / SLA / age)
+  // meant the same board could tell three different stories and a reader could not know
+  // which one they were looking at without checking a dropdown - and two of the three were
+  // already columns you can read down. Opening time is the one ordering that never lies
+  // about itself: it is a fact about the customer, not a score we computed.
   rows.sort(function(a, b) {
-    // A breach outranks everything under every sort: its deadline has already passed.
-    var ab = sdSla(a).breached ? 1 : 0, bb = sdSla(b).breached ? 1 : 0;
-    if (ab !== bb) return bb - ab;
-    if (sort === 'age') return new Date(a.created_at) - new Date(b.created_at);
-    if (sort === 'sla') {
-      var ad = a.sla_due_at ? new Date(a.sla_due_at).getTime() : Infinity;
-      var bd = b.sla_due_at ? new Date(b.sla_due_at).getTime() : Infinity;
-      return ad - bd;
-    }
-    var d = (b.priority_score || 0) - (a.priority_score || 0);
-    if (d !== 0) return d;
-    return new Date(b.last_activity_at || b.created_at) - new Date(a.last_activity_at || a.created_at);
+    return new Date(b.created_at) - new Date(a.created_at);
   });
 
   var list = document.getElementById('sdRows');
@@ -3472,7 +3514,6 @@ function sdBenchRow(a) {
   var sub = a.is_operator ? 'any team · no limit' : sdTeamLabel(a.team) + ' · ' + a.availability;
   return '<div class="sd-bp-a' + (sdState.agent === a.username ? ' on' : '') +
     '" onclick="sdFilterAgent(\'' + escH(a.username) + '\')">' +
-    sdAvatar(a.username, a.availability) +
     '<span class="sd-bp-n">' + escH(a.username.replace(/_/g, ' ')) +
     '<span class="sd-bp-t"> · ' + escH(sub) + '</span></span>' +
     (a.is_operator ? '' : '<span class="sd-bp-b"><i class="' + hot + '" style="width:' + pct + '%"></i></span>') +
@@ -3480,8 +3521,15 @@ function sdBenchRow(a) {
 }
 
 function sdRowHtml(t) {
+  // Computed here, not read from renderServiceDesk: that is a different function scope, and
+  // referencing its local would throw on every row and blank the whole board.
+  var closedView = sdIsClosedView();
   var sla = sdSla(t);
   var score = Math.round(t.priority_score || 0);
+  // The tier comes off the ticket (TicketPriority, set by score_priority at creation), not
+  // re-derived from the score here - one source of truth, and it is the field SLA reads.
+  var tier = String(t.priority || 'low').toLowerCase();
+  var tierLabel = tier.charAt(0).toUpperCase() + tier.slice(1);
   var held = sdHeldDraft(t);
   var needsDecision = !!held;
 
@@ -3495,17 +3543,35 @@ function sdRowHtml(t) {
   // loudest colour in the row on it. One broken connector is ONE fact, and it belongs with
   // the other connector health in System Configuration, not stamped on each case.
   var tags = '';
-  if (t.approval_status === 'pending') tags += '<span class="sd-blk sd-blk--amb">Approval pending</span>';
+  // No "Approval pending" tag. approval_status is written ONCE at ticket creation for five
+  // intents and there is no UI anywhere that calls set_approval(), so the tag could never
+  // clear - it would sit on every fraud and claim case for the life of the ticket. A mark
+  // that cannot change asserts a sign-off process this product does not have, which is the
+  // same defect as telling a customer "the fraud team is reviewing" when nobody is.
+  //
+  // No channel tag either. It is the channel the ticket STARTED on, and the whole product
+  // claim is that one case moves across channels - so it is wrong the moment a customer
+  // emails about a WhatsApp case. Measured on the live board it also read "Web Chat" on
+  // every row at once, which carries no information. Per-turn channel is on the exchange
+  // rows in Agent Workspace, where it varies and means something.
+  //
+  // No fork tag. "Forked from 2" reported a grouping decision the code had already made,
+  // and there is nothing a person can do about it - no merge, no undo - so it failed the
+  // test every element on this page has to pass: can someone ACT on it? It was also our
+  // internal vocabulary on a surface meant to answer "what does this customer need and
+  // who has it". The metadata is still written on the ticket for provenance.
+  //
   // HELD and FOLLOW-UP DUE are no longer tags: both are STAGES now, and each is shown in
   // its own column with the action that advances it. A tag saying the same thing would be
   // the row claiming it twice.
-  if (t.metadata && t.metadata.channel) tags += '<span class="sd-tag sd-tag--gry">' + escH(chLabel(t.metadata.channel)) + '</span>';
-  var forked = (t.metadata && t.metadata.forked_from) || [];
-  if (forked.length) tags += '<span class="sd-tag sd-tag--gry">Forked from ' + forked.length + '</span>';
   // "Answered" only when nothing is still owed. It used to render on first_response_at
   // alone, so a case whose reply promised an investigation carried a done-looking tag
   // beside a live follow-up clock - two opposite claims on one row.
-  if (t.first_response_at && !sdPromiseState(t)) tags += '<span class="sd-tag sd-tag--gry">Answered</span>';
+  // No "Answered" tag. It meant "we sent a first reply and nothing is promised" - both true
+  // on a live fraud dispute where the customer was owed Rs.48,037 and had been told nothing.
+  // Replying is not resolving, which is the spine of this page, and a tag that says a case
+  // is handled while it is open is the same defect as telling a customer "the fraud team is
+  // reviewing" when nobody is. What is owed now reads in WAITING ON and NEXT ACTION.
 
   // The customer's own words beat the generated title ("Fraud Report request"), which is
   // an intent label wearing a sentence. A supervisor scans for the ISSUE.
@@ -3526,12 +3592,11 @@ function sdRowHtml(t) {
   // where an assignment decision is actually made.
   var owner;
   if (t.assigned_to) {
-    var a = sdAgent(t.assigned_to);
-    owner = '<div class="sd-own2">' + sdAvatar(t.assigned_to, a && a.availability) +
+    owner = '<div class="sd-own2">' +
       '<div style="min-width:0"><div class="sd-on">' + escH(t.assigned_to.replace(/_/g, ' ')) + '</div></div>' +
       '</div>';
   } else {
-    owner = '<div class="sd-own2">' + sdAvatar('', null) +
+    owner = '<div class="sd-own2">' +
       '<div style="min-width:0"><div class="sd-on sd-on--none">Unassigned</div></div>' +
       '</div>';
   }
@@ -3556,22 +3621,69 @@ function sdRowHtml(t) {
   // action at all: it already runs at ticket CREATION (_auto_assign in ticket_manager),
   // so offering it as a button re-opened a decision the machine had already made.
   return '<div class="sd-row' + edge + '" onclick="sdGoWorkspace(\'' + escH(t.conversation_id) + '\',\'' + escH(t.ticket_id) + '\')">' +
-    '<div class="sd-pri"><div class="sd-pri-v">' + score + '</div>' +
-      '<div class="sd-pri-t"><i class="' + (score >= 70 ? 'hi' : score >= 40 ? 'md' : '') + '" style="width:' +
+    // PRIORITY reads as the WORD, not the 0-100 score. The score is the sum of four hidden
+    // weights (urgency, sentiment, intent criticality, customer segment) and nobody can say
+    // why a case is 63 rather than 70 - but the TIER is what the system actually acts on:
+    // sla_hours() sets the answering deadline from it (critical 1h, high 4h, medium 12h,
+    // low 24h) and the aging-case nudge only fires on critical/high. The bar still carries
+    // the score, so ranking within a tier stays visible and the sort is unchanged.
+    // Thresholds here match PRIORITY_THRESHOLDS in shared/constants/priority_weights.py
+    // (critical 70, high 45) - they were 70/40, so a 41-44 case drew an amber bar while
+    // being scored "medium".
+    '<div class="sd-pri"><div class="sd-pri-v sd-pri-v--' + escH(tier) + '">' + escH(tierLabel) + '</div>' +
+      '<div class="sd-pri-t"><i class="' + (score >= 70 ? 'hi' : score >= 45 ? 'md' : '') + '" style="width:' +
       Math.max(4, Math.min(100, score)) + '%"></i></div></div>' +
     '<div><div class="sd-ttl">' + escH(title) + '</div>' +
       '<div class="sd-meta"><span class="sd-id">' + escH(t.ticket_id) + '</span>' + tags + '</div></div>' +
     // CUSTOMER holds the customer and nothing else. The team was rendered as a subtitle
     // here, which put routing data under a header that means "who is this person".
-    '<div class="sd-cust">' + sdAvatar(cname, null, 'sd-cav-x') +
+    '<div class="sd-cust">' +
       '<div style="min-width:0"><div class="sd-cn">' + escH(cname) + '</div></div></div>' +
     '<div class="sd-team">' + escH(sdTeamLabel(t.assigned_team)) + '</div>' +
     owner +
-    '<div>' + reassign + '</div>' +
-    sdRespCell(t, sla) +
-    sdFollowCell(t) +
-    sdClosedCell(t) +
+    // Reading order on a working view: what has happened, what to do about it, whose move it
+    // is. The history comes first because it is the evidence for the other two - a reader
+    // checks the trail before trusting the verdict beside it.
+    //
+    // The Closed view drops all three action columns and ends on the closing record instead.
+    // Reassigning, acting on and waiting for a finished case are all meaningless, and an
+    // em-dash in each would still spend the width.
+    (closedView
+      ? sdOpenedCell(t) + sdHilCell(t) + sdClosedAtCell(t)
+      : '<div>' + reassign + '</div>' +
+        sdOpenedCell(t) + sdHilCell(t) + sdNextActionCell(t, sla) + sdWaitingCell(t, sla)) +
   '</div>';
+}
+
+// CLOSED: when it ended and who decided, with the reason on hover. A record, never a control
+// - closing is a judgement about whether the customer's problem is actually solved, and that
+// cannot be made from a truncated sentence in a table row, so the act itself stays in Agent
+// Workspace inside the conversation.
+function sdClosedAtCell(t) {
+  var when = t.updated_at ? new Date(t.updated_at) : null;
+  if (!when || isNaN(when.getTime())) return '<div class="sd-stg sd-stg-none">&mdash;</div>';
+  // How long the case ran, which is the question a closed record is actually asked.
+  var opened = new Date(t.created_at);
+  var lived = isNaN(opened.getTime()) ? null
+    : Math.max(0, Math.round((when.getTime() - opened.getTime()) / 60000));
+  var who = t.closed_by ? t.closed_by.replace(/_/g, ' ') : 'Customer confirmed';
+  // Same shape as Opened (sdStampCell): date on the strong line, detail underneath. The
+  // second line carries WHO decided and how long the case ran, because that is what a closed
+  // record is asked; the reason itself is on hover.
+  // Hover carries what the row has no width for: how long the case ran, and why it closed.
+  var hover = (lived !== null ? 'Ran ' + sdDur(lived) : '') +
+    (lived !== null && t.closure_reason ? ' — ' : '') + (t.closure_reason || '');
+  return '<div class="sd-stg"' + (hover ? ' title="' + escH(hover) + '"' : '') + '>' +
+    '<div class="sd-stg-t">' + escH(when.toLocaleDateString([], { day: 'numeric', month: 'short' })) + '</div>' +
+    // "by <name>" and not the bare name: the column to the left is ASSIGNED AGENT, and on a
+    // case someone else finished, two different people sat side by side with nothing saying
+    // which was which - Rahul Menon owning it, Admin SS having closed it.
+    //
+    // How long the case RAN moved to the tooltip with the closing reason. Time, name and
+    // duration together overran the column and clipped mid-word ("by Admin SS · ran ..."),
+    // and of the three the duration is the one nobody scans a board for.
+    '<div class="sd-stg-s">' + escH(sdTime(t.updated_at)) + ' &middot; by ' + escH(who) +
+    '</div></div>';
 }
 
 // Wall-clock time of day. The board is a TODAY surface - a case that has sat for days
@@ -3582,61 +3694,216 @@ function sdTime(iso) {
   return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
-// FIRST RESPONSE: when we answered, or the action that answers it. A held draft is not a
-// separate queue - it IS this stage, unfinished: the AI wrote a reply and nobody has sent
-// it, which is why "Held for review" stopped being a tab.
-function sdRespCell(t, sla) {
-  if (t.first_response_at) {
-    var due = t.sla_due_at ? new Date(t.sla_due_at).getTime() : NaN;
-    var at = new Date(t.first_response_at).getTime();
-    var late = !isNaN(due) && at > due;
-    var mins = Math.round((at - new Date(t.created_at).getTime()) / 60000);
-    return '<div class="sd-stg"><div class="sd-stg-t">' + escH(sdTime(t.first_response_at)) + '</div>' +
-      '<div class="sd-stg-s' + (late ? ' sd-stg-late' : '') + '">' +
-      escH(sdDur(mins)) + ' · ' + (late ? 'late' : 'on time') + '</div></div>';
+// ── WAITING ON · NEXT ACTION · LAST CONTACT ──────────────────────────────────
+//
+// These three replaced a PROGRESS column that listed the times of the last three contacts.
+// Progress was the wrong question: it is backward-looking, a history report, and nothing in
+// it could be acted on - three bare timestamps ("02:28 › 02:29 › 02:34") told a reader that
+// three things happened and nothing about what any of them were. This page exists so that
+// nothing the bank owes a customer gets dropped and a named person owns each one, and the
+// test for every element on it is whether a person can ACT on what it says.
+//
+// So the row answers, in reading order: who is the ball with, what needs doing, and how
+// long since we last spoke. The history it replaced survives as ONE value - the last
+// contact - because "3h ago" shows neglect and a row of times does not.
+
+// How long silence on a case stops meaning "they are thinking about it" and starts meaning
+// nobody has looked. Three days: long enough that a customer replying over a weekend is not
+// chased, short enough that a case cannot quietly rot for a week - which is exactly what the
+// live claim case did while the board showed nothing to do on it.
+var SD_STALE_DAYS = 3;
+
+// The ONE state that genuinely belongs to the customer. The advisor raises it only when the
+// next step is something SHE has to give us - a document, a confirmation, a choice.
+var SD_BLOCKED_ON_CUSTOMER = 'information_needed';
+
+// Everything the two decision cells need, computed once so WAITING ON and NEXT ACTION can
+// never disagree with each other - they are the same judgement rendered twice.
+//
+// DEFAULT IS US. The bank owes the customer until something proves otherwise, so "Them" is
+// the exception and needs a positive reason. The previous rule - whoever wrote last - is not
+// one: we write last both when we have ANSWERED her and when we have said "still working on
+// it", and those are opposite meanings from one signal. Under it every live case read
+// "Them · nothing to do", including a fraud dispute owing Rs.48,037 and a claim untouched
+// for seven days. That is the "Answered" defect again: reporting our activity, not her
+// outcome.
+function sdCaseState(t, sla) {
+  var contacts = t.contacts || [];
+  var last = contacts.length ? contacts[contacts.length - 1] : null;
+  var promised = sdPromiseState(t);
+  var held = sdHeldDraft(t);
+  var openActions = t.open_actions || [];
+  var idleMins = last
+    ? Math.round((Date.now() - new Date(last.created_at).getTime()) / 60000) : null;
+  var stale = idleMins !== null && idleMins >= SD_STALE_DAYS * 1440;
+
+  // First match wins, most-owed first.
+  if (held) return { ours: true, label: 'Review reply', sub: 'AI drafted · not sent', hot: true };
+  if (!contacts.length) {
+    return { ours: true, label: 'Send reply', sub: sla.breached ? sla.txt : '', hot: true,
+             late: sla.breached };
   }
-  if (t.status === 'logged') return '<div class="sd-stg sd-stg-none">—</div>';
-  var overdue = sla.breached
-    ? '<div class="sd-stg-s sd-stg-late">' + escH(sla.txt) + '</div>' : '';
-  return '<div class="sd-stg"><button class="sd-act" onclick="event.stopPropagation();sdGoWorkspace(\'' +
-    escH(t.conversation_id) + '\',\'' + escH(t.ticket_id) + '\')">Send reply →</button>' + overdue + '</div>';
+  if (promised && promised.overdue) {
+    return { ours: true, label: 'Send update', sub: 'promised ' + sdDur(promised.mins) + ' ago',
+             hot: true, late: true };
+  }
+  if (last && last.direction === 'inbound') {
+    return { ours: true, label: 'Reply', sub: 'they wrote last', hot: true };
+  }
+  if (promised) {
+    return { ours: true, label: 'Send update', sub: 'due in ' + sdDur(promised.mins), hot: false };
+  }
+  // Only here can the ball be theirs, and only on the advisor's own evidence.
+  if (openActions.indexOf(SD_BLOCKED_ON_CUSTOMER) !== -1) {
+    if (stale) {
+      return { ours: true, label: 'Chase customer', hot: true, late: true,
+               sub: 'asked ' + sdDur(idleMins) + ' ago' };
+    }
+    return { ours: false, label: 'Chase customer', sub: 'waiting on them', hot: false };
+  }
+  if (stale) {
+    return { ours: true, label: 'Chase customer', sub: 'silent ' + sdDur(idleMins), hot: true,
+             late: true };
+  }
+  // Open, answered, nothing promised, nothing asked of her, not yet stale. Still ours - we
+  // have not finished her problem, we have only written about it. NOT an em dash: an open
+  // case always has a next step, and a blank cell is how "nothing to do" crept back in.
+  return { ours: true, label: 'Follow up', sub: 'no reply yet', hot: false };
 }
 
-// FOLLOW-UP: what we still owe after answering. A closed case reads "kept" when it was
-// closed before the clock ran out - closing in time IS the promise kept, so nothing extra
-// has to be recorded to say so.
-function sdFollowCell(t) {
-  if (!t.follow_up_due_at) return '<div class="sd-stg sd-stg-none">—</div>';
+// WAITING ON: us, or them. The board's primary split, and the one it never made - an
+// untouched fraud dispute and a case genuinely pending the customer's documents read
+// identically before this.
+function sdWaitingCell(t, sla) {
+  var st = sdCaseState(t, sla);
+  return '<div class="sd-wait ' + (st.ours ? 'sd-wait--us' : 'sd-wait--them') + '">' +
+    '<span class="sd-wait-dot"></span>' + (st.ours ? 'Us' : 'Them') + '</div>';
+}
+
+// NEXT ACTION: the one thing to do next, as the control that does it. Not a status word -
+// a button, because the board's whole purpose is that work gets picked up.
+//
+// NOT YET DERIVABLE HERE: "Review close" for a case the customer has asked to close. That
+// proposal lives in ticket_events, which this page does not load (it has tickets,
+// conversations, agents and pending drafts). Adding it means attaching close proposals to
+// the tickets payload the way `contacts` was attached - deliberately left out rather than
+// guessed at, so the column never shows an action it cannot actually detect.
+function sdNextActionCell(t, sla) {
+  // Reads the SAME decision as WAITING ON rather than re-deriving it. When each cell had its
+  // own branch chain they could disagree - the row would say the ball was with the customer
+  // and offer a button for us in the next column - and any later rule change had to be made
+  // twice or the two would drift apart silently.
+  var st = sdCaseState(t, sla);
+  return '<div class="sd-stg"><button class="sd-next' + (st.hot ? ' sd-next--hot' : '') +
+    '" onclick="event.stopPropagation();sdGoWorkspace(\'' +
+    escH(t.conversation_id) + '\',\'' + escH(t.ticket_id) + '\')">' + escH(st.label) + '</button>' +
+    (st.sub ? '<div class="sd-stg-s' + (st.late ? ' sd-stg-late' : '') + '">' + escH(st.sub) +
+      '</div>' : '') + '</div>';
+}
+
+// HIL CONTACT HISTORY: the back-and-forth on this case, and how much of it a person
+// actually handled.
+//
+// Replaced a LAST CONTACT cell reading "7d ago / we wrote / 6 contacts" - three fragments
+// that never added up to a sentence. A reader had to assemble them and still did not learn
+// the thing this product exists to record: that a human was in the loop.
+//
+// Line 1 is the sequence, so the shape of the case is visible - a customer asking three
+// times and getting one answer looks nothing like a steady exchange, and both used to render
+// as one number. Line 2 counts the contacts a PERSON reviewed and sent, then the age of the
+// last one, which is what shows neglect.
+function sdHilCell(t) {
+  var contacts = t.contacts || [];
+  if (!contacts.length) return '<div class="sd-stg sd-stg-none">No contact yet</div>';
+
+  // HOW FAR THROUGH THE HUMAN LOOP, not how many messages. Three earlier versions of this
+  // cell counted contacts or drew the sequence step by step, and both were the wrong
+  // question: a case with six contacts and one with two can be at the identical stage, and
+  // any case long enough to matter is too long to draw without truncating it.
+  //
+  // The loop in this product is: the AI drafts -> A PERSON REVIEWS AND SENDS -> a promise
+  // may be made -> A PERSON HONOURS IT -> A PERSON CLOSES IT. The human enters at exactly
+  // those three points; everything between them is machinery. So the stage is named by
+  // which of those has happened.
+  var human = contacts.filter(function(c) { return c.by_human; }).length;
+  var held = sdHeldDraft(t);
+  var promised = sdPromiseState(t);
+
+  var stage, cls = 'sd-jrn';
   if (t.status === 'closed') {
-    var kept = new Date(t.updated_at || t.follow_up_due_at).getTime() <= new Date(t.follow_up_due_at).getTime();
-    return '<div class="sd-stg"><div class="sd-stg-t' + (kept ? ' sd-stg-kept' : ' sd-stg-late') + '">' +
-      (kept ? 'kept' : 'missed') + '</div>' +
-      '<div class="sd-stg-s">' + (kept ? 'closed before it was due' : 'closed after it was due') + '</div></div>';
+    stage = 'Closed';
+    cls += human ? ' sd-jrn--done' : ' sd-jrn--none';
+  } else if (held) {
+    stage = human ? 'New reply awaiting review' : 'Awaiting first review';
+    cls += ' sd-jrn--wait';
+  } else if (!human) {
+    // Answered entirely by the pipeline, with nobody ever reading it. On a page whose
+    // purpose is that a named person owns each case, this is the state that should worry a
+    // reader most - so it is the only one drawn as a warning.
+    stage = 'No human involvement';
+    cls += ' sd-jrn--none';
+  } else if (promised && promised.overdue) {
+    stage = 'Update promised, overdue';
+    cls += ' sd-jrn--late';
+  } else if (promised) {
+    stage = 'Update promised';
+    cls += ' sd-jrn--wait';
+  } else {
+    // NEUTRAL, not green. Green reads as "finished" - and this case is open, unresolved and
+    // still owed to the customer; a person having replied is not an outcome. Colour on this
+    // board is reserved for what is WRONG, so an ordinary in-progress case is plain.
+    stage = 'Reviewed & sent';
+    cls += ' sd-jrn--plain';
   }
-  var fu = sdPromiseState(t);
-  if (!fu) return '<div class="sd-stg sd-stg-none">—</div>';
-  return '<div class="sd-stg"><div class="sd-clk ' + (fu.overdue ? 'sd-clk--over' : 'sd-clk--soon') + '">' +
-    (fu.overdue ? 'overdue ' : 'due in ') + escH(sdDur(fu.mins)) + '</div>' +
-    '<div class="sd-stg-s">promised an update</div></div>';
+
+  // Line 2 is HOW MUCH A PERSON DID - a plain count of the replies a human reviewed and
+  // sent, labelled as exactly that.
+  //
+  // It used to read "N updates", where N was `human - 1`: invented arithmetic, an invented
+  // word, and a label nobody could decode, since "1 update" secretly meant two human
+  // replies. It also restated line 1 - a row saying "2 human replies / 1 update" gave the
+  // same fact twice, once plainly and once in code.
+  var by = human
+    ? human + (human === 1 ? ' reply by a person' : ' replies by a person')
+    : 'No reply by a person yet';
+
+  // Idle time belongs only to a LIVE case. On a closed one it counts time since a case that
+  // is finished last moved, which asks a reader to worry about nothing.
+  var tail = '';
+  if (t.status !== 'closed') {
+    var last = contacts[contacts.length - 1];
+    var mins = Math.max(0, Math.round((Date.now() - new Date(last.created_at).getTime()) / 60000));
+    tail = ' · <span class="' + (mins >= 1440 ? 'sd-stg-late' : '') + '">' +
+      escH(sdDur(mins)) + ' idle</span>';
+  }
+
+  return '<div class="sd-stg">' +
+    '<div class="' + cls + '">' + escH(stage) + '</div>' +
+    '<div class="sd-stg-s">' + escH(by) + tail + '</div></div>';
 }
 
-// CLOSED: a RECORD, never a control. Closing is a judgement about whether the customer's
-// problem is actually solved, and that cannot be made from a truncated sentence in a
-// table row - so the act stays in Agent Workspace, inside the conversation, where
-// resolveTicket() already lives. This cell only reports what it decided.
-function sdClosedCell(t) {
-  if (t.status !== 'closed') return '<div class="sd-stg sd-stg-none">—</div>';
-  var who = t.closed_by ? t.closed_by.replace(/_/g, ' ') : 'Customer confirmed';
-  var when = t.updated_at
-    ? new Date(t.updated_at).toLocaleDateString([], { day: 'numeric', month: 'short' }) + ' · ' + sdTime(t.updated_at)
-    : '';
-  return '<div class="sd-stg"' + (t.closure_reason ? ' title="' + escH(t.closure_reason) + '"' : '') + '>' +
-    '<div class="sd-stg-t">' + escH(who) + '</div>' +
-    (when ? '<div class="sd-stg-s">' + escH(when) + '</div>' : '') + '</div>';
+// OPENED: when the customer first raised it. The board is always sorted by this, newest
+// first, so the column is the sort made visible rather than a fact you have to hunt for.
+function sdOpenedCell(t) {
+  return sdStampCell(t.created_at, sdDurSuffix(t.created_at, 'old'));
 }
 
-function chLabel(ch) {
-  return String(ch).replace(/_/g, ' ').replace(/\b\w/g, function(c) { return c.toUpperCase(); });
+// One shape for every date on this board: the DATE on the strong line, then the time and how
+// long ago underneath. Opened and Closed were written separately and drifted - one read
+// "13 Sept / 03:30 am · 1d old", the other "14 Sept · 02:16 am / Admin SS · ran 23h" - so two
+// cells side by side put the same kind of fact in two different places.
+function sdStampCell(iso, sub) {
+  var d = iso ? new Date(iso) : null;
+  if (!d || isNaN(d.getTime())) return '<div class="sd-stg sd-stg-none">&mdash;</div>';
+  return '<div class="sd-stg"><div class="sd-stg-t">' +
+    escH(d.toLocaleDateString([], { day: 'numeric', month: 'short' })) + '</div>' +
+    '<div class="sd-stg-s">' + escH(sdTime(iso)) + (sub ? ' &middot; ' + escH(sub) : '') + '</div></div>';
+}
+
+function sdDurSuffix(iso, word) {
+  var d = iso ? new Date(iso) : null;
+  if (!d || isNaN(d.getTime())) return '';
+  return sdDur(Math.max(0, Math.round((Date.now() - d.getTime()) / 60000))) + ' ' + word;
 }
 
 window.sdSetSearch = function(v) { sdState.search = v || ''; renderServiceDesk(); };
@@ -3926,54 +4193,25 @@ window.closeGraphModal = function() {
 function kgEsc(s) { return escH(String(s == null ? '' : s)); }
 
 // ── Case summary — what an agent needs before reading the thread ────────────
-// Fetched separately from renderRight so a slow or unavailable LLM never delays the
-// rest of the panel. The endpoint caches against the newest turn, so re-opening an
-// unchanged conversation costs nothing; only Refresh forces a regeneration.
-var _csumFor = null;
-// The fetched summary HTML, keyed by conversation id. Caching the RESULT rather than the
-// fact that a fetch happened is what makes this correct: renderRight rebuilds the right
-// panel and resets #csum-body to the literal "Summarising…" placeholder, but the old guard
-// (`_csumFor === conversationId`) then returned before re-filling it - so the card sat on
-// that placeholder forever with nothing in flight. Holding the text lets a re-render restore
-// it instantly and for free; a fetch happens only when nothing is cached, or on Refresh.
-var _csumCache = {};
-
-function applyCaseSummary(conversationId) {
-  var el = document.getElementById('csum-body');
-  if (!el) return false;
-  var cached = _csumCache[conversationId];
-  if (cached === undefined) return false;
-  el.innerHTML = cached;
-  return true;
+// CASE SUMMARY. Called from renderRight, beside the two cards it shares an LLM call with -
+// no cache, no in-flight flag, no force parameter. See the note at the call site for why the
+// separate path and its two caches were removed rather than patched again.
+//
+// `refresh` is true only for the Refresh button, which is the one caller that means
+// "regenerate", not "show me the current text".
+function renderCaseSummary(conv, refresh) {
+  if (!conv || !conv.conversation_id) return;
+  api('/admin/conversations/' + encodeURIComponent(conv.conversation_id)
+      + '/case-summary?refresh=' + (refresh ? 'true' : 'false') + focusedCaseParam(conv))
+    .then(function(p) { paintCaseSummary(p); })
+    .catch(function() {
+      var el = document.getElementById('csum-body');
+      if (el) el.innerHTML = '<span class="csum-muted">Summary unavailable right now.</span>';
+    });
 }
 
-async function loadCaseSummary(conversationId, force) {
-  if (!conversationId) return;
-  // The summary is now PER CASE, like the two cards below it, so every cache and in-flight
-  // guard here must key on the case as well as the conversation. Keyed on the conversation
-  // alone they served case A's summary while the agent was reading case B.
-  var _focusKey = (state.detailFocus[conversationId] || '');
-  var csumKey = conversationId + '|' + _focusKey;
-  // A re-render wiped the card back to the placeholder: refill it from the cache. This runs
-  // even when the fetch is skipped below, which is exactly the case the old guard broke.
-  if (!force && applyCaseSummary(csumKey)) return;
-  if (!force && _csumFor === csumKey) return;   // fetch already in flight for this one
-  _csumFor = csumKey;
-  var bodyEl = document.getElementById('csum-body');
-  if (!bodyEl) return;
-  if (force) bodyEl.innerHTML = '<span class="csum-muted">Summarising…</span>';
-  try {
-    // ticket_id names WHICH case to summarise, so this card matches the two below it and
-    // the case bar above. Absent, the route falls back to the conversation's active case.
-    var _tkt = (_focusKey.indexOf('tkt_') === 0)
-      ? '&ticket_id=' + encodeURIComponent(_focusKey) : '';
-    var p = await api('/admin/conversations/' + encodeURIComponent(conversationId)
-      + '/case-summary?refresh=' + (force ? 'true' : 'false') + _tkt);
-    // The panel may have moved to another conversation OR another case while this was in
-    // flight - both change the key, and comparing against the conversation alone let a
-    // slow response for case A overwrite the card showing case B.
-    if (_csumFor !== csumKey) return;
-    bodyEl = document.getElementById('csum-body');
+function paintCaseSummary(p) {
+    var bodyEl = document.getElementById('csum-body');
     if (!bodyEl) return;
     if (!p.summary) {
       // Say why there is nothing rather than showing an empty card.
@@ -3990,19 +4228,13 @@ async function loadCaseSummary(conversationId, force) {
     // rewording the situation instead of returning nothing. Every value it ever
     // produced was an echo or empty, through three prompt rules written to stop it.
     // Open work is in the Open Tickets card directly below, with status and Resolve.
-    var html = (p.summary.situation ? '<div class="csum-sit">' + escH(p.summary.situation) + '</div>' : '');
-    _csumCache[csumKey] = html;   // survives the next renderRight, per case
-    bodyEl.innerHTML = html;
-  } catch (e) {
-    if (_csumFor !== csumKey) return;
-    var el = document.getElementById('csum-body');
-    if (el) el.innerHTML = '<span class="csum-muted">Summary unavailable right now.</span>';
-  }
+    bodyEl.innerHTML = (p.summary.situation
+      ? '<div class="csum-sit">' + escH(p.summary.situation) + '</div>' : '');
 }
 
 document.addEventListener('click', function(e) {
   var btn = e.target && e.target.closest && e.target.closest('#csum-refresh');
-  if (btn && state.convDetail) loadCaseSummary(state.convDetail.conversation_id, true);
+  if (btn && state.convDetail) renderCaseSummary(state.convDetail, true);
 });
 
 // Open Tickets fold. A class toggle on the card — the rows stay in the DOM, so the

@@ -38,7 +38,25 @@ class TicketClose(BaseModel):
 
 @router.get("")
 def list_tickets() -> list[dict]:
-    return get_repository().list_tickets()
+    """Every ticket, each carrying the CONTACTS made on it.
+
+    `contacts` is attached here rather than inside repository.list_tickets() because this
+    route is the Service Desk board and the other five callers of list_tickets() do not want
+    the extra scan. Without it the board cannot show a case as a sequence: the ticket row
+    records when we FIRST answered and nothing about the times we went back afterwards, so a
+    fraud dispute we had updated three times rendered as one timestamp and two dashes.
+    """
+    repository = get_repository()
+    contacts = repository.list_ticket_contacts()
+    # `open_actions` carries the one thing the ticket row cannot: whether the case is blocked
+    # on the CUSTOMER. See list_open_action_types - without it the board has no honest way to
+    # say "waiting on them", and defaults every case to us.
+    open_actions = repository.list_open_action_types()
+    tickets = repository.list_tickets()
+    for ticket in tickets:
+        ticket["contacts"] = contacts.get(ticket["ticket_id"], [])
+        ticket["open_actions"] = open_actions.get(ticket["ticket_id"], [])
+    return tickets
 
 
 @router.get("/{ticket_id}")

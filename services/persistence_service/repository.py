@@ -23,6 +23,14 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# Interim acknowledgement sent before a human-reviewed reply (mirrors HOLDING_MESSAGE in
+# services/orchestration_service/graph.py, and the identical marker in
+# apps/api/routes/user_portal.py). Spelled out locally rather than imported: persistence
+# must not depend on the orchestration layer, which pulls in LangGraph to be read at all.
+# A substring rather than a prefix, because the sent text is sometimes prefixed downstream.
+_HOLDING_MARKER = "will help you with this shortly"
+
+
 def _status_in(statuses: tuple[TicketStatus, ...]) -> tuple[str, list[str]]:
     """An inclusion test for a ticket status, as a SQL fragment plus its parameters.
 
@@ -82,6 +90,8 @@ class CXRepository(Protocol):
     def list_active_tickets_for_conversation(self, conversation_id: str, limit: int = 5) -> list[Ticket]: ...
     def find_open_tickets_for_customer(self, customer_id: str, limit: int = 5) -> list[dict]: ...
     def list_tickets(self) -> list[dict]: ...
+    def list_ticket_contacts(self) -> dict[str, list[dict]]: ...
+    def list_open_action_types(self) -> dict[str, list[str]]: ...
     def get_ticket(self, ticket_id: str) -> dict | None: ...
     def add_ticket_event(self, ticket_id: str, event_type: str, actor: str, details: dict | None = None) -> dict: ...
     def list_ticket_events(self, ticket_id: str) -> list[dict]: ...
@@ -111,6 +121,8 @@ class CXRepository(Protocol):
     def list_agent_assist_recommendations(self, conversation_id: str | None = None,
                                            ticket_id: str | None = None,
                                            status: str | None = None) -> list[dict]: ...
+    def refresh_agent_assist_recommendation(self, recommendation_id: str, reason: str,
+                                             confidence: float, metadata: dict | None = None) -> dict | None: ...
     def update_agent_assist_recommendation(self, recommendation_id: str, status: str, actor: str) -> dict | None: ...
     def get_agent_assist_recommendation(self, recommendation_id: str) -> dict | None: ...
     def add_reply_draft(self, conversation_id: str, customer_id: str, channel: str, draft_text: str,
@@ -762,6 +774,77 @@ class SQLiteCXRepository:
             rows = conn.execute("SELECT * FROM tickets ORDER BY created_at DESC").fetchall()
         return [self._ticket_dict(row) for row in rows]
 
+    def list_ticket_contacts(self) -> dict[str, list[dict]]:
+        """Every CONTACT on every ticket, keyed by ticket_id, oldest first.
+
+        A contact is one message that actually reached someone: the customer writing in, or
+        us writing out. The auto-sent holding line is excluded - "Support Agent will help you
+        with this shortly" is the system acknowledging receipt, not a person making contact,
+        and counting it would put a fake entry between every question and its answer.
+
+        Exists because a HIL case is almost never ONE exchange. The board had three
+        single-value columns (first response / follow-up / closed), each written once, so a
+        case we wrote to three times showed one timestamp and a dash - the row could not say
+        how many times we had been back to the customer, because the ticket payload carries
+        no message data at all.
+
+        ONE grouped scan for the whole board rather than a query per ticket. Deliberately not
+        folded into list_tickets(): that has five other callers (the customer portal reads it
+        twice per request) and none of them wants this.
+        """
+        with self.connection() as conn:
+            rows = conn.execute(
+                "SELECT ticket_id, direction, created_at, text, metadata_json FROM conversation_turns "
+                "WHERE ticket_id IS NOT NULL ORDER BY created_at ASC"
+            ).fetchall()
+        contacts: dict[str, list[dict]] = {}
+        for row in rows:
+            text = (row["text"] or "").strip().lower()
+            if _HOLDING_MARKER in text:
+                continue
+            # Did a PERSON send this, or did the pipeline? `manual_agent_reply` is written by
+            # both send paths - the held-draft route and the conversation composer - and it is
+            # the only trustworthy human-in-the-loop signal on a turn.
+            #
+            # The actor NAME deliberately is not read: every human action in this database
+            # records the literal string "admin" rather than the signed-in user, on turns, on
+            # reply_drafts.decided_by and in ticket_events alike. Only ticket_assigned carries
+            # a real username. So the history can honestly say HOW MANY contacts a person
+            # reviewed and sent, and cannot yet say who - naming them would print "admin" on
+            # every row and imply one mystery person did everything.
+            try:
+                metadata = json.loads(row["metadata_json"] or "{}")
+            except (TypeError, ValueError):
+                metadata = {}
+            contacts.setdefault(row["ticket_id"], []).append({
+                "direction": row["direction"],
+                "created_at": row["created_at"],
+                "by_human": metadata.get("source") == "manual_agent_reply",
+            })
+        return contacts
+
+    def list_open_action_types(self) -> dict[str, list[str]]:
+        """Pending recommendation action types per ticket, for the Service Desk board.
+
+        The board needs ONE fact the ticket row cannot carry: is this case blocked on the
+        CUSTOMER? `information_needed` is exactly that - the advisor raises it only when the
+        next step is something she has to give us (a document, a confirmation, a choice).
+
+        Without it "waiting on Them" has no honest source. Direction of the last contact was
+        tried and is not one: we write last both when we have ANSWERED her and when we have
+        told her we are still working on it, and those are opposite. Every live case fell to
+        "Them · nothing to do", including one silent for seven days.
+        """
+        with self.connection() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT ticket_id, action_type FROM agent_assist_recommendations "
+                "WHERE status = 'pending' AND ticket_id IS NOT NULL"
+            ).fetchall()
+        actions: dict[str, list[str]] = {}
+        for row in rows:
+            actions.setdefault(row["ticket_id"], []).append(row["action_type"])
+        return actions
+
     def get_ticket(self, ticket_id: str) -> dict | None:
         with self.connection() as conn:
             row = conn.execute("SELECT * FROM tickets WHERE ticket_id = ?", (ticket_id,)).fetchone()
@@ -838,6 +921,33 @@ class SQLiteCXRepository:
 
     def get_agent_assist_recommendation(self, recommendation_id: str) -> dict | None:
         with self.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM agent_assist_recommendations WHERE recommendation_id = ?", (recommendation_id,)
+            ).fetchone()
+        return self._json_fields(dict(row), "metadata_json") if row else None
+
+    def refresh_agent_assist_recommendation(self, recommendation_id: str, reason: str,
+                                            confidence: float, metadata: dict | None = None) -> dict | None:
+        """Rewrite a PENDING row's content in place, keeping its id and its decision state.
+
+        The engine re-reads the case on every render and can reach the same conclusion with
+        new wording - a promise nudge whose deadline has moved, a sentiment nudge on a newer
+        message. The route used to SKIP such an action because a row of that type already
+        existed, so the first nudge of a type on a case was frozen: it could never be
+        updated, only dismissed by hand. Measured on tkt_30142bd67753 - the card showed a
+        deadline from a minute before the agent's follow-up, while the freshly generated,
+        correct text was discarded on arrival.
+
+        Deliberately does NOT touch status, decided_by or decided_at: refreshing the words
+        is not a decision, and an approved or superseded row must not be dragged back into
+        the queue by new wording.
+        """
+        with self.connection() as conn:
+            conn.execute(
+                "UPDATE agent_assist_recommendations SET reason = ?, confidence = ?, metadata_json = ? "
+                "WHERE recommendation_id = ? AND status = 'pending'",
+                (reason, confidence, json_text(metadata), recommendation_id),
+            )
             row = conn.execute(
                 "SELECT * FROM agent_assist_recommendations WHERE recommendation_id = ?", (recommendation_id,)
             ).fetchone()

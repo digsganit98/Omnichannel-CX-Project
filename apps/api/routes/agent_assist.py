@@ -62,7 +62,8 @@ def _review_generator():
     return GroqGenerator()
 
 
-def case_review(repository, conversation_id: str, ticket_id: str | None) -> dict:
+def case_review(repository, conversation_id: str, ticket_id: str | None,
+                refresh: bool = False) -> dict:
     """ONE review of ONE case, cached against that case's own newest turn.
 
     The single LLM call behind all three right-panel cards. It replaces three calls -
@@ -106,7 +107,16 @@ def case_review(repository, conversation_id: str, ticket_id: str | None) -> dict
 
     # The cache is keyed by ticket_id, so a ticketless conversation cannot be cached. It is
     # reviewed every time, which is correct and cheap: it has no case history to re-read.
-    cached = repository.get_case_review(tid) if tid else None
+    # `refresh` is the Refresh button on the Case Summary card - the one caller that means
+    # "regenerate", not "show me the current text". Without this the flag was accepted by
+    # the route, documented in its docstring, and then dropped: the button returned the
+    # cached row and the response labelled it "generated", so it looked like it had worked
+    # and had not fired an LLM call in an hour.
+    #
+    # Safe to force: the write below overwrites the stored row on success, and a failed or
+    # suppressed review is still never cached - so a 429 during a manual refresh cannot
+    # poison the cache.
+    cached = repository.get_case_review(tid) if tid and not refresh else None
     if cached and cached.get("latest_turn_id") == latest_turn_id and latest_turn_id:
         return {
             "situation": cached.get("situation") or "",
@@ -188,9 +198,39 @@ def get_next_best_actions(conversation_id: str, ticket_id: str | None = None) ->
     suppressed = advice.get("suppressed")
 
     pending = repository.list_agent_assist_recommendations(conversation_id=conversation_id, status="pending")
-    existing_types = {row["action_type"] for row in pending}
+    # THIS CASE's rows only, for the two decisions below. `pending` stays conversation-wide
+    # because it is also the response body, and conversation-level rows (an offer, which
+    # carries no ticket_id) belong there - but a decision about one case must never read
+    # another case's rows.
+    #
+    # One conversation holds several cases: this customer has two fraud disputes in
+    # conv_6c8c88e59ca5. Keyed on the conversation, `existing_by_type` matched the OTHER
+    # case's acknowledgement, so this case's acknowledgement took the refresh branch below,
+    # overwrote that case's text, and never created a row of its own - the card rendered
+    # empty while the LLM had produced the nudge correctly. The sweep had the same flaw in
+    # reverse: one case's review could retire another case's nudges.
+    _case_id = (ticket or {}).get("ticket_id")
+    case_pending = [row for row in pending if row.get("ticket_id") == _case_id] if _case_id else pending
+    # Keyed by type, and it has to be: one live nudge per type per case. The engine re-reads
+    # the case on every render, so the same TYPE legitimately recurs with different words -
+    # a promise whose deadline has moved after the agent sent an update.
+    existing_by_type = {row["action_type"]: row for row in case_pending}
     for action in advice.get("actions", []):
-        if action["action_type"] in existing_types:
+        prior = existing_by_type.get(action["action_type"])
+        if prior is not None:
+            # REFRESH, never skip. `continue` here froze the first nudge of each type: the
+            # freshly generated text was discarded on arrival and the stale row stayed on
+            # screen, so the card told the agent "nothing sent since we promised it" one
+            # minute AFTER they had sent it. The sweep below could not save it either -
+            # it also compares action_type, so a new promise nudge protected the old one.
+            refreshed = repository.refresh_agent_assist_recommendation(
+                prior["recommendation_id"],
+                reason=action["reason"],
+                confidence=action["confidence"],
+                metadata=_action_metadata(action, ticket),
+            )
+            if refreshed is not None:
+                prior.update(refreshed)
             continue
         pending.append(repository.add_agent_assist_recommendation(
             conversation_id=conversation_id,
@@ -232,7 +272,10 @@ def get_next_best_actions(conversation_id: str, ticket_id: str | None = None) ->
     # ec2-operations.md where a 429 cached as "no offers" and Refresh could not clear it.
     if not llm_error and not suppressed:
         still_current = {a["action_type"] for a in advice.get("actions", [])}
-        for row in pending:
+        # case_pending, not pending: this review describes ONE case, so it is only evidence
+        # about that case's rows. Sweeping the whole conversation let a review of case A
+        # retire case B's nudges purely because B's type was absent from A's actions.
+        for row in case_pending:
             action_type = row["action_type"]
             if (action_type in _OFFER_ACTION_TYPES
                     or action_type in PIPELINE_ACTION_TYPES

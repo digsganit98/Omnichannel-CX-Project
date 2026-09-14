@@ -6,7 +6,7 @@
 <title>OmnichannelCX</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="icon" type="image/png" href="/admin-ui/assets/ganit-logo.png">
-<link rel="stylesheet" href="/admin-ui/assets/style.css?v=20260914-merge1">
+<link rel="stylesheet" href="/admin-ui/assets/style.css?v=20260914-hil5">
 </head>
 <body>
 
@@ -768,11 +768,6 @@
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0016 9.5 6.5 6.5 0 109.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5z"/></svg>
             <input id="sdSearch" placeholder="Search cases, customers, IDs" oninput="sdSetSearch(this.value)">
           </div>
-          <select class="sd-sort" id="sdSort" onchange="renderServiceDesk()" aria-label="Sort">
-            <option value="priority">Sort: Priority</option>
-            <option value="sla">Sort: SLA</option>
-            <option value="age">Sort: Age</option>
-          </select>
           <!-- The bench is only needed while assigning, so it is a control rather than a
                permanent band. Row-level hints ("or Rahul 3/8") carry the routing
                suggestion where the decision actually happens. -->
@@ -786,16 +781,10 @@
         <div class="sd-views" id="sdViews"></div>
 
         <div class="sd-listwrap">
-          <div class="sd-lhd">
-            <span>Priority</span>
-            <span>Case</span>
-            <span>Customer</span>
-            <span>Team</span>
-            <span>Owner</span>
-            <span>Reassign</span>
-            <span>First Response</span>
-            <span>Follow-up</span>
-            <span>Closed</span>
+          <!-- Rendered by renderServiceDesk: the Closed view carries a different column set
+               (no Reassign / Next action / Waiting on, plus a Closed column), so the header
+               cannot be static markup. -->
+          <div class="sd-lhd" id="sdLhd">
           </div>
           <div class="sd-rows" id="sdRows"></div>
           <div class="sd-empty" id="sdEmpty" hidden></div>
@@ -885,6 +874,6 @@
 <!-- d3-force, vendored (15KB, tree-shaken to the 7 functions used). Local, not a CDN:
      the app has no other external JS and a demo must not depend on a network fetch. -->
 <script src="/admin-ui/assets/vendor-d3-force.js?v=20260902"></script>
-<script src="/admin-ui/assets/app.js?v=20260914-merge2"></script>
+<script src="/admin-ui/assets/app.js?v=20260914-hil5"></script>
 </body>
 </html>

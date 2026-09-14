@@ -403,6 +403,10 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .draft-card--offer .draft-hdr{background:var(--grn-t)}
 /* Bank-initiated offer rows in the Detailed view */
 .det-q-text--offer{color:var(--t3);font-style:italic}
+/* An exchange WE started - a promised update, a chased follow-up. Same quiet treatment as
+   an offer row: there is no customer message, and the column must not look like one failed
+   to load. */
+.det-q-text--ours{color:var(--t3);font-style:italic}
 /* Offer touchpoint in the Lineage mini-timeline: amber ring on the channel dot */
 .tl-ex--offer .tl-dot{box-shadow:0 0 0 2.5px var(--amb-bd)}
 .tl-ex--offer .tl-ch{color:var(--amb-t);font-weight:700}
@@ -1632,7 +1636,7 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .sd-srch:focus-within{border-color:var(--blue);box-shadow:0 0 0 3px var(--blue-bg)}
 .sd-srch svg{width:13px;height:13px;fill:var(--t3);flex:0 0 auto}
 .sd-srch input{border:0;background:none;outline:none;font:400 11.5px inherit;color:var(--t1);width:100%}
-.sd-sort{border:1px solid var(--bdr);background:var(--surf);color:var(--t2);border-radius:7px;
+.sd-sort--removed{border:1px solid var(--bdr);background:var(--surf);color:var(--t2);border-radius:7px;
   padding:6px 9px;font:600 11.5px inherit;cursor:pointer;outline:none;flex-shrink:0}
 .sd-sort:focus{border-color:var(--blue)}
 .sd-benchbtn{border:1px solid var(--bdr);background:var(--surf);color:var(--t2);border-radius:7px;
@@ -1675,7 +1679,6 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .sd-v.on .sd-v-n{color:var(--blue)}
 .sd-v-n--hot{color:var(--red-t)}
 .sd-v-n--warn{color:var(--org-t)}
-.sd-v-sep{width:1px;height:18px;background:var(--bdr);margin:0 6px;flex:0 0 auto}
 
 /* The list. One grid template shared by the header and every row, so columns
    cannot drift apart. */
@@ -1685,8 +1688,15 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
    stalled case is one that stops early - which is why the old "Breaching SLA"/"Promised"
    tabs became columns: they were stages wearing filter costumes. */
 .sd-lhd,.sd-row{display:grid;
-  grid-template-columns:58px minmax(200px,1fr) 132px 116px 124px 96px 140px 132px 118px;
+  grid-template-columns:58px minmax(180px,1fr) 116px 104px 112px 88px 92px 168px 142px 88px;
   gap:14px;align-items:center}
+/* The Closed view: eight columns, not ten. No Reassign, no Next action, no Waiting on - a
+   finished case cannot be reassigned, needs nothing done and is waiting for nobody - and a
+   Closed column in their place. The extra width goes to the case title and the closing
+   record, which is what someone opening this view came to read. Overrides the template
+   above, so it must stay AFTER it and carries no other declarations. */
+.sd-lhd--closed,.sd-rows--closed .sd-row{
+  grid-template-columns:58px minmax(220px,1fr) 128px 112px 120px 100px 184px 150px}
 .sd-lhd{position:sticky;top:0;z-index:2;padding:9px 20px;background:var(--surf);
   border-bottom:1px solid var(--bdr);font-size:9.5px;font-weight:700;text-transform:uppercase;
   letter-spacing:.5px;color:var(--t3)}
@@ -1702,7 +1712,13 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 /* Priority: a number over a proportional track, so the shape of the queue is
    readable without parsing every digit. */
 .sd-pri{display:flex;flex-direction:column;gap:4px}
-.sd-pri-v{font-size:14px;font-weight:700;color:var(--t1);line-height:1;font-variant-numeric:tabular-nums}
+/* The tier WORD, not the score. Sized down from the old 14px number: "Critical" is eight
+   characters where "100" was three, and at 14px/700 it out-shouted the customer's problem,
+   which is the loudest thing the row should carry. Colour is the tier's own - the same red
+   and orange the bar below it uses - so the word and the bar say one thing, not two. */
+.sd-pri-v{font-size:11px;font-weight:700;line-height:1;letter-spacing:.02em;color:var(--t2)}
+.sd-pri-v--critical{color:var(--red)}
+.sd-pri-v--high{color:var(--org)}
 .sd-pri-t{height:3px;border-radius:2px;background:var(--surf2);overflow:hidden}
 .sd-pri-t i{display:block;height:100%;border-radius:2px;background:var(--bdr2)}
 .sd-pri-t i.hi{background:var(--red)}
@@ -1717,20 +1733,10 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .sd-tag--gry{background:var(--surf2);color:var(--t2);font-weight:600}
 
 .sd-cust{display:flex;align-items:center;gap:8px;min-width:0}
-.sd-cav{width:26px;height:26px;border-radius:50%;background:var(--surf2);color:var(--t2);
-  font:700 9.5px inherit;display:flex;align-items:center;justify-content:center;flex:0 0 auto}
 .sd-cn{font-size:11.5px;color:var(--t1);font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .sd-ct{font-size:10px;color:var(--t3)}
 
 .sd-own{display:flex;align-items:center;gap:8px;min-width:0}
-.sd-av{width:26px;height:26px;border-radius:50%;background:var(--blue-bg);color:var(--blue-t);
-  font:700 9.5px inherit;display:flex;align-items:center;justify-content:center;flex:0 0 auto;position:relative}
-.sd-av--none{background:var(--surf2);color:var(--t3);border:1px dashed var(--bdr2);font-weight:500}
-.sd-dot{position:absolute;right:-1px;bottom:-1px;width:8px;height:8px;border-radius:50%;border:2px solid var(--surf)}
-.sd-dot--active{background:var(--grn)}
-.sd-dot--idle{background:var(--amb)}
-.sd-dot--away{background:var(--t3)}
-.sd-dot--unknown{background:var(--surf);border-color:var(--bdr2)}
 .sd-on{font-size:11.5px;font-weight:600;color:var(--t1);line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .sd-ol{font-size:10px;color:var(--t3)}
 /* Claiming a case is a routine action that repeats on EVERY row, so it uses the app's
@@ -1750,6 +1756,45 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
    to do, an em dash when it does not apply. Never a control for a decision that cannot be
    made from a table row - closing is a judgement about the customer's problem, so Closed
    is a RECORD and the act itself stays in Agent Workspace. */
+/* HIL CONTACT HISTORY - the STAGE of the human loop, named. Not a count of messages and not
+   a drawn sequence: both were tried, and a case with six contacts can be at the identical
+   stage as one with two, while any case long enough to matter is too long to draw without
+   clipping it. Colour carries how much it should worry a reader: red for a case no person
+   has ever read, amber while something is waiting on us, green once a person has handled
+   it, grey when it is finished. */
+.sd-jrn{font-size:11px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sd-jrn--none{color:var(--red-t)}
+.sd-jrn--late{color:var(--red-t)}
+.sd-jrn--wait{color:var(--org-t)}
+/* An ordinary open case that a person has handled. Deliberately NOT green: green reads as
+   finished, and the case is still open and still owed. Colour here marks what is wrong. */
+.sd-jrn--plain{color:var(--t1)}
+/* Closed. Same weight AND the same text colour as every other stage line: --t3 is the
+   palest grey in the stylesheet, and at 11px it read as not-bold next to the near-black
+   stages beside it, which looked like a rendering fault rather than a calmer state. The
+   column is already all-grey on a closed row; the stage line does not need to fade too. */
+.sd-jrn--done{color:var(--t1)}
+
+/* WAITING ON. The board's primary split: is the ball ours or theirs? A dot plus one word,
+   because this is scanned down the column rather than read - "Us" in the brand blue is the
+   work, "Them" is deliberately quiet so a screenful of waiting-on-customer cases recedes
+   and the ones needing a person stand out. */
+.sd-wait{display:flex;align-items:center;gap:6px;font-size:11px;font-weight:600;white-space:nowrap}
+.sd-wait-dot{width:7px;height:7px;border-radius:50%;flex:0 0 auto}
+.sd-wait--us{color:var(--blue-t)}
+.sd-wait--us .sd-wait-dot{background:var(--blue)}
+.sd-wait--them{color:var(--t3);font-weight:500}
+.sd-wait--them .sd-wait-dot{background:var(--bdr2)}
+
+/* NEXT ACTION. The app's settled quiet button treatment (.tkt-resolve-btn, .sd-take): pale
+   ground, coloured text, fills on hover. --hot is the same shape in orange for work that is
+   actually waiting on someone; a case with nothing owed renders an em dash instead, so the
+   loud treatment never lands on every row at once and stops meaning anything. */
+.sd-next{border:1px solid var(--blue-bd);background:var(--blue-bg);color:var(--blue-t);
+  border-radius:6px;padding:4px 9px;font:600 10.5px inherit;cursor:pointer;white-space:nowrap}
+.sd-next:hover{background:var(--blue);color:#fff;border-color:var(--blue)}
+.sd-next--hot{border-color:var(--org-bd);background:var(--org-bg);color:var(--org-t)}
+.sd-next--hot:hover{background:var(--org);color:#fff;border-color:var(--org)}
 .sd-stg{font-size:11px;line-height:1.35;min-width:0}
 .sd-stg-t{color:var(--t1);font-weight:600;font-variant-numeric:tabular-nums;white-space:nowrap;
   overflow:hidden;text-overflow:ellipsis}
@@ -1758,9 +1803,6 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .sd-stg-none{color:var(--t3)}
 .sd-stg-kept{color:var(--grn-t);font-weight:700}
 .sd-stg-late{color:var(--red-t);font-weight:600}
-.sd-act{border:1px solid var(--org-bd);background:var(--org-bg);color:var(--org-t);
-  border-radius:6px;padding:4px 10px;font:600 10.5px inherit;cursor:pointer;white-space:nowrap}
-.sd-act:hover{background:var(--org);color:#fff;border-color:var(--org)}
 .sd-clk{font-size:11px;font-weight:700;font-variant-numeric:tabular-nums;white-space:nowrap}
 .sd-clk--soon{color:var(--org-t)}
 .sd-clk--over{color:var(--red-t)}

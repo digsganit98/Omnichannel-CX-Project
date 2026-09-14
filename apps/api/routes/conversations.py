@@ -190,7 +190,7 @@ def case_summary(conversation_id: str, refresh: bool = False, ticket_id: str | N
     # view is showing. Absent, the route falls back to the conversation's active case,
     # which is what it did before the cards became per-case.
     from apps.api.routes.agent_assist import case_review
-    review = case_review(repo, conversation_id, ticket_id)
+    review = case_review(repo, conversation_id, ticket_id, refresh=refresh)
     summary = None
     if not review.get("llm_error") and not review.get("suppressed") and review.get("situation"):
         summary = {"situation": review["situation"], "model": None}
