@@ -259,6 +259,7 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 169 — a customer's "thanks" proposes a close instead of performing one:** the pipeline now records a proposal on the ticket and a named person decides it from the Suggested Actions card, so no case ends without a human, a reason and an attribution.
 - **Fix 170 — close a case from the case you are reading:** a sticky bar above the exchanges carries the ticket id, its status and the one Close button, the per-ticket Close buttons left the right panel, and the closing reason arrives written from the case summary instead of being typed into a browser prompt.
 - **Fix 171 — one LLM review per case instead of three per conversation:** case_summary, case_advice and opportunity_generation became a single `case_review` call scoped to one ticket's turns and cached per ticket, measured at 2,062 tokens against 2,821, and the three right-panel cards now follow whichever case the Detailed view is showing.
+- **Fix 172 — show the case as a sequence of contacts, and stop nudges crossing cases:** the Service Desk row became Opened / HIL contact history / Next action / Waiting on with a separate column set for closed cases, nudges and their supersede sweep are scoped to the ticket rather than the conversation, the review prompt reuses `_format_graph_context` instead of rendering counts, and the Case Summary card lost both of its caches.
 - **EC2 deploy 2026-09-07 (second) — Fix 152 to Fix 162, UI only:** four bind-mounted files took effect on landing with no rebuild and no container restarted; the two changed Python files are on the box but deliberately not built into the image.
 - **OPEN - Fix 149 turned three escalation gates into constants (NOT FIXED, measured):** moving the KB into the graph made retrieval EXHAUSTIVE - all 14 chunks, every message - and three gates that read `contexts` to judge relevance silently became no-ops. Measured on all 11 messages sent through the UI today, with contexts rebuilt from `retrieval_evidence`: **`_is_strong_l1_knowledge_answer` TRUE 11/11**, `knowledge_not_found` fired **0/11**, KB chunks per turn **min 14 max 14**. The third gate is the damaging one - returning True SKIPS the handoff check entirely, the rule that reads the customer's own words. Live consequence: the FD question, for which the KB has zero guidance, auto-sent as a confident L1 knowledge answer and volunteered a penalty rule from the model's own general knowledge. Today's real escalations (fraud, claim dispute) were caught earlier by intent-label rules, which MASKS this for the intents that have their own rules and exposes it for everything else. `confidence=0.95` is hardcoded in Priority 2, so `confidence < 0.3` cannot fire either. **Fix 149 verified the PROVENANCE consumers of contexts and never enumerated the DECISION consumers.** This gate has now broken twice in opposite directions (Fix 143 inverted it) because it reads a property of RETRIEVAL to answer a question about RELEVANCE - so the fix is not a patched condition. Fix 150 already supplies the raw material (`customer_holds`, each chunk's `concept`); probe it on real messages before designing the gate.
 - **Reference - local vs the hosted instance:** the two are NOT meant to match. Application code must; `docker-compose.yml` deliberately must not (Ollama commented out on EC2, and ngrok has **no** `profiles: ["tunnel"]` there - copying the local file over means the next `up` starts no tunnel and **WhatsApp goes silent with nothing to say why**). EC2 is the sole holder of the shared WhatsApp number, mailbox and ngrok domain, which is why local ships with those off. Three deploy traps, all already bitten: **no git on EC2** (scp only), `restart` runs **old code** (rebuild), and `restart` does **not re-read `.env`** (`up -d`). Plus what must never be done there - other teams' containers, the disk watermark, removing OpenSearch, `prune --volumes`.
@@ -9312,3 +9313,58 @@ was live code short-circuiting itself, not a stale file.
 Verified end to end: the FD case and the fraud case return their own summaries, a second
 visit fires no call, and zero calls to the three old operations since the restart. Tests
 5 failed / 149 passed — the same five pre-existing.
+
+---
+
+## Fix 172 — show the case as a sequence of contacts, and stop nudges crossing cases
+
+Committed `c9209e2`. The Service Desk row assumed a case was one exchange. Three
+single-value columns — first response, follow-up, closed — were each written once and then
+frozen, so a fraud dispute we had written to three times showed one timestamp and two
+dashes, and the row read "Answered · on time · —" on a case where the customer was owed
+₹48,037 and had been told nothing. Every cell was reporting OUR activity rather than her
+outcome, which is the same defect as the reply that promised an investigation nobody
+started. The row now answers what has happened, what to do next and whose move it is;
+closed cases carry a different column set, because reassigning or chasing a finished case
+is meaningless and an em dash in each would still spend the width. The board always sorts
+newest first and the sort control is gone — three sort modes let one board tell three
+stories with nothing on screen saying which. Avatars, an "Approval pending" tag nothing
+could ever clear, a channel tag that read the same on every row, and an internal fork tag
+were removed; priority reads as the word the SLA clock acts on rather than a 0-100 score
+nobody can decode.
+
+**Nudges were keyed by conversation while cases are keyed by ticket.** One conversation
+holds several cases — this customer has two fraud disputes in `conv_6c8c88e59ca5` — so the
+second case's acknowledgement matched the first one's row, took the refresh branch,
+overwrote that case's text and never created a row of its own. The card rendered empty
+while the LLM had produced the nudge correctly. The supersede sweep had the same flaw in
+reverse: one case's review could retire another case's nudges. `pending` stays
+conversation-wide because it is also the response body and conversation-level offer rows
+belong there; the two decisions read a per-case subset.
+
+**The review prompt carried counts where the other calls carry facts.** "Credit cards: 1"
+stood in for DPD 45, a ₹1,258 penalty and a ₹1,284 late fee — every fact
+`proactive_warning` is defined against, so that action type could not fire on any case.
+The block now calls `_format_graph_context`, the renderer `answer_generation` and
+`classify_message` already use, whose own docstring records this exact bug being fixed once
+before: "six hand-written blocks used to sit here, each naming the 4-6 fields it printed…
+her charges were absent entirely". A seventh had been written anyway. Hard Rule 3 was also
+forbidding what the vocabulary required — "state only what the CASE FACTS support" against
+a type defined as "something in THEIR RECORDS will cost them" — and now admits both.
+Probed on the live case: the warning fires in 1 of 2 runs, which is not the same as fixed.
+
+**The Case Summary fetched through its own path** with an HTML cache and an in-flight flag,
+so a caller had to remember to force a refresh and `doSend` never did; the card showed a
+stale situation for the rest of the session. It now fetches inside `renderRight` beside the
+two cards it shares an LLM call with, and both caches are deleted — the isolation existed
+so a slow summary call could not delay the panel, and Fix 171 ended that. The Refresh
+button was separately dead: the route accepted a `refresh` flag, documented it, and dropped
+it before calling `case_review`. Verified by call count and row timestamp rather than by
+reading the wiring, which had already misled once.
+
+**Still open.** The close path never classifies the turn: `propose_close` reaches
+`send_outbound_reply` without passing `classify_intent`, so a closing message gets no
+sentiment, no intent and no `ticket_id` — measured, 1 of 15 inbound turns, and it is that
+one. The prompt is therefore told "60% negative" while the browser's keyword fallback shows
+the same message as Positive, and the summary, the upset nudge and the offers gate all
+inherit the stale label. Tests 5 failed / 149 passed, the same five pre-existing.
