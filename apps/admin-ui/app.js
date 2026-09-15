@@ -247,6 +247,9 @@ window.switchAnalyticsTab = function(name, btn) {
   var tabs = document.querySelectorAll('#anTabs .an-tab');
   for (var j = 0; j < tabs.length; j++) tabs[j].classList.remove('on');
   if (btn) btn.classList.add('on');
+  // Runs are paginated/filtered state, unrelated to the KPI/chart panels that load
+  // eagerly in loadAnalytics() — fetch them once, lazily, the first time this tab opens.
+  if (name === 'audit' && !auditState.loaded) { auditState.loaded = true; loadAuditRuns(); }
 };
 
 window.switchLoginMode = function(mode) {
@@ -490,7 +493,6 @@ window.switchPage = function(name) {
   activePage = name;
   if (name === 'analytics') loadAnalytics();
   if (name === 'connectors') loadConnectors();
-  if (name === 'sim') loadAudit();
   if (name === 'settings') loadSettings();
 };
 
@@ -1810,7 +1812,6 @@ window.loadAnalytics = async function() {
       fetch('/analytics/channels', { headers: adminHeaders() }).then(function(r){return r.json();}),
       fetch('/analytics/intents',  { headers: adminHeaders() }).then(function(r){return r.json();}),
       fetch('/analytics/agents',   { headers: adminHeaders() }).then(function(r){return r.json();}),
-      fetch('/admin/audit-events', { headers: adminHeaders() }).then(function(r){return r.json();}),
       fetch('/admin/llm-observability/summary?days=7', { headers: adminHeaders() }).then(function(r){return r.json();}),
       fetch('/analytics/sentiment', { headers: adminHeaders() }).then(function(r){return r.json();}),
       fetch('/analytics/solution-performance', { headers: adminHeaders() }).then(function(r){return r.json();}),
@@ -1819,12 +1820,12 @@ window.loadAnalytics = async function() {
     renderChannelBars(results[1]);
     renderIntentBars(results[2]);
     renderAgentPanel(results[3]);
-    renderFeedList(results[4], false);
-    renderLlmUsagePanel(results[5]);
-    renderModelVersionTable(results[5]);
-    renderLlmTimeTrends(results[5]);
-    renderSolutionStats(results[7]);
-    renderSolutionCharts(results[7]);
+    renderLlmUsagePanel(results[4]);
+    renderModelVersionTable(results[4]);
+    renderLlmTimeTrends(results[4]);
+    renderSolutionStats(results[6]);
+    renderSolutionCharts(results[6]);
+    if (document.querySelector('.analytics-section[data-an="audit"]:not([hidden])')) loadAuditRuns();
   } catch(e) {
     console.error('Analytics load error:', e.message);
   } finally {
@@ -2421,40 +2422,209 @@ function renderAgentPanel(data) {
   el.innerHTML = '<table class="mini-table llm-op-table"><thead><tr><th>Team/Agent</th><th class="llm-num">Handled</th><th class="llm-num">Avg handle time</th></tr></thead><tbody>'+rows+'</tbody></table>';
 }
 
-function feedDotColor(evType) {
+// Shared dot/pill color for anything shown as an audit timeline item, whether it's a raw
+// audit_event (kind 'audit') or an LLM usage row (kind 'llm'). A hard failure always wins
+// over the event-type guess below it, so a failed ticket_created still reads red.
+function timelineDotColor(kind, evType, status) {
+  if (status === 'error' || status === 'failed' || evType === 'workflow_failed') return '#dc2626';
   var t = (evType||'').toLowerCase();
+  if (kind === 'llm') return '#7c3aed';
   if (t.includes('escalat')) return '#dc2626';
   if (t.includes('ticket')) return '#2563eb';
-  if (t.includes('resolve')) return '#16a34a';
+  if (t.includes('resolve')||t.includes('completed')) return '#16a34a';
   if (t.includes('message')||t.includes('inbound')||t.includes('outbound')) return '#7c3aed';
   return '#94a3b8';
 }
 
-function renderFeedList(events, prepend) {
-  var list = document.getElementById('feedList');
-  if (!list) return;
-  if (!events || !events.length) {
-    if (!prepend) list.innerHTML = '<div class="empty-state">No events yet</div>';
-    return;
+// ── AUDIT (Analytics → Audit tab) ────────────────────────────────────────────
+var auditState = { limit: 50, offset: 0, total: 0, loaded: false, loading: false };
+
+function auditFilterQuery() {
+  var qs = ['days=' + encodeURIComponent(document.getElementById('auditFilterDays').value || '14')];
+  var channel = document.getElementById('auditFilterChannel').value;
+  var status = document.getElementById('auditFilterStatus').value;
+  var search = document.getElementById('auditFilterSearch').value.trim();
+  if (channel) qs.push('channel=' + encodeURIComponent(channel));
+  if (status) qs.push('status=' + encodeURIComponent(status));
+  if (search) qs.push('search=' + encodeURIComponent(search));
+  qs.push('limit=' + auditState.limit, 'offset=' + auditState.offset);
+  return qs.join('&');
+}
+
+window.loadAuditRuns = async function() {
+  if (auditState.loading) return;
+  auditState.loading = true;
+  var table = document.getElementById('auditRunsTable');
+  try {
+    var data = await api('/admin/audit-events/runs?' + auditFilterQuery());
+    auditState.total = data.total || 0;
+    renderAuditRuns(data.runs || []);
+    renderAuditPager();
+  } catch (e) {
+    if (table) table.innerHTML = '<div class="empty-state">Could not load runs: ' + escH(e.message) + '</div>';
+  } finally {
+    auditState.loading = false;
   }
-  if (!prepend) list.innerHTML = '';
-  var sorted = events.slice().sort(function(a, b) { return new Date(b.created_at) - new Date(a.created_at); });
-  sorted.forEach(function(e) {
-    var item = document.createElement('div');
-    item.className = 'feed-item';
-    var d = e.created_at ? new Date(e.created_at) : null;
-    var tm = d ? d.toLocaleDateString([], {month:'short',day:'numeric'}) + ' ' + d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '';
-    var meta = [];
-    if (e.channel) meta.push('<span>' + escH(e.channel) + '</span>');
-    if (e.intent)  meta.push('<span>' + escH(e.intent.replace(/_/g,' ')) + '</span>');
-    if (e.customer_id) meta.push('<span>cust:' + escH(e.customer_id.slice(0,8)) + '…</span>');
-    item.innerHTML = '<div class="feed-dot" style="background:' + feedDotColor(e.event_type) + '"></div>'
-      + '<div class="feed-content"><div class="feed-type">' + escH(e.event_type || 'event') + '</div>'
-      + (meta.length ? '<div class="feed-meta">' + meta.join('') + '</div>' : '') + '</div>'
-      + '<div class="feed-time">' + tm + '</div>';
-    if (prepend) list.insertBefore(item, list.firstChild);
-    else list.appendChild(item);
+};
+
+function runStatusPillHtml(status) {
+  return '<span class="run-status-pill run-status-pill--' + (status === 'failed' ? 'failed' : 'ok') + '">'
+    + (status === 'failed' ? 'Failed' : 'OK') + '</span>';
+}
+
+function fmtDuration(ms) {
+  if (ms == null) return '—';
+  if (ms < 1000) return ms + ' ms';
+  return (ms / 1000).toFixed(1) + ' s';
+}
+
+function renderAuditRuns(runs) {
+  var el = document.getElementById('auditRunsTable');
+  if (!el) return;
+  if (!runs.length) { el.innerHTML = '<div class="empty-state">No runs in this window</div>'; return; }
+  var rows = runs.map(function(r) {
+    var d = r.started_at ? new Date(r.started_at) : null;
+    var when = d ? d.toLocaleDateString([], {month:'short',day:'numeric'}) + ' ' + d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '—';
+    return '<tr>'
+      + '<td>' + escH(when) + '</td>'
+      + '<td>' + escH(chMeta(r.channel).label) + '</td>'
+      + '<td>' + (r.customer_id ? escH(r.customer_id.slice(0,8)) + '…' : '—') + '</td>'
+      + '<td>' + (r.intent ? escH(r.intent.replace(/_/g,' ')) : '—') + '</td>'
+      + '<td>' + (r.ticket_id ? escH(r.ticket_id.slice(0,8)) + '…' : '—') + '</td>'
+      + '<td>' + runStatusPillHtml(r.status) + '</td>'
+      + '<td>' + escH(fmtDuration(r.duration_ms)) + '</td>'
+      + '<td><button class="audit-view-btn" onclick="openRunModal(\'' + escH(r.correlation_id) + '\')">View</button></td>'
+      + '</tr>';
+  }).join('');
+  el.innerHTML = '<table class="mini-table"><thead><tr>'
+    + '<th>Started</th><th>Channel</th><th>Customer</th><th>Intent</th><th>Ticket</th><th>Status</th><th>Duration</th><th></th>'
+    + '</tr></thead><tbody>' + rows + '</tbody></table>';
+}
+
+function renderAuditPager() {
+  var el = document.getElementById('auditPager');
+  if (!el) return;
+  var from = auditState.total === 0 ? 0 : auditState.offset + 1;
+  var to = Math.min(auditState.offset + auditState.limit, auditState.total);
+  el.innerHTML = '<span>' + from + '–' + to + ' of ' + auditState.total + '</span>'
+    + '<button' + (auditState.offset === 0 ? ' disabled' : '') + ' onclick="auditPagePrev()">Prev</button>'
+    + '<button' + (to >= auditState.total ? ' disabled' : '') + ' onclick="auditPageNext()">Next</button>';
+}
+
+window.auditPagePrev = function() {
+  auditState.offset = Math.max(0, auditState.offset - auditState.limit);
+  loadAuditRuns();
+};
+window.auditPageNext = function() {
+  if (auditState.offset + auditState.limit < auditState.total) {
+    auditState.offset += auditState.limit;
+    loadAuditRuns();
+  }
+};
+
+function auditFilterChanged() {
+  auditState.offset = 0;
+  loadAuditRuns();
+}
+
+(function initAuditFilters() {
+  var channelSel = document.getElementById('auditFilterChannel');
+  if (channelSel) {
+    Object.keys(CH).forEach(function(k) {
+      var opt = document.createElement('option');
+      opt.value = k; opt.textContent = CH[k].label;
+      channelSel.appendChild(opt);
+    });
+  }
+  ['auditFilterChannel','auditFilterStatus','auditFilterDays'].forEach(function(id) {
+    var el = document.getElementById(id);
+    if (el) el.addEventListener('change', auditFilterChanged);
   });
+  var search = document.getElementById('auditFilterSearch');
+  if (search) {
+    var t;
+    search.addEventListener('input', function() {
+      clearTimeout(t);
+      t = setTimeout(auditFilterChanged, 300);
+    });
+  }
+})();
+
+window.closeRunModal = function() {
+  document.getElementById('runModal').classList.add('hidden');
+};
+
+window.openRunModal = async function(correlationId) {
+  var modal = document.getElementById('runModal');
+  var body = document.getElementById('runModalBody');
+  document.getElementById('runModalSub').textContent = '';
+  body.innerHTML = '<div class="why-loading">Loading…</div>';
+  modal.classList.remove('hidden');
+  try {
+    var run = await api('/admin/audit-events/runs/' + encodeURIComponent(correlationId));
+    document.getElementById('runModalSub').innerHTML =
+      runStatusPillHtml(run.status) + ' &nbsp;·&nbsp; '
+      + [chMeta(run.channel).label, run.intent ? run.intent.replace(/_/g,' ') : null, fmtDuration(new Date(run.ended_at) - new Date(run.started_at))]
+        .filter(Boolean).map(escH).join(' · ');
+    body.innerHTML = renderRunTimeline(run);
+  } catch (e) {
+    body.innerHTML = '<div class="why-none">Could not load run: ' + escH(e.message) + '</div>';
+  }
+};
+
+function renderRunTimeline(run) {
+  var items = (run.audit_events || []).map(function(e) {
+    return { ts: e.created_at, kind: 'audit', event_type: e.event_type, data: e };
+  }).concat((run.llm_usage_events || []).map(function(e) {
+    return { ts: e.created_at, kind: 'llm', event_type: e.operation, data: e };
+  }));
+  items.sort(function(a, b) { return new Date(a.ts) - new Date(b.ts); });
+  if (!items.length) return '<div class="empty-state">No events recorded for this run</div>';
+  var html = items.map(renderTimelineItem).join('');
+  return '<div class="feed-list run-timeline">' + html + '</div>';
+}
+
+function renderTimelineItem(item) {
+  var d = item.ts ? new Date(item.ts) : null;
+  var tm = d ? d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '';
+  var isStep = item.kind === 'audit' && item.event_type === 'workflow_step_completed';
+  var isError = item.kind === 'llm' ? item.data.status === 'error' : item.event_type === 'workflow_failed';
+  var dot = timelineDotColor(item.kind, item.event_type, item.data.status);
+  var cls = 'feed-item' + (isStep ? ' feed-item--step' : '') + (isError ? ' feed-item--error' : '');
+
+  var title, detail;
+  if (item.kind === 'llm') {
+    title = 'LLM · ' + escH(item.data.agent || item.data.operation || 'call');
+    var bits = [
+      item.data.model ? escH(item.data.model) : null,
+      item.data.total_tokens ? item.data.total_tokens + ' tok' : null,
+      item.data.estimated_cost_usd ? '$' + Number(item.data.estimated_cost_usd).toFixed(4) : null,
+      item.data.latency_ms != null ? item.data.latency_ms + ' ms' : null,
+    ].filter(Boolean).join(' · ');
+    detail = bits + (item.data.error ? ' — ' + escH(item.data.error) : '');
+    var meta = item.data.metadata || {};
+    if (meta.langfuse_trace_url) {
+      detail += ' <a class="feed-trace-link" href="' + escH(meta.langfuse_trace_url) + '" target="_blank" rel="noopener">Trace ↗</a>';
+    }
+  } else if (isStep) {
+    title = escH((item.data.details && item.data.details.step) || 'step') + ' · ' + escH((item.data.details && item.data.details.agent) || '');
+    detail = '';
+  } else {
+    title = escH(item.event_type || 'event');
+    var metaBits = [
+      item.data.intent ? item.data.intent.replace(/_/g,' ') : null,
+      item.data.ticket_id ? 'ticket ' + item.data.ticket_id.slice(0,8) + '…' : null,
+    ].filter(Boolean).map(escH).join(' · ');
+    var d2 = item.data.details && Object.keys(item.data.details).length ? JSON.stringify(item.data.details) : '';
+    detail = [metaBits, d2].filter(Boolean).join(' — ');
+  }
+
+  return '<div class="' + cls + '">'
+    + '<div class="feed-dot" style="background:' + dot + '"></div>'
+    + '<div class="feed-content"><div class="feed-type">' + title + '</div>'
+    + (detail ? '<div class="feed-detail">' + detail + '</div>' : '') + '</div>'
+    + '<div class="feed-time">' + tm + '</div>'
+    + '</div>';
 }
 
 function setSseStatus(text, cssText) {
@@ -2475,16 +2645,10 @@ function connectSSE() {
     // 1. Analytics overview card (always update — data is cheap)
     try { var d = JSON.parse(ev.data); if (d.total_open !== undefined) renderOverview(d); } catch(e) {}
 
-    // 2. Live event feed — use full audit trail
-    fetch('/admin/audit-events', { headers: adminHeaders() })
-      .then(function(r) { return r.json(); })
-      .then(function(evs) { renderFeedList(evs, false); })
-      .catch(function() {});
-
-    // 3. Inbox — refresh conversation list + badge on every event
+    // 2. Inbox — refresh conversation list + badge on every event
     loadConversations();
 
-    // 4. Analytics charts — full refresh if analytics page is open
+    // 3. Analytics charts — full refresh if analytics page is open
     if (activePage === 'analytics') loadAnalytics();
   };
 
@@ -2682,21 +2846,6 @@ function setSimStatusEm(msg, st) {
   el.className = 'sim-status' + (st ? ' ' + st : '');
   el.style.display = msg ? 'block' : 'none';
 }
-
-window.loadAudit = async function() {
-  var list = document.getElementById('auditList');
-  if (!list) return;
-  try {
-    var events = await api('/admin/audit-events');
-    if (!events.length) { list.innerHTML = '<div style="text-align:center;color:var(--t3);font-size:12px;padding:16px 0">No events yet</div>'; return; }
-    list.innerHTML = events.slice().reverse().slice(0,50).map(function(e) {
-      return '<div class="audit-item"><div class="audit-item-type">'+escH(e.event_type)+'</div>'
-        + '<div class="audit-item-meta">'+(e.channel?escH(e.channel)+' · ':'')+escH(e.created_at||'')+(e.intent?' · '+escH(e.intent):'')+'</div></div>';
-    }).join('');
-  } catch(e) {
-    list.innerHTML = '<div style="color:var(--red-t);font-size:12px;padding:8px">'+escH(e.message)+'</div>';
-  }
-};
 
 // ── TICKETS (shared cache) ───────────────────────────────────────────────────
 // The standalone Tickets page was removed (Fix 49) — ticket lifecycle management
