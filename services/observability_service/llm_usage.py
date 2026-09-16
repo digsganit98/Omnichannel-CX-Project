@@ -254,6 +254,76 @@ def _send_langfuse_event(event: dict, *, input_text: str, output_text: str) -> N
         logger.exception("langfuse_export_failed")
 
 
+def fetch_langfuse_trace_observations(trace_id: str) -> dict:
+    """Pull a trace's observations straight from Langfuse for inline display.
+
+    Lets the audit-run detail panel show what Langfuse recorded without sending the
+    viewer to the Langfuse UI (which needs its own account/access). Uses the v2
+    Observations API (api.observations.get_many) rather than the deprecated
+    GET /api/public/traces/{traceId}, per Langfuse's own migration guidance (the v1
+    trace endpoint sunsets 2026-11-16 on Cloud).
+    """
+    if not trace_id:
+        return {"enabled": _langfuse_configured(), "fetched": False, "observations": [], "error": None}
+    if not _langfuse_configured():
+        return {"enabled": False, "fetched": False, "observations": [], "error": None}
+    try:
+        from langfuse import get_client
+
+        client = get_client()
+        page = client.api.observations.get_many(
+            trace_id=trace_id,
+            fields="core,basic,io,metadata,model,usage,metrics,trace_context",
+            limit=100,
+        )
+        rows = [_normalize_observation(row) for row in (page.data or [])]
+        rows.sort(key=lambda row: row.get("start_time") or "")
+        return {"enabled": True, "fetched": True, "observations": rows, "error": None}
+    except Exception as exc:
+        logger.exception("langfuse_fetch_observations_failed")
+        return {"enabled": True, "fetched": False, "observations": [], "error": str(exc)}
+
+
+def _normalize_observation(row: Any) -> dict:
+    return {
+        "id": _get(row, "id"),
+        "name": _get(row, "name"),
+        "type": _get(row, "type"),
+        "level": _get(row, "level"),
+        "status_message": _get(row, "status_message") or _get(row, "statusMessage"),
+        "start_time": _stringify_time(_get(row, "start_time") or _get(row, "startTime")),
+        "end_time": _stringify_time(_get(row, "end_time") or _get(row, "endTime")),
+        "latency": _get(row, "latency"),
+        "input": _maybe_json(_get(row, "input")),
+        "output": _maybe_json(_get(row, "output")),
+        "model": _get(row, "model"),
+        "model_parameters": _get(row, "model_parameters") or _get(row, "modelParameters"),
+        "usage_details": _get(row, "usage_details") or _get(row, "usageDetails"),
+        "cost_details": _get(row, "cost_details") or _get(row, "costDetails"),
+        "metadata": _get(row, "metadata"),
+    }
+
+
+def _maybe_json(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    try:
+        return json.loads(value)
+    except (TypeError, ValueError):
+        return value
+
+
+def _stringify_time(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    try:
+        return value.isoformat()
+    except AttributeError:
+        return str(value)
+
+
 def _langfuse_configured() -> bool:
     return (
         os.getenv("LANGFUSE_ENABLED", "false").lower() == "true"

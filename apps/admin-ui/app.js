@@ -2579,9 +2579,25 @@ function renderRunTimeline(run) {
     return { ts: e.created_at, kind: 'llm', event_type: e.operation, data: e };
   }));
   items.sort(function(a, b) { return new Date(a.ts) - new Date(b.ts); });
-  if (!items.length) return '<div class="empty-state">No events recorded for this run</div>';
-  var html = items.map(renderTimelineItem).join('');
-  return '<div class="feed-list run-timeline">' + html + '</div>';
+  var timelineHtml = items.length
+    ? '<div class="feed-list run-timeline">' + items.map(renderTimelineItem).join('') + '</div>'
+    : '<div class="empty-state">No events recorded for this run</div>';
+  return timelineHtml + renderLangfuseTrace(run.langfuse);
+}
+
+// Formats a details object as "key value · key value" for inline display, skipping
+// keys already shown elsewhere (e.g. step/agent, which are in the row title).
+function fmtDetails(details, skipKeys) {
+  if (!details || typeof details !== 'object') return '';
+  var skip = skipKeys || [];
+  return Object.keys(details)
+    .filter(function(k) { return skip.indexOf(k) === -1 && details[k] !== null && details[k] !== undefined && details[k] !== ''; })
+    .map(function(k) {
+      var v = details[k];
+      if (typeof v === 'object') v = JSON.stringify(v);
+      return '<b>' + escH(k.replace(/_/g,' ')) + ':</b> ' + escH(String(v));
+    })
+    .join(' · ');
 }
 
 function renderTimelineItem(item) {
@@ -2607,16 +2623,19 @@ function renderTimelineItem(item) {
       detail += ' <a class="feed-trace-link" href="' + escH(meta.langfuse_trace_url) + '" target="_blank" rel="noopener">Trace ↗</a>';
     }
   } else if (isStep) {
-    title = escH((item.data.details && item.data.details.step) || 'step') + ' · ' + escH((item.data.details && item.data.details.agent) || '');
-    detail = '';
+    // details.step/agent are already the row title — everything else here (reason,
+    // confidence, source, action taken, etc.) is exactly the "how/why" this step ran.
+    var stepDetails = item.data.details || {};
+    title = escH(stepDetails.step || 'step') + ' · ' + escH(stepDetails.agent || '');
+    detail = fmtDetails(stepDetails, ['step', 'agent']);
   } else {
     title = escH(item.event_type || 'event');
     var metaBits = [
       item.data.intent ? item.data.intent.replace(/_/g,' ') : null,
       item.data.ticket_id ? 'ticket ' + item.data.ticket_id.slice(0,8) + '…' : null,
     ].filter(Boolean).map(escH).join(' · ');
-    var d2 = item.data.details && Object.keys(item.data.details).length ? JSON.stringify(item.data.details) : '';
-    detail = [metaBits, d2].filter(Boolean).join(' — ');
+    var d2 = fmtDetails(item.data.details, []);
+    detail = [metaBits, d2].filter(Boolean).join(' · ');
   }
 
   return '<div class="' + cls + '">'
@@ -2624,6 +2643,50 @@ function renderTimelineItem(item) {
     + '<div class="feed-content"><div class="feed-type">' + title + '</div>'
     + (detail ? '<div class="feed-detail">' + detail + '</div>' : '') + '</div>'
     + '<div class="feed-time">' + tm + '</div>'
+    + '</div>';
+}
+
+// Renders the run's Langfuse trace (observations pulled server-side via the API keys
+// already configured for this app) inline, so viewers without Langfuse account access
+// can see exactly what Langfuse recorded instead of following the "Trace ↗" link out.
+function renderLangfuseTrace(langfuse) {
+  if (!langfuse || !langfuse.enabled) return '';
+  var header = '<div class="why-banner" style="margin-top:12px"><b>Langfuse trace</b>';
+  if (!langfuse.fetched) {
+    return header + '<div style="margin-top:4px">Could not fetch the trace from Langfuse'
+      + (langfuse.error ? ': ' + escH(langfuse.error) : '.') + '</div></div>';
+  }
+  if (!langfuse.observations.length) {
+    return header + '<div style="margin-top:4px">No observations recorded for this trace.</div></div>';
+  }
+  var rows = langfuse.observations.map(renderLangfuseObservation).join('');
+  return header + '</div><div class="feed-list" style="margin-top:6px">' + rows + '</div>';
+}
+
+function renderLangfuseObservation(obs) {
+  var badgeColor = obs.level === 'ERROR' ? 'var(--red)' : obs.level === 'WARNING' ? 'var(--amb)' : 'var(--t3)';
+  var bits = [
+    obs.type ? escH(obs.type) : null,
+    obs.model ? escH(obs.model) : null,
+    obs.usage_details && obs.usage_details.total ? obs.usage_details.total + ' tok' : null,
+    obs.cost_details && obs.cost_details.total ? '$' + Number(obs.cost_details.total).toFixed(4) : null,
+    obs.latency != null ? Math.round(obs.latency * 1000) + ' ms' : null,
+  ].filter(Boolean).join(' · ');
+  var io = '';
+  if (obs.input !== undefined && obs.input !== null && obs.input !== '') {
+    io += '<div class="why-chunk-t"><b>Input:</b> ' + escH(typeof obs.input === 'string' ? obs.input : JSON.stringify(obs.input)) + '</div>';
+  }
+  if (obs.output !== undefined && obs.output !== null && obs.output !== '') {
+    io += '<div class="why-chunk-t"><b>Output:</b> ' + escH(typeof obs.output === 'string' ? obs.output : JSON.stringify(obs.output)) + '</div>';
+  }
+  if (!io) {
+    io = '<div class="why-chunk-t" style="color:var(--t3)">Input/output not captured (LANGFUSE_CAPTURE_IO is off).</div>';
+  }
+  return '<div class="why-chunk">'
+    + '<div class="why-chunk-h"><span>' + escH(obs.name || obs.id || 'observation') + '</span>'
+    + '<span style="color:' + badgeColor + '">' + bits + '</span></div>'
+    + io
+    + (obs.status_message ? '<div class="why-chunk-t" style="color:var(--red)">' + escH(obs.status_message) + '</div>' : '')
     + '</div>';
 }
 

@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from apps.api.dependencies.runtime import get_repository
 from apps.api.dependencies.security import require_admin_auth
+from services.observability_service import fetch_langfuse_trace_observations
 
 router = APIRouter(prefix="/admin/audit-events", tags=["admin"], dependencies=[Depends(require_admin_auth)])
 
@@ -30,4 +31,15 @@ def get_audit_run(correlation_id: str) -> dict:
     run = get_repository().get_audit_run(correlation_id)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
+    # A run's LLM calls all nest under one root span (see langfuse_workflow_trace in
+    # graph.py), so every llm_usage_event for this run shares the same trace_id.
+    trace_id = next(
+        (
+            (event.get("metadata") or {}).get("langfuse_trace_id")
+            for event in run.get("llm_usage_events", [])
+            if (event.get("metadata") or {}).get("langfuse_trace_id")
+        ),
+        None,
+    )
+    run["langfuse"] = fetch_langfuse_trace_observations(trace_id)
     return run
