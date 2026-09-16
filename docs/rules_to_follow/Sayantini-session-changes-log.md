@@ -9441,3 +9441,60 @@ rebuild from a complete copy would delete the need for all three, and costs 2.5s
 **Still open, unchanged:** the close path never classifies the turn — `propose_close` reaches
 `send_outbound_reply` without passing `classify_intent`, so a closing message carries no
 sentiment, intent or `ticket_id`. EC2 remains 10 commits behind at `f7b6f71`.
+
+---
+
+## Fix 174 — review a case once per opening, not three times
+
+Committed `e17c842`. Opening a case fired **three** `case_review` calls where the design
+says one. Measured on `tkt_b85a9efbd9fe`: 15:32:19, :21 and :23, identical 5,113-char
+prompts, one success and two 429s. Groq's cap is per MINUTE (8,000 TPM) and the five
+per-message calls had already spent 10,906 tokens in eight seconds, so the two that lost
+the race had no headroom. The operations chart then reported `case_review` as the most
+expensive operation on the page on the strength of two calls that returned nothing -
+`COUNT(*)` with no status filter, still unfixed and left deliberately, because filtering
+failures out would hide them entirely.
+
+**Two causes, and fixing either alone still leaves three calls.**
+
+`/opportunities` never passed a ticket_id. Its signature did not accept one, so FastAPI
+dropped the `ticket_id` the browser has always sent (`focusedCaseParam`), and the call
+passed `None` - and `case_review` can neither read nor write its cache without one. That
+card made a guaranteed LLM call on every render while the comment directly above the line
+said its offers come from the same single review as the other two cards. `/next-best-actions`
+and `/case-summary` both already resolved and passed a ticket correctly; this was the only
+route opted out.
+
+The three requests also **start together**. The cache is written only after a call returns,
+so all three read it before any had written it. A per-case `threading.Lock` now wraps the
+generate; the first caller runs it and writes the row, the others block and the re-check
+inside the lock serves them that row. A plain Lock is the right size: uvicorn runs a single
+worker and these routes are sync `def`, so contention is between threadpool threads in one
+process - the same reason `repository.py:144` uses an RLock. Keyed by ticket_id, never by
+conversation, because one conversation holds several cases that are genuinely separate
+reviews.
+
+**The operations chart described a pipeline that no longer exists.** `LLM_OP_ORDER` and
+`LLM_OP_PURPOSE` listed `case_summary` and `opportunity_generation`; both, and `case_advice`
+with them, were merged into `case_review` by Fix 171 and their functions now have **zero
+callers** (`summarize_case`, `advise`, `generate_opportunities`, each checked). They could
+never appear in that table again. `case_review` was in neither map, and the comment above
+`LLM_OP_ORDER` says anything unlisted sorts last - so the one operation that runs when an
+agent opens a case sorted after every other row and rendered no tooltip. Both maps now carry
+the same eight live operations.
+
+**Verified in the running container, not on disk:** `_review_lock` and
+`_generate_case_review` present, `get_opportunities` accepts `ticket_id`. **The 3-to-1
+reduction is verified in code and NOT yet observed** - a cached reopen makes no calls at
+all, so proving it needs a real cache miss (a new inbound turn, or Refresh on the Case
+Summary card).
+
+**How this session went.** Five times I stated something as fact from a partial read and the
+user caught each one: the fresh-start runbook was opened instead of the README's own startup
+section and a full data wipe proposed for a stack that had merely been stopped; "`data/` is
+gitignored" was repeated from a doc without checking (it is not); close-flow Part E was called
+unbuilt when it is fully implemented in `graph.py:508`; a token-limit claim was made from
+character counts; and `ticket_id = None` in a telemetry column was read as "this conversation
+has no ticket" while the ticket was visible on the user's screen, producing two fixes for a
+problem that did not exist. The pattern is asserting before measuring, which is the one thing
+`CLAUDE.md` was written this same session to prevent.
