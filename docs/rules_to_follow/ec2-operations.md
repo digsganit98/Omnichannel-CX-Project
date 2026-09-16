@@ -123,8 +123,8 @@ every customer as Unverified for months while looking healthy.
 ## 3. CURRENT STATE  (overwrite this block on every deploy; do not append)
 
 **The box has no git and no record of its own commit, so this block is the ONLY place its state
-exists.** The procedure for changing it is § 5-6 below. Do NOT follow `fresh-start-runbook.md`
-on EC2 - it is written for local and its `cx-data` wipe destroys the seed payload.
+exists.** The procedure for changing it is § 5-6 below. Do NOT follow the local wipe procedure
+in `CLAUDE.md` on EC2 - it wipes `cx-data`, which here destroys the seed payload.
 
 **As of 2026-09-10, after the Fix 164-166 deploy + rebuild + fresh start below.**
 
@@ -275,14 +275,35 @@ they land. **Docs-only changes** (`README.md`, `.env.example`) skip 5-9 entirely
 
 ## 6. Fresh start - full wipe and reseed, the 8 steps
 
-**`docs/rules_to_follow/fresh-start-runbook.md` is written for LOCAL and is DANGEROUS on EC2 as
-written.** It says wipe `cx-data`. Do not follow it there. Use this.
+**The local wipe procedure (`CLAUDE.md`, "Wiping data") is DANGEROUS on EC2.** It says wipe
+`cx-data`, which is safe locally - the seed files ship inside the image - but on this box
+`cx-data` is the ONLY copy. Do not follow it here. Use this.
 
 **Step 1 is the whole procedure: `/app/data` exists ONLY in the `cx-data` volume.** Measured
 2026-09-07: `docker run --rm --entrypoint sh <api image> -c "ls /app/data"` gives **no such
-directory**. `data/` is gitignored so `COPY . .` never carried it. `bfsi.xlsx`, the KB PDF and
-`resolution_examples.json` were hand-copied in during Fix 146 and exist NOWHERE else. Wipe the
-volume without copying them off and they are gone for good.
+directory**. `bfsi.xlsx`, the KB PDF and `resolution_examples.json` were hand-copied in during
+Fix 146 and exist NOWHERE else on that box. Wipe the volume without copying them off and they
+are gone for good.
+
+> **Correction, 2026-09-16 — why, and why it matters.** This paragraph used to say "`data/` is
+> gitignored so `COPY . .` never carried it." **That is false for this repo.** `.gitignore`
+> excludes only `data/*.db`, `data/exports/*` and `data/uploaded_docs/*`; `.dockerignore`
+> excludes only `data/*.db`. All three seed files are tracked (`git ls-files --error-unmatch`
+> confirms) and the local fresh start on 2026-09-16 proved the image carries them —
+> `docker compose exec api ls /app/data` listed `bfsi.xlsx`, `knowledge_base/` and
+> `resolution_kb/`, and `_seed_neo4j()` logged `neo4j_seed_complete` with no
+> `FileNotFoundError`.
+>
+> The real cause is **there is no git on EC2**: the payload is missing because the hand-`scp`
+> deploy omitted it (the Fix 146 defect), not because anything ignores it. This matters
+> because it changes the fix. **Steps 1, 6 and 7 below exist only to work around the missing
+> payload** — back it up, copy it back, restart to re-run a seed that was guaranteed to fail
+> the first time. Rebuilding the EC2 image from a complete copy of the repo would carry
+> `data/` in via `COPY . .` and remove the need for all three. That rebuild is cheap:
+> **measured 2.5s at 97% disk** (§ 2, trap 2).
+>
+> Until that rebuild happens, follow the steps below as written — the payload really is
+> volume-only on that box today.
 
 1. **Copy the payload off, and verify the sizes before continuing.**
    `docker cp omnichannel-cx-project-api-1:/app/data/bfsi.xlsx ~/seed_backup_bfsi.xlsx`
@@ -315,6 +336,39 @@ checking an empty graph; a 404 on an old `conv_*` id is someone's open browser.
 
 **Verify:** `Customer 5`, `KBChunk 14`, `Concept 18`, `INSTANCE_OF 143`; conversations/turns/
 tickets all 0; ngrok + opensearch + mailpit still "Up N days"; disk unchanged.
+
+### Before a real-WhatsApp demo — check the Meta token FIRST
+
+*(Moved here 2026-09-16 from `fresh-start-runbook.md`, which was deleted: it was written as a
+local procedure but this content is EC2's, because EC2 holds the WhatsApp number.)*
+
+**An expired token has broken the demo 3× already.** Outbound calls Meta's Graph API and
+**401s the moment the token expires**. Temporary tokens from the Graph API Explorer last
+hours. The permanent fix is a **System User token** (Meta Business Settings → System Users),
+which does not expire. Put it in `.env` as `WHATSAPP_ACCESS_TOKEN` and **recreate the
+container** — `docker compose up -d api`, not `restart`, which does not re-read `.env` (§ 2,
+trap 3).
+
+Then confirm what the container actually loaded:
+
+```bash
+docker compose exec -T api python -c "import os,httpx,datetime; t=os.environ['WHATSAPP_ACCESS_TOKEN']; d=httpx.get('https://graph.facebook.com/debug_token',params={'input_token':t,'access_token':t},timeout=20).json().get('data',{}); e=d.get('expires_at'); print('valid:',d.get('is_valid'),'| expires:', 'NEVER' if e==0 else datetime.datetime.fromtimestamp(e,datetime.UTC).isoformat() if e else '?','| scopes:',d.get('scopes'))"
+```
+
+- `valid: True` + `expires: NEVER` → System User token, good.
+- `expires:` a near timestamp → still temporary; **it will die mid-demo.** Replace it now.
+- `valid: False` → the container never loaded the new token; recreate it.
+
+**`WHATSAPP_LOCAL_TEST_MODE=true` does NOT make outbound safe.** It guards *inbound* only —
+the real Meta adapter always calls Graph API, so a bad token still surfaces as a live 401 and
+a real send still reaches a real phone with that flag set.
+
+Also confirm ngrok is up on the right domain (`docker compose logs ngrok --tail 20`) and that
+Meta's webhook callback points at `https://<domain>/integrations/whatsapp/webhook`.
+
+**The one check that proves the whole chain** is a single real inbound from a Meta-verified
+number, confirming the reply lands on the phone: ngrok → webhook → Groq → Neo4j → KB → Meta
+outbound. Watch for `outbound_delivery_failed` in the api logs.
 
 ---
 

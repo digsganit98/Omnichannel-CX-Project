@@ -336,8 +336,8 @@ Invoke-RestMethod -Headers $H "http://localhost:8888/admin/crm/status"
 Invoke-RestMethod -Headers $H "http://localhost:8888/admin/llm-observability/summary?days=1"
 ```
 
-`docs/rules_to_follow/fresh-start-runbook.md` has the full checklist and a verified
-full-wipe-and-restart procedure.
+`CLAUDE.md` at the repo root has the full-wipe procedure, the login table you need after one,
+and the Groq-quota check. For the hosted instance, see `docs/rules_to_follow/ec2-operations.md`.
 
 ---
 
@@ -428,7 +428,8 @@ edges and that every customer can reach the KB through their own holdings. Neith
 
 | Document | What it covers |
 |---|---|
-| `docs/rules_to_follow/fresh-start-runbook.md` | Full wipe and restart, dependency checklist |
+| `CLAUDE.md` (repo root) | How to start the app, the full-wipe procedure, and what never to run |
+| `docs/rules_to_follow/ec2-operations.md` | The hosted instance: deploying, fresh start, real-WhatsApp checks |
 | `docs/rules_to_follow/Sayantini-session-changes-log.md` | Every fix, why it was made, how it was verified |
 | `docs/ticket_model_design/ticket-model-redesign.md` | The ticket model and its rationale |
 | `docs/production_scope_discussion/` | Production scope and inbound routing |

@@ -9368,3 +9368,76 @@ sentiment, no intent and no `ticket_id` — measured, 1 of 15 inbound turns, and
 one. The prompt is therefore told "60% negative" while the browser's keyword fallback shows
 the same message as Positive, and the summary, the upset nudge and the offers gate all
 inherit the stale label. Tests 5 failed / 149 passed, the same five pre-existing.
+
+---
+
+## Fix 173 — stop running two services nothing reads, and write down how to start the app
+
+Not committed yet. Local went from 5 containers to 3.
+
+**OpenSearch and Ollama were both live and both dead.** `RAG_BACKEND=neo4j` in `.env` and
+`services/rag_service/config.py:47` returns `"neo4j"` even when the variable is unset, so
+every KB query goes to Neo4j and nothing had queried OpenSearch in a long time — it was
+costing 512 MB of heap and a 2.33 GB image to serve zero traffic. Ollama was the offline
+fallback for when Groq is unreachable, except `OLLAMA_ENABLED=false` makes `OllamaGenerator`
+short-circuit before it dials, and the `ollama-data` volume was **32 kB** — SSH keys and
+empty `models/` and `cache/` dirs, meaning no model was ever pulled, for an 8.24 GB image.
+EC2 had already commented Ollama out for exactly this reason on a 94%-full disk; local kept
+it only because nobody looked. Both are now commented out — service, the api's `depends_on`
+entry (leave that in and compose fails on an undefined dependency), and the volume — with
+the restore procedure in the comment. **The OpenSearch removal must NOT be copied to EC2:**
+it is kept running there as the `RAG_BACKEND=opensearch` rollback, because re-pulling 1.34 GB
+onto a shared 94%-full disk may fail.
+
+**Full local fresh start.** `cx-data` and `neo4j-data` wiped; `opensearch-data` and
+`huggingface-cache` left alone. Rebuilt with `--build`, which the runbook said was
+unnecessary — measured false: image built `06:25:29`, commit `c9209e2` landed `06:30:14`.
+Verified after: `Customer 5`, `KBChunk 14`, `Concept 18`, `indexed 14/14 errors 0`,
+`holdings_linked: 123`, conversations 0, and the api recreated cleanly with no OpenSearch in
+compose at all. Logins were destroyed with `cx-data` and were re-created by hand.
+
+**`fresh-start-runbook.md` deleted**, its content split by which machine it belongs to. The
+file was a third wrong after this session - it told you to wipe an `opensearch-data` volume
+that no longer exists (its quick reference would have errored on its second command), to KEEP
+a 32 kB empty `ollama-data`, that Ollama being down breaks intent classification (it never
+did - `OLLAMA_ENABLED=false`), and to probe Groq with `llama-3.1-8b-instant`, a model that now
+404s. It also called itself a LOCAL procedure while being a REAL-WHATSAPP procedure, and
+WhatsApp lives on EC2 - `ec2-operations.md` § 6 already said "written for LOCAL and DANGEROUS
+on EC2", so the two files disagreed about who it was even for.
+
+The six facts that existed nowhere else were moved to the machine each belongs to. Local ->
+`CLAUDE.md`: the 5-customer login table (signup must match a seeded email or phone or identity
+resolution rejects it), the shell-shadows-`.env` trap, "a wipe makes ZERO Groq calls", and the
+Groq TPD quota trap - an exhausted cap returns empty replies and looks exactly like broken AI.
+EC2 -> `ec2-operations.md`: the Meta `debug_token` expiry check, and that
+`WHATSAPP_LOCAL_TEST_MODE=true` does NOT make outbound safe. **Each moved line was verified
+against the running system before being written, after the user caught them being copied as
+"facts" unchecked:** `WHATSAPP_LOCAL_TEST_MODE` has exactly one call site
+(`apps/api/dependencies/security.py:66`, an inbound signature validator - it cannot affect
+outbound); `httpx` imports in the image; `GROQ_MODEL` is set (`openai/gpt-oss-20b`), so
+dropping the hardcoded Llama name was required, not cosmetic; and `docker compose exec` is
+already EC2's convention. `curl` is NOT in the api image - use `python -c` with `urllib`.
+Four live references were repointed first (README ×2, `ec2-operations.md` ×2) so the delete
+left no dead links; session-log references are history and stay as written. Recoverable from
+`cdfc627`.
+
+**`CLAUDE.md` written at the repo root**, because the knowledge that would have prevented
+this session's mistakes was already in `README.md` and two runbooks and was simply not
+opened. It carries the start commands, port 8888, the rebuild-not-restart and
+`restart`-does-not-re-read-`.env` traps, the never-do list, and the local/EC2 split.
+
+**Two documentation lies corrected.** The fresh-start runbook now opens with a banner saying
+it is not how you start the app — a session read it instead of the README and proposed
+destroying every conversation, ticket and login to restart a stack that had merely been
+stopped by the Docker daemon (`Exited (255)` is not damage). Its step ⑤ "no `--build` needed"
+is replaced with the measurement and a command to re-check it rather than trust the sentence.
+And `ec2-operations.md` claimed "`data/` is gitignored so `COPY . .` never carried it" —
+**false**: `.gitignore` covers only `data/*.db`, `data/exports/*`, `data/uploaded_docs/*`,
+all three seed files are tracked, and this session's rebuild proved the image contains them.
+The real cause is that EC2 has no git and the hand-`scp` deploy omitted the payload. That
+matters because EC2's fresh-start steps 1, 6 and 7 exist *only* to compensate for it; a
+rebuild from a complete copy would delete the need for all three, and costs 2.5s.
+
+**Still open, unchanged:** the close path never classifies the turn — `propose_close` reaches
+`send_outbound_reply` without passing `classify_intent`, so a closing message carries no
+sentiment, intent or `ticket_id`. EC2 remains 10 commits behind at `f7b6f71`.

@@ -67,10 +67,12 @@ services:
       - huggingface-cache:/root/.cache/huggingface
       - ./apps/admin-ui:/app/apps/admin-ui
     depends_on:
-      ollama:
-        condition: service_started
-      opensearch:
-        condition: service_healthy
+      # ollama:                      # commented out with the ollama service below
+      #   condition: service_started # - leave this in and compose fails on an
+      #                              #   undefined dependency.
+      # opensearch:                   # commented out with the opensearch service below
+      #   condition: service_healthy  # - leave this in and compose fails on an
+      #                               #   undefined dependency.
       neo4j:
         condition: service_healthy
 
@@ -101,39 +103,68 @@ services:
       api:
         condition: service_started
 
-  opensearch:
-    image: opensearchproject/opensearch:2.17.1
-    environment:
-      - discovery.type=single-node
-      - DISABLE_SECURITY_PLUGIN=true
-      - OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m
-    ports:
-      - "9200:9200"
-    volumes:
-      - opensearch-data:/usr/share/opensearch/data
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:9200/_cluster/health || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 20
+  # OpenSearch was the original KB vector store. Commented out 2026-09-16 for the same
+  # reason as ollama: nothing reads it. RAG_BACKEND=neo4j in .env, and
+  # services/rag_service/config.py defaults to "neo4j" even when the variable is unset,
+  # so the KB lives in Neo4j (`:KBChunk`, index kb_chunk_embedding) and every query goes
+  # there. Measured on the 2026-09-16 fresh start: with opensearch untouched, the KB
+  # indexed 14/14 into neo4j_vector and linked 123 holdings - opensearch held nothing and
+  # served nothing while running, costing 512 MB of heap and a 2.33 GB image.
+  #
+  # It was kept this long as the rollback for RAG_BACKEND=opensearch; that path still
+  # exists in code and is unchanged. Note EC2 keeps opensearch RUNNING for exactly that
+  # reason (re-pulling 1.34 GB onto a 94%-full shared disk may fail) - do not copy this
+  # edit there. Locally the image is already on disk, so uncommenting restores it.
+  #
+  # To bring it back: uncomment this, the api's `depends_on: opensearch` above, and the
+  # opensearch-data volume below, set RAG_BACKEND=opensearch in .env, then
+  # `docker compose up -d` and POST /admin/rag/index?recreate=true to rebuild the index.
+  #
+  # opensearch:
+  #   image: opensearchproject/opensearch:2.17.1
+  #   environment:
+  #     - discovery.type=single-node
+  #     - DISABLE_SECURITY_PLUGIN=true
+  #     - OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m
+  #   ports:
+  #     - "9200:9200"
+  #   volumes:
+  #     - opensearch-data:/usr/share/opensearch/data
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "curl -fsS http://localhost:9200/_cluster/health || exit 1"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 20
 
-  ollama:
-    image: ollama/ollama:latest
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollama-data:/root/.ollama
-
-  ollama-pull:
-    image: ollama/ollama:latest
-    environment:
-      - OLLAMA_HOST=http://ollama:11434
-    entrypoint: ["/bin/sh"]
-    command: ["-c", "sleep 8 && ollama pull ${OLLAMA_MODEL:-qwen2.5:0.5b}"]
-    depends_on:
-      - ollama
-    profiles:
-      - setup
+  # Ollama is the offline fallback LLM for when Groq is unreachable or out of quota.
+  # Commented out 2026-09-16, matching what EC2 already did, because the fallback was
+  # never actually live here: `.env` has OLLAMA_ENABLED=false, so OllamaGenerator
+  # short-circuits before it ever calls out, and the ollama-data volume was 32 kB -
+  # SSH keys and empty models/ and cache/ dirs, meaning no model was ever pulled. The
+  # image is 8.24 GB. EC2 removed it for disk (94% full); local kept it only because
+  # nobody noticed. Nothing in Python breaks - the fallback path was already dead.
+  #
+  # To bring it back: uncomment this, the api's `depends_on: ollama` above, and the
+  # ollama-data volume below, then `docker compose --profile setup run --rm ollama-pull`
+  # to actually pull a model, and set OLLAMA_ENABLED=true in .env.
+  #
+  # ollama:
+  #   image: ollama/ollama:latest
+  #   ports:
+  #     - "11434:11434"
+  #   volumes:
+  #     - ollama-data:/root/.ollama
+  #
+  # ollama-pull:
+  #   image: ollama/ollama:latest
+  #   environment:
+  #     - OLLAMA_HOST=http://ollama:11434
+  #   entrypoint: ["/bin/sh"]
+  #   command: ["-c", "sleep 8 && ollama pull ${OLLAMA_MODEL:-qwen2.5:0.5b}"]
+  #   depends_on:
+  #     - ollama
+  #   profiles:
+  #     - setup
 
   neo4j:
     image: neo4j:5
@@ -158,7 +189,7 @@ services:
 
 volumes:
   cx-data:
-  opensearch-data:
-  ollama-data:
+  # opensearch-data:    # commented out with the opensearch service above
+  # ollama-data:        # commented out with the ollama service above
   huggingface-cache:
   neo4j-data:
