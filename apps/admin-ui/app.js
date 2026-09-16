@@ -2309,6 +2309,13 @@ function renderIntentBars(data) {
 // handoff_check sits at 4 because that is where it runs: inside _escalation_reason, after
 // the resolution level is known and BEFORE the reply is written, since what it decides is
 // whether that reply reaches the customer at all.
+// case_summary, case_advice and opportunity_generation used to sit at 7/8/9. All three
+// were merged into ONE case_review call, and their functions now have zero callers
+// (summarize_case, advise, generate_opportunities - checked 2026-09-16), so they could
+// never appear in this table again. case_review, the call that replaced them, was never
+// added - and the comment below says anything unlisted sorts last, so the one operation
+// that actually runs when an agent opens a case was sorting after every other row and
+// rendering no tooltip, because LLM_OP_PURPOSE did not know it either.
 var LLM_OP_ORDER = {
   ticket_action_detection: 1,
   intent_classification: 2,
@@ -2316,9 +2323,8 @@ var LLM_OP_ORDER = {
   handoff_check: 4,
   answer_generation: 5,
   ticket_referee: 6,
-  case_summary: 7,
-  customer_context: 8,
-  opportunity_generation: 9
+  case_review: 7,
+  customer_context: 8
 };
 
 // What each call is for, shown on hover. Names like "resolution level classification"
@@ -2336,12 +2342,10 @@ var LLM_OP_PURPOSE = {
     'EVERY message. Writes the customer-facing reply from whatever the retrieval step returned (graph records, ticket record, or KB passages).',
   ticket_referee:
     'Only when ticket matching is ambiguous: the message matches no open ticket but same-intent tickets exist. Picks the right one or says NEW. Any doubt forks a new ticket.',
-  case_summary:
-    'When an agent opens a conversation. Writes the situation and open items for someone picking the case up cold. Cached against the newest turn, so re-opening costs nothing.',
+  case_review:
+    'When an agent opens a case. ONE call behind all three right-panel cards — the Case Summary, Suggested Actions and Suggested Offers — replacing three that each re-sent the same case. Cached against that case’s newest turn, so re-opening it costs nothing.',
   customer_context:
-    'When an agent opens a conversation. Sorts the customer’s records into the Risk / Holdings / Activity / Claims / Profile tabs. Cached against a fingerprint of the record.',
-  opportunity_generation:
-    'Evaluates cross-sell and up-sell offers for the Suggested Offers card. Code picks the candidate products; the LLM writes the pitch.'
+    'When an agent opens a conversation. Sorts the customer’s records into the Risk / Holdings / Activity / Claims / Profile tabs. Cached against a fingerprint of the record.'
 };
 
 // Stable colour per operation so the same op keeps its colour across the table + meters.

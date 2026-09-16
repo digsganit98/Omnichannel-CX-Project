@@ -8,6 +8,7 @@ import hashlib
 import json
 import logging
 import os
+import threading
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -60,6 +61,36 @@ def _try_neo4j():
 def _review_generator():
     """The model behind the merged case review. A seam, so tests can replace it."""
     return GroqGenerator()
+
+
+# One lock per case, so the three cards that share a review cannot each start their own.
+#
+# The cache below is written only AFTER a call returns. Opening a case fires all three
+# right-panel requests at once, so all three read the cache before any of them has
+# written it, all three miss, and all three call the LLM. Measured 2026-09-16 on
+# tkt_b85a9efbd9fe: three case_review calls 19s/21s/23s, identical 5,113-char prompts,
+# and because Groq's limit is per MINUTE (8,000 TPM) the two that lost the race came
+# back 429 - one success, two failures, for a card set that needs exactly one call.
+#
+# A plain threading.Lock is the right size here: uvicorn runs a single worker (see
+# docker-compose.yml) and these routes are sync `def`, so FastAPI runs them in its
+# threadpool - the contention is between threads in one process, which is also why
+# repository.py:144 uses an RLock. A multi-worker deployment would need this in the
+# database instead; there is no such deployment.
+#
+# Keyed by ticket_id, never by conversation: one conversation holds several cases and
+# two of them are independent reviews that SHOULD run separately.
+_review_locks: dict[str, threading.Lock] = {}
+_review_locks_guard = threading.Lock()
+
+
+def _review_lock(ticket_id: str) -> threading.Lock:
+    with _review_locks_guard:
+        lock = _review_locks.get(ticket_id)
+        if lock is None:
+            lock = threading.Lock()
+            _review_locks[ticket_id] = lock
+        return lock
 
 
 def case_review(repository, conversation_id: str, ticket_id: str | None,
@@ -116,17 +147,59 @@ def case_review(repository, conversation_id: str, ticket_id: str | None,
     # Safe to force: the write below overwrites the stored row on success, and a failed or
     # suppressed review is still never cached - so a 429 during a manual refresh cannot
     # poison the cache.
-    cached = repository.get_case_review(tid) if tid and not refresh else None
-    if cached and cached.get("latest_turn_id") == latest_turn_id and latest_turn_id:
-        return {
-            "situation": cached.get("situation") or "",
-            "actions": cached.get("actions") or [],
-            "offers": cached.get("offers") or [],
-            "offers_suppressed": cached.get("offers_suppressed"),
-            "ticket_id": tid,
-            "cached": True,
-        }
+    def _cached_row() -> dict | None:
+        row = repository.get_case_review(tid) if tid else None
+        if row and row.get("latest_turn_id") == latest_turn_id and latest_turn_id:
+            return {
+                "situation": row.get("situation") or "",
+                "actions": row.get("actions") or [],
+                "offers": row.get("offers") or [],
+                "offers_suppressed": row.get("offers_suppressed"),
+                "ticket_id": tid,
+                "cached": True,
+            }
+        return None
 
+    if not refresh:
+        hit = _cached_row()
+        if hit:
+            return hit
+
+    # Hold the case's lock for the generate. Whoever gets here first calls the LLM and
+    # writes the cache; the other cards block, and the re-check below then serves them
+    # that same row. Without it all three call the LLM - see _review_lock.
+    #
+    # A ticketless conversation has no key to lock on and no row to cache, so it runs
+    # unguarded exactly as before. It is also the cheap case: no case history to re-read.
+    if tid:
+        lock = _review_lock(tid)
+        with lock:
+            # Re-check INSIDE the lock. A caller that waited here was almost certainly
+            # waiting for the very review it needs, and serving that row is the entire
+            # point - a second identical call would be the bug this guards against.
+            # `refresh` still forces regeneration, but only for the caller that asked:
+            # the Refresh button means "regenerate", and it holds the lock while it does.
+            if not refresh:
+                hit = _cached_row()
+                if hit:
+                    return hit
+            return _generate_case_review(
+                repository, conversation_id, customer_id, ticket, tid,
+                case_turns, all_turns, latest_turn_id,
+            )
+
+    return _generate_case_review(
+        repository, conversation_id, customer_id, ticket, tid,
+        case_turns, all_turns, latest_turn_id,
+    )
+
+
+def _generate_case_review(repository, conversation_id: str, customer_id: str,
+                          ticket: dict | None, tid: str | None,
+                          case_turns: list[dict], all_turns: list[dict],
+                          latest_turn_id: str) -> dict:
+    """The LLM call and its cache write. Split out of case_review so the lock above can
+    wrap it without duplicating the body on the locked and unlocked paths."""
     pending_drafts = repository.list_reply_drafts(
         conversation_id=conversation_id, status="pending")
     graph_context = _graph_context_for(repository, customer_id)
@@ -462,7 +535,7 @@ def _promise_overdue(ticket: dict | None) -> bool:
 
 
 @router.get("/opportunities")
-def get_opportunities(conversation_id: str) -> dict:
+def get_opportunities(conversation_id: str, ticket_id: str | None = None) -> dict:
     """Cross-sell/up-sell opportunities for a conversation (LLM-selected from a
     code-built candidate set, code-gated; see opportunity_engine). Persists new
     items as pending agent_assist_recommendations rows; returns pending rows.
@@ -472,6 +545,16 @@ def get_opportunities(conversation_id: str) -> dict:
     if conversation is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
     customer_id = conversation.get("customer_id") or ""
+
+    # Same resolution the other two cards use. The browser has always sent ticket_id here
+    # (focusedCaseParam, app.js), but this signature did not accept it, so FastAPI dropped
+    # it and the call below passed None - and case_review cannot read OR write its cache
+    # without a ticket_id. This card therefore made a guaranteed LLM call on every render,
+    # while its own comment said the offers come from the same one review as the other two.
+    ticket = repository.get_ticket(ticket_id) if ticket_id else None
+    if ticket is None:
+        active = repository.find_active_ticket(conversation_id)
+        ticket = active.model_dump(mode="json") if active else None
 
     def _pending_offers() -> list[dict]:
         rows = repository.list_agent_assist_recommendations(
@@ -561,7 +644,7 @@ def get_opportunities(conversation_id: str) -> dict:
     # The offers section carries its own suppression reason (negative sentiment gates
     # selling, while actions deliberately still fire), so it is mapped onto the shape this
     # route has always returned.
-    review = case_review(repository, conversation_id, None)
+    review = case_review(repository, conversation_id, (ticket or {}).get("ticket_id"))
     result = {
         "opportunities": review.get("offers") or [],
         "suppressed": review.get("offers_suppressed") or review.get("suppressed"),
