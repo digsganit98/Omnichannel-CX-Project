@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import RLock
 from typing import Iterator, Protocol
@@ -88,6 +88,16 @@ class CXRepository(Protocol):
     def list_whatsapp_delivery_statuses(self, provider_message_id: str | None = None, limit: int = 50) -> list[dict]: ...
     def add_audit_event(self, event_type: str, correlation_id: str, **values) -> None: ...
     def list_audit_events(self, correlation_id: str | None = None) -> list[dict]: ...
+    def list_audit_runs(
+        self,
+        days: int = 14,
+        channel: str | None = None,
+        status: str | None = None,
+        search: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict: ...
+    def get_audit_run(self, correlation_id: str) -> dict | None: ...
     def add_llm_usage_event(self, event: dict) -> dict: ...
     def list_llm_usage_events(self, limit: int = 100, correlation_id: str | None = None) -> list[dict]: ...
     def get_llm_usage_summary(self, days: int = 7) -> dict: ...
@@ -971,6 +981,99 @@ class SQLiteCXRepository:
             rows = conn.execute(query, args).fetchall()
         return [self._json_fields(dict(row), "details_json") for row in rows]
 
+    def list_audit_runs(
+        self,
+        days: int = 14,
+        channel: str | None = None,
+        status: str | None = None,
+        search: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict:
+        """One row per audit run (grouped by correlation_id), for the Audit tab's landing
+        list. A single message run writes 8-15 raw audit_events rows, so grouping is what
+        makes this scannable — see list_audit_events for the raw per-event feed a run's
+        detail view drills into.
+        """
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=max(1, min(int(days or 14), 90)))).isoformat()
+        query = """
+            SELECT
+                correlation_id,
+                MIN(created_at) AS started_at,
+                MAX(created_at) AS ended_at,
+                COUNT(*) AS event_count,
+                MAX(channel) AS channel,
+                MAX(customer_id) AS customer_id,
+                MAX(conversation_id) AS conversation_id,
+                MAX(intent) AS intent,
+                MAX(ticket_id) AS ticket_id,
+                MAX(CASE WHEN event_type = 'workflow_failed' THEN 1 ELSE 0 END) AS workflow_failed
+            FROM audit_events
+            WHERE created_at >= :cutoff
+        """
+        args: dict = {"cutoff": cutoff}
+        if channel:
+            query += " AND channel = :channel"
+            args["channel"] = channel
+        if search:
+            query += (
+                " AND (correlation_id LIKE :search OR customer_id LIKE :search"
+                " OR conversation_id LIKE :search OR ticket_id LIKE :search)"
+            )
+            args["search"] = f"%{search}%"
+        query += " GROUP BY correlation_id ORDER BY started_at DESC"
+
+        with self.connection() as conn:
+            rows = [dict(r) for r in conn.execute(query, args).fetchall()]
+            error_ids = {
+                r["correlation_id"]
+                for r in conn.execute(
+                    "SELECT DISTINCT correlation_id FROM llm_usage_events"
+                    " WHERE created_at >= :cutoff AND status = 'error' AND correlation_id IS NOT NULL",
+                    {"cutoff": cutoff},
+                ).fetchall()
+            }
+
+        for row in rows:
+            failed = bool(row.pop("workflow_failed")) or row["correlation_id"] in error_ids
+            row["status"] = "failed" if failed else "ok"
+            started = datetime.fromisoformat(row["started_at"])
+            ended = datetime.fromisoformat(row["ended_at"])
+            row["duration_ms"] = round((ended - started).total_seconds() * 1000)
+
+        if status:
+            rows = [r for r in rows if r["status"] == status]
+
+        total = len(rows)
+        limit = max(1, min(int(limit or 50), 200))
+        offset = max(0, int(offset or 0))
+        return {"runs": rows[offset : offset + limit], "total": total, "limit": limit, "offset": offset}
+
+    def get_audit_run(self, correlation_id: str) -> dict | None:
+        """One run's full merged detail: every audit event plus every LLM usage event for
+        this correlation_id, in chronological order, for the Audit tab's drill-down.
+        """
+        events = self.list_audit_events(correlation_id)
+        if not events:
+            return None
+        llm_events = self.list_llm_usage_events(limit=500, correlation_id=correlation_id)
+        llm_events.reverse()  # list_llm_usage_events is DESC; the timeline wants chronological order
+        has_failure = any(e["event_type"] == "workflow_failed" for e in events)
+        has_llm_error = any(e.get("status") == "error" for e in llm_events)
+        return {
+            "correlation_id": correlation_id,
+            "status": "failed" if (has_failure or has_llm_error) else "ok",
+            "started_at": events[0]["created_at"],
+            "ended_at": events[-1]["created_at"],
+            "channel": next((e["channel"] for e in events if e.get("channel")), None),
+            "customer_id": next((e["customer_id"] for e in events if e.get("customer_id")), None),
+            "conversation_id": next((e["conversation_id"] for e in events if e.get("conversation_id")), None),
+            "intent": next((e["intent"] for e in reversed(events) if e.get("intent")), None),
+            "ticket_id": next((e["ticket_id"] for e in reversed(events) if e.get("ticket_id")), None),
+            "audit_events": events,
+            "llm_usage_events": llm_events,
+        }
+
     def add_llm_usage_event(self, event: dict) -> dict:
         event_id = event.get("event_id") or new_id("llm")
         created_at = event.get("created_at") or utc_now()
@@ -1044,8 +1147,6 @@ class SQLiteCXRepository:
     def get_llm_usage_summary(self, days: int = 7) -> dict:
         cutoff = None
         if days and days > 0:
-            from datetime import timedelta
-
             cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
 
         where = "WHERE created_at >= ?" if cutoff else ""
