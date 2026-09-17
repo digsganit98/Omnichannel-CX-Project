@@ -302,6 +302,12 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
    the header is narrow — the name and the graph button stay intact. */
 .cmeta{font-size:11px;color:var(--t3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
 .cmeta-sep{padding:0 6px;opacity:.5}
+/* Sender we could not match to a BFSI customer record. Amber, not red: they are not a
+   threat, they are simply unverified, and account-specific requests are refused. Same
+   tokens and pill shape as .user-status-pill / .fns-active so it is not a new treatment. */
+.cmeta-unreg{display:inline-block;font-size:9px;font-weight:700;letter-spacing:.2px;
+  padding:1px 7px;border-radius:20px;vertical-align:1px;
+  background:var(--amb-bg);color:var(--amb-t);border:1px solid var(--amb-bd)}
 /* ── Sentiment, in the conversation header ──
    The right panel's readout, moved to the right of the header. Its own rules
    (.ssent-head/.ssc/.sbar/.srow/.slbl) are restored verbatim below and do all the work;
@@ -619,13 +625,18 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .casebar{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:8px;
   margin:0 0 12px;padding:8px 12px;background:var(--surf);border:1px solid var(--bdr);
   border-radius:var(--r);box-shadow:var(--shadow)}
-/* Only `logged` is tinted. It was --surf on a --surf page, so the header of the case read
-   as a gap above it; blue because amber and green already mean something here and the
-   brand blue is the one colour no status speaks for. The open and closed bars keep the
-   white ground they have always had - their state is already said by the chip and dot.
+/* All three states are tinted, at ONE weight. The bar was --surf on a --surf page, so the
+   header of the case read as a gap above it.
+   The fills for open and closed are hard-coded rather than --amb-bg / --grn-bg. Those two
+   tokens are ~99% white (#fffbeb, #f0fdf4), while `logged` uses the Ganit brand blue
+   #d5e0f6, which is a genuine fill - so the same component in three states read as three
+   different kinds of element, the amber and green barely registering as tinted at all.
+   #fdf0d5 and #d9f2e2 sit the same distance from white as the blue does.
+   Kept LOCAL to the case bar: --amb-bg and --grn-bg are shared with draft cards, status
+   pills, the unregistered tag and the resolve button, none of which should move.
    Two selectors deep so it wins over the bare .fns-* background the children strip. */
-.casebar.fns-active{background:var(--amb-bg);border-color:var(--amb-bd)}
-.casebar.fns-done{background:var(--grn-bg);border-color:var(--grn-bd)}
+.casebar.fns-active{background:#fdf0d5;border-color:#f7dda0}
+.casebar.fns-done{background:#d9f2e2;border-color:#a8dcbd}
 .casebar.fns-logged{background:var(--blue-bg);border-color:var(--blue-bd)}
 
 /* The bare .fns-* classes (style.css:431) carry a background AND a border, so both

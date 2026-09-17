@@ -40,15 +40,26 @@ an angry customer is exactly who we owe a follow-up. One call, but the offers se
 simply omitted from the request when the sentiment gate fires, so the decision stays in
 code and the model is never asked to police it.
 
-It does NOT write the customer-facing message. See case_advisor's module docstring: probed
-against this same case, the model claimed we had blocked a card we had not and escalated a
-case that did not exist. Nudges carry a reason; the agent writes the words.
+IT DOES WRITE THE CUSTOMER-FACING MESSAGE - under a contract
+------------------------------------------------------------
+Each action and offer now carries a `draft`: the message itself, which the agent reviews,
+edits and sends. It previously did not, and case_advisor's module docstring records why -
+probed against this same case, the model claimed we had blocked a card we had not and
+escalated a case that did not exist.
+
+That failure was an UNCONSTRAINED request for a sentence, not evidence the model cannot
+write one. The fix is the same one that already keeps `basis` honest (rule 5 makes it quote
+the record): the DRAFT contract forbids stating anything about OUR side of the work - no
+action taken, no decision made, no date we will reply by - because none of that is in the
+records it can see. What only a human knows stays a square bracket on its own line, which
+is visibly unfinished rather than quietly wrong. Every draft is reviewed before it is sent.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime, timezone
 
 from services.agent_assist_service import opportunity_engine
@@ -75,8 +86,10 @@ _SYSTEM_PROMPT = (
     "You review ONE support case for the agent who has just opened it.\n"
     "\n"
     "Return ONLY a JSON object:\n"
-    '{"situation":"...","actions":[{"type":"...","reason":"...","basis":"...","confidence":0.0}],'
-    '"offers":[{"product":"...","kind":"...","pitch":"...","reason":"...","confidence":0.0}]}\n'
+    '{"situation":"...","actions":[{"type":"...","reason":"...","basis":"...","draft":"...",'
+    '"confidence":0.0}],'
+    '"offers":[{"product":"...","kind":"...","pitch":"...","reason":"...","draft":"...",'
+    '"confidence":0.0}]}\n'
     "\n"
     "SITUATION - this case in 2-3 sentences, for someone picking it up cold.\n"
     "\n"
@@ -96,8 +109,30 @@ _SYSTEM_PROMPT = (
     "Never promise or imply an outcome: no approval, no guaranteed rate, no eligibility.\n"
     "Max 20 words per pitch. An empty array is correct when nothing fits.\n"
     "\n"
+    "DRAFT - for EVERY action and EVERY offer, the message itself, ready for the agent to\n"
+    "review and send to the customer. This is the ONLY field addressed to the customer.\n"
+    "  - LAYOUT, exactly. Separate every part with a BLANK LINE, written as \\n\\n in the\n"
+    "    JSON string. A wall of text is not acceptable:\n"
+    "      Hi [NAME_1],\\n\\n<the facts, 2-4 short sentences>\\n\\n<a bracket line, only if\n"
+    "      one is needed>\\n\\nThank you for your patience.\n"
+    "  - [NAME_1] is a placeholder the system replaces with their real name; write it\n"
+    "    literally and never guess a name.\n"
+    "  - State the specific facts from CUSTOMER RECORDS that this action is about - the\n"
+    "    amount, the reference, the date, the product - not a general sentence. Copy every\n"
+    "    number and date EXACTLY as written.\n"
+    "  - NEVER state what we have done, decided, or will do: no \"I have blocked\",\n"
+    "    \"we have refunded\", \"this has been escalated\", no dates we will reply by. You\n"
+    "    cannot see our side of the work, only the records.\n"
+    "  - Where the message needs something ONLY a human can supply - what we are doing\n"
+    "    about it, the update we owe - write it as a square-bracket instruction on its own\n"
+    "    line, e.g. \"[Add what we are doing about this before sending.]\". Use a bracket\n"
+    "    ONLY for that. Never bracket a fact that is already in CUSTOMER RECORDS.\n"
+    "  - An offer's draft must carry its real numbers and may never promise approval,\n"
+    "    a rate, or eligibility.\n"
+    "\n"
     "HARD RULES\n"
-    "1. Do NOT write a message to the customer. You are briefing the agent.\n"
+    "1. `situation`, `reason` and `basis` brief the AGENT - never write those to the\n"
+    "   customer. `draft` is the only field the customer will read.\n"
     "2. NEVER suggest an internal check, lookup, escalation or system fix. If the only next\n"
     "   step is something the agent does internally, return no action for it.\n"
     "3. State only what the CASE FACTS or CUSTOMER RECORDS support. Never assert that an\n"
@@ -210,6 +245,66 @@ def build_user_prompt(*, ticket: dict | None, turns: list[dict], graph_context: 
     return "\n\n".join(blocks) + "\n"
 
 
+_MAX_DRAFT_CHARS = 900
+
+# Mask tokens look like [NAME_1] / [PHONE_2] / [EMAIL_1]. unmask_text restores every token
+# it holds a mapping for; anything still matching this pattern afterwards is a token the
+# model INVENTED (a field that was never in the prompt, or a wrong index), and would reach
+# the customer as literal "[ACCOUNT_3]" text.
+_LEFTOVER_MASK = re.compile(r"\[(?:NAME|PHONE|EMAIL|ACCOUNT|CARD|AADHAAR|PAN)_\d+\]", re.I)
+
+
+def _clean_draft(value: object) -> str:
+    """A customer-ready draft, or "" to fall back to the caller's template.
+
+    Rejected rather than repaired, because a draft is sent to a real person: a half-fixed
+    message is worse than the plain template it replaces. The agent edits and approves
+    whatever survives, so this guards the shape, not the wording.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if _LEFTOVER_MASK.search(text):
+        # unmask_text ran BEFORE this (review() unmasks the whole response), so a surviving
+        # token is an invented one - never a real name we failed to restore.
+        logger.info("case_review_draft_dropped_unresolved_mask")
+        return ""
+    return _paragraphs(text)[:_MAX_DRAFT_CHARS]
+
+
+def _paragraphs(text: str) -> str:
+    """Break a one-paragraph draft onto the greeting / body / bracket / sign-off lines.
+
+    The prompt asks for \\n\\n between the parts and the model returned ONE continuous
+    string anyway - measured on the first real draft, which arrived with zero newlines and
+    rendered as a wall of text in the draft box. A layout instruction is a request; this is
+    the guarantee. Text that already has blank lines is left exactly as written.
+    """
+    if "\n" in text:
+        return text
+    parts: list[str] = []
+    rest = text
+    # Greeting: up to the first comma, when it looks like one ("Hi <name>,").
+    head, sep, tail = rest.partition(",")
+    if sep and len(head) <= 60 and head.lower().startswith(("hi", "hello", "dear")):
+        parts.append(head + sep)
+        rest = tail.strip()
+        # The model wrote greeting and first fact as ONE sentence ("Hi <name>, your loan
+        # ..."), so splitting at the comma leaves the body starting lower-case. Measured on
+        # the first real draft.
+        if rest[:1].islower():
+            rest = rest[0].upper() + rest[1:]
+    # Sign-off: split it off the end so it does not ride on the last fact sentence.
+    for closer in ("Thank you for your patience.", "Thank you for banking with us.",
+                   "Thank you for your time."):
+        if rest.endswith(closer):
+            rest = rest[: -len(closer)].strip()
+            parts.extend([rest, closer] if rest else [closer])
+            return "\n\n".join(p for p in parts if p)
+    parts.append(rest)
+    return "\n\n".join(p for p in parts if p)
+
+
 def parse_and_validate(raw_text: str, candidates: list[dict]) -> dict | None:
     """Parse one response into three validated sections.
 
@@ -253,6 +348,10 @@ def parse_and_validate(raw_text: str, candidates: list[dict]) -> dict | None:
             "action_type": action_type,
             "reason": reason[:240],
             "basis": str(item.get("basis") or "").strip()[:160],
+            # "" when absent or rejected - the draft builders fall back to their template,
+            # so a model that omits this degrades to the old behaviour rather than to an
+            # empty message.
+            "draft": _clean_draft(item.get("draft")),
             "confidence": confidence,
         })
         if len(actions) >= MAX_ACTIONS:

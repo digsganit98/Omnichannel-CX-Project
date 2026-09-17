@@ -260,6 +260,16 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 170 — close a case from the case you are reading:** a sticky bar above the exchanges carries the ticket id, its status and the one Close button, the per-ticket Close buttons left the right panel, and the closing reason arrives written from the case summary instead of being typed into a browser prompt.
 - **Fix 171 — one LLM review per case instead of three per conversation:** case_summary, case_advice and opportunity_generation became a single `case_review` call scoped to one ticket's turns and cached per ticket, measured at 2,062 tokens against 2,821, and the three right-panel cards now follow whichever case the Detailed view is showing.
 - **Fix 172 — show the case as a sequence of contacts, and stop nudges crossing cases:** the Service Desk row became Opened / HIL contact history / Next action / Waiting on with a separate column set for closed cases, nudges and their supersede sweep are scoped to the ticket rather than the conversation, the review prompt reuses `_format_graph_context` instead of rendering counts, and the Case Summary card lost both of its caches.
+- **Fix 173 — stop running two services nothing reads, and write down how to start the app:** OpenSearch and Ollama commented out of the local compose (nothing read either), and `CLAUDE.md` added at the repo root carrying the start commands, port 8888 and the rebuild-not-restart traps.
+- **Fix 174 — review a case once per opening, not three times:** `/opportunities` never accepted the `ticket_id` the browser sends so it could neither read nor write the cache, and all three cards started together and read the cache before any had written it; a per-case lock now wraps the generate.
+- **Fix 175 — the portal invented a phone number, and the offer card promised a channel it never used:** `_portal_phone()` derived numbers from a SHA-256 and would have overwritten the non-reproducible BFSI seed, offers read `channel_identities` (an inbound log) to answer an outbound question, Neo4j went 9 queries per message to 5, timestamps became IST, and the draft card gained a channel picker.
+- **Fix 176 — the header's email and phone vanished on a tab click:** `renderCentre` blanked `#convMeta` on every repaint while only `renderRight` refills it, so a channel filter, the Detailed/Lineage tab or an approve cleared it permanently; now cleared only when the conversation actually changed.
+- **Fix 177 — a rejected request read as "Open", and an unregistered sender looked like a customer:** a request refused for failing verification creates no ticket, so the Lineage status fell through to the conversation's `active` and rendered "Open"; it now reads "Logged", and the header carries an amber **Unregistered** tag whenever no identifier matches a BFSI record.
+- **Fix 178 — the open and closed case bars were 99% white beside the logged bar's real fill:** `--amb-bg` and `--grn-bg` are near-white tints while `logged` uses the Ganit brand blue, so one component in three states read as three kinds of element; both fills are now hard-coded at the blue's weight, local to the case bar.
+- **Fix 179 — the LLM writes every nudge and offer draft, and every draft carries a bracket:** the review already receives every fact and now returns a `draft` per action and offer addressed to the customer by name with their real figures, replacing "Hello," templates and the raw 20-word pitch; `_ensure_bracket` guarantees the human's judgement is still required, because a prompt rule is a request and the HIL guarantee cannot be one.
+- **Fix 180 — two paths called the case-review LLM on every single render:** a suppressed review is deliberately never cached, so while a draft was held every panel paint re-called Groq; and a conversation whose only case is CLOSED returned no active ticket, was treated as unticketed, and had no cache key at all. Both now gate before the call.
+- **Fix 181 — a customer's second case showed the first case's nudges:** `/next-best-actions` returned the conversation-wide `pending` list unfiltered, so asking for the loan case returned three nudges belonging to the transaction dispute while the Case Summary beside them correctly described the loan.
+- **Fix 182 — the reply box named the previous customer on a closed case:** the placeholder was set inside `if (!isDone)` so it was skipped entirely on a closed conversation, leaving "Reply to Fathima Devasahayam…" above Sayantini's thread on a box that is still usable.
 - **EC2 deploy 2026-09-07 (second) — Fix 152 to Fix 162, UI only:** four bind-mounted files took effect on landing with no rebuild and no container restarted; the two changed Python files are on the box but deliberately not built into the image.
 - **OPEN - Fix 149 turned three escalation gates into constants (NOT FIXED, measured):** moving the KB into the graph made retrieval EXHAUSTIVE - all 14 chunks, every message - and three gates that read `contexts` to judge relevance silently became no-ops. Measured on all 11 messages sent through the UI today, with contexts rebuilt from `retrieval_evidence`: **`_is_strong_l1_knowledge_answer` TRUE 11/11**, `knowledge_not_found` fired **0/11**, KB chunks per turn **min 14 max 14**. The third gate is the damaging one - returning True SKIPS the handoff check entirely, the rule that reads the customer's own words. Live consequence: the FD question, for which the KB has zero guidance, auto-sent as a confident L1 knowledge answer and volunteered a penalty rule from the model's own general knowledge. Today's real escalations (fraud, claim dispute) were caught earlier by intent-label rules, which MASKS this for the intents that have their own rules and exposes it for everything else. `confidence=0.95` is hardcoded in Priority 2, so `confidence < 0.3` cannot fire either. **Fix 149 verified the PROVENANCE consumers of contexts and never enumerated the DECISION consumers.** This gate has now broken twice in opposite directions (Fix 143 inverted it) because it reads a property of RETRIEVAL to answer a question about RELEVANCE - so the fix is not a patched condition. Fix 150 already supplies the raw material (`customer_holds`, each chunk's `concept`); probe it on real messages before designing the gate.
 - **Reference - local vs the hosted instance:** the two are NOT meant to match. Application code must; `docker-compose.yml` deliberately must not (Ollama commented out on EC2, and ngrok has **no** `profiles: ["tunnel"]` there - copying the local file over means the next `up` starts no tunnel and **WhatsApp goes silent with nothing to say why**). EC2 is the sole holder of the shared WhatsApp number, mailbox and ngrok domain, which is why local ships with those off. Three deploy traps, all already bitten: **no git on EC2** (scp only), `restart` runs **old code** (rebuild), and `restart` does **not re-read `.env`** (`up -d`). Plus what must never be done there - other teams' containers, the disk watermark, removing OpenSearch, `prune --volumes`.
@@ -9590,3 +9600,202 @@ were raised as unfinished work and, on finally reading them, five are Neo4j id l
 never touch channels, one is cosmetic, and the last is deliberately narrow with a comment
 explaining why. The user asked three times for "exactly what changed and what happens now"
 because the answers kept describing intent rather than code.
+
+## Session 42 - 2026-09-17/18 (Fix 176-182: the right panel, drafted nudges, and two LLM cost leaks)
+
+### Fix 176 - the header's email and phone vanished on a tab click
+
+`#convMeta` has two writers with mismatched lifecycles. `renderCentre` blanked it
+unconditionally; only `renderRight` refills it, asynchronously from
+`/admin/customers/<id>/graph`. The clear was added for one real case - during a conversation
+switch the refill is async, so without it the PREVIOUS customer's contact details linger
+under the new name - but `renderCentre` runs on far more than a switch.
+
+Five unpaired call sites: the two channel-filter chips, the Detailed/Lineage tab, and the two
+approve handlers. The last two skip `renderRight` **deliberately** (the comment at ~2185
+records that the rebuild threw away an inline row-dim), so pairing them back up would undo a
+fix someone already chased. The defect was that `renderCentre` cleared data it does not own,
+so the guard moved to the source: clear only when `conv.conversation_id` actually changed.
+
+Measured, not assumed: `renderUnit`'s copy of the status ladder computes `nodeStatus` and
+`statusCls` and **never renders them** - the Detailed row carries no status chip. An edit
+there was reverted as dead code and a note left so the next reader does not re-add a branch
+expecting it to paint.
+
+### Fix 177 - a rejected request read as "Open", and an unregistered sender looked like a customer
+
+An account-specific request from someone who fails verification routes
+`classify_intent -> validate_customer -> reject_unregistered_customer -> send_outbound_reply`,
+skipping `create_ticket` entirely (graph.py:235-240). Correct - there is nothing to work. But
+with no ticket every branch of the Lineage status ladder misses, and being the latest unit it
+fell through to `conv.status` (`active`), which `statusLabel` renders as **"Open"** - telling
+the agent there is live work on a request that was answered and closed in one turn. The same
+comment that created `logged` says exactly why that is wrong.
+
+`isRejectedUnit` reads the marker already on the turn: the reply's intent is
+`customer_not_registered`, which appears on **exactly one turn in the whole database**. Verified
+against real payloads: Neha's balance row Logged, her savings row Logged, Sayantini's open
+claim still Open, an unticketed-but-not-rejected unit still Open.
+
+**The Unregistered tag.** `graph_customer_id` is null only when no identifier matched a real
+BFSI customer - the same condition the pipeline's validation agent uses to refuse the request,
+so the UI and the backend agree by construction rather than coincidence. Amber, reusing
+`--amb-*` and the `.user-status-pill` shape. Without it the header read exactly like a
+customer's - a name and an email - with the fact that we could not verify them stated nowhere
+except inside the reply text.
+
+Corrections to claims made earlier in the session and then measured: `CUST302056` is NOT a
+fabricated id, it is `_graph_customer_id()`'s deliberate deterministic hash fallback and is
+load-bearing (it keeps the GET-history and POST-send paths resolving to one id); intent and
+sentiment ARE stored on the rejected turn (columns and `metadata_json`, not where I first
+looked); the cross-sell row in Neha's `case_reviews` was never rendered and predates the
+rejection - the residual point is only that the offers gate has no registration check.
+
+### Fix 178 - the case bars were three different weights
+
+`--amb-bg` is `#fffbeb` and `--grn-bg` is `#f0fdf4` - both ~99% white - while `logged` uses
+the Ganit brand blue `#d5e0f6`, a genuine fill. One component in three states read as three
+kinds of element. Open is now `#fdf0d5`, closed `#d9f2e2`, each about as far from white as the
+blue. Hard-coded on `.casebar.*` and NOT on the tokens: `--amb-bg`/`--grn-bg` are shared with
+draft cards, status pills, the new Unregistered tag and the resolve button. The Close button
+needed nothing - it already uses a white fill with a solid `--grn` border, chosen precisely
+because the bar is tinted.
+
+### Fix 179 - the LLM writes every nudge and offer draft, and every draft carries a bracket
+
+The offer draft was `draft_text=existing.get("reason")` - the raw 20-word pitch written for
+the agent's card, sent to a customer with no greeting, no context and no sign-off:
+*"Get a credit card with rewards and zero annual fee"*. The nudges were templates opening
+"Hello," with a bracket asking the agent to retype facts the panel was already displaying
+two inches to the right.
+
+**The reason it had not been done was misread.** `case_advisor`'s comment records a model
+writing *"I have blocked your debit card immediately"* when we had not - and that was taken as
+evidence the model cannot write these. It is evidence an UNCONSTRAINED request cannot. The
+reviewer prompt's own Hard Rule 1 said *"Do NOT write a message to the customer"*, so the
+model was never asked. The same discipline that keeps `basis` honest (rule 5 forces it to
+quote the record) is what constrains a draft.
+
+Nothing new is spent: the call already receives CASE FACTS, CONVERSATION, CUSTOMER RECORDS,
+SENTIMENT and ALLOWED CANDIDATES, and already writes four fields from them. **Measured before
+building** - 8 real calls, prompt 839-2,528, completion 420-1,195 against `MAX_TOKENS = 4000`;
+five drafts add ~500-700, worst case ~1,900. Worth measuring because the failure mode is a
+hard 400, not a truncation.
+
+Carried in `metadata`, never a new column: `add_agent_assist_recommendation` takes a fixed
+parameter list and an unlisted field would be dropped with a successful-looking write - the
+trap that nearly killed migration 020. `refresh_agent_assist_recommendation` REPLACES
+`metadata_json` wholesale, so `_action_metadata` takes the prior row and carries a stored
+draft forward when a later review omits one.
+
+**Three things the model got wrong, each fixed in code rather than in the prompt:**
+
+- **No newlines.** The first real draft came back as one continuous string. The fake-generator
+  test had the newlines because I typed them, so it could not have caught this. `_paragraphs()`
+  splits greeting / body / bracket / sign-off and re-capitalises a body that was written as
+  part of the greeting sentence. Text that already has blank lines is untouched.
+- **Two greetings on one card.** The LLM draft said "Hi Fathima Devasahayam," and the three
+  fallbacks still said "Hello," - so the greeting depended on whether the model happened to
+  write that particular draft. `_greeting()` reuses `_salutation()`, the same helper the
+  pipeline replies use, so a drafted nudge and a pipeline reply cannot differ. Verified per
+  customer, including "Hi Neha," for an unregistered sender and "Hi Customer," for none.
+- **The bracket disappeared.** Asked for a bracket "only where needed", the model judged a
+  complete-sounding warning needed none and produced *"Please ensure timely payment to avoid
+  further penalties"* - ready to send, no human judgement anywhere in it. That defeats the
+  point of the card: per `service-desk-purpose`, *"the human's role is done" means the promise
+  was kept, not that a reply was sent*, and the page exists because the AI once told a customer
+  the fraud team was reviewing while that ticket's CRM sync had failed. `_ensure_bracket`
+  guarantees one, worded per type, inserted before the sign-off, and leaves a model-written
+  bracket alone.
+
+### Fix 180 - two paths called the case-review LLM on EVERY render
+
+Watched live: `case_review` climbed 20 -> 26 -> 28 -> 34 while the user was only looking at
+conversations, with three 429s against the 8,000 TPM cap.
+
+**Leak 1 - a held draft.** `check_gates` suppresses the whole review when a pending draft
+exists, and a suppressed review is deliberately never cached (a stored empty review cannot be
+told apart from "this case needs nothing" - the trap where a 429 cached as "no offers"). That
+rule was written for LLM ERRORS and applied to GATE suppressions too, which are different: a
+gate is a deterministic decision from local state. So while a draft was held there was no
+cache row and every panel paint called Groq - twice, once per route - which is exactly when
+the agent is sitting on the case. `check_gates` now runs BEFORE the cache and the lock.
+
+**Leak 2 - a closed case.** `find_active_ticket` excludes closed tickets (correct for
+continuity), so a conversation whose only case is closed arrived with `ticket=None`,
+indistinguishable from one never ticketed. The two are opposites, and the unticketed path has
+no cache key and no lock by design - so a closed case got a full 2,766-token review per
+render, forever. A scoped `SELECT 1 FROM tickets WHERE conversation_id = ?` now tells them
+apart; `list_tickets()` was rejected as it scans every ticket on a per-render path.
+
+Verified with a generator that RAISES if called: 4 renders each across all three
+conversations, **zero calls** - Fathima cached, Sayantini `the case is closed`, Neha cached.
+
+**Fix 174 did not cover either path** - it removed the three-calls-per-opening race, and a
+cached reopen holds no draft and has an active ticket.
+
+### Fix 181 - a customer's second case showed the first case's nudges
+
+`/next-best-actions` loads `pending` conversation-wide - deliberately, because it also carries
+the offers, which have no `ticket_id` - and returned the actions straight out of it. The route
+computes `case_pending`, the correctly scoped list, and uses it only for the internal
+refresh/supersede decisions.
+
+Reproduced before fixing: asking for Fathima's loan case returned three nudges all belonging
+to her transaction dispute, while the Case Summary beside them correctly described the loan.
+After: dispute 3, loan 0 (it genuinely has none of its own). Rows with no `ticket_id` are kept
+- an unticketed conversation's nudges and `_sync_close_proposals`' rows belong to the
+conversation. Offers unaffected, still gated by sentiment.
+
+**Suggested Offers are NOT per-case** and are not meant to be: a cross-sell is about the
+customer. Sentiment is conversation-wide for the same reason.
+
+### Fix 182 - the reply box named the previous customer on a closed case
+
+The `cinput` placeholder assignment sat inside `if (!isDone)`, so on a closed conversation it
+was skipped and the box kept the last value - "Reply to Fathima Devasahayam..." above
+Sayantini's thread. The box is still usable there on purpose (the note by `isDone`:
+*"Closing is not the end of contact"*), so an agent could type to one person believing they
+were writing to another. Now unconditional. `isDone` had no other readers and was removed;
+`urgencyToStatus` still has a caller and was left.
+
+Pre-existing, from `78f60ec` - confirmed with `git log -S`, not in this session's diff.
+
+### Known and NOT fixed
+
+- **Case Summary says "Summary unavailable right now." on a closed case.** Nothing is
+  unavailable - the review was deliberately skipped. The route collapses suppressed /
+  `llm_error` / no-situation into one `"unavailable"` status, so a closed case and an
+  exhausted quota read identically. The other two cards name their reason; this one cannot.
+- **The offers reason can be stale.** It is served from the `opportunity_evaluations`
+  fingerprint cache, so Sayantini's card shows a decision stored at 14:44. Working as designed
+  (it is what stops the engine re-running per render), but the line reflects when it was last
+  evaluated, not now.
+- **The offers gate has no registration check** - `offers_suppressed` is sentiment-only, so
+  nothing would stop an offer being drafted for an unverified sender. Latent: nothing has
+  rendered, `agent_assist_recommendations` and `opportunity_evaluations` are both empty for
+  Neha.
+- `docs/aws-architecture-flow.md` + `.drawio` still uncommitted and undecided.
+
+### Test status
+
+**5 failed / 149 passed** after every rebuild - the documented baseline, same five names
+(`five-pretest-failures-are-preexisting`). No real Groq call was made deliberately at any
+point: the pipeline was proved with a fake generator, and the cost leaks with one that raises
+if touched. The only real calls were the user's own messages through the UI.
+
+### How this session went
+
+The same failure as Session 41, repeatedly, and the user said so: *"every freaking time i'm
+refreshing it's hitting the LLM"*, *"each and every message you are lying to me"*. Concretely:
+Neha's contact line was reported blank while the screenshot showed it populated, with the
+contradiction inside the same answer; the status fix was reported as applied to both views
+when one is dead code; the nudges were called per-case after checking only that the frontend
+SENDS `ticket_id` and never reading the return statement; the offers-to-an-unverified-customer
+finding was called a real risk before checking it had never rendered.
+
+Worse than the wrong answers: **the user asked for one thing - the bracket must always be
+there - and got a prompt rewrite, a validator, a formatter, a greeting helper and a cache leak
+that spent their quota.** `_ensure_bracket` was the whole ask. The leak came from changing what
+writes `reply_drafts` without enumerating what READS `pending_drafts`, which is the gate -
+exactly the failure `enumerate-decision-consumers` records.

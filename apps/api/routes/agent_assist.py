@@ -8,6 +8,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import threading
 from datetime import datetime, timezone
 
@@ -19,6 +20,10 @@ from apps.api.dependencies.security import require_admin_auth
 # but the class stays imported and on disk: tests/test_agent_assist.py exercises each rule
 # directly, and deleting it would break a passing suite for no gain.
 from services.agent_assist_service.next_best_action import NextBestActionEngine
+# The SAME salutation the AI replies use: the customer's real name, or "Customer" when all
+# we have is an email address. Reused rather than reimplemented so a drafted nudge and a
+# pipeline reply cannot greet the same person two different ways.
+from services.agent_service.orchestration_agents import _salutation
 from services.agent_assist_service import case_advisor, case_reviewer, opportunity_engine
 from services.rag_service.groq_generator import GroqGenerator
 from shared.schemas.agent_assist import (
@@ -123,7 +128,25 @@ def case_review(repository, conversation_id: str, ticket_id: str | None,
         # case it means still gets the conversation's active one.
         active = repository.find_active_ticket(conversation_id)
         ticket = active.model_dump(mode="json") if active else None
-    # A conversation with no ticket is still reviewed. It has turns, a customer and a
+        if ticket is None:
+            # find_active_ticket EXCLUDES closed tickets - correct for continuity, but it
+            # means a conversation whose only case is closed lands here with ticket=None,
+            # indistinguishable from one that was never ticketed. The two are opposites:
+            # nothing is outstanding on a closed case, and the block below then treats it
+            # as an unticketed conversation - no cache key, no lock, and a full LLM review
+            # on EVERY render, forever. Measured on the closed claim case: 2,766 prompt
+            # tokens per panel paint.
+            # Scoped query, not list_tickets(): that loads every ticket in the database on
+            # a path that runs on every panel render.
+            with repository.connection() as conn:
+                had_ticket = conn.execute(
+                    "SELECT 1 FROM tickets WHERE conversation_id = ? LIMIT 1",
+                    (conversation_id,),
+                ).fetchone()
+            if had_ticket:
+                return {"suppressed": "the case is closed", "situation": "",
+                        "actions": [], "offers": [], "ticket_id": None}
+    # A conversation with no ticket AT ALL is still reviewed. It has turns, a customer and a
     # sentiment, and the engine this replaces advised on it; refusing here would silently
     # drop the acknowledgement nudge for anyone who has not been ticketed yet.
     tid = ticket["ticket_id"] if ticket else None
@@ -135,6 +158,28 @@ def case_review(repository, conversation_id: str, ticket_id: str | None,
     # case - which is what they are at that point.
     case_turns = [t for t in all_turns if t.get("ticket_id") == tid] if tid else all_turns
     latest_turn_id = case_turns[-1]["turn_id"] if case_turns else ""
+
+    # GATE FIRST, before the cache and before the lock. check_gates reads only the ticket's
+    # status and whether a draft is held - both local rows, no LLM - so a suppressed review
+    # must never reach Groq.
+    #
+    # It used to be checked INSIDE review(), after this function had already decided to
+    # generate. A suppressed result is deliberately never cached (a stored empty review
+    # cannot be told apart from "this case needs nothing"), so while a draft was held there
+    # was no cache row and EVERY render called the LLM again - twice, once per route. That
+    # is precisely the window an agent sits in while reviewing a draft. Measured: refreshing
+    # with one draft held produced pairs of calls seconds apart, three of them 429s against
+    # the 8,000 TPM cap.
+    #
+    # Fix 174 removed the three-calls-per-opening race; this closes the remaining path,
+    # which that fix never reached because a cached reopen holds no draft.
+    pending_drafts = repository.list_reply_drafts(
+        conversation_id=conversation_id, status="pending")
+    gate = case_reviewer.check_gates(ticket=ticket, pending_drafts=pending_drafts)
+    if gate:
+        # Same shape review() returns when it gates, plus the ticket_id the caller expects.
+        return {"suppressed": gate, "situation": "", "actions": [], "offers": [],
+                "ticket_id": tid}
 
     # The cache is keyed by ticket_id, so a ticketless conversation cannot be cached. It is
     # reviewed every time, which is correct and cheap: it has no case history to re-read.
@@ -296,11 +341,15 @@ def get_next_best_actions(conversation_id: str, ticket_id: str | None = None) ->
             # screen, so the card told the agent "nothing sent since we promised it" one
             # minute AFTER they had sent it. The sweep below could not save it either -
             # it also compares action_type, so a new promise nudge protected the old one.
+            # `prior` is passed so a refresh that carries no draft keeps the one already on
+            # the row: refresh_agent_assist_recommendation REPLACES metadata_json wholesale,
+            # so without this a single review that omitted the field would silently blank a
+            # good draft and the card would fall back to the generic template.
             refreshed = repository.refresh_agent_assist_recommendation(
                 prior["recommendation_id"],
                 reason=action["reason"],
                 confidence=action["confidence"],
-                metadata=_action_metadata(action, ticket),
+                metadata=_action_metadata(action, ticket, prior=prior),
             )
             if refreshed is not None:
                 prior.update(refreshed)
@@ -393,7 +442,19 @@ def get_next_best_actions(conversation_id: str, ticket_id: str | None = None) ->
         # like a clean case.
         "suppressed": suppressed,
         "llm_error": llm_error,
-        "actions": [r for r in pending if r.get("action_type") not in _OFFER_ACTION_TYPES],
+        # Scoped to the case the caller asked for. `pending` is deliberately
+        # conversation-wide (it carries the offers, which have no ticket_id), and the
+        # actions were returned straight out of it - so opening a customer's SECOND case
+        # showed the FIRST one's nudges. Measured on Fathima: asking for the loan case
+        # returned three nudges all belonging to the transaction dispute, while the Case
+        # Summary beside them correctly described the loan.
+        #
+        # Rows with no ticket_id are KEPT: an unticketed conversation's nudges, and the
+        # close proposals _sync_close_proposals writes, both have none and belong to the
+        # conversation rather than to one case.
+        "actions": [r for r in pending
+                    if r.get("action_type") not in _OFFER_ACTION_TYPES
+                    and (not _case_id or r.get("ticket_id") in (None, _case_id))],
     }
 
 
@@ -472,13 +533,101 @@ def _sync_close_proposals(repository, conversation_id: str, customer_id: str,
     pending.append(created)
 
 
-def _action_metadata(action: dict, ticket: dict | None) -> dict:
+# What the HUMAN must supply, per nudge type. Every drafted nudge gets one.
+#
+# This is the point of the card. A nudge exists because a person has to DO something - the
+# page it feeds was built because "we told a customer something false": the AI wrote "the
+# fraud team is reviewing" while that ticket's CRM sync had failed. If the model writes the
+# whole message and the agent only clicks Send, the human-in-the-loop gap is back and
+# approving a nudge is forwarding an AI message.
+#
+# So the LLM supplies the FACTS (loan ids, amounts, dates - it does this well) and the
+# bracket is where the judgement goes. Named per type, because each owes something
+# different: a promise owes the update, a warning owes what we are doing about it.
+_REQUIRED_BRACKET = {
+    ActionType.PROMISED_UPDATE.value:
+        "[Add the update we promised - what has actually happened since.]",
+    ActionType.PROACTIVE_WARNING.value:
+        "[State what we are doing about this, or what they should do next.]",
+    ActionType.INFORMATION_NEEDED.value:
+        "[Name exactly what is outstanding and how they should send it.]",
+    ActionType.ACKNOWLEDGEMENT.value:
+        "[Say what you are doing about it before sending.]",
+    "cross_sell": "[Confirm the terms and why this customer, before sending.]",
+    "up_sell": "[Confirm the terms and why this customer, before sending.]",
+}
+
+# A bracket the model wrote itself - any [....] on its own line.
+_HAS_BRACKET = re.compile(r"\[[^\]]{10,}\]")
+
+
+def _ensure_bracket(draft_text: str, action_type: str) -> str:
+    """Guarantee the agent has something to fill in. Never trusted to the prompt.
+
+    The DRAFT contract asks for a bracket only where one is needed, and the model duly
+    decided a complete-looking warning needed none - "Please ensure timely payment to avoid
+    further penalties", ready to send, no human judgement anywhere in it. A prompt rule is a
+    request; this is the guarantee.
+
+    A bracket the model wrote itself is kept: it already names what is missing, in the
+    context of the message it wrote.
+    """
+    text = (draft_text or "").strip()
+    if not text or _HAS_BRACKET.search(text):
+        return text
+    bracket = _REQUIRED_BRACKET.get(action_type)
+    if not bracket:
+        return text
+    # Before the sign-off when there is one, so the message does not end mid-instruction.
+    lines = text.split("\n\n")
+    if len(lines) > 1 and lines[-1].lower().startswith("thank you"):
+        lines.insert(-1, bracket)
+    else:
+        lines.append(bracket)
+    return "\n\n".join(lines)
+
+
+def _greeting(repository, customer_id: str) -> str:
+    """"Hi <their name>," for a fallback draft - the same opening the LLM drafts use.
+
+    The fallback templates used to start "Hello,". That put two different greetings on the
+    same card depending only on whether the model had written that particular draft: an
+    LLM draft said "Hi Fathima Devasahayam," and the template beside it said "Hello,".
+    """
+    name = ""
+    if customer_id:
+        # There is no repository.get_customer(); the display_name lives on `customers` and
+        # is the right source here - it is populated for an unregistered sender (Neha) where
+        # the graph record is None, and _salutation turns a bare email into "Customer".
+        with repository.connection() as conn:
+            row = conn.execute(
+                "SELECT display_name FROM customers WHERE customer_id = ?", (customer_id,)
+            ).fetchone()
+        name = (row["display_name"] if row else "") or ""
+    return f"Hi {_salutation(name)},"
+
+
+def _action_metadata(action: dict, ticket: dict | None, prior: dict | None = None) -> dict:
     """What travels with a recommendation row.
 
     The promise deadline goes ONLY on the action that is about the promise. Everything
     else gets `basis` alone, so the card shows a countdown exactly where one applies.
+
+    `prior` is the existing row on a refresh. It exists only to carry a stored draft
+    forward when the new review did not write one - see the call site.
     """
     metadata = {"basis": action.get("basis")}
+    # The customer-facing message the review wrote for this action. Carried in `metadata`
+    # rather than a new column deliberately: add_agent_assist_recommendation takes a fixed
+    # parameter list, so an unlisted field would be dropped with a successful-looking write
+    # - the trap that nearly killed migration 020. metadata is already a free-form JSON
+    # blob both the add and refresh paths persist, so nothing else has to change.
+    #
+    # The new draft when there is one, else whatever the row already held. A review that
+    # omits the field must never blank a good draft - refresh replaces metadata_json whole.
+    draft = action.get("draft") or (prior or {}).get("metadata", {}).get("draft")
+    if draft:
+        metadata["draft"] = draft
     if action["action_type"] in DRAFTABLE_ACTION_TYPES and (ticket or {}).get("follow_up_due_at"):
         metadata["follow_up_due_at"] = ticket["follow_up_due_at"]
     return metadata
@@ -681,8 +830,12 @@ def get_opportunities(conversation_id: str, ticket_id: str | None = None) -> dic
             reason=opp["pitch"],
             confidence=opp["confidence"],
             priority=5,
+            # `draft` is the customer-facing offer message; `reason` above is the 20-word
+            # pitch the CARD shows the agent. They are different audiences and the offer
+            # draft used to send the pitch verbatim - a card fragment, with no greeting.
             metadata={"product": opp["product"], "basis": opp["basis"],
-                      "why_now": opp["reason"], "source": "opportunity_engine"},
+                      "why_now": opp["reason"], "source": "opportunity_engine",
+                      **({"draft": opp["draft"]} if opp.get("draft") else {})},
         )
 
     return {"conversation_id": conversation_id, "customer_id": customer_id,
@@ -696,19 +849,20 @@ def list_recommendations(ticket_id: str | None = None, conversation_id: str | No
     )
 
 
-# The opening line for each nudge that can be answered with a message. The facts come from
-# the record; the JUDGEMENT is left as a bracket for the agent to fill.
+# THE FALLBACK. The review now writes the message itself (case_reviewer's DRAFT contract)
+# and _build_nudge_draft prefers it; these templates are what a row gets when the model
+# omitted the draft or it failed validation.
 #
-# Deliberately NOT model-written. Probed against the live fraud case, a model asked for this
-# sentence wrote "I have blocked your debit card immediately" when we had told the customer
-# to block it themselves and the CRM sync had failed - the outcome is not in the system, so
-# a model asked to state it can only invent it. That finding is why the card advised and
-# never drafted (commit 6d7977d). It is also why the fix is a template, not a prompt: the
-# reason not to generate these sentences has not changed.
+# They are kept, rather than deleted, because they degrade honestly: a generic opener plus
+# a visible bracket is obviously unfinished, whereas an empty draft card looks broken and a
+# silently generic one looks finished when it is not.
 #
-# The bracket is the whole point. It is the one thing the agent must supply, it is obvious
-# on screen, and a draft sent with it still in is visibly unfinished rather than quietly
-# wrong.
+# The history behind them still matters. Probed against the live fraud case, a model asked
+# for this sentence wrote "I have blocked your debit card immediately" when we had told the
+# customer to block it themselves and the CRM sync had failed - which is why the card
+# advised and never drafted (commit 6d7977d). That request carried no contract; the DRAFT
+# rules now forbid stating anything about our side of the work, and the agent reviews every
+# draft before it is sent.
 _ACK_OPENERS = {
     ActionType.ACKNOWLEDGEMENT.value: (
         "I am sorry this has been frustrating, and thank you for bearing with us.\n\n"
@@ -751,11 +905,20 @@ def _build_nudge_draft(repository, recommendation: dict) -> dict:
     last_inbound = inbound[-1] if inbound else None
     channel = (last_inbound or {}).get("channel") or "web_chat"
 
-    subject = (ticket or {}).get("title") or "your request"
-    reference = ticket_id or conversation_id
-    opener = _ACK_OPENERS[action_type].format(
-        subject=subject.lower(), reference=reference)
-    draft_text = "Hello,\n\n" + opener + "\n\nThank you for your patience."
+    # The review's own draft, written against this customer's records and already greeting
+    # them by name. Falls back to the template when the model omitted it or _clean_draft
+    # rejected it - see the note above _ACK_OPENERS.
+    draft_text = (recommendation.get("metadata") or {}).get("draft") or ""
+    if not draft_text:
+        subject = (ticket or {}).get("title") or "your request"
+        reference = ticket_id or conversation_id
+        opener = _ACK_OPENERS[action_type].format(
+            subject=subject.lower(), reference=reference)
+        draft_text = (_greeting(repository, recommendation.get("customer_id") or "")
+                      + "\n\n" + opener + "\n\nThank you for your patience.")
+    # Applied to BOTH paths: the model's draft may have no bracket, and a template's bracket
+    # is already counted by _HAS_BRACKET, so this neither duplicates nor misses one.
+    draft_text = _ensure_bracket(draft_text, action_type)
 
     return repository.add_reply_draft(
         conversation_id=conversation_id,
@@ -791,15 +954,22 @@ def _build_follow_up_draft(repository, recommendation: dict) -> dict:
     last_inbound = inbound[-1] if inbound else None
     channel = (last_inbound or {}).get("channel") or "web_chat"
 
-    subject = (ticket or {}).get("title") or "your request"
-    reference = ticket_id or conversation_id
-    draft_text = (
-        "Hello,\n\n"
-        f"I am following up on {subject.lower()} (reference {reference}), which we told you "
-        "we would come back to you about.\n\n"
-        "[Add the update here before sending.]\n\n"
-        "Thank you for your patience."
-    )
+    # The review's own draft first, same as _build_nudge_draft. A promised_update still
+    # carries a bracket in practice - the update we owe is a decision, not a record - but
+    # the rest of the message names the case and its real facts instead of "your request".
+    draft_text = (recommendation.get("metadata") or {}).get("draft") or ""
+    if not draft_text:
+        subject = (ticket or {}).get("title") or "your request"
+        reference = ticket_id or conversation_id
+        draft_text = (
+            _greeting(repository, recommendation.get("customer_id") or "") + "\n\n"
+            f"I am following up on {subject.lower()} (reference {reference}), which we told you "
+            "we would come back to you about.\n\n"
+            "[Add the update here before sending.]\n\n"
+            "Thank you for your patience."
+        )
+    draft_text = _ensure_bracket(
+        draft_text, recommendation.get("action_type") or ActionType.PROMISED_UPDATE.value)
     return repository.add_reply_draft(
         conversation_id=conversation_id,
         customer_id=recommendation.get("customer_id") or "",
@@ -856,11 +1026,24 @@ def decide_recommendation(recommendation_id: str, payload: NBADecisionUpdate) ->
         # draft so the sent offer turn can be grouped by its own theme in the
         # conversation view (matching topic group, else its own group).
         offer_product = (existing.get("metadata") or {}).get("product")
+        # The review's offer message. Falls back to the pitch wrapped in a greeting - the
+        # pitch ALONE used to be the whole draft ("Get a credit card with rewards and zero
+        # annual fee"), which is a card fragment written for the agent, sent to a customer
+        # with no greeting, no context and no sign-off.
+        offer_draft = (existing.get("metadata") or {}).get("draft") or ""
+        if not offer_draft:
+            offer_draft = (
+                _greeting(repository, customer_id) + "\n\n"
+                + (existing.get("reason") or "")
+                + "\n\n[Add anything else they should know before sending.]\n\n"
+                "Thank you for banking with us."
+            )
+        offer_draft = _ensure_bracket(offer_draft, existing.get("action_type") or "cross_sell")
         draft = repository.add_reply_draft(
             conversation_id=conversation_id,
             customer_id=customer_id,
             channel=OFFER_DRAFT_CHANNEL,
-            draft_text=existing.get("reason") or "",  # the pitch, editable by the agent
+            draft_text=offer_draft,  # editable by the agent before it goes
             hold_reason="Approved offer — review & send",
             reason_code=existing.get("action_type") or "cross_sell",
             channel_identifier=None,

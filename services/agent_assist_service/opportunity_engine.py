@@ -328,6 +328,10 @@ def parse_and_validate(raw_text: str, candidates: list[dict]) -> list[dict]:
     Returns [] on any parse failure (caller falls back to previously stored
     pending rows — the fail-safe rule: never blank the UI on an LLM error).
     """
+    # Imported HERE, not at module scope: case_reviewer imports this module, so a top-level
+    # import back would be circular.
+    from services.agent_assist_service.case_reviewer import _clean_draft as _clean_offer_draft
+
     allowed = {c["product"]: c for c in candidates}
     try:
         parsed = json.loads(_clean_json_array(raw_text))
@@ -364,6 +368,12 @@ def parse_and_validate(raw_text: str, candidates: list[dict]) -> list[dict]:
             "pitch": pitch,
             "reason": str(item.get("reason") or "").strip()[:120],
             "basis": candidate["basis"],
+            # The customer-facing message for this offer. "" when the model omitted it or
+            # it failed validation, in which case the offer-draft builder wraps the pitch
+            # in a greeted template instead. Sanitised by case_reviewer's _clean_draft -
+            # imported rather than reimplemented so the action and offer drafts cannot
+            # diverge on what counts as sendable.
+            "draft": _clean_offer_draft(item.get("draft")),
             "confidence": confidence,
         })
         if len(results) >= MAX_OPPORTUNITIES:

@@ -772,24 +772,37 @@ function turnSentiment(turn) {
   return clientSentiment(turn.text);
 }
 
+// Which conversation the header meta line (email · phone) was last painted for, so
+// renderCentre can tell a genuine customer switch from a repaint of the same one.
+var _lastMetaConvId = null;
+
 function renderCentre(conv) {
   var turns = conv.turns || [];
   var conv_meta = state.convs.find(function(c) { return c.conversation_id === conv.conversation_id; }) || conv;
   var nm = customerLabel(conv_meta);
   document.getElementById('convName').textContent = nm;
-  // Clear the meta line + graph button on every switch: both are filled asynchronously
-  // by renderRight, so without this the previous customer's details linger until the
-  // graph call returns (or forever, if this customer resolves to no graph node).
+  // Clear the meta line ONLY when the conversation actually changed. It is filled
+  // asynchronously by renderRight, so on a switch the previous customer's details would
+  // linger under the new name until the graph call returns (or forever, if this customer
+  // resolves to no graph node) - that is what this guard is for.
+  //
+  // It used to clear unconditionally, but renderCentre runs on far more than a switch:
+  // a channel-filter click (~821/829), the Detailed/Lineage tab (~848) and an approve
+  // (~2183/2262) all repaint the centre for the SAME customer. Only renderRight refills
+  // this line, and those last two skip it deliberately (see the note at ~2185), so the
+  // email/phone vanished on a plain tab click and did not come back until you left the
+  // conversation and reopened it. Comparing the id keeps the protection and drops the
+  // collateral damage.
   var _metaEl = document.getElementById('convMeta');
-  if (_metaEl) _metaEl.innerHTML = '';
+  if (_metaEl && _lastMetaConvId !== conv.conversation_id) _metaEl.innerHTML = '';
+  _lastMetaConvId = conv.conversation_id;
 
   // "No open tickets" used to be a banner across the middle of the conversation, which put
   // the answer to "is anything outstanding?" in a different place depending on the answer:
   // the banner when the count was zero, the right panel's Open Tickets card when it was not.
   // It now reads as one line in the right panel beside that card (see renderRight), so the
-  // agent looks in one place either way. isDone is still read below, for the reply
-  // placeholder only.
-  var isDone = urgencyToStatus(conv_meta) === 'closed';
+  // agent looks in one place either way. Its last reader was the reply placeholder, which
+  // now names the customer whether or not the case is closed - see the note there.
   // The compose box stays on a closed conversation. Closing is not the end of contact:
   // a customer writes back after a case is closed, and an agent who has just closed one
   // may still owe them a word - closing notifies nobody, which is why the banner above no
@@ -1099,6 +1112,18 @@ function renderCentre(conv) {
     return !!(t && t.metadata && t.metadata.source === 'opportunity_offer');
   }
 
+  // A request from someone we could not verify. The pipeline routes these straight to
+  // reject_unregistered_customer → send_outbound_reply (graph.py), skipping ticket
+  // creation entirely, so the unit has no ticket and nothing is pending on a person.
+  // The reply carries intent 'customer_not_registered' — the only durable marker that
+  // this is a REJECTED request rather than one still being worked.
+  function isRejectedUnit(u) {
+    if (!u || u.ticket) return false;
+    return (u.exchanges || []).some(function(ex) {
+      return ex.reply && ex.reply.intent === 'customer_not_registered';
+    });
+  }
+
   // Renders one request unit for the DETAILED view: every customer→AI exchange
   // in the request as its own 3-column row (Customer Query · ticket/channel/
   // status/time · AI Agent Reply), stacked oldest→newest. All exchanges share
@@ -1121,6 +1146,9 @@ function renderCentre(conv) {
     else if (tktStatus === 'open' || tktStatus === 'in_progress') nodeStatus = 'active';
     else if (!isLatestUnit) nodeStatus = 'closed';
     else nodeStatus = convIsResolved ? 'closed' : (conv.status || 'active');
+    // NOTE: nodeStatus/statusCls are computed but NOT rendered in this view - the Detailed
+    // row carries no status chip (only Lineage does). Left in place rather than deleted so
+    // this ladder stays readable beside renderLineageRow's live copy of it.
     var statusCls = nodeStatus === 'logged' ? 'fns-logged'
       : (nodeStatus === 'active' || nodeStatus === 'open' || nodeStatus === 'in_progress') ? 'fns-active' : 'fns-done';
 
@@ -1273,6 +1301,11 @@ function renderCentre(conv) {
     else if (tktStatus === 'logged') nodeStatus = 'logged';
     else if (tktStatus === 'open' || tktStatus === 'in_progress') nodeStatus = 'active';
     else if (!isLatestUnit) nodeStatus = 'closed';
+    // Rejected-unverified: answered and finished in one turn, no ticket, nothing owed.
+    // Without this it falls through to conv.status ('active') and statusLabel turns the
+    // unrecognised value into "Open" - telling the agent there is work here when the
+    // pipeline already closed it out. Same reasoning as 'logged' two lines up.
+    else if (isRejectedUnit(u)) nodeStatus = 'logged';
     else nodeStatus = convIsResolved ? 'closed' : (conv.status || 'active');
     var statusCls = nodeStatus === 'logged' ? 'fns-logged'
       : (nodeStatus === 'active' || nodeStatus === 'open' || nodeStatus === 'in_progress') ? 'fns-active' : 'fns-done';
@@ -1476,10 +1509,12 @@ function renderCentre(conv) {
     state.highlightTicketId = null;
   }
 
-  // Compose
-  if (!isDone) {
-    document.getElementById('cinput').placeholder = 'Reply to ' + nm + '…';
-  }
+  // Compose. ALWAYS named, including on a closed case. Guarded by `if (!isDone)` this was
+  // simply skipped on a closed conversation, so the box kept the PREVIOUS customer's name -
+  // Sayantini's closed case showed "Reply to Fathima Devasahayam…" - and the box is still
+  // usable (see the note by isDone: closing is not the end of contact), so an agent could
+  // type to one person believing they were writing to another.
+  document.getElementById('cinput').placeholder = 'Reply to ' + nm + '…';
 
   renderDraftCard(conv, viewMode, shownInboundTurnIds);
 }
@@ -1982,12 +2017,24 @@ function renderRight(conv, tickets) {
       // look up, or quote to anyone. The identifier that means something is the CRN the
       // BFSI dataset is keyed on, and that belongs in the Profile tab with the rest of
       // the record. Email and phone stay: they are how an agent verifies who is writing.
+      //
+      // An UNREGISTERED sender is tagged here. `graph_customer_id` is null only when no
+      // identifier matched a real BFSI customer record (routes/customers.py returns the
+      // empty `base` in that case) - the same condition the pipeline's validation agent
+      // uses to refuse account-specific requests. Without the tag the header reads exactly
+      // like a customer's: a name and an email address, with the fact that we could not
+      // verify them stated nowhere on the page except inside the reply text.
       var metaEl = document.getElementById('convMeta');
       if (metaEl) {
         var parts = [];
         if (emailId) parts.push(escH(emailId));
         if (phoneId) parts.push(escH(phoneId));
-        metaEl.innerHTML = parts.join('<span class="cmeta-sep">·</span>');
+        var line = parts.join('<span class="cmeta-sep">·</span>');
+        if (!g.graph_customer_id) {
+          line += (line ? '<span class="cmeta-sep">·</span>' : '')
+                + '<span class="cmeta-unreg">Unregistered</span>';
+        }
+        metaEl.innerHTML = line;
       }
     }).catch(function() {});
   }
