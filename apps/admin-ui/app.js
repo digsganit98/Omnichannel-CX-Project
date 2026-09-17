@@ -4524,8 +4524,15 @@ function paintCaseSummary(p) {
       // Say why there is nothing rather than showing an empty card.
       // NOT cached: "no messages yet" and "unavailable" are transient states, and caching
       // them would keep the card empty after the conversation gains its first message.
+      // Three different reasons, and they must not read alike. "unavailable" is the only
+      // one that means something is WRONG (no LLM - quota, outage, no key); a suppressed
+      // review is a deliberate silence and now names itself, matching the wording of the
+      // two cards below ("Not suggesting - the case is closed"). Before this, a closed
+      // case and an exhausted quota rendered the same sentence.
       bodyEl.innerHTML = '<span class="csum-muted">'
-        + (p.status === 'empty' ? 'No messages yet.' : 'Summary unavailable right now.')
+        + (p.status === 'empty' ? 'No messages yet.'
+         : p.suppressed ? 'No summary — ' + escH(p.suppressed) + '.'
+         : 'Summary unavailable right now.')
         + '</span>';
       return;
     }

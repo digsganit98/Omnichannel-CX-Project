@@ -192,11 +192,26 @@ def case_summary(conversation_id: str, refresh: bool = False, ticket_id: str | N
     from apps.api.routes.agent_assist import case_review
     review = case_review(repo, conversation_id, ticket_id, refresh=refresh)
     summary = None
-    if not review.get("llm_error") and not review.get("suppressed") and review.get("situation"):
+    # `suppressed` is deliberately NOT a reason to withhold the summary. It gates the two
+    # cards that propose WORK - there is nothing to suggest on a closed case, and nothing to
+    # add while a draft is held - but the question "what is this case about" still has a
+    # true answer, and case_review now serves it from the stored row at no cost. Gating the
+    # summary on it too is why a closed case read "Summary unavailable right now.", which
+    # made a deliberate silence indistinguishable from an exhausted quota.
+    #
+    # llm_error still withholds, and that asymmetry is the point: a failed call means we may
+    # genuinely be out of date, so saying nothing beats presenting stale text as current.
+    if not review.get("llm_error") and review.get("situation"):
         summary = {"situation": review["situation"], "model": None}
     if summary is None:
-        # No LLM (quota, outage, no key). Say so rather than showing the agent a
-        # fabricated or stale-but-unlabelled summary.
+        # Nothing to show - and WHY decides what the card says. A gated case with no stored
+        # review (closed before it was ever summarised, or its stored row now stale) is not
+        # a failure, so it carries its reason through and reads like the two cards beside
+        # it. Everything else is a real absence of LLM (quota, outage, no key): say so
+        # rather than showing the agent a fabricated or stale-but-unlabelled summary.
+        if review.get("suppressed"):
+            return {"conversation_id": conversation_id, "status": "suppressed",
+                    "suppressed": review["suppressed"], "summary": None}
         return {"conversation_id": conversation_id, "status": "unavailable", "summary": None}
 
     # Nothing is written here. case_review already stored this review against its TICKET;

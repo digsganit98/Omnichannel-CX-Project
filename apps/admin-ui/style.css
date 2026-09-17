@@ -433,7 +433,11 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .tkt-resolve-btn{margin-top:8px;width:100%;font-size:11px;font-weight:600;padding:6px 10px;border-radius:6px;border:1px solid var(--grn-bd);background:var(--grn-bg);color:var(--grn-t);cursor:pointer}
 .tkt-resolve-btn:hover{background:var(--grn);color:#fff;border-color:var(--grn)}
 .tkt-resolve-btn:disabled{opacity:.5;cursor:default}
-.nba-item{background:var(--surf);border:1px solid var(--bdr);border-radius:var(--rs);padding:9px 10px;margin-bottom:6px}
+/* position:relative anchors .nba-actions to the card's top-right corner. The buttons used
+   to sit at the BOTTOM, after the Why line, so their position moved with the length of the
+   reason text and the two cards in a stack had their buttons at different heights. Pinned
+   to the corner they are in one predictable place on every card. */
+.nba-item{background:var(--surf);border:1px solid var(--bdr);border-radius:var(--rs);padding:9px 10px;margin-bottom:6px;position:relative}
 .nba-item:last-child{margin-bottom:0}
 .nba-badge{font-size:9px;font-weight:600;text-transform:uppercase;letter-spacing:.3px;padding:2px 7px;border-radius:20px;background:var(--blue-bg);color:var(--blue-t);border:1px solid var(--blue-bd);display:inline-block}
 .nba-badge-crosssell{background:var(--grn-bg);color:var(--grn-t);border:1px solid var(--grn-bd)}
@@ -457,7 +461,13 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
   font-variant-numeric:tabular-nums;white-space:nowrap}
 .nba-clock--over{color:var(--red-t)}
 .nba-reason{font-size:11px;color:var(--t2);line-height:1.5;margin-top:6px}
-.nba-actions{display:flex;gap:6px;margin-top:8px}
+/* TOP RIGHT of the card, level with the badge. Absolute, so the badge keeps its own line
+   and the reason text below it stays FULL WIDTH - an earlier attempt reserved a 142px
+   right gutter on .nba-reason instead, which squeezed every line of the sentence into a
+   narrow column rather than only clearing the buttons on the first one. */
+.nba-actions{display:flex;gap:6px;position:absolute;top:8px;right:9px;margin-top:0}
+/* The badge shares its line with the buttons, so only IT needs the clearance. */
+.nba-item > .nba-badge{max-width:calc(100% - 150px)}
 .nba-approve-btn,.nba-dismiss-btn{font-size:10px;font-weight:600;padding:4px 10px;border-radius:var(--rs);border:1px solid var(--bdr);background:var(--surf2);color:var(--t2);cursor:pointer}
 .nba-approve-btn{border-color:var(--grn-bd);color:var(--grn-t)}
 .nba-dismiss-btn{border-color:var(--red-bd);color:var(--red-t)}

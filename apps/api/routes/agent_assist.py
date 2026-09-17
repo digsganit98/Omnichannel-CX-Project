@@ -98,6 +98,47 @@ def _review_lock(ticket_id: str) -> threading.Lock:
         return lock
 
 
+def _stored_situation(repository, conversation_id: str, ticket_id: str | None) -> str:
+    """This case's last stored summary, or "" - for a review that is GATED, never failed.
+
+    A gate (a held draft, a closed case) is a deterministic decision from local rows that
+    says nothing new needs saying. It used to return an empty situation as well, so the
+    Case Summary card read "Summary unavailable right now." on a case whose summary was
+    sitting in case_reviews - and a closed case therefore looked identical to an exhausted
+    quota, which is the one thing that card must be able to distinguish.
+
+    Not called on the llm_error path, and that distinction is the whole point: a FAILED
+    call leaves us genuinely without a current summary, so serving the old text unlabelled
+    would present stale state as fresh.
+
+    STALENESS IS CHECKED, against the same key the cache itself uses. A gate does not
+    freeze the case: while a draft is held the customer can send another message, so the
+    stored row can describe fewer turns than the case now has. Measured on the live data
+    all five rows were current, which is exactly why this cannot be left to chance - a
+    summary that silently omits the newest message is worse than none, and the gate means
+    no new one will be generated to replace it.
+    """
+    if not ticket_id:
+        return ""
+    try:
+        row = repository.get_case_review(ticket_id)
+        if not row:
+            return ""
+        # Scoped to THIS case, the same way case_review scopes its own cache check: the
+        # conversation's newest turn may belong to a different case entirely, and comparing
+        # against that would blank a perfectly current summary whenever the customer wrote
+        # in about something else.
+        case_turns = [t for t in repository.list_conversation_turns(conversation_id) or []
+                      if t.get("ticket_id") == ticket_id]
+        newest = case_turns[-1]["turn_id"] if case_turns else ""
+        if not newest or row.get("latest_turn_id") != newest:
+            return ""
+    except Exception:
+        logger.exception("stored_situation_read_failed")
+        return ""
+    return row.get("situation") or ""
+
+
 def case_review(repository, conversation_id: str, ticket_id: str | None,
                 refresh: bool = False) -> dict:
     """ONE review of ONE case, cached against that case's own newest turn.
@@ -138,14 +179,21 @@ def case_review(repository, conversation_id: str, ticket_id: str | None,
             # tokens per panel paint.
             # Scoped query, not list_tickets(): that loads every ticket in the database on
             # a path that runs on every panel render.
+            # The ticket_id, not just a 1: a closed case's stored review is still the
+            # correct description of it, and reading it costs nothing. Without the id
+            # there is no cache key, so the Case Summary card rendered "unavailable" on a
+            # case whose summary was sitting in case_reviews - see _stored_situation.
             with repository.connection() as conn:
                 had_ticket = conn.execute(
-                    "SELECT 1 FROM tickets WHERE conversation_id = ? LIMIT 1",
+                    "SELECT ticket_id FROM tickets WHERE conversation_id = ? "
+                    "ORDER BY created_at DESC LIMIT 1",
                     (conversation_id,),
                 ).fetchone()
             if had_ticket:
-                return {"suppressed": "the case is closed", "situation": "",
-                        "actions": [], "offers": [], "ticket_id": None}
+                closed_tid = had_ticket["ticket_id"]
+                return {"suppressed": "the case is closed",
+                        "situation": _stored_situation(repository, conversation_id, closed_tid),
+                        "actions": [], "offers": [], "ticket_id": closed_tid}
     # A conversation with no ticket AT ALL is still reviewed. It has turns, a customer and a
     # sentiment, and the engine this replaces advised on it; refusing here would silently
     # drop the acknowledgement nudge for anyone who has not been ticketed yet.
@@ -178,8 +226,15 @@ def case_review(repository, conversation_id: str, ticket_id: str | None,
     gate = case_reviewer.check_gates(ticket=ticket, pending_drafts=pending_drafts)
     if gate:
         # Same shape review() returns when it gates, plus the ticket_id the caller expects.
-        return {"suppressed": gate, "situation": "", "actions": [], "offers": [],
-                "ticket_id": tid}
+        #
+        # `suppressed` stays set - it is what tells Suggested Actions and Suggested Offers
+        # to stay quiet, AND what stops the supersede sweep from retiring this case's
+        # recommendation rows on the strength of a review that never ran. Only the
+        # situation is filled in: a gate means "nothing NEW to say about this case", not
+        # "we no longer know what this case is". The stored summary describes the same
+        # turns either way, and serving it is a row read, not an LLM call.
+        return {"suppressed": gate, "situation": _stored_situation(repository, conversation_id, tid),
+                "actions": [], "offers": [], "ticket_id": tid}
 
     # The cache is keyed by ticket_id, so a ticketless conversation cannot be cached. It is
     # reviewed every time, which is correct and cheap: it has no case history to re-read.
@@ -449,12 +504,29 @@ def get_next_best_actions(conversation_id: str, ticket_id: str | None = None) ->
         # returned three nudges all belonging to the transaction dispute, while the Case
         # Summary beside them correctly described the loan.
         #
-        # Rows with no ticket_id are KEPT: an unticketed conversation's nudges, and the
-        # close proposals _sync_close_proposals writes, both have none and belong to the
-        # conversation rather than to one case.
+        # A case's card shows THAT CASE'S rows and nothing else. Rows with no ticket_id
+        # used to be kept here as well, for two reasons that were both checked and are
+        # both false:
+        #
+        #   - "the close proposals _sync_close_proposals writes have none" - it passes
+        #     ticket_id=ticket_id and returns early when there is no ticket, so a close
+        #     proposal ALWAYS carries its case.
+        #   - "an unticketed conversation's nudges" - there is no such conversation. Since
+        #     the ticket redesign a ticket is the name of a matter and is created for every
+        #     query: TicketDecision is built with `required=True` hardcoded
+        #     (orchestration_agents.py:653, "a ticket is a grouping id: always") at both of
+        #     its call sites, so decide_ticket can never route to skip_ticket. And a
+        #     conversation that genuinely had no case would have _case_id None and be served
+        #     by the `not _case_id` branch anyway.
+        #
+        # So the clause could only ever fire WITH a case on screen, which is exactly when a
+        # case-less row does not belong there. Measured on the live customer: an
+        # information_needed nudge about claim CLM001003 - a document request on her CLOSED
+        # claim case - rendered on a general_inquiry case about her credit card interest
+        # rate, beside a Case Summary that correctly described only the interest rate.
         "actions": [r for r in pending
                     if r.get("action_type") not in _OFFER_ACTION_TYPES
-                    and (not _case_id or r.get("ticket_id") in (None, _case_id))],
+                    and (not _case_id or r.get("ticket_id") == _case_id)],
     }
 
 
@@ -768,9 +840,17 @@ def get_opportunities(conversation_id: str, ticket_id: str | None = None) -> dic
     # anything - measured at 53 calls in one day with zero customer messages. Re-run only
     # when something that could change the answer has changed: the customer's graph
     # records, how many turns they have, or which offers were already suggested.
+    # `gate` is IN the fingerprint, and has to be: it is the one input that decides whether
+    # offers appear at all, and without it a mood change could not invalidate this cache.
+    # Everything else here is holdings, counts and products - none of which move when a
+    # customer calms down. Measured on the live customer: the gate stopped suppressing her
+    # offers, case_reviews recorded the offer correctly, and this row still answered
+    # "recent negative sentiment" from before the change, because its inputs were all
+    # unchanged. The card cannot be more current than the coarsest key in its path.
     fingerprint = json.dumps(
         {"graph": graph_context, "turns": len(turns), "tickets": len(tickets),
-         "suggested": sorted(already_suggested)},
+         "suggested": sorted(already_suggested),
+         "gate": case_reviewer.offers_suppressed(turns)},
         sort_keys=True, default=str,
     )
     input_hash = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()

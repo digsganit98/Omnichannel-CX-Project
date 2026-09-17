@@ -163,17 +163,42 @@ def check_gates(*, ticket: dict | None, pending_drafts: list[dict]) -> str | Non
     return None
 
 
-def offers_suppressed(sentiment: str | None) -> str | None:
-    """Whether to leave offers out of this review.
+def offers_suppressed(turns: list[dict] | None) -> str | None:
+    """Whether to leave offers out of this review: is the LATEST inbound message negative?
 
     The opposite of the actions gate, and that is the point: an angry customer is the wrong
-    person to sell to and exactly the right person to chase what we owe them. Mirrors
-    opportunity_engine.check_gates, which reads the latest inbound turn's sentiment; here
-    the already-aggregated label is used so the card and the right panel cannot disagree.
+    person to sell to and exactly the right person to chase what we owe them.
+
+    THE RULE IS THE LATEST MESSAGE, deliberately, and this is the same rule
+    opportunity_engine.check_gates has always implemented - "don't pitch to a customer
+    whose latest message is negative". That gate is now unreachable from the routes (its
+    only caller, generate_opportunities, is exercised by tests alone since the three calls
+    were merged into this review), and when the live path was rewired it was pointed at
+    _recent_sentiment's DISPLAY LABEL instead, matching on substrings:
+
+        if "frustrat" in label or "negative" in label
+
+    That silently replaced the policy. The label describes the last FIVE inbound messages
+    and reads "some frustration" at 20% - one negative message in five - so a single bad
+    turn suppressed every offer until it fell out of the window, four messages later.
+    Measured on the live customer: her latest message was a neutral interest-rate question
+    while three older negatives about an already-CLOSED claim kept selling switched off.
+    Nobody chose that threshold; it fell out of the else-branch that returns
+    "neutral or positive" only when the count is exactly zero.
+
+    A percentage was considered and rejected: with a five-message window the only reachable
+    values are 0/20/40/60/80/100, so any threshold is an invented number. "Has the customer
+    calmed down?" is answered by the latest message, which is also what a human reads.
+
+    `_recent_sentiment`'s label keeps its job - it is what the conversation header shows -
+    and simply stops being a gate.
     """
-    label = (sentiment or "").lower()
-    if "frustrat" in label or "negative" in label:
-        return "recent negative sentiment"
+    for turn in reversed(turns or []):
+        if turn.get("direction") != "inbound":
+            continue
+        if ((turn.get("metadata") or {}).get("sentiment") or "").lower() == "negative":
+            return "recent negative sentiment"
+        break  # only the latest inbound turn decides
     return None
 
 
@@ -391,7 +416,12 @@ def review(*, generator, ticket: dict | None, turns: list[dict], graph_context: 
     if reason:
         return {"suppressed": reason, "situation": "", "actions": [], "offers": []}
 
-    offers_gate = offers_suppressed(sentiment)
+    # The WHOLE conversation, not this case's turns: an offer is about the customer, not
+    # the case (which is why offers are not per-case and sentiment is conversation-wide),
+    # so the mood that matters is their latest message anywhere. `all_turns` is already
+    # passed for the candidate rules. Falling back to `turns` keeps a caller that omits it
+    # working rather than silently ungating.
+    offers_gate = offers_suppressed(all_turns if all_turns is not None else turns)
     candidates: list[dict] = []
     if not offers_gate:
         # charges and turns are REQUIRED arguments in practice: without them this returns

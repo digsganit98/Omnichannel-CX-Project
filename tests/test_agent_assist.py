@@ -404,3 +404,86 @@ def test_channel_response_validates_with_workflow_status_field():
     )
     assert response.workflow_status == "human_follow_up"
     assert "next_best_action" not in response.model_dump()
+
+
+# ── A gated review still knows what the case is about ──────────────────────
+
+class _NeverCalledGenerator:
+    """Any touch is a failure. A gated case must be served from the stored row alone."""
+
+    def __getattr__(self, name):
+        raise AssertionError(f"LLM CALLED via {name} on a gated case")
+
+
+def test_closed_and_held_cases_serve_their_stored_summary_without_an_llm_call(monkeypatch):
+    """The Case Summary card shows a closed case's summary; the other two stay silent.
+
+    Both halves matter and they pull in opposite directions. `suppressed` must stay SET -
+    it is what keeps Suggested Actions and Suggested Offers quiet and what stops the
+    supersede sweep retiring this case's rows on the strength of a review that never ran -
+    while `situation` must be POPULATED, because "nothing new to suggest" is not the same
+    as "we no longer know what this case is". Serving it must cost nothing: a closed case
+    once cost a full review on every panel render.
+    """
+    from apps.api.routes import agent_assist, conversations
+
+    repo = SQLiteCXRepository(":memory:")
+    customer_id = _make_customer(repo)
+    conv = repo.get_or_create_conversation(customer_id)
+    conversation_id = conv["conversation_id"]
+
+    ticket = repo.create_ticket(Ticket(
+        ticket_id=new_id("tkt"), conversation_id=conversation_id, customer_id=customer_id,
+        title="Claim stuck", description="Claim under review for weeks",
+        intent="claim_status", priority=TicketPriority.HIGH,
+        assigned_team="customer_care", status=TicketStatus.OPEN,
+    ))
+    turn = repo.append_turn(
+        conversation_id=conversation_id, customer_id=customer_id, channel="web_chat",
+        direction="inbound", text="My claim has been Under Review for weeks",
+        intent="claim_status", urgency="high", ticket_id=ticket.ticket_id,
+    )
+    situation = "Customer's claim CLM001003 has not progressed despite documents submitted."
+    repo.save_case_review(ticket.ticket_id, conversation_id, turn["turn_id"],
+                          {"situation": situation, "actions": [], "offers": []})
+
+    monkeypatch.setattr(agent_assist, "get_repository", lambda: repo)
+    monkeypatch.setattr(agent_assist, "_try_neo4j", lambda: None)
+    monkeypatch.setattr(agent_assist, "_review_generator", lambda: _NeverCalledGenerator())
+    monkeypatch.setattr(conversations, "get_repository", lambda: repo)
+
+    # 1. CLOSED - the case in the screenshot that read "Summary unavailable right now."
+    repo.update_ticket(ticket.ticket_id, status=TicketStatus.CLOSED.value)
+    for _ in range(3):  # several renders: the leak this replaces was per-paint
+        review = agent_assist.case_review(repo, conversation_id, ticket.ticket_id)
+        assert review["suppressed"] == "the case is closed"
+        assert review["situation"] == situation
+        assert review["actions"] == [] and review["offers"] == []
+
+    payload = conversations.case_summary(conversation_id, ticket_id=ticket.ticket_id)
+    assert payload["status"] == "generated"
+    assert payload["summary"]["situation"] == situation
+
+    # 2. A HELD DRAFT gates the same way, and the summary survives it too.
+    repo.update_ticket(ticket.ticket_id, status=TicketStatus.OPEN.value)
+    monkeypatch.setattr(repo, "list_reply_drafts",
+                        lambda **kwargs: [{"draft_id": "d1", "status": "pending"}])
+    review = agent_assist.case_review(repo, conversation_id, ticket.ticket_id)
+    assert review["suppressed"] == "a reply is already held for review"
+    assert review["situation"] == situation
+
+    # 3. A STALE stored row is withheld, not shown. A gate does not freeze the case: the
+    #    customer can write in while a draft is held, and a summary silently missing the
+    #    newest message is worse than none - especially as no new one will be generated.
+    repo.append_turn(
+        conversation_id=conversation_id, customer_id=customer_id, channel="web_chat",
+        direction="inbound", text="Any update?", intent="claim_status", urgency="high",
+        ticket_id=ticket.ticket_id,
+    )
+    review = agent_assist.case_review(repo, conversation_id, ticket.ticket_id)
+    assert review["suppressed"] == "a reply is already held for review"
+    assert review["situation"] == ""
+    payload = conversations.case_summary(conversation_id, ticket_id=ticket.ticket_id)
+    assert payload["status"] == "suppressed"
+    assert payload["suppressed"] == "a reply is already held for review"
+    assert payload["summary"] is None

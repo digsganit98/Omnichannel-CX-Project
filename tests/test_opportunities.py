@@ -477,3 +477,44 @@ def test_dedupe_email_case_insensitive():
         {"channel": "email", "identifier": "fathima@x.com"},
     ]
     assert len(_dedupe_push_identifiers(push)) == 1
+
+
+# ── The offers gate is the LATEST message, not a window ────────────────────
+
+def test_offers_gate_reads_only_the_latest_inbound_message():
+    """One negative message in a calm history must not suppress selling.
+
+    The live gate (case_reviewer.offers_suppressed) was rewired during the three-call
+    merge to read _recent_sentiment's DISPLAY label by substring - `"frustrat" in label`.
+    That label describes the last FIVE inbound turns and reads "some frustration" at 20%,
+    so a single negative message blocked every offer until it fell out of the window four
+    messages later. Measured on the live customer: a neutral interest-rate question was
+    gated by three older negatives about an already-CLOSED claim.
+
+    This is the same rule opportunity_engine.check_gates has always had, and the two are
+    asserted together here so they cannot drift apart again.
+    """
+    from services.agent_assist_service import case_reviewer
+
+    def turns(*sentiments):
+        return [{"direction": "inbound", "metadata": {"sentiment": s}} for s in sentiments]
+
+    # The live case: three negatives, then the customer calms down.
+    calmed = turns("negative", "negative", "negative", "neutral")
+    assert case_reviewer.offers_suppressed(calmed) is None
+    # And the old gate agrees - that is the point.
+    assert oe.check_gates(tickets=[], turns=calmed) is None
+
+    # Still angry RIGHT NOW: suppressed, which is the guard's whole purpose.
+    angry = turns("neutral", "neutral", "negative")
+    assert case_reviewer.offers_suppressed(angry) == "recent negative sentiment"
+    assert oe.check_gates(tickets=[], turns=angry) == "recent negative sentiment"
+
+    # A later OUTBOUND turn must not be mistaken for the customer's mood.
+    mixed = [{"direction": "inbound", "metadata": {"sentiment": "neutral"}},
+             {"direction": "outbound", "metadata": {"sentiment": "negative"}}]
+    assert case_reviewer.offers_suppressed(mixed) is None
+
+    # No inbound turns at all is not a reason to suppress.
+    assert case_reviewer.offers_suppressed([]) is None
+    assert case_reviewer.offers_suppressed(None) is None

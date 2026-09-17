@@ -270,6 +270,11 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 180 — two paths called the case-review LLM on every single render:** a suppressed review is deliberately never cached, so while a draft was held every panel paint re-called Groq; and a conversation whose only case is CLOSED returned no active ticket, was treated as unticketed, and had no cache key at all. Both now gate before the call.
 - **Fix 181 — a customer's second case showed the first case's nudges:** `/next-best-actions` returned the conversation-wide `pending` list unfiltered, so asking for the loan case returned three nudges belonging to the transaction dispute while the Case Summary beside them correctly described the loan.
 - **Fix 182 — the reply box named the previous customer on a closed case:** the placeholder was set inside `if (!isDone)` so it was skipped entirely on a closed conversation, leaving "Reply to Fathima Devasahayam…" above Sayantini's thread on a box that is still usable.
+- **Fix 183 — a closed case said its summary was unavailable while the summary sat in the database:** `check_gates` returns before the cache is read, so a closed case and a held draft both returned a hardcoded empty `situation` and the card rendered "Summary unavailable right now." — indistinguishable from an exhausted quota; the stored review is now served on both gated paths at no LLM cost, and withheld when the case has gained turns since it was written.
+- **Fix 184 — one negative message in five blocked every offer:** the live gate matched substrings against `_recent_sentiment`'s DISPLAY label, silently replacing the rule `opportunity_engine.check_gates` has always implemented — do not pitch to a customer whose LATEST message is negative — which had become unreachable when the three calls were merged.
+- **Fix 185 — the offers cache could not see a mood change:** the `opportunity_evaluations` fingerprint covers holdings, turn count, ticket count and suggested products, none of which move when a customer calms down, so a row written under the old gate kept answering "recent negative sentiment"; the gate result is now part of the fingerprint.
+- **Fix 186 — a case showed another case's nudges:** the response kept rows with no `ticket_id` for two reasons that were both checked and false, so the clause only ever fired WITH a case on screen — exactly when a case-less row does not belong there.
+- **Fix 187 — the nudge and offer buttons moved to the card's top-right corner:** they sat below the Why line, so their position moved with the length of the reason text and two stacked cards had their buttons at different heights.
 - **EC2 deploy 2026-09-07 (second) — Fix 152 to Fix 162, UI only:** four bind-mounted files took effect on landing with no rebuild and no container restarted; the two changed Python files are on the box but deliberately not built into the image.
 - **OPEN - Fix 149 turned three escalation gates into constants (NOT FIXED, measured):** moving the KB into the graph made retrieval EXHAUSTIVE - all 14 chunks, every message - and three gates that read `contexts` to judge relevance silently became no-ops. Measured on all 11 messages sent through the UI today, with contexts rebuilt from `retrieval_evidence`: **`_is_strong_l1_knowledge_answer` TRUE 11/11**, `knowledge_not_found` fired **0/11**, KB chunks per turn **min 14 max 14**. The third gate is the damaging one - returning True SKIPS the handoff check entirely, the rule that reads the customer's own words. Live consequence: the FD question, for which the KB has zero guidance, auto-sent as a confident L1 knowledge answer and volunteered a penalty rule from the model's own general knowledge. Today's real escalations (fraud, claim dispute) were caught earlier by intent-label rules, which MASKS this for the intents that have their own rules and exposes it for everything else. `confidence=0.95` is hardcoded in Priority 2, so `confidence < 0.3` cannot fire either. **Fix 149 verified the PROVENANCE consumers of contexts and never enumerated the DECISION consumers.** This gate has now broken twice in opposite directions (Fix 143 inverted it) because it reads a property of RETRIEVAL to answer a question about RELEVANCE - so the fix is not a patched condition. Fix 150 already supplies the raw material (`customer_holds`, each chunk's `concept`); probe it on real messages before designing the gate.
 - **Reference - local vs the hosted instance:** the two are NOT meant to match. Application code must; `docker-compose.yml` deliberately must not (Ollama commented out on EC2, and ngrok has **no** `profiles: ["tunnel"]` there - copying the local file over means the next `up` starts no tunnel and **WhatsApp goes silent with nothing to say why**). EC2 is the sole holder of the shared WhatsApp number, mailbox and ngrok domain, which is why local ships with those off. Three deploy traps, all already bitten: **no git on EC2** (scp only), `restart` runs **old code** (rebuild), and `restart` does **not re-read `.env`** (`up -d`). Plus what must never be done there - other teams' containers, the disk watermark, removing OpenSearch, `prune --volumes`.
@@ -9799,3 +9804,134 @@ there - and got a prompt rewrite, a validator, a formatter, a greeting helper an
 that spent their quota.** `_ensure_bracket` was the whole ask. The leak came from changing what
 writes `reply_drafts` without enumerating what READS `pending_drafts`, which is the gate -
 exactly the failure `enumerate-decision-consumers` records.
+
+
+## Session 43 - 2026-09-18 (Fix 183-187: the case panel tells the truth about one case)
+
+### Fix 183 - a closed case said its summary was unavailable while the summary sat in the database
+
+`case_review` gates before it reads the cache - correctly, that is Fix 180 and it is what
+stops a closed case calling Groq on every panel paint - but the gated return carried a
+hardcoded `"situation": ""`. The route then withheld the summary on `suppressed` as well as on
+`llm_error`, so the card printed "Summary unavailable right now." on a case whose summary was
+in `case_reviews` all along, and a deliberate silence read exactly like an exhausted quota.
+The two cards beside it name their reason; this one could not.
+
+Measured before changing anything: `tkt_b85a9efbd9fe` held a stored situation whose
+`latest_turn_id` matched that case's newest turn exactly, so serving it is a row read.
+
+`suppressed` STAYS SET, and that is the load-bearing half. It is what keeps Suggested Actions
+and Suggested Offers quiet, and what gates the supersede sweep - a closed case whose review
+"ran" would retire that case's recommendation rows. Only `situation` is filled in.
+
+Applied to the held-draft gate too, on the user's decision: the stored summary describes the
+same turns either way. `llm_error` still withholds, and that asymmetry is the point - a failed
+call means we may genuinely be out of date, so saying nothing beats presenting stale text as
+current.
+
+Staleness IS checked, against the case's own newest turn. A gate does not freeze the case:
+while a draft is held the customer can write in, and no new review will be generated to
+replace a summary that silently omits their latest message. All five live rows were current,
+which is precisely why this could not be left to chance.
+
+The closed-case branch previously ran `SELECT 1` - it knew a ticket had existed but not which
+one, so it had no cache key at all. It now selects the ticket_id.
+
+### Fix 184 - one negative message in five blocked every offer
+
+`opportunity_engine.check_gates` has always implemented the rule its own docstring states:
+"don't pitch to a customer whose latest message is negative". Its only caller,
+`generate_opportunities`, has been exercised by tests alone since the three calls were merged
+into one review - so the gate the routes actually use was written fresh, pointed at
+`_recent_sentiment`'s display label, and matched on substrings.
+
+That label describes the last FIVE inbound turns and returns "neutral or positive" only when
+the negative count is exactly zero, so it reads "some frustration" at 20% - one negative
+message in five. The policy silently changed from "latest message" to "any negative in the
+last five", and nobody chose that. Measured on the live customer: her latest inbound was a
+neutral interest-rate question, and three older negatives about an already-CLOSED claim kept
+selling switched off for four more messages.
+
+A percentage threshold was considered and rejected - with a five-message window the only
+reachable values are 0/20/40/60/80/100, so any threshold is an invented number, and 40% was
+proposed here with no basis at all before that was caught.
+
+`offers_suppressed` now takes turns and reads the latest inbound one. The call site passes
+`all_turns`, the whole conversation, because an offer is about the customer rather than the
+case. `_recent_sentiment` is untouched - it is what the conversation header shows, and it
+simply stops being a gate. A test asserts both gates agree so they cannot drift apart again.
+
+### Fix 185 - the offers cache could not see a mood change
+
+With the gate fixed the card still said "recent negative sentiment": `opportunity_evaluations`
+is a second cache, checked before `case_review` is reached, and its fingerprint covers graph
+context, turn count, ticket count and already-suggested products - not sentiment. So the row
+written at 20:21 under the old gate kept answering after the gate had stopped suppressing.
+The card cannot be more current than the coarsest key in its path. The gate result is now in
+the fingerprint, verified to produce different hashes for a negative and a neutral latest turn.
+
+### Fix 186 - a case showed another case's nudges
+
+An `information_needed` nudge about claim CLM001003 - a document request on a CLOSED claim -
+rendered on a `general_inquiry` case about a credit card interest rate, beside a Case Summary
+that correctly described only the interest rate. The row's `ticket_id` was NULL, and the
+response filter kept NULL deliberately, for two reasons that were both read and found false:
+`_sync_close_proposals` passes `ticket_id=ticket_id` and returns early without one, so a close
+proposal always carries its case; and a conversation with no ticket cannot exist, because
+`TicketDecision` is built with `required=True` hardcoded at both call sites
+(`orchestration_agents.py:653`, "a ticket is a grouping id: always") so `decide_ticket` can
+never route to `skip_ticket`. A genuinely case-less conversation would have `_case_id` None
+and be served by the `not _case_id` branch anyway - so the clause could only ever fire WITH a
+case on screen.
+
+The WRITE that produced those NULLs is already closed by Fix 183. Proven from timestamps: all
+five were written between 14:44:44, when her only ticket closed, and 20:20:57, when the next
+query created a new one - the window where `find_active_ticket` returns None and the route
+reviewed a closed case as never-ticketed. Reproduced in an isolated database: only ticket
+closed, `find_active_ticket` None, and `case_review` now returns "the case is closed" with
+zero actions. Eight stale rows were deleted rather than left masked by the filter.
+
+### Fix 187 - the buttons moved to the card's top-right corner
+
+`position:relative` on `.nba-item`, `.nba-actions` absolute at top 8px / right 9px. Both cards
+share these classes and have no other users, so Suggested Actions and Suggested Offers moved
+together. A first attempt also reserved a 142px right gutter on `.nba-reason`, which squeezed
+EVERY line of the sentence into a narrow column instead of clearing the buttons on the first
+one; only the badge shares that line, so only the badge needs the clearance.
+
+### Known and NOT fixed
+
+- **`offers_suppressed` has no registration check** - sentiment-only, so nothing would stop an
+  offer being drafted for an unverified sender. Unchanged by Fix 184.
+- **The offers reason can still read stale** - served from the fingerprint cache, so the line
+  reflects when it was last evaluated. Less reachable now the gate is in the fingerprint.
+- **System Configuration advertises what it does not have**: the hub card promises "the model
+  and runtime configuration" and the page subtitle "the runtime this workspace is running on",
+  and the page is four connector cards. The runtime configuration does not exist anywhere in
+  the UI - FinOps' "By model / config" is a USAGE report grouped by model, not configuration.
+- `docs/aws-architecture-flow.md` + `.drawio` still uncommitted and undecided.
+
+### Test status
+
+**5 failed / 151 passed** - the documented baseline five, plus two new tests. Both were checked
+against a reverted fix and FAIL without it, so neither is a test that cannot detect its own
+bug. No deliberate real Groq call: the pipeline was proved with a fake generator and the gated
+paths with one that raises if touched. One real call will follow naturally, because the
+fake-authored `case_reviews` row for the interest-rate case was deleted rather than left to be
+read later as genuine model output.
+
+### How this session went
+
+The user's complaint, repeatedly and correctly: answering before reading. Concretely - the
+offers gate was explained twice before `opportunity_engine.check_gates` was opened; "five more
+calm messages" was arithmetic done in the head, and it is four, which one call to the function
+would have shown; a 40% threshold was proposed with no basis at all; `case_reviews` was
+reported fixed and verified without checking `opportunity_evaluations` sat in the same path; a
+`skip_ticket` branch was presented as a live case without checking that `required=True` makes
+it unreachable; "no response yet" was carried as an open defect from a paraphrased screenshot
+after a later screenshot already showed different text; and a ticket created by a real
+customer message was announced as this session's own test pollution.
+
+The user's instruction, which stands: **"you should be careful about when you make any edit.
+always properly analyze each and every thing"**. Every fix above was landed by reading the
+code or the rows; none of the wrong answers came from a measurement.
