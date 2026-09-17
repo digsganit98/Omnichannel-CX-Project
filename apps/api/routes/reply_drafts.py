@@ -7,6 +7,7 @@ portal's history poll) and persists a normal outbound turn.
 """
 
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -23,9 +24,19 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin/reply-drafts", tags=["admin"], dependencies=[Depends(require_admin_auth)])
 
 
+# Draft kinds that get a channel picker: an approved offer (proactive, fans out) and a
+# draft the agent asked for by approving a Suggested Action. Keyed on provider because
+# that is what already distinguishes them - see renderDraftCard in app.js.
+_PICKER_PROVIDERS = {"nudge_reply", "follow_up_nudge"}
+
+
 class SendDraftRequest(BaseModel):
     text: str            # final text the agent sends (may differ from the AI draft)
     actor: str = "admin"
+    # Which of the customer's reachable channels the agent ticked. None means "decide as
+    # before" - every push channel for an offer, the draft's own channel for a reply - so
+    # an older caller that omits it is unchanged.
+    channels: list[str] | None = None
 
 
 class DiscardDraftRequest(BaseModel):
@@ -35,9 +46,20 @@ class DiscardDraftRequest(BaseModel):
 @router.get("")
 def list_drafts(conversation_id: str | None = None, status: str = "pending") -> list[dict]:
     # status="" (empty) returns all statuses
-    return get_repository().list_reply_drafts(
+    repository = get_repository()
+    drafts = repository.list_reply_drafts(
         conversation_id=conversation_id, status=status or None,
     )
+    # Where this customer can be reached, so the card can offer the agent a choice rather
+    # than deciding for them. Only for the two draft kinds that fan out or are proactive -
+    # an offer, and a draft the agent asked for by approving a Suggested Action. A held
+    # pipeline reply answers a question that arrived on one channel and belongs on that
+    # channel, so it is not given a picker and pays for no lookup.
+    for draft in drafts:
+        if draft.get("channel") == "offer" or draft.get("provider") in _PICKER_PROVIDERS:
+            draft["reachable_channels"] = reachable_push_identities(
+                repository, draft.get("customer_id") or "")
+    return drafts
 
 
 @router.post("/{draft_id}/send")
@@ -58,7 +80,23 @@ def send_draft(draft_id: str, payload: SendDraftRequest) -> dict:
     # push channel the customer has on record (WhatsApp and/or email — real banks
     # send offers on both), never web chat. One outbound turn per delivery.
     if draft["channel"] == "offer":
-        return _send_offer_draft(repository, draft, draft_id, text, payload.actor)
+        return _send_offer_draft(repository, draft, draft_id, text, payload.actor,
+                                 channels=payload.channels)
+
+    # An approved nudge or follow-up the agent chose to send somewhere OTHER than the
+    # channel the draft was built for - or to more than one - goes through the same fan-out
+    # the offer path uses. It is the only code that delivers one text to several
+    # destinations, and duplicating it here would be a second copy to keep in step.
+    #
+    # Deliberately not used for the single-channel case below: that path threads the reply
+    # onto the original inbound turn (In-Reply-To / "Re: <subject>"), which is meaningful
+    # only on the channel the question arrived on. Sending the same text to a second
+    # channel is a fresh message, not a threaded reply.
+    if payload.channels is not None:
+        wanted = {str(c).strip().lower() for c in payload.channels}
+        if wanted and wanted != {str(draft.get("channel") or "").lower()}:
+            return _send_offer_draft(repository, draft, draft_id, text, payload.actor,
+                                     channels=payload.channels)
 
     # Deliver to the customer over the same channel the held query arrived on. Web-chat has
     # no push provider — delivery.send() returns a synchronous "sent" and the customer sees
@@ -365,6 +403,69 @@ def _push_dedupe_key(identity: dict) -> str:
     return f"whatsapp:{digits}"
 
 
+def reachable_push_identities(repository, customer_id: str) -> list[dict]:
+    """Where this customer can actually be reached: whatsapp/email, deduped.
+
+    Combines two sources, in this order:
+
+      1. the CUSTOMER RECORD in Neo4j - their email and phone as the bank holds them.
+         This is the authority on where someone can be reached, and it was not being
+         consulted at all.
+      2. channel_identities - every address they have written in FROM, which catches a
+         second email the record does not carry.
+
+    channel_identities alone was the old source, and it answers a different question:
+    "which channels has this customer used". A customer whose phone sits on their BFSI
+    record but who has only ever used web chat had no whatsapp row, so the offer card
+    promised "Delivers via WhatsApp + Email" and the send reached email only. Both seeded
+    portal customers were in exactly that state.
+
+    Record first so its address wins the dedupe; _push_dedupe_key collapses a number
+    stored both bare and 91-prefixed to one destination.
+    """
+    identities: list[dict] = []
+    try:
+        if os.getenv("NEO4J_ENABLED", "true").lower() == "true":
+            from services.neo4j_service.client import Neo4jClient
+            from services.neo4j_service.queries import get_customer_by_id
+
+            client = Neo4jClient()
+            try:
+                graph_id = ""
+                for row in repository.list_customer_identifiers(customer_id) or []:
+                    if row.get("channel") == "graph":
+                        graph_id = row.get("identifier") or ""
+                        break
+                record = get_customer_by_id(client, graph_id) if graph_id else None
+                if record:
+                    if record.get("email"):
+                        identities.append({"channel": "email", "identifier": str(record["email"]).strip()})
+                    if record.get("phone"):
+                        identities.append({"channel": "whatsapp", "identifier": str(record["phone"]).strip()})
+            finally:
+                client.close()
+    except Exception:
+        # The record is an enrichment, not a requirement: without Neo4j this falls back to
+        # exactly the old behaviour rather than refusing to send.
+        logger.warning("reachable_identities_graph_lookup_failed", exc_info=True)
+
+    # All three destinations, always. Web chat is not a PUSH channel - delivery.py has no
+    # outbound provider for it, so a message sent there waits in the portal until the
+    # customer next looks - but it is still somewhere a reply can be sent, and the agent
+    # decides whether that is appropriate.
+    #
+    # This used to be gated on an include_web_chat flag so the offer fan-out could exclude
+    # it. That made ONE function answer "where can this customer be reached" differently
+    # depending on who asked, which is a question with one answer. The choice belongs on
+    # the card (see draftChannelPicker: an offer leaves web chat unticked), not buried in
+    # channel resolution where nothing on screen explains it.
+    identities.extend(
+        i for i in (repository.list_customer_identifiers(customer_id) or [])
+        if i.get("channel") in ("whatsapp", "email", "web_chat")
+    )
+    return _dedupe_push_identifiers(identities)
+
+
 def _dedupe_push_identifiers(push: list[dict]) -> list[dict]:
     """Keep the first identifier per normalized destination (order preserved)."""
     seen: set[str] = set()
@@ -377,16 +478,27 @@ def _dedupe_push_identifiers(push: list[dict]) -> list[dict]:
     return unique
 
 
-def _send_offer_draft(repository, draft: dict, draft_id: str, text: str, actor: str) -> dict:
+def _send_offer_draft(repository, draft: dict, draft_id: str, text: str, actor: str,
+                      channels: list[str] | None = None) -> dict:
     """Deliver an approved offer to every push channel on record (whatsapp/email).
 
     A missing channel is skipped; at least one identifier is guaranteed because
     the approve endpoint refuses to create an offer draft without one.
     """
-    identifiers = repository.list_customer_identifiers(draft.get("customer_id") or "")
-    push = _dedupe_push_identifiers(
-        [i for i in identifiers if i["channel"] in ("whatsapp", "email")]
-    )
+    # The customer RECORD as well as the channels they have written in from - see
+    # reachable_push_identities. Reading channel_identities alone meant a customer whose
+    # phone is on their BFSI record but who has only ever used web chat had no whatsapp
+    # row, so this fan-out silently delivered to email while the card promised both.
+    wanted = {str(c).strip().lower() for c in channels} if channels is not None else set()
+    push = reachable_push_identities(repository, draft.get("customer_id") or "")
+    # Narrow to what the agent ticked. Filtering rather than trusting the list means a
+    # channel the customer is not reachable on cannot be sent to by editing the request.
+    if channels is not None:
+        push = [i for i in push if i.get("channel") in wanted]
+        if not push:
+            raise HTTPException(
+                status_code=400,
+                detail="Select at least one channel this customer can be reached on.")
     if not push:
         raise HTTPException(
             status_code=400,
@@ -453,6 +565,48 @@ def discard_draft(draft_id: str, payload: DiscardDraftRequest) -> dict:
     if draft["status"] != "pending":
         raise HTTPException(status_code=409, detail=f"Draft already {draft['status']}")
     updated = repository.update_reply_draft(draft_id, status="discarded", actor=payload.actor)
+
+    # Discarding a draft that came from an APPROVED recommendation puts it back on the card.
+    #
+    # Approving a Suggested Action or Offer does two things: flips the recommendation to
+    # `approved` and writes this draft. Discarding undid only the second, so the
+    # recommendation stayed `approved` and the card stopped offering it although nothing
+    # was sent and the agent never pressed Dismiss.
+    #
+    # THE GUARD IS THE POINT. The card holds ONE pending row per (ticket, action_type) -
+    # the same rule get_next_best_actions applies with `existing_by_type`. Approving causes
+    # a re-render, that review finds no pending row of this type (this one is `approved`)
+    # and writes a REPLACEMENT. Reopening blindly then leaves two identical cards on
+    # screen. Reopening without checking is what produced four identical "Customer upset"
+    # nudges on the live conversation.
+    #
+    # So: reopen only when nothing has taken this row's place. If something has, the
+    # suggestion is already back on the card under a different id and there is nothing to do.
+    rec_id = draft.get("recommendation_id")
+    if rec_id:
+        rec = repository.get_agent_assist_recommendation(rec_id)
+        # Only an `approved` row is reopened. A dismissed one was a decision about the
+        # SUGGESTION and stays dismissed; this undoes the approve that made this draft.
+        if rec and rec.get("status") == "approved":
+            replacement = [
+                row for row in repository.list_agent_assist_recommendations(
+                    conversation_id=rec.get("conversation_id"), status="pending")
+                if row.get("action_type") == rec.get("action_type")
+                and row.get("ticket_id") == rec.get("ticket_id")
+            ]
+            if not replacement:
+                repository.update_agent_assist_recommendation(
+                    rec_id, status="pending", actor=payload.actor)
+                repository.add_audit_event(
+                    "nba_recommendation_reopened",
+                    rec_id,
+                    customer_id=draft.get("customer_id"),
+                    conversation_id=draft.get("conversation_id"),
+                    ticket_id=draft.get("ticket_id"),
+                    details={"actor": payload.actor, "via": "draft_discarded",
+                             "draft_id": draft_id},
+                )
+
     repository.add_audit_event(
         "reply_draft_discarded",
         draft_id,

@@ -246,6 +246,18 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .draft-body{padding:10px 12px}
 .draft-label{font-size:10px;color:var(--amb-t);font-weight:700;text-transform:uppercase;letter-spacing:.04em;margin-bottom:5px}
 .draft-textarea{width:100%;min-height:96px;resize:vertical;font-family:inherit;font-size:13px;line-height:1.5;padding:9px 11px;border:1px solid var(--amb-bd);border-radius:8px;background:#fff;color:var(--t1,#1e293b);box-sizing:border-box}
+/* Channel picker - in the draft header, where the fixed "Delivers via WhatsApp + Email"
+   label used to sit. Colours are set inline from CH.clr (see draftChannelPicker): the
+   .pwa/.pem/.pwc pill classes are declared after this rule and so overrode it, which left
+   every box the same pale wash whatever its state. */
+.dch-row{display:inline-flex;align-items:center;gap:5px;margin-left:auto}
+.dch{display:inline-flex;align-items:center;gap:5px;cursor:pointer;
+  font-size:10.5px;font-weight:700;padding:3px 9px;border-radius:20px;
+  border:1px solid;transition:background .12s,border-color .12s,color .12s}
+/* Ticked sits on the header's own colour, so it needs an edge to lift off it. */
+/* Ticked sits on the header's own colour, so a faint ring keeps its edge defined. */
+.dch.on{box-shadow:0 0 0 1px rgba(255,255,255,.35)}
+.dch-box{margin:0;cursor:pointer;width:11px;height:11px;accent-color:currentColor}
 .draft-actions{display:flex;gap:8px;margin-top:9px}
 .draft-send-btn{font-size:12px;font-weight:600;padding:7px 16px;border-radius:7px;border:none;background:var(--blue);color:#fff;cursor:pointer}
 .draft-send-btn:disabled{opacity:.5;cursor:default}
@@ -279,13 +291,39 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 /* CENTRE */
 .ctr{display:flex;flex-direction:column;overflow:hidden;background:var(--bg);min-height:0}
 .chdr{background:var(--surf);border-bottom:1px solid var(--bdr);padding:8px 18px;display:flex;align-items:center;gap:12px;flex-shrink:0}
-.cnfo{flex:1;min-width:0;display:flex;align-items:baseline;gap:10px}
+/* flex:0 1 auto, not flex:1. As flex:1 this claimed every spare pixel in the header and
+   pushed the sentiment block to the far right edge, leaving ~320px of empty bar between
+   the email and it. Now the name/email take only what they need, the sentiment sits
+   directly after them, and .chdr's margin-left:auto-free layout keeps the pair together
+   at the left where the eye already is. */
+.cnfo{flex:0 1 auto;min-width:0;display:flex;align-items:baseline;gap:10px}
 .cnm{font-size:14px;font-weight:600;white-space:nowrap;flex-shrink:0}
 /* Customer id · email · phone beside the name. This is the part that gives way when
    the header is narrow — the name and the graph button stay intact. */
 .cmeta{font-size:11px;color:var(--t3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
 .cmeta-sep{padding:0 6px;opacity:.5}
-.hbtns{display:flex;gap:6px;flex-shrink:0}
+/* ── Sentiment, in the conversation header ──
+   The right panel's readout, moved to the right of the header. Its own rules
+   (.ssent-head/.ssc/.sbar/.srow/.slbl) are restored verbatim below and do all the work;
+   this only gives it a width to live in, because the panel column used to supply one.
+   No .rpcard wrapper and no "SENTIMENT" label: a card's ground belongs to a panel of
+   stacked cards, and a label naming the section belongs where sections need naming. The
+   reading itself - "Very frustrated" - says what this is. */
+.hsent{flex:0 0 auto;width:250px;margin-left:auto}
+.hsent:empty{display:none}
+/* The card's rules, exactly as they were in the right panel. */
+/* One row: reading, meter, count. align-items:center (not baseline) because a 5px bar
+   has no text baseline to sit on, and no wrap - the three must stay on one line. */
+.ssent-head{display:flex;align-items:center;gap:8px;margin-bottom:2px}
+/* The bar takes the space the other two leave. */
+.ssent-head .sbar{flex:1;min-width:0}
+.ssent-head .ssc{flex-shrink:0}
+.ssent-head .ssent-count{flex-shrink:0;font-variant-numeric:tabular-nums}
+.ssent-count{font-size:10px;color:var(--t3)}
+.ssc{font-size:11px;font-weight:600;margin-bottom:0}
+.sbar{display:flex;height:5px;border-radius:3px;overflow:hidden;gap:2px;margin-bottom:0}
+.srow{display:flex;justify-content:space-between}
+.slbl{font-size:10px;color:var(--t3)}
 .hbtn{font-size:11px;padding:5px 12px;border-radius:var(--rs);border:1px solid var(--bdr2);background:var(--surf);color:var(--t2);cursor:pointer;font-family:inherit;font-weight:500;transition:all .12s}
 .hbtn:hover{background:var(--surf2);color:var(--t1)}
 .hbtn.prim{background:var(--blue);color:#fff;border-color:var(--blue)}
@@ -353,20 +391,18 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .rpbody{flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:8px}
 .rpbody::-webkit-scrollbar{width:3px}
 .rpbody::-webkit-scrollbar-thumb{background:var(--bdr);border-radius:3px}
-.rpcard{background:var(--surf2);border-radius:var(--r);padding:11px}
+/* flex:0 0 auto because .rpbody is a flex column: without it a card is free to be
+   stretched or squeezed by the flex algorithm, and a tall one refuses to shrink below its
+   content (min-height:auto), pushing the column past its height so .rpbody's
+   overflow-y:auto never engages and the panel stops scrolling. Cards keep their natural
+   height; the CONTAINER scrolls. */
+.rpcard{background:var(--surf2);border-radius:var(--r);padding:11px;flex:0 0 auto}
 .rplbl{font-size:10px;font-weight:600;color:var(--blue-t);text-transform:uppercase;letter-spacing:.5px;margin-bottom:9px}
 .rplbl-tickets{color:var(--blue-t)}
 .rplbl-offers{color:var(--blue-t)}
 /* Sentiment header: label + value + count on one line */
-.ssent-head{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;margin-bottom:8px}
-.ssent-head .rplbl{margin-bottom:0}
-.ssent-count{font-size:10px;color:var(--t3)}
-.ssc{font-size:12px;font-weight:600;margin-bottom:1px}
 .ssub{font-size:11px;color:var(--t3);margin-bottom:8px}
-.sbar{display:flex;height:5px;border-radius:3px;overflow:hidden;gap:2px;margin-bottom:4px}
 .sbp{background:#22c55e}.sbn{background:#ef4444}.sbu{background:var(--bdr2)}
-.srow{display:flex;justify-content:space-between}
-.slbl{font-size:10px;color:var(--t3)}
 .tkt-item{background:var(--surf);border:1px solid var(--bdr);border-radius:var(--rs);padding:9px 10px;margin-bottom:6px}
 .tkt-item:last-child{margin-bottom:0}
 .tkt-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:4px}
@@ -583,24 +619,42 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .casebar{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:8px;
   margin:0 0 12px;padding:8px 12px;background:var(--surf);border:1px solid var(--bdr);
   border-radius:var(--r);box-shadow:var(--shadow)}
+/* Only `logged` is tinted. It was --surf on a --surf page, so the header of the case read
+   as a gap above it; blue because amber and green already mean something here and the
+   brand blue is the one colour no status speaks for. The open and closed bars keep the
+   white ground they have always had - their state is already said by the chip and dot.
+   Two selectors deep so it wins over the bare .fns-* background the children strip. */
+.casebar.fns-active{background:var(--amb-bg);border-color:var(--amb-bd)}
+.casebar.fns-done{background:var(--grn-bg);border-color:var(--grn-bd)}
+.casebar.fns-logged{background:var(--blue-bg);border-color:var(--blue-bd)}
+
 /* The bare .fns-* classes (style.css:431) carry a background AND a border, so both
    children below must strip them or the status arrives as an amber chip and the id
    gets an amber ground under its intended neutral one. Same override the two existing
    users of these classes already apply (.det-head/.lin-meta .flow-node-status). */
-.casebar-id{font-size:11px;font-weight:600;letter-spacing:.02em;background:#fafbfc!important;
-  border:1px solid #ecedf0!important;border-radius:5px;padding:3px 8px}
+.casebar-id{font-size:11px;font-weight:600;letter-spacing:.02em;background:var(--surf)!important;
+  border:1px solid var(--bdr)!important;border-radius:5px;padding:3px 8px}
 .casebar-id.fns-active{color:var(--amb-t)}
 .casebar-id.fns-done{color:var(--grn-t)}
 .casebar-id.fns-logged{color:var(--t3)}
-.casebar-st{background:none!important;border:0!important;padding:0;
+/* White, like the Close case button beside it. These chips were #fafbfc from when the bar
+   itself was white and an off-white ground was the only thing that separated them; now the
+   bar is tinted, that same off-white reads as grey against it. */
+.casebar-st{background:var(--surf)!important;border:1px solid var(--bdr)!important;
+  border-radius:5px;padding:3px 8px;
   font-size:10.5px;font-weight:500;display:inline-flex;align-items:center;gap:5px}
 .casebar-st::before{content:"";width:5px;height:5px;border-radius:50%;background:currentColor;flex:0 0 auto}
 .casebar-st.fns-active{color:var(--amb-t)}
 .casebar-st.fns-done{color:var(--grn-t)}
 .casebar-st.fns-logged{color:var(--t3)}
 /* Pushed to the far end: the bar reads identity first, action last. */
+/* White ground and a SOLID green border, because the bar is tinted now. Measured against
+   the amber bar: the old pale --grn-bg fill scored 1.01 and the --grn-bd border 1.17 -
+   both invisible, so the button read as flat text. A white fill alone is barely better
+   (1.04), since the tints are pale; it is the --grn border at 3.18 that draws the button.
+   The label keeps --grn-t, 5.02 on white. */
 .casebar-close{margin-left:auto;font-size:11px;font-weight:600;padding:5px 12px;
-  border-radius:6px;border:1px solid var(--grn-bd);background:var(--grn-bg);
+  border-radius:6px;border:1px solid var(--grn);background:var(--surf);
   color:var(--grn-t);cursor:pointer;font-family:inherit}
 .casebar-close:hover{background:var(--grn);color:#fff;border-color:var(--grn)}
 .casebar-close:disabled{opacity:.5;cursor:default}
@@ -938,7 +992,10 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .kg-btn-l{display:flex;align-items:center;gap:7px}
 /* In the conversation header it sits inline beside the customer, so it must hug its
    label rather than fill the width the way the panel version did. */
-.kg-btn-hdr{width:auto;margin-top:0;padding:6px 11px;font-size:11px;white-space:nowrap}
+/* Sits beside the Inbox title in the queue column. width:auto so it hugs its label
+   instead of filling the column the way the panel .kg-btn does, and min-width:0 so the
+   narrower column can shrink it rather than be widened by it. */
+.kg-btn-hdr{width:auto;min-width:0;margin-top:0;padding:5px 9px;font-size:10.5px;white-space:nowrap}
 
 /* A system diagram is a fixed-width drawing, not a hugging radial graph: give it the
    viewport. :has() targets only the diagram modals, leaving the 360 sizing intact. */
@@ -1067,7 +1124,10 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 /* Capped at roughly 5 rows and scrolled. Profile alone runs to 11 rows, which pushed
    Case summary and Sentiment off the panel entirely - the tab is a filter, not a reason
    to own the whole column. */
-.cctx-panel.on{display:block;max-height:150px;overflow-y:auto}
+/* 125px = 5 rows. A .cctx-item is 25px (5px padding, a ~15px line, 5px padding), so the
+   height is set in whole rows - at anything else the list stops mid-row and the clipped
+   half reads as a rendering fault rather than as more content below. */
+.cctx-panel.on{display:block;max-height:125px;overflow-y:auto}
 .cctx-panel::-webkit-scrollbar{width:3px}
 .cctx-panel::-webkit-scrollbar-thumb{background:var(--bdr);border-radius:3px}
 
@@ -1096,10 +1156,57 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
   max-height:180px;overflow-y:auto;margin:6px 0 0;padding:6px;border-radius:var(--rs);
   background:var(--surf);color:var(--t2);font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
 
-.csum-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin-bottom:8px}
-.csum-head .rplbl{margin-bottom:0}
-.csum-refresh{background:none;border:none;padding:0;cursor:pointer;font-size:10px;color:var(--t3);text-decoration:underline}
-.csum-refresh:hover{color:var(--t1)}
+/* ── Case review ──
+   Summary, actions and offers are ONE LLM call and ONE Refresh, so they are ONE card with
+   internal rules - not three cards inside a wrapper. The wrapper version could not work:
+   the lower two sections are appended with `body.innerHTML +=`, which re-parses the whole
+   string and auto-closes an open wrapper, so the group ended up around the summary alone.
+   One card also pays for card padding once instead of three times. */
+/* flex-shrink:0 and min-height:auto, explicitly. .rpbody is a flex COLUMN, and a flex
+   item there defaults to min-height:auto - it refuses to shrink below its content, so a
+   tall card pushed the column past its own height and .rpbody's overflow-y:auto never
+   engaged: the panel stopped scrolling. Cards must keep their natural height and let the
+   CONTAINER scroll.
+   No overflow:hidden either - it clipped the card's own content. The rounded corners come
+   from .rpcard's border-radius, which the sections inherit visually without clipping. */
+.crvw{padding:0}
+.crvw-head{display:flex;align-items:center;gap:6px;padding:8px 11px;
+  background:var(--blue-bg);border-bottom:1px solid var(--blue-bd)}
+.crvw-lbl{font-size:10px;font-weight:700;color:var(--blue-t);text-transform:uppercase;letter-spacing:.5px}
+.crvw-refresh{margin-left:auto}
+/* A rule between sections, not a gap: the divider does the separating that three sets of
+   card padding used to, for 1px instead of ~22px each. */
+.crvw-sec{padding:9px 11px 10px;border-top:1px solid var(--bdr)}
+.crvw-sec:first-of-type{border-top:none}
+/* Same blue as .rplbl, which is what these section headings were before they moved into
+   this card - the colour is the panel's heading colour and moving a heading must not
+   change it. Size/weight match .rplbl too; only the margin is tighter, because the card's
+   dividers already do the separating that .rplbl's 9px margin used to. */
+.crvw-sub{font-size:10px;font-weight:600;color:var(--blue-t);text-transform:uppercase;
+  letter-spacing:.5px;margin-bottom:6px}
+.crvw-secbody{font-size:11px;color:var(--t3)}
+
+/* ── Refresh controls: one busy state for every reload button ──
+   A refresh used to change nothing on screen until its response landed, so on a slow call
+   the button looked dead and got clicked again. `.rfx` is the shared control, `.is-busy`
+   the shared state - set by setRefreshBusy() in app.js, never by hand. */
+.rfx{display:inline-flex;align-items:center;gap:4px;background:none;border:none;padding:0;
+  cursor:pointer;font-size:10px;color:var(--t3);text-decoration:underline}
+.rfx:hover{color:var(--t1)}
+.rfx-ico{width:10px;height:10px;flex:0 0 auto;transform-origin:50% 50%}
+.rfx.is-busy{cursor:default;color:var(--blue-t);text-decoration:none}
+.rfx.is-busy .rfx-ico{animation:rfx-spin .7s linear infinite}
+@keyframes rfx-spin{to{transform:rotate(360deg)}}
+/* The content being replaced recedes while the call runs. Opacity only - the text stays
+   readable, so an agent mid-sentence is not robbed of it, and the layout never shifts. */
+.rfx-target{transition:opacity .15s ease}
+.rfx-target.is-busy{opacity:.45}
+/* Motion is decoration here: the label already says "Refreshing…". */
+@media (prefers-reduced-motion: reduce){
+  .rfx.is-busy .rfx-ico{animation:none}
+  .rfx-target{transition:none}
+}
+
 .csum-body{font-size:10.5px;line-height:1.4}
 .csum-muted{font-size:11px;color:var(--t3)}
 .csum-sit{margin-bottom:8px}

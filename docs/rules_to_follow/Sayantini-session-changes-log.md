@@ -9498,3 +9498,95 @@ character counts; and `ticket_id = None` in a telemetry column was read as "this
 has no ticket" while the ticket was visible on the user's screen, producing two fixes for a
 problem that did not exist. The pattern is asserting before measuring, which is the one thing
 `CLAUDE.md` was written this same session to prevent.
+
+## Fix 175 — the portal invented a phone number, and the offer card promised a channel it never used
+
+**Start here: `_portal_phone()` made up phone numbers.** It derived one from a SHA-256 of the
+user id — Fathima's was `918389736307` while her real number on the BFSI record is
+`7538870992`. That invented value was used for identity resolution (matched against the
+customer master, where a collision would resolve a session to somebody else's record), for
+the `linked_phone` that creates a whatsapp channel identity nobody can be reached on, and it
+was passed to `upsert_customer()`, whose Cypher is
+`SET c.phone = CASE WHEN $phone <> '' THEN $phone ELSE c.phone END`.
+
+So a portal message on the WhatsApp channel would have written the hash over the seeded
+`c.phone`. It had not happened only because both portal customers have used web chat, which
+passes `phone=""` and the guard skips empty. The BFSI seed is not reproducible (117 cells
+differ on an unmodified run, CLAUDE.md), so that overwrite would have been unrecoverable.
+`_graph_contact()` now reads the record; a generated number is never written back.
+
+**The symptom that led there.** The offer card said "Delivers via WhatsApp + Email" and sent
+email only. `_send_offer_draft` read `channel_identities`, which records *channels a customer
+has written in from* — an outbound question answered from an inbound log. Fathima's phone is
+on her record; she has never sent a WhatsApp; no row; no delivery. `reachable_push_identities()`
+now merges the record with the identities, deduped (her number was stored both bare and
+91-prefixed, which would have messaged her twice).
+
+**The portal branch of `_resolve_identity` took the NAME only** while the WhatsApp/email
+branch took name + email + phone. Both now take all three. A second
+`get_customer_by_identifier()` for WhatsApp senders was deleted: it queried the node the
+branch above had already read, for a value already in `metadata["linked_email"]`.
+
+**Neo4j was queried 9 times per message, 4 of them duplicates** (counted by instrumenting
+the client, per stage). `_load_context` fetches the full context — its own comment says
+"once here so BOTH intent and resolution agents share it" — and then `IntentClassificationAgent`
+re-fetched it with the same function and the same key and overwrote the value with a
+byte-identical dict, and `neo4j_answer()` in `_resolve` walked `get_all_customer_records()`
+for the 9 collections already sitting in that dict. Both now read the context. 9 → 5.
+
+**`get_guidance()` STAYS.** It is the Concept walk —
+`Customer →holdings→ INSTANCE_OF →Concept← EXPLAINS ←KBChunk` — returning 14 chunks with 7
+flagged `is_hers`, which scores guidance about a product she owns at 0.9 against 0.6 for
+general. It is not in `graph_context` and is not a duplicate. I twice told the user nothing
+in `_resolve` would change, having read neither call.
+
+**Timestamps were UTC in text a person reads.** `_when()` parsed to a UTC-aware datetime and
+formatted `parsed.hour` directly, so a follow-up due 11:08am IST was shown to the agent as
+"5:38am" — five and a half hours early, on the one sentence that says when we promised to
+reply. Now IST, matching the `+5 hours, +30 minutes` the analytics rollup already applies in
+SQL. `ticket_manager` had the same bug on the opened-date.
+
+**The channel picker** replaces the fixed "Delivers via WhatsApp + Email" label in the draft
+header: a checkbox per channel the customer can be reached on, coloured from `CH` (the same
+green/blue/violet every channel badge uses). Offer drafts default to Email + WhatsApp ticked
+with Web Chat shown unticked — web chat has no push provider, so an offer sent there waits in
+the portal. Nudge and follow-up drafts default to the channel they were drafted for, so
+sending without touching the picker does exactly what it did before. Held pipeline replies get
+no picker: they answer a question that arrived on one channel and are threaded onto it.
+
+**The offer precondition stays PUSH-ONLY.** `test_approve_offer_fails_without_push_channel`
+holds it: a web-chat-only customer cannot be sent an offer at all. I called that rule an
+obsolete leftover and removed it; the test caught me. It now narrows the shared resolver at
+the point of use, so the precondition and the send cannot disagree about *where* someone is
+reachable — only about which of those places an offer may use.
+
+**Discarding a draft reopens the recommendation that made it — with a dedupe guard.**
+Approving a suggestion flips it to `approved` AND writes a draft; discard undid only the
+second, so the card stopped offering work that was never done and never dismissed. The guard
+is the point: approving triggers a re-render, that review finds no pending row of the type
+(this one is `approved`) and writes a REPLACEMENT, so reopening blindly leaves two identical
+cards. I shipped it without the guard and produced four identical "Customer upset" nudges on
+the live conversation, then a bulk reset resurrected four more.
+
+**Test runs were polluting the FinOps panel.** A call blocked by `conftest.py` is still
+written to `llm_usage_events` with `llm_used=0, tokens=0, status='failed'`, and the panel
+counts rows — one pytest run added 33 `handoff_check` "calls" and made the cheapest operation
+show the longest bar while burying the only two rows that mattered there, real 429s from live
+traffic. `conftest.py` now sets `LLM_OBSERVABILITY_ENABLED=false`, which `_persist_event`
+already honoured, so no production code changed.
+
+**Verified without sending anything and without spending quota:** records identical across
+all 5 customers and all 9 sections before the swap; `graph_context` byte-identical on both the
+portal and phone paths; classifier makes 0 queries with a populated context and 1 with an
+empty one; Fathima resolves to `whatsapp 7538870992` + `917538870992` under one customer_id;
+all 5 graph phones intact. Tests 5 failed / 149 passed — the documented baseline.
+
+**How this session went.** The same failure, repeatedly: asserting from a partial read and
+correcting only when caught. `neo4j_answer` was described as fetching "intent-specific
+records" when its docstring says `intent` is accepted and ignored. The offer fan-out was said
+to drop a ticked Web Chat when line 499 already honoured it — a fix I had made an hour
+earlier and then described in its pre-fix form. Seven `list_customer_identifiers` callers
+were raised as unfinished work and, on finally reading them, five are Neo4j id lookups that
+never touch channels, one is cosmetic, and the last is deliberately narrow with a comment
+explaining why. The user asked three times for "exactly what changed and what happens now"
+because the answers kept describing intent rather than code.

@@ -37,6 +37,18 @@ class RealNetworkCallInTest(RuntimeError):
 def _block_real_network(monkeypatch, request):
     """Fail loudly on any HTTP request or Groq SDK call that escapes a test."""
 
+    # A blocked call is still WRITTEN to llm_usage_events: the recorder logs the attempt
+    # with llm_used=0, tokens=0, status='failed'. Those rows are development artifacts, not
+    # usage - but the FinOps panel counts every row, so one pytest run added 33 handoff_check
+    # "calls" to a production cost table and made the cheapest operation look like the
+    # biggest consumer. They also drowned the only rows that matter there: two real 429
+    # rate-limit failures from live traffic.
+    #
+    # LLM_OBSERVABILITY_ENABLED is the switch _persist_event already honours, so this needs
+    # no production code. A test that wants the write (test_groq_generator_records_local_llm_usage)
+    # sets it back to "true" itself against its own tmp_path DB.
+    monkeypatch.setenv("LLM_OBSERVABILITY_ENABLED", "false")
+
     def _fail(service):
         def boom(*args, **kwargs):
             raise RealNetworkCallInTest(

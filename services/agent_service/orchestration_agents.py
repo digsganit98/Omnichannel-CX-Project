@@ -191,7 +191,21 @@ class IntentClassificationAgent:
         self.neo4j_client = neo4j_client
 
     def run(self, message: InboundMessage, context: dict) -> IntentResult:
-        if self.neo4j_client:
+        # Only when the caller has not already supplied it.
+        #
+        # _load_context runs three nodes earlier and fetches exactly this - same function,
+        # same key (message.metadata['portal_graph_customer_id']), same fallback to the
+        # channel identifier - into context['graph_context'], and its comment says it is
+        # fetched there "once here so BOTH intent and resolution agents share it". This
+        # block then re-fetched it and overwrote the value with an identical dict:
+        # measured byte-for-byte equal, 16 keys, on both the portal and the phone path.
+        # Three Neo4j round trips per message to replace data with itself.
+        #
+        # The fetch is kept for the empty case rather than deleted outright: a caller that
+        # passes no graph_context at all (a unit test, or a future caller outside the
+        # pipeline) still gets one, and if _load_context's own lookup failed transiently
+        # this is still the second attempt it has always accidentally been.
+        if self.neo4j_client and not (context or {}).get("graph_context"):
             try:
                 from services.neo4j_service.queries import get_customer_context, get_customer_context_by_id
                 graph_customer_id = message.metadata.get("portal_graph_customer_id")
@@ -387,11 +401,24 @@ class QueryResolutionAgent:
         # can no longer hide a record from the answer.
         if self.neo4j_client:
             try:
-                from services.neo4j_service.queries import neo4j_answer
+                from services.neo4j_service.queries import records_block
                 graph_ctx = context.get("graph_context", {})
                 customer_id = graph_ctx.get("customer_id", "")
                 if customer_id:
-                    raw_data = neo4j_answer(self.neo4j_client, intent, customer_id)
+                    # Rendered from the records ALREADY in graph_context, not re-queried.
+                    #
+                    # This was neo4j_answer(client, intent, customer_id), which called
+                    # get_all_customer_records() - the same walk _load_context ran a few
+                    # nodes earlier to build graph_context, whose 9 record collections are
+                    # that walk's output. One extra Neo4j round trip per message for data
+                    # already in hand. (`intent` was accepted and ignored by that function
+                    # since the TRANSACTIONAL_INTENTS gate was removed, so nothing is lost
+                    # by not passing it.)
+                    #
+                    # Verified byte-identical across all 5 seeded customers and all 9
+                    # sections before the swap; records_block is the same formatting loop,
+                    # lifted so both callers share it.
+                    raw_data = records_block(graph_ctx)
                     if raw_data:
                         neo4j_ctx = [{
                             "text": raw_data,

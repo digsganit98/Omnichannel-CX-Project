@@ -157,6 +157,35 @@ class FakeResolutionEngine:
         }
 
 
+# The graph_context the PIPELINE builds, in the shape the resolution agent now expects.
+#
+# _load_context (orchestration_service/graph.py) calls get_customer_context* once and puts
+# BOTH the identity fields and the customer's record collections into context
+# ["graph_context"]. The resolution agent reads the records straight from there rather than
+# issuing a second get_all_customer_records() walk for rows already in hand.
+#
+# These tests used to pass {"customer_id": "CUST-001"} alone, which was enough while the
+# agent fetched the records itself from that id. It no longer does, so a context carrying
+# only an id describes a state the pipeline never produces. The loan below is exactly what
+# FakeNeo4j's properties(n) branch returns, so the two cannot drift apart.
+def fake_graph_context(**extra) -> dict:
+    ctx = {
+        "customer_id": "CUST-001",
+        "name": "Test Customer",
+        "email": "customer@example.com",
+        "phone": "+919999999999",
+        "city": "Mumbai",
+        "loans": [{
+            "loan_id": "L001", "loan_type": "Personal Loan", "status": "Active",
+            "amount_inr": 500000, "interest_rate": 10.5,
+            "next_step": "Pay EMI by 5th", "last_updated": "2024-01-01",
+            "emis_paid": 12, "emis_pending": 48, "total_emis": 60,
+        }],
+    }
+    ctx.update(extra)
+    return ctx
+
+
 class FakeNeo4j:
     """Stub Neo4j client that returns canned BFSI graph data.
 
@@ -1086,7 +1115,7 @@ def test_query_resolution_agent_routes_transactional_intent_to_neo4j():
         WhatsAppWebhookPayload(from_="+919999999999", text="What is my loan status?",
                                message_id="test-1", metadata={"provider": "test"})
     )
-    context = {"graph_context": {"customer_id": "CUST-001"}}
+    context = {"graph_context": fake_graph_context()}
     resolution = agent.run(msg, context, intent="loan_status")
     assert resolution.retrieval_backend == "neo4j_graph"
     assert "loan" in resolution.answer.lower() or "L001" in resolution.answer
@@ -1142,7 +1171,7 @@ def test_process_intents_never_route_to_customer_graph():
 
     fake_rag = FakeRAG()
     agent = QueryResolutionAgent(rag=fake_rag, neo4j_client=FakeNeo4j(), resolution_engine=FakeResolutionEngine())
-    context = {"graph_context": {"customer_id": "CUST-001"}}
+    context = {"graph_context": fake_graph_context()}
 
     claim = agent.run(
         whatsapp_message(text="How do I file a health insurance claim?"),

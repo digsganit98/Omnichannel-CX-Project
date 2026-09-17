@@ -486,6 +486,31 @@ def neo4j_answer(client, intent: str | None, customer_id: str) -> str | None:
     records = get_all_customer_records(client, customer_id)
     if not records:
         return None
+    # The KB is deliberately NOT appended here. The caller emits the same chunks as
+    # entries in `contexts` (orchestration_agents.py), and every context's text is
+    # concatenated into the prompt by GroqGenerator.generate_answer - so returning
+    # them here too would send all 14 chunks twice, ~1,124 tokens of exact duplicate
+    # per message. contexts is the right home: it carries the provenance metadata
+    # that citations, retrieval evidence and the agent console all read, which a
+    # block of text inside this string cannot.
+    return records_block(records)
+
+
+def records_block(records: dict | None) -> str | None:
+    """The customer's records rendered for the prompt, from a dict already in hand.
+
+    Split out of neo4j_answer so the resolution agent can format the records that
+    _load_context already put in graph_context, instead of issuing a second
+    get_all_customer_records() walk for the same rows. Both callers share this loop, so
+    the two can never drift into rendering the same records differently.
+
+    Takes either a get_all_customer_records() result or a graph_context - the record keys
+    are identical in both (loans, credit_cards, accounts, fixed_deposits, policies,
+    claims, charges, transactions, kyc). graph_context carries identity fields alongside
+    them, which _RECORD_SECTIONS does not name and so ignores.
+    """
+    if not records:
+        return None
 
     from services.rag_service.groq_generator import _RECORD_SECTIONS, _format_record
 
@@ -497,12 +522,4 @@ def neo4j_answer(client, intent: str | None, customer_id: str) -> str | None:
         lines.append(f"{heading}:")
         for row in rows:
             lines.append("  - " + _format_record(row))
-
-    # The KB is deliberately NOT appended here. The caller emits the same chunks as
-    # entries in `contexts` (orchestration_agents.py), and every context's text is
-    # concatenated into the prompt by GroqGenerator.generate_answer - so returning
-    # them here too would send all 14 chunks twice, ~1,124 tokens of exact duplicate
-    # per message. contexts is the right home: it carries the provenance metadata
-    # that citations, retrieval evidence and the agent console all read, which a
-    # block of text inside this string cannot.
     return "\n".join(lines) if lines else None

@@ -227,6 +227,16 @@ function showStage(stage) {
   // value NONE of those gates match, or the browser polls the API behind a page that is
   // not showing any of that data. Measured with a request counter, not reasoned about.
   if (stage !== 'app') activePage = stage;
+
+  // Remember WHERE the user is, so a refresh returns them here. The token already
+  // survives a reload in sessionStorage; the location did not, so every refresh landed
+  // on the Control Centre no matter what was open.
+  //
+  // Only the three signed-in stages are stored. 'home' and 'apikey' are pre-auth screens
+  // and restoring into one would put a signed-in user back at a sign-in card.
+  if (stage === 'hub' || stage === 'app' || stage === 'user') {
+    try { sessionStorage.setItem('cx-stage', stage); } catch (e) {}
+  }
 }
 
 // ── Home page entry points ────────────────────────────────────────────────────
@@ -482,6 +492,9 @@ window.doLogout = function() {
   currentUser = null;
   sessionStorage.removeItem('cx-admin-jwt');
   sessionStorage.removeItem('cx-admin-user');
+  // Clear the remembered location too, or signing out and back in would restore the
+  // last stage instead of the front door.
+  try { sessionStorage.removeItem('cx-stage'); sessionStorage.removeItem('cx-page'); sessionStorage.removeItem('cx-conv'); } catch (e) {}
   // Back to the home page, not the sign-in card. Landing on the card left the home page
   // unreachable for the rest of the session — nothing links back to it and a reload just
   // re-shows the card. Signing out returns you to the front door; signing in again is one
@@ -503,6 +516,9 @@ window.backToPortalSelection = function() {
   sessionStorage.removeItem('cx-admin-key');
   sessionStorage.removeItem('cx-admin-jwt');
   sessionStorage.removeItem('cx-admin-user');
+  // Clear the remembered location too, or signing out and back in would restore the
+  // last stage instead of the front door.
+  try { sessionStorage.removeItem('cx-stage'); sessionStorage.removeItem('cx-page'); sessionStorage.removeItem('cx-conv'); } catch (e) {}
   document.getElementById('adminPasswordInput').value = '';
   switchLoginMode('admin');
   showStage('home');
@@ -526,6 +542,8 @@ window.switchPage = function(name) {
   var navEl = document.getElementById('nav-' + name);
   if (navEl) navEl.classList.add('active');
   activePage = name;
+  // Same reason as the stage above: a refresh in Analytics should come back to Analytics.
+  try { sessionStorage.setItem('cx-page', name); } catch (e) {}
   if (name === 'analytics') loadAnalytics();
   if (name === 'connectors') loadConnectors();
   if (name === 'sim') loadAudit();
@@ -629,6 +647,17 @@ window.loadConversations = async function() {
       else { nrBadge.style.display = 'none'; }
     }
     if (hasNew && state.selectedConvId) refreshSelectedConv();
+
+    // Reopen the conversation that was open before a refresh. Done HERE because it needs
+    // the loaded list: a saved id whose conversation has since gone would otherwise put a
+    // "not found" error in the pane, so it is only honoured when still in the queue.
+    if (!state.selectedConvId) {
+      var _saved = null;
+      try { _saved = sessionStorage.getItem('cx-conv'); } catch (e) {}
+      if (_saved && convs.some(function(c) { return c.conversation_id === _saved; })) {
+        selectConv(_saved);
+      }
+    }
   } catch(e) {
     document.getElementById('qlist').innerHTML = '<div style="padding:20px;text-align:center;color:var(--red-t);font-size:12px">' + escH(e.message) + '</div>';
   }
@@ -682,6 +711,11 @@ function renderQueue() {
 
 async function selectConv(convId) {
   state.selectedConvId = convId;
+  // `state` is in memory only, so it survives moving between stages - the page never
+  // unloads - but not a refresh. That is the whole difference the user sees: going to the
+  // Control Centre and back keeps the open conversation, F5 loses it and the pane reads
+  // "Select a conversation".
+  try { sessionStorage.setItem('cx-conv', convId); } catch (e) {}
   renderQueue();
   var msgsEl = document.getElementById('msgs');
   msgsEl.className = 'msgs';
@@ -1369,7 +1403,10 @@ function renderCentre(conv) {
       var barServiceable = barStatus === 'open' || barStatus === 'in_progress';
       var barCls = barStatus === 'logged' ? 'fns-logged' : barServiceable ? 'fns-active' : 'fns-done';
       var bar = document.createElement('div');
-      bar.className = 'casebar';
+      // The bar carries the status class too, so its OWN ground is coloured by state -
+      // amber needs work, green is done, blue is logged. It was white on a white page,
+      // which read as a gap rather than the header of the case below it.
+      bar.className = 'casebar ' + barCls;
       bar.innerHTML =
           '<span class="casebar-id ' + barCls + '">' + escH(barTicketId.toUpperCase()) + '</span>'
         + '<span class="casebar-st ' + barCls + '">' + escH(statusLabel(barStatus || 'active')) + '</span>'
@@ -1461,6 +1498,94 @@ function confPill(label, score) {
     + escH(label) + ' ' + pct + '%</span>';
 }
 
+// Where this message goes - the agent's choice, not the system's.
+//
+// Sits in the card HEADER, in place of the fixed "Delivers via WhatsApp + Email" label
+// that used to state a destination as a fact nobody had chosen. An approved nudge said
+// nothing at all and quietly replied on whichever channel the customer last used.
+//
+// Channel names only. The address belongs to the customer, not to this decision, and the
+// conversation header three inches above already shows the email and phone beside their
+// name - printing them again here says nothing new and doubles the width of the row.
+//
+// Colours come from CH (the channel map every other surface uses: the turn badges, the
+// channel filter, the lineage stripes), so WhatsApp is green and Email is blue here for
+// the same reason they are everywhere else.
+//
+// NOT on a held pipeline reply: that answers a question which arrived on one channel and
+// is threaded onto it, so there is nothing to choose.
+// A channel colour at 75% toward black, so a label stays readable on that channel's own
+// mid tone. CH carries three steps (bg / bd / clr) and none of them is a text colour that
+// works ON bd - clr on bd measures 2.72 for WhatsApp, under the 4.5 a small label needs.
+function darken(hex) {
+  var v = String(hex || '').replace('#', '');
+  if (v.length !== 6) return hex;
+  var out = '#';
+  for (var i = 0; i < 6; i += 2) {
+    out += ('0' + Math.round(parseInt(v.substr(i, 2), 16) * 0.75).toString(16)).slice(-2);
+  }
+  return out;
+}
+
+function draftChannelPicker(draft, isOffer, isApproved) {
+  if (!isOffer && !isApproved) return '';
+  var reach = draft.reachable_channels || [];
+  if (!reach.length) return '';
+  var own = String(draft.channel || '').toLowerCase();
+  var seen = {};
+  var boxes = reach.map(function(r) {
+    var ch = String(r.channel || '').toLowerCase();
+    if (seen[ch]) return '';          // one control per CHANNEL, not per address
+    seen[ch] = 1;
+    var meta = chMeta(ch);
+    // What is ticked when the card opens.
+    //
+    // An offer: the PUSH channels, which is what the fan-out has always delivered to.
+    // Web chat is offered but left unticked - delivery.py has no outbound provider for it,
+    // so an offer sent there waits in the portal until the customer happens to visit,
+    // which is the wrong shape for a message whose whole purpose is to reach someone who
+    // is NOT already looking. Tickable, because that is the agent's call, not ours.
+    //
+    // A nudge or follow-up: the channel it was drafted for, so sending without touching
+    // the picker does exactly what it did before the picker existed.
+    var on = isOffer ? (ch === 'whatsapp' || ch === 'email') : (ch === own);
+    // Colour inline from CH, not via the .pwa/.pem/.pwc pill classes: those are declared
+    // LATER in the stylesheet than .dch, so they won the cascade and painted every box the
+    // same wash whatever its state.
+    //
+    // TICKED fills with CH.bd - the MID tone - not CH.bg. The bg tints are ~97% white
+    // (#f0fdf4, #eff6ff, #f5f3ff): designed to sit on a white card, where a whisper of
+    // colour is enough. On a saturated green or amber card header they simply read as
+    // "white", which is why the ticked pills looked colourless. bd is a real green / blue
+    // / violet (2.24-2.72 against both headers) and takes the channel's own text at
+    // 2.72-5.12, lifted to 4.49-7.29 by darkening the label.
+    //
+    // NOT CH.clr as a fill, which is the obvious choice and fails: the offer header is
+    // #16a34a and WhatsApp is #16a34a, so a ticked WhatsApp pill scored 1.00 - invisible.
+    // BOTH states carry the channel's colour - an unticked WhatsApp box is still the
+    // WhatsApp box, and an agent should be able to find it by colour whether or not it is
+    // selected. It was translucent white before, so a card with nothing ticked showed
+    // three identical white pills.
+    //
+    // The two states are told apart by WEIGHT, not by presence of colour: ticked fills
+    // with the mid tone (bd) and a darkened label, unticked with the pale tint (bg) and
+    // the channel's own text. Measured on both card headers - ticked 4.49-7.29 text
+    // contrast, unticked 3.15-6.48, and every pill lifts off the header at 2.24-3.04.
+    // Same border on both states - the channel's own mid-strength colour. Giving ticked a
+    // darkened border and unticked the mid tone meant the edge read differently per pill
+    // AND per state: a dark green border on a light green fill all but vanished, so some
+    // boxes looked outlined and others did not, on the same row.
+    var style = 'border-color:' + meta.clr + ';'
+      + (on ? 'background:' + meta.bd + ';color:' + darken(meta.clr)
+            : 'background:' + meta.bg + ';color:' + meta.clr);
+    return '<label class="dch' + (on ? ' on' : '') + '" style="' + style + '">'
+      + '<input type="checkbox" class="dch-box" value="' + escH(ch) + '"' + (on ? ' checked' : '') + '>'
+      + escH(meta.label)
+      + '</label>';
+  }).join('');
+  return '<span class="dch-row">' + boxes + '</span>';
+}
+
 function renderDraftCard(conv, viewMode, shownInboundTurnIds) {
   var mount = document.getElementById('draftMount');
   if (!mount) return;
@@ -1502,10 +1627,21 @@ function renderDraftCard(conv, viewMode, shownInboundTurnIds) {
   // Offer drafts (channel="offer", from an approved cross-/up-sell opportunity)
   // are proactive outbound: sent to every push channel on record, not a reply.
   var isOffer = draft.channel === 'offer';
+  // A draft the AGENT asked for by approving a Suggested Action, not one the review gate
+  // held. Two different events that rendered identically: both said "Held for review" over
+  // a label reading "AI-proposed reply", when nothing held these and no model wrote them -
+  // they are templates from the record with a [bracket] for the agent to complete.
+  var isApproved = draft.provider === 'nudge_reply' || draft.provider === 'follow_up_nudge';
   var hdr = isOffer
-    ? '<span>💡 Approved offer — edit &amp; send</span>'
-    + '<span class="draft-reason">Delivers via WhatsApp + Email</span>'
-    : '<span>✋ Held for review — edit &amp; send manually</span>'
+    ? '<span>💡 Approved offer</span>'
+    + draftChannelPicker(draft, true, false)
+    : isApproved
+    // No reason pill: it said "Approved nudge - edit & send", which is what this header
+    // already says. The gate reason below is real information; this was a restatement.
+    ? '<span>✅ ' + (draft.provider === 'follow_up_nudge'
+        ? 'Approved follow-up' : 'Approved nudge') + '</span>'
+    + draftChannelPicker(draft, false, true)
+    : '<span>✋ Held for review</span>'
     + '<span class="draft-reason">' + escH(draft.hold_reason || 'Escalated') + '</span>'
     + confPill('Retrieval confidence', draft.retrieval_confidence)
     + confPill('Intent confidence', draft.intent_confidence);
@@ -1513,7 +1649,12 @@ function renderDraftCard(conv, viewMode, shownInboundTurnIds) {
     '<div class="draft-card' + (isOffer ? ' draft-card--offer' : '') + '" data-draft-id="' + escH(draft.draft_id) + '">'
     + '<div class="draft-hdr">' + hdr + '</div>'
     + '<div class="draft-body">'
-    + '<div class="draft-label">' + (isOffer ? 'Offer message (editable)' : 'AI-proposed reply (editable)') + '</div>'
+    // "AI-proposed" only where a model actually proposed it. An approved nudge or
+    // follow-up is assembled from the record, so the label names the thing the agent has
+    // to do: fill the bracket.
+    + '<div class="draft-label">' + (isOffer ? 'Offer message (editable)'
+        : isApproved ? 'Draft reply — complete the [bracket] (editable)'
+        : 'AI-proposed reply (editable)') + '</div>'
     + '<textarea class="draft-textarea" id="draftText">' + escH(draft.draft_text || '') + '</textarea>'
     + '<div class="draft-actions">'
     + '<button class="draft-send-btn" onclick="sendDraft(this)">' + (isOffer ? 'Send offer' : 'Send reply') + '</button>'
@@ -1541,10 +1682,19 @@ window.sendDraft = function(btn) {
   var draftId = card && card.getAttribute('data-draft-id');
   var text = (document.getElementById('draftText').value || '').trim();
   if (!draftId || !text) { toast('Reply text is required'); return; }
+  // The ticked channels, when this card has a picker. null - not [] - when it has none,
+  // so the API keeps its existing behaviour rather than reading "send nowhere".
+  var boxes = card.querySelectorAll('.dch-box');
+  var channels = null;
+  if (boxes.length) {
+    channels = [];
+    boxes.forEach(function(b) { if (b.checked) channels.push(b.value); });
+    if (!channels.length) { toast('Pick at least one channel'); return; }
+  }
   card.querySelectorAll('button').forEach(function(b){ b.disabled = true; });
   api('/admin/reply-drafts/' + encodeURIComponent(draftId) + '/send', {
     method: 'POST',
-    body: JSON.stringify({ text: text }),
+    body: JSON.stringify(channels ? { text: text, channels: channels } : { text: text }),
   }).then(function(res) {
     // Say what ACTUALLY happened. This used to read "Reply sent to customer" for every
     // outcome, including the one where nothing left the building: delivery.py returns
@@ -1578,6 +1728,10 @@ window.discardDraft = function(btn) {
     if (state.convDetail) {
       delete state.pendingDrafts[state.convDetail.conversation_id];
       renderCentre(state.convDetail);  // clears the card + restores the compose box
+      // The right panel too: discarding a draft that came from an approved suggestion can
+      // put that suggestion back to `pending` (routes/reply_drafts.py), and without this
+      // it would not reappear on the card until the next poll.
+      renderRight(state.convDetail, allTickets());
     }
     loadConversations();
   }).catch(function(err) {
@@ -1586,7 +1740,88 @@ window.discardDraft = function(btn) {
   });
 };
 
+// ── Refresh controls ────────────────────────────────────────────────────────
+// Every reload button in the app goes through these two. A refresh used to change nothing
+// on screen until its response arrived, so on a slow call the button looked broken and got
+// clicked again - which is exactly what a second LLM call must not be.
+//
+// `targets` are the elements whose CONTENT is being replaced; they dim while the call runs
+// so it is obvious what is about to change. Passing none is fine - the button alone spins.
+var RFX_ICON = '<svg class="rfx-ico" viewBox="0 0 16 16" fill="none" stroke="currentColor"'
+  + ' stroke-width="2" stroke-linecap="round" aria-hidden="true">'
+  + '<path d="M14 8a6 6 0 1 1-1.8-4.3"/><path d="M14 2v4h-4"/></svg>';
+
+// The label is rebuilt rather than toggled so the spinning icon and the word always agree.
+function setRefreshBusy(btn, busy, targets, idleLabel) {
+  if (!btn) return;
+  btn.classList.toggle('is-busy', !!busy);
+  btn.disabled = !!busy;
+  // aria-busy, not just colour: the state has to reach a screen reader too.
+  btn.setAttribute('aria-busy', busy ? 'true' : 'false');
+  btn.innerHTML = RFX_ICON + '<span>' + (busy ? 'Refreshing…' : (idleLabel || 'Refresh')) + '</span>';
+  (targets || []).forEach(function(el) {
+    if (el) el.classList.toggle('is-busy', !!busy);
+  });
+}
+
+// Run `work` (a promise-returning function) with the button held busy until it settles.
+// `finally` is deliberate: a failed refresh must release the button, or one 429 leaves it
+// spinning for the rest of the session.
+function runRefresh(btn, targets, idleLabel, work) {
+  setRefreshBusy(btn, true, targets, idleLabel);
+  return Promise.resolve()
+    .then(work)
+    .catch(function() {})
+    .then(function() { setRefreshBusy(btn, false, targets, idleLabel); });
+}
+
 function renderRight(conv, tickets) {
+  // Open escalations / tickets are built HERE, before the panel HTML, and injected above
+  // the Case Summary card below. They used to be appended BETWEEN the summary and
+  // Suggested Actions, which split the three cards of one case review - summary, actions,
+  // offers - with an unrelated list. Those three are one LLM call and read as one block;
+  // the ticket list is navigation and belongs above them.
+  var escHtml = '';
+  var _tickets = tickets || allTickets();
+  var convTickets = _tickets.filter(function(t) {
+    return t.conversation_id === conv.conversation_id && isServiceable(t);
+  });
+  if (!convTickets.length) {
+    // Nothing open: a plain line, not a card. There is no list to head, count or fold,
+    // so the card chrome would be a container for nothing. This is where the old
+    // centre-pane banner went (see renderCentre).
+    escHtml = '<div class="rp-noesc">No open escalations.</div>';
+  } else {
+    var tktHtml = convTickets.map(function(t) {
+      var isOpen = isServiceable(t);
+      var stBg = t.status === 'closed' ? 'background:var(--grn-bg);border-color:var(--grn-bd);color:var(--grn-t)' :
+                 isOpen ? 'background:var(--amb-bg);border-color:var(--amb-bd);color:var(--amb-t)' :
+                 'background:var(--surf2);border-color:var(--bdr);color:var(--t3)';
+      return '<div class="tkt-item tkt-item--clickable" onclick="goToConversation(\'' + escH(conv.conversation_id) + '\',\'' + escH(t.ticket_id) + '\')"><div class="tkt-head">'
+        + '<span class="tkt-id">' + escH(t.ticket_id.slice(0,16)) + '</span>'
+        + '<span class="tkt-st" style="' + stBg + '">' + escH(statusLabel(t.status)) + '</span>'
+        + '</div><div class="tkt-desc">' + escH((t.title||t.intent||'').slice(0,60)) + '</div>'
+        + '<div class="tkt-created">Created: ' + escH(fmtDateTime(t.created_at)) + '</div>'
+        // No Close button here any more. Closing happens on the CASE BAR in the
+        // conversation, above the exchanges of the case being read - one button, on the
+        // case the agent has actually just read, with no ids to tell apart. This card
+        // stayed a list: it is the way to REACH the customer's other open cases (clicking
+        // a row focuses that case in the conversation, where its own bar closes it), which
+        // matters because the Detailed view shows one case at a time.
+        + '</div>';
+    }).join('');
+    // Collapsed by default: the COUNT is the at-a-glance signal an agent needs, and
+    // each ticket row carries an id, a description, a date and a Resolve button, so
+    // three open tickets otherwise own most of the panel.
+    escHtml = '<div class="rpcard tkt-card' + (state.tktOpen ? ' on' : '') + '" id="tkt-card">'
+      + '<button class="tkt-toggle" id="tkt-toggle" type="button">'
+      + '<span class="rplbl rplbl-tickets">Open Tickets (' + convTickets.length + ')</span>'
+      + '<svg class="tkt-chev" width="10" height="10" viewBox="0 0 16 16" aria-hidden="true">'
+      + '<path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="2"/></svg>'
+      + '</button>'
+      + '<div class="tkt-scroll">' + tktHtml + '</div></div>';
+  }
+
   var conv_meta = state.convs.find(function(c) { return c.conversation_id === conv.conversation_id; }) || conv;
 
   var turns = conv.turns || [];
@@ -1631,32 +1866,66 @@ function renderRight(conv, tickets) {
     // asynchronously so a slow or unavailable LLM never delays the rest of the panel.
     + '<div class="rpcard cctx-card" id="cctx-card">'
     + '<div class="cctx-head"><span class="rplbl">Customer context</span>'
-    + '<button class="cctx-refresh" id="cctx-refresh" type="button" title="Regroup this customer\'s records">Refresh</button></div>'
+    + '<button class="rfx cctx-refresh" id="cctx-refresh" type="button" title="Regroup this customer\'s records">' + RFX_ICON + '<span>Refresh</span></button></div>'
     + '<div class="cctx-tabs" id="cctx-tabs"></div>'
     + '<div class="cctx-body" id="cctx-body"><span class="cctx-muted">Grouping records…</span></div>'
     + '</div>'
-    // Sentiment before the case summary: it is a one-line read, so it answers "how is
-    // this customer feeling" before the agent starts reading prose.
-    + '<div class="rpcard"><div class="ssent-head"><span class="rplbl">Sentiment</span>'
-    + '<span class="ssc" style="color:' + sentClr + '">' + escH(sentLbl) + '</span>'
-    + '<span class="ssent-count">(last ' + sentCount + ' message' + (sentCount === 1 ? '' : 's') + ')</span></div>'
-    + '<div class="sbar">'
-    + '<div class="sbp" style="flex:' + posPct + '"></div>'
-    + '<div class="sbu" style="flex:' + neuPct + '"></div>'
-    + '<div class="sbn" style="flex:' + negPct + '"></div>'
+    // Tickets / escalations sit here - above the case review, not inside it.
+    + escHtml
+    // CASE REVIEW - one header over all three cards it regenerates.
+    //
+    // Summary, actions and offers are ONE LLM call (Fix 171) and one Refresh regenerates
+    // all three. With the button sitting in the Case Summary header it read as belonging
+    // to that card alone, so nothing on screen said the other two would change. The header
+    // makes the group visible and gives the button somewhere honest to live.
+    // ONE card, three sections - not three cards in a wrapper.
+    //
+    // ONE card, three sections, written in ONE assignment.
+    //
+    // It MUST be one assignment. `body.innerHTML +=` reads the DOM back out as HTML,
+    // appends, and re-parses: an unclosed wrapper is auto-closed on the way out, so
+    // sections appended afterwards land OUTSIDE it and a trailing `</div>` is dropped as
+    // unmatched. That is what emptied this card - the header and summary were parsed into
+    // a card the later appends then fell out of. Built whole, there is nothing to re-parse.
+    + '<div class="rpcard crvw rfx-target" id="crvw-group">'
+    + '<div class="crvw-head"><span class="crvw-lbl">Case review</span>'
+    + '<button class="rfx crvw-refresh" id="csum-refresh" type="button"'
+    + ' title="Regenerate the summary, actions and offers">' + RFX_ICON + '<span>Refresh</span></button>'
     + '</div>'
-    + '<div class="srow">'
-    + '<span class="slbl" style="color:var(--grn-t)">' + posPct + '% positive</span>'
-    + '<span class="slbl">' + neuPct + '% neutral</span>'
-    + '<span class="slbl" style="color:var(--red-t)">' + negPct + '% negative</span>'
-    + '</div></div>'
-    // Rendered as a placeholder and filled asynchronously so a slow or unavailable LLM
-    // never delays the rest of the panel.
-    + '<div class="rpcard csum-card" id="csum-card">'
-    + '<div class="csum-head"><span class="rplbl">Case summary</span>'
-    + '<button class="csum-refresh" id="csum-refresh" type="button" title="Regenerate this summary">Refresh</button></div>'
+    // The three sections are placeholders, filled asynchronously so a slow or unavailable
+    // LLM never delays the rest of the panel.
+    + '<div class="crvw-sec" id="csum-card">'
+    + '<div class="crvw-sub">Case summary</div>'
     + '<div class="csum-body" id="csum-body"><span class="csum-muted">Summarising…</span></div>'
+    + '</div>'
+    + '<div class="crvw-sec" id="rpNbaCard"><div class="crvw-sub">Suggested Actions</div>'
+    + '<div id="rpNbaBody" class="crvw-secbody">Checking…</div></div>'
+    + '<div class="crvw-sec" id="rpOppCard"><div class="crvw-sub">Suggested Offers</div>'
+    + '<div id="rpOppBody" class="crvw-secbody">Checking…</div></div>'
     + '</div>';
+
+  // SENTIMENT - the right panel's card, moved to the right of the conversation header.
+  // Same markup it had there, so it looks and reads exactly as it did.
+  var hs = document.getElementById('hsent');
+  if (hs) {
+    hs.innerHTML =
+        '<div><div class="ssent-head">'
+      // Reading, meter and count on ONE row: the label sits left of the bar and the
+      // message count right of it, so the row reads "how they feel - over what - how much".
+      + '<span class="ssc" style="color:' + sentClr + '">' + escH(sentLbl) + '</span>'
+      + '<div class="sbar">'
+      + '<div class="sbp" style="flex:' + posPct + '"></div>'
+      + '<div class="sbu" style="flex:' + neuPct + '"></div>'
+      + '<div class="sbn" style="flex:' + negPct + '"></div>'
+      + '</div>'
+      + '<span class="ssent-count">' + sentCount + ' msg' + (sentCount === 1 ? '' : 's') + '</span>'
+      + '</div>'
+      + '<div class="srow">'
+      + '<span class="slbl" style="color:var(--grn-t)">' + posPct + '% positive</span>'
+      + '<span class="slbl">' + neuPct + '% neutral</span>'
+      + '<span class="slbl" style="color:var(--red-t)">' + negPct + '% negative</span>'
+      + '</div></div>';
+  }
 
   // CASE SUMMARY - fetched here, exactly like Suggested Actions and Suggested Offers below.
   //
@@ -1723,45 +1992,6 @@ function renderRight(conv, tickets) {
     }).catch(function() {});
   }
 
-  var _tickets = tickets || allTickets();
-  var convTickets = _tickets.filter(function(t) {
-    return t.conversation_id === conv.conversation_id && isServiceable(t);
-  });
-  if (!convTickets.length) {
-    // Nothing open: a plain line, not a card. There is no list to head, count or fold,
-    // so the card chrome would be a container for nothing. This is where the old
-    // centre-pane banner went (see renderCentre).
-    body.innerHTML += '<div class="rp-noesc">No open escalations.</div>';
-  } else {
-    var tktHtml = convTickets.map(function(t) {
-      var isOpen = isServiceable(t);
-      var stBg = t.status === 'closed' ? 'background:var(--grn-bg);border-color:var(--grn-bd);color:var(--grn-t)' :
-                 isOpen ? 'background:var(--amb-bg);border-color:var(--amb-bd);color:var(--amb-t)' :
-                 'background:var(--surf2);border-color:var(--bdr);color:var(--t3)';
-      return '<div class="tkt-item tkt-item--clickable" onclick="goToConversation(\'' + escH(conv.conversation_id) + '\',\'' + escH(t.ticket_id) + '\')"><div class="tkt-head">'
-        + '<span class="tkt-id">' + escH(t.ticket_id.slice(0,16)) + '</span>'
-        + '<span class="tkt-st" style="' + stBg + '">' + escH(statusLabel(t.status)) + '</span>'
-        + '</div><div class="tkt-desc">' + escH((t.title||t.intent||'').slice(0,60)) + '</div>'
-        + '<div class="tkt-created">Created: ' + escH(fmtDateTime(t.created_at)) + '</div>'
-        // No Close button here any more. Closing happens on the CASE BAR in the
-        // conversation, above the exchanges of the case being read - one button, on the
-        // case the agent has actually just read, with no ids to tell apart. This card
-        // stayed a list: it is the way to REACH the customer's other open cases (clicking
-        // a row focuses that case in the conversation, where its own bar closes it), which
-        // matters because the Detailed view shows one case at a time.
-        + '</div>';
-    }).join('');
-    // Collapsed by default: the COUNT is the at-a-glance signal an agent needs, and
-    // each ticket row carries an id, a description, a date and a Resolve button, so
-    // three open tickets otherwise own most of the panel.
-    body.innerHTML += '<div class="rpcard tkt-card' + (state.tktOpen ? ' on' : '') + '" id="tkt-card">'
-      + '<button class="tkt-toggle" id="tkt-toggle" type="button">'
-      + '<span class="rplbl rplbl-tickets">Open Tickets (' + convTickets.length + ')</span>'
-      + '<svg class="tkt-chev" width="10" height="10" viewBox="0 0 16 16" aria-hidden="true">'
-      + '<path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="2"/></svg>'
-      + '</button>'
-      + '<div class="tkt-scroll">' + tktHtml + '</div></div>';
-  }
 
   // SUGGESTED ACTIONS. The rules behind this have existed since the agent-assist service
   // was written - an overdue SLA, a run of angry messages, a stalled KYC - and NOTHING in
@@ -1769,21 +1999,30 @@ function renderRight(conv, tickets) {
   // the day it was built. The follow-up rule is new; the card is what makes all four
   // reachable. Operational actions only - cross-sell/up-sell render in their own card
   // below, because those are a sales judgement and these are work that is slipping.
-  body.innerHTML += '<div class="rpcard" id="rpNbaCard"><div class="rplbl rplbl-tickets">Suggested Actions</div>'
-    + '<div id="rpNbaBody" style="font-size:11px;color:var(--t3)">Checking…</div></div>';
-  api('/admin/agent-assist/next-best-actions?conversation_id=' + encodeURIComponent(conv.conversation_id)
+  fetchNbaActions(conv);
+
+  // Cross-sell / up-sell opportunities (LLM-selected, code-gated; admin
+  // approves → editable offer draft → sent to WhatsApp + email).
+  fetchOpportunities(conv);
+}
+
+// The other two thirds of the case review, split out of renderRight so the Case Summary
+// Refresh button can repaint them too. Fix 171 made all three cards ONE server-side review
+// cached against the newest turn: regenerating it invalidates all three, but Refresh only
+// ever repainted the summary, so corrected actions stayed off screen until a full reload.
+// Neither call costs an LLM call on its own - both read the row the summary just wrote.
+function fetchNbaActions(conv) {
+  return api('/admin/agent-assist/next-best-actions?conversation_id=' + encodeURIComponent(conv.conversation_id)
       + focusedCaseParam(conv))
     .then(function(result) { renderNbaActions(result); })
     .catch(function() {
       var el = document.getElementById('rpNbaBody');
       if (el) el.textContent = 'Unavailable';
     });
+}
 
-  // Cross-sell / up-sell opportunities (LLM-selected, code-gated; admin
-  // approves → editable offer draft → sent to WhatsApp + email).
-  body.innerHTML += '<div class="rpcard" id="rpOppCard"><div class="rplbl rplbl-offers">Suggested Offers</div>'
-    + '<div id="rpOppBody" style="font-size:11px;color:var(--t3)">Checking…</div></div>';
-  api('/admin/agent-assist/opportunities?conversation_id=' + encodeURIComponent(conv.conversation_id)
+function fetchOpportunities(conv) {
+  return api('/admin/agent-assist/opportunities?conversation_id=' + encodeURIComponent(conv.conversation_id)
       + focusedCaseParam(conv))
     .then(function(result) { renderOpportunities(result); })
     .catch(function() {
@@ -1808,9 +2047,17 @@ var NBA_LABELS = {
   draft_follow_up:    'Follow-up due'   // superseded by promised_update
 };
 // Approving one of these writes an editable draft; anything else only records the
-// decision. Mirrors DRAFTABLE_ACTION_TYPES in shared/schemas/agent_assist.py - if the two
-// disagree the button promises a draft the API will not create.
-var NBA_DRAFTABLE = { promised_update: 1, draft_follow_up: 1 };
+// decision. Mirrors the API: DRAFTABLE_ACTION_TYPES in shared/schemas/agent_assist.py for
+// the first two, _ACK_OPENERS in routes/agent_assist.py for the other three. If the two
+// sides disagree the button promises a draft the API will not create.
+//
+// The last three used to be absent, so their button said "Acknowledge" and approving them
+// flipped a status column - nothing reached the customer, on the three nudges whose whole
+// definition is a reason to write to one.
+var NBA_DRAFTABLE = {
+  promised_update: 1, draft_follow_up: 1,
+  acknowledgement: 1, information_needed: 1, proactive_warning: 1
+};
 // Approving THIS one closes the case, so it gets its own words on both buttons. The
 // customer's message only ever proposes - a person decides here, which is the whole point
 // of the flow: a "thank you" used to close a live fraud dispute with nobody looking.
@@ -1924,6 +2171,7 @@ window.decideNbaAction = function(btn, status) {
 };
 
 function _sendNbaDecision(btn, recId, status) {
+  var item = btn.closest('.opp-item');
   btn.parentElement.querySelectorAll('button').forEach(function(b) { b.disabled = true; });
   api('/admin/agent-assist/recommendations/' + encodeURIComponent(recId) + '/decision', {
     method: 'POST',
@@ -1935,6 +2183,14 @@ function _sendNbaDecision(btn, recId, status) {
         if (state.convDetail) renderCentre(state.convDetail);
         renderQueue();
       });
+      // Dim the decided row and RETURN, exactly as decideOpportunity does for an offer.
+      // Returning is the half that matters: the renderRight at the end of this function
+      // rebuilds the card from the server, which is why an inline dim here had no effect
+      // before - it was painted and then thrown away microseconds later. The other
+      // branches keep that rebuild; only the draft branch, where the decision is now
+      // visible as a draft card in the centre, skips it.
+      if (item) item.style.opacity = '0.4';
+      return;
     } else if (res && res.action_type === 'ready_to_close' && status === 'approved') {
       // The case actually ended here, so the board, the queue and the ticket panel are all
       // stale. loadConversations refreshes the _allTickets cache the panels read.
@@ -4205,7 +4461,7 @@ function kgEsc(s) { return escH(String(s == null ? '' : s)); }
 // "regenerate", not "show me the current text".
 function renderCaseSummary(conv, refresh) {
   if (!conv || !conv.conversation_id) return;
-  api('/admin/conversations/' + encodeURIComponent(conv.conversation_id)
+  return api('/admin/conversations/' + encodeURIComponent(conv.conversation_id)
       + '/case-summary?refresh=' + (refresh ? 'true' : 'false') + focusedCaseParam(conv))
     .then(function(p) { paintCaseSummary(p); })
     .catch(function() {
@@ -4238,7 +4494,27 @@ function paintCaseSummary(p) {
 
 document.addEventListener('click', function(e) {
   var btn = e.target && e.target.closest && e.target.closest('#csum-refresh');
-  if (btn && state.convDetail) renderCaseSummary(state.convDetail, true);
+  if (!btn || !state.convDetail) return;
+  var conv = state.convDetail;
+  // Refresh regenerates the ONE review behind all three cards, so all three must repaint.
+  // Repainting only the summary left corrected actions on screen from the previous render,
+  // and the only way to see them was a full page reload.
+  //
+  // Sequenced, not parallel: the summary call holds refresh=true and rewrites the cached
+  // row. Firing the other two alongside it would race that write and repaint from the row
+  // it is replacing - the same staleness, just harder to see. Chained, they read what it
+  // wrote, and the per-case lock means they cost no second LLM call.
+  // The whole card dims: one review, one target. The three sections inside it are all
+  // about to be replaced, so dimming them individually would say the same thing three
+  // times and leave the header oddly bright between them.
+  var targets = [document.getElementById('crvw-group')];
+  runRefresh(btn, targets, 'Refresh', function() {
+    return Promise.resolve(renderCaseSummary(conv, true)).then(function() {
+      // Held busy until the LAST card has painted, not just the summary: releasing early
+      // would clear the spinner over two cards still showing the old text.
+      return Promise.all([fetchNbaActions(conv), fetchOpportunities(conv)]);
+    });
+  });
 });
 
 // Open Tickets fold. A class toggle on the card — the rows stay in the DOM, so the
@@ -4381,7 +4657,14 @@ document.addEventListener('click', function(e) {
     var meta = state.convs.find(function(c) {
       return c.conversation_id === state.convDetail.conversation_id;
     }) || state.convDetail;
-    if (meta.customer_id) loadCustomerContext(meta.customer_id, true);
+    // Same busy state as the case review's Refresh - one helper, so the two controls
+    // cannot drift apart. The tabs dim with the body: both are rebuilt by this call.
+    if (meta.customer_id) {
+      var targets = [document.getElementById('cctx-body'), document.getElementById('cctx-tabs')];
+      runRefresh(btn, targets, 'Refresh', function() {
+        return loadCustomerContext(meta.customer_id, true);
+      });
+    }
   }
 });
 
@@ -4718,6 +5001,9 @@ window.doUserLogout = function() {
   if (portalChatTimer) { clearInterval(portalChatTimer); portalChatTimer = null; }
   sessionStorage.removeItem('cx-user-jwt');
   sessionStorage.removeItem('cx-user-account');
+  // Clear the remembered location too, or signing out and back in would restore the
+  // last stage instead of the front door.
+  try { sessionStorage.removeItem('cx-stage'); sessionStorage.removeItem('cx-page'); sessionStorage.removeItem('cx-conv'); } catch (e) {}
   document.getElementById('userIdInput').value = '';
   document.getElementById('userPasswordInput').value = '';
   switchLoginMode('user');
@@ -4875,8 +5161,21 @@ if (userToken && portalUser && !isTokenExpired(userToken)) {
   bootUserPortal();
 } else if (adminToken && !isTokenExpired(adminToken)) {
   updateHubUser();
-  showStage('hub');
+  // Back to whatever was open, not always the Control Centre. Only 'app' is honoured
+  // here: 'user' is the customer portal, which the branch above already owns and which
+  // needs a portal token this branch does not have, and anything else means the hub.
+  var _saved = null;
+  try { _saved = sessionStorage.getItem('cx-stage'); } catch (e) {}
+  showStage(_saved === 'app' ? 'app' : 'hub');
   bootApp();
+  // The page INSIDE the console, restored after bootApp so its own setup has run.
+  // switchPage re-renders the nav and fires that page's loader, which is exactly what
+  // arriving on it should do.
+  if (_saved === 'app') {
+    var _page = null;
+    try { _page = sessionStorage.getItem('cx-page'); } catch (e) {}
+    if (_page && document.getElementById('page-' + _page)) switchPage(_page);
+  }
 } else {
   // First arrival with no session: the home page. The sign-in card ('apikey') is one
   // click away via openLogin/openSignup, and every logout path still returns straight

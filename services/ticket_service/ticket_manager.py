@@ -297,7 +297,9 @@ class TicketManager:
             lines = []
             for i, t in enumerate(by_id.values(), 1):
                 masked_desc, _ = mask_text((t.description or "")[:300])
-                opened = t.created_at.strftime("%d %b %Y") if t.created_at else "unknown date"
+                # IST, like every other date a person reads here: created_at is stored in
+                # UTC, so a ticket opened after 6:30pm IST otherwise reads as the day before.
+                opened = _when_date(t.created_at) if t.created_at else "unknown date"
                 subtype = _scope_label(t.metadata.get("ticket_scope"), t.intent)
                 lines.append(f'{i}. {t.ticket_id} — {subtype} (opened {opened}): "{masked_desc}"')
                 # What has actually been said on this case, not just how it opened.
@@ -556,6 +558,16 @@ class TicketManager:
             ticket_id=ticket.ticket_id,
             details=details,
         )
+
+
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _when_date(value) -> str:
+    """A stored UTC datetime as an IST date: "13 Sep 2026"."""
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(IST).strftime("%d %b %Y")
 
 
 def _scope_label(ticket_scope: str | None, intent: str) -> str:

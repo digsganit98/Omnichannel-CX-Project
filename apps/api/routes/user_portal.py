@@ -102,6 +102,17 @@ def _portal_email(user_id: str) -> str:
 
 
 def _portal_phone(user_id: str) -> str:
+    """DEPRECATED - has no callers, and must not gain one.
+
+    This invents a phone number from a hash of the user id: Fathima's is 918389736307
+    while her real number on the BFSI record is 7538870992. It was used for identity
+    resolution (matching an invented number against the customer master), for the
+    linked_phone that creates a whatsapp channel identity nobody can be reached on, and
+    it was passed to upsert_customer(), which would have written it over the seeded
+    c.phone. Use _graph_contact() to read the customer's real number instead.
+
+    Kept only because removing a module-level name is a wider change than this fix.
+    """
     digits = str(int(hashlib.sha256(user_id.encode()).hexdigest()[:12], 16))[-10:].zfill(10)
     return "91" + digits
 
@@ -109,6 +120,44 @@ def _portal_phone(user_id: str) -> str:
 def _graph_customer_id(user_id: str) -> str:
     digits = str(int(hashlib.sha256(user_id.encode()).hexdigest()[:12], 16))[-6:].zfill(6)
     return "CUST" + digits
+
+
+def _graph_contact(email: str = "", phone: str = "") -> dict:
+    """The matched BFSI customer's REAL contact details, or {} when nobody matches.
+
+    The portal had no way to learn a customer's real phone number. _portal_phone()
+    derives one from a SHA-256 of the user id - Fathima's is 918389736307 while her
+    actual number is 7538870992 - and that invented value was used for `linked_phone`,
+    for identity resolution, and passed to upsert_customer(), which writes:
+
+        SET c.phone = CASE WHEN $phone <> '' THEN $phone ELSE c.phone END
+
+    so a portal WhatsApp message would have overwritten the seeded master record with
+    the hash. It has not happened yet only because both portal customers have used web
+    chat, which passes phone="". The BFSI seed is not reproducible (see CLAUDE.md), so
+    that overwrite would be unrecoverable.
+
+    This reads the record instead of inventing one.
+    """
+    if os.getenv("NEO4J_ENABLED", "true").lower() != "true":
+        return {}
+    client = None
+    try:
+        from services.neo4j_service.client import Neo4jClient
+        from services.neo4j_service.queries import get_customer_by_identifier
+
+        client = Neo4jClient()
+        for candidate in (email, phone):
+            if candidate:
+                existing = get_customer_by_identifier(client, candidate)
+                if existing and existing.get("customer_id"):
+                    return existing
+    except Exception:
+        logger.warning("portal_graph_contact_lookup_failed", exc_info=True)
+    finally:
+        if client is not None:
+            client.close()
+    return {}
 
 
 def _resolve_graph_customer_id(user_id: str, email: str = "", phone: str = "") -> str:
@@ -347,13 +396,24 @@ def submit_user_message(
     channel = request.channel.strip().lower()
     contact_identifier = (request.contact_identifier or "").strip()
     email = str(user.get("email") or _portal_email(user_id)).strip().lower()
-    phone = _portal_phone(user_id)
+    # The customer's REAL number from the BFSI record, not _portal_phone()'s hash. Three
+    # things read this: identity resolution, the linked_phone that creates the whatsapp
+    # channel identity, and the graph write below - all of which were being handed an
+    # invented number.
+    record = _graph_contact(email)
+    phone = str(record.get("phone") or "").strip()
+    # True only when the number came from the customer themselves - typed into the
+    # WhatsApp box, or already on their record. A number we generated must never be
+    # written back to the graph, which is the master BFSI data.
+    phone_is_real = bool(phone)
     if channel == "email":
         email = contact_identifier.lower() or email
         if "@" not in email:
             raise HTTPException(status_code=400, detail="Enter a valid email address")
     elif channel == "whatsapp":
-        phone = re.sub(r"\D", "", contact_identifier) or phone
+        typed = re.sub(r"\D", "", contact_identifier)
+        if typed:
+            phone, phone_is_real = typed, True
         if len(phone) < 10 or len(phone) > 15:
             raise HTTPException(status_code=400, detail="Enter a valid WhatsApp number with country code")
     metadata = {
@@ -363,11 +423,17 @@ def submit_user_message(
         "source": "user_portal",
         "provider": "whatsapp_cloud" if channel == "whatsapp" else "email_user_portal",
         "linked_email": email,
-        "linked_phone": phone,
     }
+    # Only a real number becomes an identity. A generated one would create a whatsapp
+    # channel identity nobody can be reached on.
+    if phone_is_real and phone:
+        metadata["linked_phone"] = phone
     if channel == "whatsapp":
         metadata["outbound_provider"] = "meta"
-    graph_status = _upsert_customer_graph_user(user_id, email, phone, channel)
+    # "" unless the number is genuinely the customer's: upsert_customer only overwrites
+    # c.phone when the argument is non-empty, so this is what protects the seeded record.
+    graph_status = _upsert_customer_graph_user(
+        user_id, email, phone if phone_is_real else "", channel)
     if channel == "email":
         response = handle_email_message(
             EmailWebhookPayload(
@@ -406,7 +472,11 @@ def _web_chat_identity(user_id: str, user: dict) -> tuple[dict, str]:
     email = str(user.get("email") or _portal_email(user_id)).strip().lower()
     metadata = {
         "portal_user_id": user_id,
-        "portal_graph_customer_id": _resolve_graph_customer_id(user_id, email, _portal_phone(user_id)),
+        # Email only. The second argument used to be _portal_phone()'s hash, which is
+        # looked up against real BFSI phone numbers - a generated value has no business
+        # being matched against the customer master, and a collision would resolve this
+        # session to somebody else's record.
+        "portal_graph_customer_id": _resolve_graph_customer_id(user_id, email),
         "portal_contact_identifier": email,
         "linked_email": email,
         "source": "user_portal",

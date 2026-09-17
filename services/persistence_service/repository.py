@@ -131,7 +131,8 @@ class CXRepository(Protocol):
                         channel_identifier: str | None = None, provider: str | None = None,
                         retrieval_confidence: float | None = None,
                         intent_confidence: float | None = None,
-                        offer_product: str | None = None) -> dict: ...
+                        offer_product: str | None = None,
+                        recommendation_id: str | None = None) -> dict: ...
     def list_reply_drafts(self, conversation_id: str | None = None, status: str | None = None) -> list[dict]: ...
     def get_reply_draft(self, draft_id: str) -> dict | None: ...
     def update_reply_draft(self, draft_id: str, status: str, actor: str,
@@ -981,18 +982,21 @@ class SQLiteCXRepository:
         retrieval_confidence: float | None = None,
         intent_confidence: float | None = None,
         offer_product: str | None = None,
+        recommendation_id: str | None = None,
     ) -> dict:
         draft_id = new_id("draft")
         with self.connection() as conn:
             conn.execute(
                 "INSERT INTO reply_drafts(draft_id, conversation_id, customer_id, ticket_id, channel, "
                 "channel_identifier, provider, inbound_turn_id, draft_text, hold_reason, reason_code, "
-                "retrieval_confidence, intent_confidence, offer_product, status, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
+                "retrieval_confidence, intent_confidence, offer_product, recommendation_id, "
+                "status, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
                 (
                     draft_id, conversation_id, customer_id, ticket_id, channel, channel_identifier,
                     provider, inbound_turn_id, draft_text, hold_reason, reason_code,
-                    retrieval_confidence, intent_confidence, offer_product, utc_now(),
+                    retrieval_confidence, intent_confidence, offer_product, recommendation_id,
+                    utc_now(),
                 ),
             )
             row = conn.execute("SELECT * FROM reply_drafts WHERE draft_id = ?", (draft_id,)).fetchone()

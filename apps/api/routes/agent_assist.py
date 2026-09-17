@@ -696,6 +696,83 @@ def list_recommendations(ticket_id: str | None = None, conversation_id: str | No
     )
 
 
+# The opening line for each nudge that can be answered with a message. The facts come from
+# the record; the JUDGEMENT is left as a bracket for the agent to fill.
+#
+# Deliberately NOT model-written. Probed against the live fraud case, a model asked for this
+# sentence wrote "I have blocked your debit card immediately" when we had told the customer
+# to block it themselves and the CRM sync had failed - the outcome is not in the system, so
+# a model asked to state it can only invent it. That finding is why the card advised and
+# never drafted (commit 6d7977d). It is also why the fix is a template, not a prompt: the
+# reason not to generate these sentences has not changed.
+#
+# The bracket is the whole point. It is the one thing the agent must supply, it is obvious
+# on screen, and a draft sent with it still in is visibly unfinished rather than quietly
+# wrong.
+_ACK_OPENERS = {
+    ActionType.ACKNOWLEDGEMENT.value: (
+        "I am sorry this has been frustrating, and thank you for bearing with us.\n\n"
+        "I can see {subject} (reference {reference}) is still open.\n\n"
+        "[Say what you are doing about it before sending.]"
+    ),
+    ActionType.INFORMATION_NEEDED.value: (
+        "I am writing about {subject} (reference {reference}).\n\n"
+        "To move this forward we still need something from you.\n\n"
+        "[Name exactly what is outstanding before sending.]"
+    ),
+    ActionType.PROACTIVE_WARNING.value: (
+        "I am getting in touch about {subject} (reference {reference}) before it "
+        "affects you.\n\n"
+        "[State what you found in their records, and what they can do about it, "
+        "before sending.]"
+    ),
+}
+
+
+def _build_nudge_draft(repository, recommendation: dict) -> dict:
+    """An editable draft for a nudge whose answer is a message to the customer.
+
+    Same shape as _build_follow_up_draft and the same reasons: reply on the channel the
+    customer used, thread onto their last inbound turn, and assemble the text from the
+    record rather than generating it - an LLM call here would spend the binding Groq limit
+    restating facts we already hold, and inventing the part we do not.
+
+    Before this, approving one of these three flipped a status column and wrote an audit
+    row - nothing reached the customer. The card's own prompt calls every one of them "a
+    reason to WRITE to the customer", and not one of them could produce a message.
+    """
+    action_type = recommendation.get("action_type") or ""
+    conversation_id = recommendation.get("conversation_id") or ""
+    ticket_id = recommendation.get("ticket_id")
+    ticket = repository.get_ticket(ticket_id) if ticket_id else None
+
+    turns = repository.list_conversation_turns(conversation_id)
+    inbound = [t for t in turns if t.get("direction") == "inbound"]
+    last_inbound = inbound[-1] if inbound else None
+    channel = (last_inbound or {}).get("channel") or "web_chat"
+
+    subject = (ticket or {}).get("title") or "your request"
+    reference = ticket_id or conversation_id
+    opener = _ACK_OPENERS[action_type].format(
+        subject=subject.lower(), reference=reference)
+    draft_text = "Hello,\n\n" + opener + "\n\nThank you for your patience."
+
+    return repository.add_reply_draft(
+        conversation_id=conversation_id,
+        customer_id=recommendation.get("customer_id") or "",
+        channel=channel,
+        draft_text=draft_text,
+        ticket_id=ticket_id,
+        inbound_turn_id=(last_inbound or {}).get("turn_id"),
+        hold_reason="Approved nudge - edit & send",
+        reason_code=action_type,
+        channel_identifier=None,
+        provider="nudge_reply",
+        # Lets a discard of this draft put the recommendation back to `pending`.
+        recommendation_id=recommendation.get("recommendation_id"),
+    )
+
+
 def _build_follow_up_draft(repository, recommendation: dict) -> dict:
     """Create an editable follow-up draft grounded in what we actually promised.
 
@@ -734,6 +811,7 @@ def _build_follow_up_draft(repository, recommendation: dict) -> dict:
         reason_code=recommendation.get("action_type") or ActionType.PROMISED_UPDATE.value,
         channel_identifier=None,
         provider="follow_up_nudge",
+        recommendation_id=recommendation.get("recommendation_id"),
     )
 
 
@@ -752,8 +830,18 @@ def decide_recommendation(recommendation_id: str, payload: NBADecisionUpdate) ->
     if payload.status == "approved" and existing.get("action_type") in _OFFER_ACTION_TYPES:
         conversation_id = existing.get("conversation_id") or ""
         customer_id = existing.get("customer_id") or ""
-        identifiers = repository.list_customer_identifiers(customer_id)
-        push = [i for i in identifiers if i["channel"] in ("whatsapp", "email")]
+        # PUSH channels only - whatsapp or email. An offer is a message to someone who is
+        # not currently looking at the portal, so web chat does not qualify: delivery.py
+        # has no outbound provider for it and the offer would sit unread until the
+        # customer happened to visit. test_approve_offer_fails_without_push_channel holds
+        # this rule: a web-chat-only customer cannot be sent an offer at all.
+        #
+        # Same resolver the send uses (customer RECORD + channels written in from), then
+        # narrowed here, so the two cannot disagree about WHERE someone is reachable -
+        # only about which of those places an offer may use.
+        from apps.api.routes.reply_drafts import reachable_push_identities
+        push = [i for i in reachable_push_identities(repository, customer_id)
+                if i.get("channel") in ("whatsapp", "email")]
         if not push:
             raise HTTPException(
                 status_code=400,
@@ -778,6 +866,7 @@ def decide_recommendation(recommendation_id: str, payload: NBADecisionUpdate) ->
             channel_identifier=None,
             provider="opportunity_engine",
             offer_product=offer_product,
+            recommendation_id=recommendation_id,
         )
 
     # Approving a FOLLOW-UP also executes something: an editable draft in the conversation's
@@ -793,6 +882,25 @@ def decide_recommendation(recommendation_id: str, payload: NBADecisionUpdate) ->
                 status_code=409,
                 detail="A pending reply draft already exists — send or discard it first.")
         draft = _build_follow_up_draft(repository, existing)
+
+    # The other three nudges also answer with a message, and until now approving one did
+    # nothing a customer could see. Kept as a SEPARATE branch rather than folded into
+    # DRAFTABLE_ACTION_TYPES: that set also decides which cards carry a promise countdown
+    # (_action_metadata), and adding these to it would hang a deadline clock on an empathy
+    # nudge that has none.
+    if (payload.status == "approved"
+            and existing.get("action_type") in _ACK_OPENERS
+            and draft is None):
+        conversation_id = existing.get("conversation_id") or ""
+        pending_drafts = repository.list_reply_drafts(
+            conversation_id=conversation_id, status="pending")
+        # Same one-draft-at-a-time rule the other two paths enforce. The composer holds one
+        # pending draft per conversation, so a second would be unreachable.
+        if pending_drafts:
+            raise HTTPException(
+                status_code=409,
+                detail="A pending reply draft already exists - send or discard it first.")
+        draft = _build_nudge_draft(repository, existing)
 
     # Approving a CLOSE PROPOSAL ends the case. This is the only place a customer-raised
     # proposal turns into a closed ticket, and it goes through the same POST /close path a

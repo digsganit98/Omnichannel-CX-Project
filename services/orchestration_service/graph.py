@@ -300,23 +300,29 @@ class OrchestrationGraph:
                     current = (message.display_name or "").lower()
                     if not current or current == portal_user:
                         message.display_name = neo4j_profile["name"]
+                # The record's contact details, exactly as the non-portal branch above
+                # takes them. This branch took the NAME only, so a customer who signed up
+                # on the portal never gained a whatsapp channel identity even though their
+                # number was on their record - and the offer card then promised "WhatsApp
+                # + Email" while _send_offer_draft, reading channel_identities, could only
+                # find the email. setdefault: a number the customer actually typed arrives
+                # in metadata already and outranks the record.
+                if neo4j_profile:
+                    if neo4j_profile.get("email"):
+                        message.metadata.setdefault("linked_email", neo4j_profile["email"])
+                    if neo4j_profile.get("phone"):
+                        message.metadata.setdefault("linked_phone", neo4j_profile["phone"])
             except Exception:
                 logger.exception("neo4j_portal_name_lookup_failed")
         crm_profile = self.crm.lookup_customer(message.channel.value, message.channel_identifier)
         if crm_profile.status == "synced":
             message.profile_metadata["crm"] = crm_profile.data
             message.metadata["crm_customer_id"] = crm_profile.data.get("customer_id") or crm_profile.data.get("id")
-        # Cross-channel linking: if a WhatsApp customer's phone matches a Neo4j BFSI
-        # customer that already has an email, inject that email so resolve_customer()
-        # will merge the two SQLite identities into one customer_id automatically.
-        if self.neo4j_client and message.channel.value == "whatsapp" and not is_portal_message:
-            try:
-                from services.neo4j_service.queries import get_customer_by_identifier
-                neo4j_cust = get_customer_by_identifier(self.neo4j_client, message.channel_identifier)
-                if neo4j_cust and neo4j_cust.get("email"):
-                    message.profile_metadata.setdefault("linked_email", neo4j_cust["email"])
-            except Exception:
-                pass
+        # (A second get_customer_by_identifier() for WhatsApp senders used to sit here,
+        # injecting linked_email into profile_metadata. It queried the same node the
+        # non-portal block above had already read, and that block sets metadata
+        # ["linked_email"] from the same field - so this was one duplicate Neo4j round
+        # trip per WhatsApp message for a value already in hand.)
 
         state.customer = self.repository.resolve_customer(message)
         state.conversation = self.repository.get_or_create_conversation(state.customer_id)

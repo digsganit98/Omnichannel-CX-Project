@@ -37,15 +37,26 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from services.pii_service.masker import mask_text, unmask_text
 
 logger = logging.getLogger(__name__)
 
 
+# Everything is STORED in UTC (repository.utc_now) and read by people in India. _when
+# formatted the UTC clock directly, so a follow-up due 11:08am IST was shown to the agent
+# as "5:38am" - five and a half hours early, on the one sentence that tells them when they
+# promised to reply. The browser-side formatters were always right: they use toLocale*,
+# which renders in the viewer's zone. This text cannot, because it is generated on the
+# server and STORED on the recommendation row, so the zone is pinned here instead.
+# Same conversion the hourly analytics rollup already applies in SQL
+# (repository.py: strftime(..., '+5 hours', '+30 minutes')).
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
 def _when(value) -> str:
-    """A stored timestamp as something a person can read: "13 Sep, 10:21pm".
+    """A stored UTC timestamp as an IST time a person can read: "13 Sep, 10:21pm".
 
     ABSOLUTE, never relative. The model's sentence is written once and then stored on the
     recommendation row, so anything relative rots the moment it is read later - "due in 8
@@ -62,6 +73,11 @@ def _when(value) -> str:
         parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except (TypeError, ValueError):
         return str(value)
+    # A naive value is a UTC one: everything written here comes from utc_now(). Without
+    # this, astimezone() would read it as the SERVER's local zone and shift it twice.
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    parsed = parsed.astimezone(IST)
     hour = parsed.hour % 12 or 12
     meridiem = "am" if parsed.hour < 12 else "pm"
     return f"{parsed.day} {parsed:%b}, {hour}:{parsed:%M}{meridiem}"
