@@ -35,6 +35,7 @@ from .routes.integrations import router as integrations_router
 from .routes.llm_observability import router as llm_observability_router
 from .routes.neo4j_admin import router as neo4j_admin_router
 from .routes.orchestration import router as orchestration_router
+from .routes.system_config import router as system_config_router
 from .routes.rag import router as rag_router
 from .routes.tickets import router as tickets_router
 from .routes.neo4j_admin import router as neo4j_admin_router
@@ -101,6 +102,7 @@ app.include_router(integrations_whatsapp_router)
 app.include_router(integrations_router)
 app.include_router(neo4j_admin_router)
 app.include_router(orchestration_router)
+app.include_router(system_config_router)
 app.include_router(rag_router)
 app.include_router(audit_router)
 app.include_router(llm_observability_router)

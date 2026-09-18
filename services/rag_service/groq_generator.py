@@ -117,6 +117,17 @@ _LANGUAGE_NAMES = {
 # measurement says the nine successful replies used under 500 tokens, so it does not.
 REASONING_EFFORT_OPERATIONS = {"customer_context", "answer_generation"}
 
+# The sampling values, as CONSTANTS rather than literals at the call sites. They were
+# inlined - 0.2 inside _generate's call_params, 4000 beside the customer_context request -
+# and the System Configuration page reported them by copying the numbers into a table by
+# hand, which is a copy that goes stale silently the moment either is tuned. Naming them
+# gives that page something to import, so the code stays the single source.
+TEMPERATURE = 0.2
+# Measured, not chosen: the note at the categorisation call records 8192 making a ~1.2K
+# prompt total 9,735 and failing against the per-minute ceiling, and 4000 clearing the
+# document with ~2x margin.
+CUSTOMER_CONTEXT_MAX_TOKENS = 4000
+
 
 def _reasoning_effort() -> str:
     """How hard a reasoning model should think before answering. "low" by default.
@@ -533,7 +544,7 @@ class GroqGenerator:
             #    prompt request total 9735 and failed.
             # 4000 clears the document with ~2x margin and leaves TPM room for the
             # pipeline's other calls in the same minute.
-            max_tokens=4000,
+            max_tokens=CUSTOMER_CONTEXT_MAX_TOKENS,
         )
         if not result["llm_used"]:
             return None
@@ -579,7 +590,7 @@ class GroqGenerator:
     ) -> dict:
         # The sampling config that defines this call's "version" (see llm_usage._config_version).
         # Kept in one place so every record_llm_call below stamps the same version tag.
-        call_params = {"temperature": 0.2}
+        call_params = {"temperature": TEMPERATURE}
         if not self.api_key:
             result = {"text": "", "model": self.model, "llm_used": False, "error": "GROQ_API_KEY not set"}
             record_llm_call(

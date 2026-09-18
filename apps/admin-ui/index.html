@@ -6,7 +6,7 @@
 <title>OmnichannelCX</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="icon" type="image/png" href="/admin-ui/assets/ganit-logo.png">
-<link rel="stylesheet" href="/admin-ui/assets/style.css?v=20260918-btntr2">
+<link rel="stylesheet" href="/admin-ui/assets/style.css?v=20260918-syscfg10">
 </head>
 <body>
 
@@ -656,12 +656,42 @@
     <!-- ── CONNECTORS PAGE ── -->
     <div class="page" id="page-connectors">
       <div class="conn-page">
-        <div>
-          <div class="dash-title">System Configuration</div>
-          <div class="dash-sub">Channels, integrations and the runtime this workspace is running on</div>
+        <!-- No subtitle: the tabs below name the same things it listed, and
+             Performance & Cost carries none either. -->
+        <div class="dash-title">System Configuration</div>
+        <!-- Same tab mechanism as Performance & Cost: an-tabs / an-tab and one section per
+             tab, so the two configuration-and-reporting pages behave identically rather
+             than each inventing a way to switch panels. -->
+        <div class="an-tabs" id="sysTabs">
+          <button class="an-tab on" onclick="switchSysTab('current',this)">Current view</button>
+          <button class="an-tab" onclick="switchSysTab('model',this)">AI Model</button>
+          <button class="an-tab" onclick="switchSysTab('channels',this)">Channels</button>
+          <button class="an-tab" onclick="switchSysTab('integrations',this)">Integrations</button>
+          <button class="an-tab" onclick="switchSysTab('data',this)">Knowledge &amp; Data</button>
         </div>
-        <div class="conn-grid" id="connGrid">
-          <div style="color:var(--t3);font-size:12px;padding:20px 0">Loading connector status…</div>
+
+        <!-- TEMPORARY. The page as it was, kept only so the new sections can be compared
+             against it. To be deleted once the rest is signed off. -->
+        <div class="sys-section" data-sys="current">
+          <div class="conn-grid" id="connGrid">
+            <div style="color:var(--t3);font-size:12px;padding:20px 0">Loading connector status…</div>
+          </div>
+        </div>
+
+        <div class="sys-section" data-sys="model" hidden>
+          <div id="sysModel"><div class="empty-state">Loading…</div></div>
+        </div>
+
+        <div class="sys-section" data-sys="channels" hidden>
+          <div id="sysChannels"><div class="empty-state">Loading…</div></div>
+        </div>
+
+        <div class="sys-section" data-sys="integrations" hidden>
+          <div id="sysIntegrations"><div class="empty-state">Loading…</div></div>
+        </div>
+
+        <div class="sys-section" data-sys="data" hidden>
+          <div id="sysData"><div class="empty-state">Loading…</div></div>
         </div>
       </div>
     </div><!-- end #page-connectors -->
@@ -876,6 +906,6 @@
 <!-- d3-force, vendored (15KB, tree-shaken to the 7 functions used). Local, not a CDN:
      the app has no other external JS and a demo must not depend on a network fetch. -->
 <script src="/admin-ui/assets/vendor-d3-force.js?v=20260902"></script>
-<script src="/admin-ui/assets/app.js?v=20260917-ph1"></script>
+<script src="/admin-ui/assets/app.js?v=20260918-syscfg10"></script>
 </body>
 </html>

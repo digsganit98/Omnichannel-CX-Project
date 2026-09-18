@@ -275,6 +275,8 @@ Terse one-liners only; full detail lives in the per-fix sections below.
 - **Fix 185 — the offers cache could not see a mood change:** the `opportunity_evaluations` fingerprint covers holdings, turn count, ticket count and suggested products, none of which move when a customer calms down, so a row written under the old gate kept answering "recent negative sentiment"; the gate result is now part of the fingerprint.
 - **Fix 186 — a case showed another case's nudges:** the response kept rows with no `ticket_id` for two reasons that were both checked and false, so the clause only ever fired WITH a case on screen — exactly when a case-less row does not belong there.
 - **Fix 187 — the nudge and offer buttons moved to the card's top-right corner:** they sat below the Why line, so their position moved with the length of the reason text and two stacked cards had their buttons at different heights.
+- **Fix 188 — System Configuration became five tabbed sections instead of four connector cards:** the page and the hub card both promised "the model and runtime configuration" and delivered four channel badges, so AI Model, Channels, Integrations and Knowledge & Data were added beside the existing view, assembled from the three probes that already perform real checks rather than a new status layer.
+- **Fix 189 — the LLM operations table reads its ceilings from the code, not a copy:** `max_tokens` and `temperature` were retyped into the endpoint, so tuning `MAX_TOKENS` in `case_reviewer` would have left the page confidently reporting the old number; they are now imported from the modules that enforce them, and `case_advice` was dropped because it has no production caller and has never fired.
 - **EC2 deploy 2026-09-07 (second) — Fix 152 to Fix 162, UI only:** four bind-mounted files took effect on landing with no rebuild and no container restarted; the two changed Python files are on the box but deliberately not built into the image.
 - **OPEN - Fix 149 turned three escalation gates into constants (NOT FIXED, measured):** moving the KB into the graph made retrieval EXHAUSTIVE - all 14 chunks, every message - and three gates that read `contexts` to judge relevance silently became no-ops. Measured on all 11 messages sent through the UI today, with contexts rebuilt from `retrieval_evidence`: **`_is_strong_l1_knowledge_answer` TRUE 11/11**, `knowledge_not_found` fired **0/11**, KB chunks per turn **min 14 max 14**. The third gate is the damaging one - returning True SKIPS the handoff check entirely, the rule that reads the customer's own words. Live consequence: the FD question, for which the KB has zero guidance, auto-sent as a confident L1 knowledge answer and volunteered a penalty rule from the model's own general knowledge. Today's real escalations (fraud, claim dispute) were caught earlier by intent-label rules, which MASKS this for the intents that have their own rules and exposes it for everything else. `confidence=0.95` is hardcoded in Priority 2, so `confidence < 0.3` cannot fire either. **Fix 149 verified the PROVENANCE consumers of contexts and never enumerated the DECISION consumers.** This gate has now broken twice in opposite directions (Fix 143 inverted it) because it reads a property of RETRIEVAL to answer a question about RELEVANCE - so the fix is not a patched condition. Fix 150 already supplies the raw material (`customer_holds`, each chunk's `concept`); probe it on real messages before designing the gate.
 - **Reference - local vs the hosted instance:** the two are NOT meant to match. Application code must; `docker-compose.yml` deliberately must not (Ollama commented out on EC2, and ngrok has **no** `profiles: ["tunnel"]` there - copying the local file over means the next `up` starts no tunnel and **WhatsApp goes silent with nothing to say why**). EC2 is the sole holder of the shared WhatsApp number, mailbox and ngrok domain, which is why local ships with those off. Three deploy traps, all already bitten: **no git on EC2** (scp only), `restart` runs **old code** (rebuild), and `restart` does **not re-read `.env`** (`up -d`). Plus what must never be done there - other teams' containers, the disk watermark, removing OpenSearch, `prune --volumes`.
@@ -9935,3 +9937,89 @@ customer message was announced as this session's own test pollution.
 The user's instruction, which stands: **"you should be careful about when you make any edit.
 always properly analyze each and every thing"**. Every fix above was landed by reading the
 code or the rows; none of the wrong answers came from a measurement.
+
+
+## Session 43b - 2026-09-18 (Fix 188-189: the System Configuration page)
+
+### Fix 188 - System Configuration became five tabbed sections
+
+The page was four connector cards. Its own subtitle promised "the runtime this workspace is
+running on" and the Control Centre hub card promised "the model and runtime configuration" -
+and none of it existed anywhere in the UI. The session-42 note that the runtime config "sits
+on the Analytics FinOps tab instead" was also wrong: FinOps' "By model / config" is a USAGE
+report grouped by model, not configuration.
+
+Five tabs, using the same `an-tabs` / `an-tab` mechanism and one section per tab as
+Performance & Cost, so the two pages do not each invent a way to switch panels. The existing
+connector grid is kept as "Current view" for comparison and is to be deleted once the rest
+is signed off.
+
+**Assembled, not re-derived.** Three endpoints already existed and each performs a REAL
+check rather than reporting what is configured: `GroqGenerator().status(check_connection=
+True)` calls `models.list()`, `/admin/rag/health` loads the embedding model so
+`active_backend` can disagree with the requested one, and `/admin/neo4j/status` counts nodes
+per label. `GET /admin/system/config` reads them and adds only what nothing exposed. Secrets
+are reduced to a boolean before they leave the module.
+
+**Not on the 20s connector poll.** Its LLM row is an outbound request, so polling it would
+fire three provider calls a minute at a page nobody is looking at.
+
+What the design cost, in the order the user rejected it:
+
+- Every section rendered at once. `.sys-section` was given `display:flex` copied from
+  `.analytics-section` WITHOUT the `[hidden]{display:none}` line sitting directly beneath
+  it, and `display:flex` beats the browser's default `hidden` rule.
+- The tab strip sat flush against the title. `.an-tabs` carries `margin:-8px`, tuned for
+  `.dash`, which is a flex column with its own gap; `.conn-page` is a plain padded
+  container.
+- A whole second visual language was invented - `cfg-row`, `cfg-k`, `cfg-v`, `cfg-alert`,
+  `cfg-pill` - when `.cctx-item` already was the app's label/value row and `.escbanner`
+  already was this exact amber banner. Both were adopted, then `.cctx-item` was itself
+  dropped: it is right in a 320px side panel and wrong across a 1300px card, where it
+  pinned every two-character value to the far edge.
+- Local material leaked onto a page a production operator reads - WhatsApp local test mode,
+  poll intervals, a mailbox counter. Removed.
+- `Connection`, `Credential` and `Request timeout` were rows saying only that the thing
+  works, which the page already assumes. Folded into one dot beside the heading.
+- The provider's `available_models` were listed - 13 entries including
+  `whisper-large-v3-turbo` and `canopylabs/orpheus-arabic-saudi`, speech and Arabic TTS
+  models, on a customer-support configuration page.
+
+Final shape: a Runtime strip of what is true of EVERY call, one LLM operations table, and
+one fact-tile grid per remaining section - 39 rows reduced to 17 tiles. Colour only where a
+check can fail; the retrieval-drift and text-capture banners render only when true.
+
+### Fix 189 - the operations table reads the code, not a copy of it
+
+Provider, model and temperature are stamped PER OPERATION rather than reported once for the
+page. Today every row resolves to the same provider, but that is a fact about this
+configuration and not about the system: nothing stops a cheap classifier and the
+customer-facing reply being routed to different models, and a card headed "the model" is
+wrong the moment they are. The table is the shape that survives that change.
+
+`max_tokens` and `temperature` were retyped into the endpoint as literals. `TEMPERATURE` and
+`CUSTOMER_CONTEXT_MAX_TOKENS` are now named constants in `groq_generator` - they were inline
+at their call sites, so there was nothing to import - and the endpoint imports them along
+with `case_reviewer.MAX_TOKENS`. Verified by setting `MAX_TOKENS = 7777` in memory and
+re-reading the endpoint: the page reported 7777, then 4000 when restored. It follows the
+code.
+
+Three claims in the first version of that table were wrong and were corrected by reading the
+call sites: `handoff_check` is deliberately UNCAPPED (120 returned 400 and the hold silently
+never fired, because the design fails open), the `max_tokens=4000` at generator:536 belongs
+to `customer_context` and not `answer_generation`, and `RAG_TOP_K` defaults to 4.
+
+`case_advice` was removed entirely: `case_review` replaced it, it has no production caller,
+and `llm_usage_events` records zero calls ever. Its row also carried "kept on disk because
+its tests still exercise it" - an internal detail about our repository, on a page an operator
+reads. The `Effort` and `JSON` columns went too: JSON mode is a response format nobody acts
+on, and effort is set on two of eight rows and already stated in the note beneath.
+
+**Still static and able to drift:** the list of operations itself, `Fires` and `Notes`. A new
+LLM operation will not appear on this page until someone adds it by hand. Making the call
+sites register themselves was offered and deferred by the user.
+
+### Test status
+
+**5 failed / 151 passed** - the documented baseline. No deliberate real Groq call; the one
+live probe on this page is `models.list()`, which the endpoint already used.

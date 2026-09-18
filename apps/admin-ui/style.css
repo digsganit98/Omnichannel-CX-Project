@@ -946,6 +946,145 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .settings-page::-webkit-scrollbar{width:3px}
 .settings-page::-webkit-scrollbar-thumb{background:var(--bdr);border-radius:3px}
 .settings-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+/* ── System Configuration sections ──────────────────────────────────────────
+   Values here are short - "4", "INBOX", "ready", "0.2" - so the page is built from FACT
+   TILES (label over value, in a responsive grid) and one table, not from full-width rows.
+   An earlier version used the Customer Context row, which is right in a 320px side panel
+   and wrong here: across a 1300px card it pinned every value to the far edge with a lake
+   of white in between. Colour appears only where a check can fail. */
+/* `.an-tabs` carries margin:-8px 0 -6px, tuned for the analytics page where `.dash` is a
+   flex column with its own gap. `.conn-page` is a plain padded scroll container, so that
+   negative top margin pulled the strip up against the title with no breathing room, and
+   the sections below sat on the border. Scoped to #sysTabs so the analytics strip, which
+   is correct where it lives, is not touched. */
+#sysTabs{margin:14px 0 0}
+/* REQUIRED, not redundant: `display:flex` beats the browser's default `[hidden]` rule, so
+   without this every section renders at once and the tabs do nothing. .analytics-section
+   carries the identical line one block above for the same reason - it was copied from
+   there without this half, and all five sections painted stacked. */
+.sys-section[hidden]{display:none}
+/* Cards are laid out two-up. Configuration is read by scanning, and a single column of
+   full-width cards on a 1300px page put four words on each line and pushed the rest below
+   the fold. The operations table and any banner opt out with .sys-wide. */
+.sys-section{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));
+  gap:14px;align-items:start;padding-top:18px}
+.sys-wide{grid-column:1/-1}
+
+/* THE CARD. A calm surface: no heavy border, a hairline and a soft lift instead, with the
+   Ganit blue as a 3px spine down the left edge. That spine is the only saturated colour on
+   a normal card - it brands the page without tinting every row, which is what the
+   --blue-bg fills were doing when this was first built. */
+.sys-section .chart-card{border-color:transparent;border-radius:12px;padding:0;
+  box-shadow:0 1px 2px rgba(16,24,40,.05),0 0 0 1px rgba(16,24,40,.05);overflow:hidden;
+  position:relative}
+.sys-section .chart-card::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;
+  background:var(--blue);opacity:.85}
+.sys-section .chart-card:hover{box-shadow:0 4px 16px rgba(23,1,208,.07),0 0 0 1px rgba(23,1,208,.10)}
+/* The heading sits on the palest Ganit blue, so a card reads as titled rather than as a
+   list with a bold first line. */
+.sys-section .chart-title{margin:0;padding:12px 16px 11px 19px;font-size:11px;font-weight:600;
+  letter-spacing:.4px;text-transform:uppercase;color:var(--blue-t);
+  background:linear-gradient(to bottom,rgba(213,224,246,.5),rgba(213,224,246,.22));
+  border-bottom:1px solid rgba(180,200,238,.45)}
+
+/* FACT TILES. Label over value, in a responsive grid. */
+.cfg-facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
+  gap:1px;background:rgba(228,231,236,.7)}
+.cfg-fact{background:var(--surf);padding:12px 14px 13px 20px;min-width:0}
+.cfg-fact--wide{grid-column:span 2}
+.cfg-fact-k{font-size:9.5px;font-weight:600;letter-spacing:.4px;text-transform:uppercase;
+  color:var(--t3);margin-bottom:5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cfg-fact-v{font-size:12.5px;font-weight:600;color:var(--t1);
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  font-variant-numeric:tabular-nums;letter-spacing:-.2px;word-break:break-word;
+  line-height:1.35;display:flex;align-items:center;gap:6px}
+.cfg-fact-v::before{content:"";width:6px;height:6px;border-radius:50%;flex:0 0 auto;
+  background:currentColor;display:none}
+/* A dot ONLY where a state can fail. A value like "INBOX" is not a state and gets none. */
+.cfg-fact--ok .cfg-fact-v::before,.cfg-fact--bad .cfg-fact-v::before,
+.cfg-fact--warn .cfg-fact-v::before{display:block}
+.cfg-fact--ok .cfg-fact-v{color:var(--grn-t)}
+.cfg-fact--bad .cfg-fact-v{color:var(--red-t)}
+.cfg-fact--warn .cfg-fact-v{color:var(--org-t)}
+/* A detail belonging to ONE value - the node breakdown, a mailbox - not a row of its own. */
+.cfg-fact-s{font-size:9.5px;color:var(--t3);line-height:1.5;margin-top:4px;font-weight:400;
+  font-family:'Inter',sans-serif;letter-spacing:0}
+
+/* THE RUNTIME STRIP. Only what is true of EVERY call. Anything that could differ between
+   operations belongs in the table instead - including the model, because nothing stops a
+   classifier and the customer-facing reply being routed to different ones. */
+.cfg-strip{display:flex;flex-wrap:wrap;background:var(--surf)}
+.cfg-strip-i{display:flex;align-items:baseline;gap:7px;padding:12px 20px;
+  border-right:1px solid rgba(228,231,236,.7)}
+.cfg-strip-i:last-child{border-right:0}
+.cfg-strip-k{font-size:9.5px;font-weight:600;letter-spacing:.4px;text-transform:uppercase;
+  color:var(--t3)}
+.cfg-strip-v{font-size:12px;font-weight:600;color:var(--t1);
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;letter-spacing:-.2px}
+.cfg-strip-v--bad{color:var(--red-t)}
+.cfg-dot{display:inline-block;width:7px;height:7px;border-radius:50%;flex:0 0 auto;
+  align-self:center}
+.cfg-dot--ok{background:var(--grn);box-shadow:0 0 0 3px rgba(22,163,74,.15)}
+.cfg-dot--bad{background:var(--red);box-shadow:0 0 0 3px rgba(220,38,38,.15)}
+.cfg-dot--off{background:var(--t3);box-shadow:0 0 0 3px rgba(152,162,179,.18)}
+
+/* Prose, under a grid or table. A caveat is a sentence, not a row whose value is not one. */
+.cfg-notes{padding:13px 20px 15px;border-top:1px solid rgba(228,231,236,.7);
+  background:rgba(242,244,247,.4)}
+.cfg-notes p{font-size:10.5px;line-height:1.65;color:var(--t2);margin:0}
+.cfg-notes p+p{margin-top:5px}
+.cfg-notes b{font-weight:600;color:var(--t1)}
+
+/* Seven columns do not fit every window. Scrolling the TABLE rather than the page keeps
+   the card and the tab strip still while the columns move. */
+.cfg-tbl-wrap{overflow-x:auto}
+.cfg-tbl-wrap::-webkit-scrollbar{height:3px}
+.cfg-tbl-wrap::-webkit-scrollbar-thumb{background:var(--bdr);border-radius:3px}
+
+/* A banner inside a card sits flush with its padding. */
+.sys-section .escbanner{border-radius:0;border-left:0;border-right:0;border-top:0}
+
+/* Per-operation settings. A table, because the columns are the point: the operations do
+   not share a configuration, and a difference only reads as a difference in a grid.
+   Striped like .cctx-item rather than ruled, so it belongs to the same family as the rows
+   above it instead of looking like a spreadsheet dropped into the page. */
+.cfg-tbl{width:100%;border-collapse:collapse;font-size:11px}
+.cfg-tbl th{text-align:left;font-size:9px;font-weight:600;text-transform:uppercase;
+  letter-spacing:.5px;color:var(--t3);padding:12px 12px 9px 0;
+  border-bottom:1px solid var(--bdr);white-space:nowrap}
+.cfg-tbl th:first-child{padding-left:19px}
+.cfg-tbl th:last-child{padding-right:16px}
+.cfg-tbl td{padding:10px 12px 10px 0;color:var(--t2);vertical-align:top;
+  border-top:1px solid rgba(228,231,236,.7)}
+.cfg-tbl td:first-child{padding-left:19px}
+.cfg-tbl td:last-child{padding-right:16px}
+.cfg-tbl tbody tr:first-child td{border-top:0}
+.cfg-tbl tbody tr:hover{background:rgba(213,224,246,.16)}
+/* The operation name is the row's subject, so it carries the Ganit blue - the only place
+   in the table that is coloured, which is what makes the column scannable. */
+.cfg-tbl td.cfg-mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  color:var(--blue-t);white-space:nowrap;font-weight:600;letter-spacing:-.2px}
+/* A setting that is not set reads as absent rather than as a value. */
+.cfg-tbl td.cfg-num{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  font-variant-numeric:tabular-nums;color:var(--t1);white-space:nowrap}
+.cfg-tbl td.cfg-num--none{color:var(--t3);font-weight:400}
+.cfg-tbl td.cfg-dim{color:var(--t3);font-size:10px;line-height:1.5;min-width:200px}
+/* WHEN it runs, the column that decides whether a row matters at all. An every-message
+   operation is on the customer path and its settings multiply across every conversation,
+   so it is the one thing on the row given weight besides the name. */
+.cfg-tbl td.cfg-fires{font-size:10.5px;color:var(--t2);min-width:150px;line-height:1.45}
+.cfg-tbl td.cfg-fires--hot{color:var(--t1);font-weight:500}
+/* The provider repeats down the column today, so it is set quietly - it is here to be
+   CORRECT when it stops repeating, not to be read on every row. */
+.cfg-tbl td.cfg-sub{font-size:10.5px;color:var(--t3)}
+.cfg-tbl td.cfg-mono--dim{color:var(--t2);font-weight:500;font-size:10.5px}
+/* Numeric columns right-align so the ceilings compare down the column. */
+.cfg-tbl th.cfg-th-n{text-align:right}
+.cfg-tbl td.cfg-num{text-align:right}
+/* No .cfg-alert: .escbanner (line ~371) is already this exact treatment - amber fill,
+   amber border, flex with a leading glyph - and a second copy of it would be a third
+   amber banner style in one stylesheet. Shown ONLY when something disagrees with its
+   configuration or leaves the system. */
 .settings-card{background:var(--surf);border:1px solid var(--bdr);border-radius:var(--r);padding:18px}
 .settings-card-title{font-size:13px;font-weight:600;color:var(--t1);margin-bottom:14px}
 .sim-tabs{display:flex;gap:5px;margin-bottom:12px}

@@ -296,6 +296,255 @@ window.switchAnalyticsTab = function(name, btn) {
   if (btn) btn.classList.add('on');
 };
 
+// ── System Configuration ────────────────────────────────────────────────────
+// Same shape as switchAnalyticsTab, deliberately: two pages that switch panels should not
+// do it two different ways. The sections are already in the DOM, so switching is a hidden
+// flag and never a refetch - one /admin/system/config call fills all four.
+window.switchSysTab = function(name, btn) {
+  var secs = document.querySelectorAll('.sys-section[data-sys]');
+  for (var i = 0; i < secs.length; i++) {
+    secs[i].hidden = secs[i].getAttribute('data-sys') !== name;
+  }
+  var tabs = document.querySelectorAll('#sysTabs .an-tab');
+  for (var j = 0; j < tabs.length; j++) tabs[j].classList.remove('on');
+  if (btn) btn.classList.add('on');
+};
+
+// A compact label-over-value tile. `state` is 'ok' | 'bad' | 'warn' and adds a dot; it is
+// omitted for anything that is a value rather than a state, because a dot beside "INBOX"
+// means nothing. `sub` is a detail belonging to this value, not a row of its own.
+function cfgFact(k, v, state, sub, wide) {
+  var val = (v === null || v === undefined || v === '') ? '—' : String(v);
+  return '<div class="cfg-fact' + (state ? ' cfg-fact--' + state : '')
+    + (wide ? ' cfg-fact--wide' : '') + '">'
+    + '<div class="cfg-fact-k">' + escH(k) + '</div>'
+    + '<div class="cfg-fact-v">' + escH(val) + '</div>'
+    + (sub ? '<div class="cfg-fact-s">' + escH(sub) + '</div>' : '')
+    + '</div>';
+}
+
+function cfgGrid(inner) { return '<div class="cfg-facts">' + inner + '</div>'; }
+
+// As cfgCard, but the heading may carry markup (the health dot).
+function cfgCardRaw(titleHtml, bodyHtml, badge, wide) {
+  return '<div class="chart-card' + (wide ? ' sys-wide' : '') + '">'
+    + '<div class="chart-title"><span>' + titleHtml + '</span>'
+    + (badge ? '<span class="win-badge">' + escH(badge) + '</span>' : '')
+    + '</div>' + bodyHtml + '</div>';
+}
+
+function cfgCard(title, rowsHtml, badge, wide) {
+  return '<div class="chart-card' + (wide ? ' sys-wide' : '') + '">'
+    + '<div class="chart-title"><span>' + escH(title) + '</span>'
+    + (badge ? '<span class="win-badge">' + escH(badge) + '</span>' : '')
+    + '</div>' + rowsHtml + '</div>';
+}
+
+window.loadSystemConfig = async function() {
+  var cfg;
+  try {
+    cfg = await api('/admin/system/config');
+  } catch (e) {
+    ['sysModel','sysChannels','sysIntegrations','sysData'].forEach(function(id) {
+      var el = document.getElementById(id);
+      if (el) el.innerHTML = '<div class="empty-state">Configuration unavailable.</div>';
+    });
+    return;
+  }
+  renderSysModel(cfg);
+  renderSysIntegrations(cfg);
+  renderSysChannels(cfg);
+  renderSysData(cfg);
+};
+
+function renderSysModel(cfg) {
+  var el = document.getElementById('sysModel');
+  if (!el) return;
+  var m = cfg.model || {};
+  var ops = (m.operations || []);
+
+  // SYSTEM-WIDE ONLY. Anything that varies per operation belongs in the table below, and
+  // anything that applies to every call belongs here - PII masking is not a property of
+  // one operation, it is a property of every prompt that leaves this system.
+  var dot = m.reachable === true ? 'cfg-dot--ok'
+          : m.reachable === false ? 'cfg-dot--bad' : 'cfg-dot--off';
+  var strip = '<div class="cfg-strip">'
+    + '<div class="cfg-strip-i"><span class="cfg-dot ' + dot + '"></span>'
+    +   '<span class="cfg-strip-k">Provider</span>'
+    +   '<span class="cfg-strip-v">' + escH(m.provider || '—')
+    +   (m.reachable === true ? ' reachable'
+        : m.reachable === false ? ' unreachable' : '') + '</span></div>'
+    + '<div class="cfg-strip-i"><span class="cfg-strip-k">PII masking</span>'
+    +   '<span class="cfg-strip-v' + (m.pii_masking ? '' : ' cfg-strip-v--bad') + '">'
+    +   (m.pii_masking ? 'on, every prompt' : 'off') + '</span></div>'
+    + '<div class="cfg-strip-i"><span class="cfg-strip-k">Binding limit</span>'
+    +   '<span class="cfg-strip-v">tokens per minute</span></div>'
+    + '</div>';
+
+  // Column order follows what a reader asks, in order: what is this call, WHEN does it run
+  // (the column that decides whether the row matters - an every-message call multiplies
+  // cost, an agent-console one does not), who answers it, how is it tuned, anything else.
+  //
+  // There is no Surface column. "customer message" / "agent console" only restated Fires -
+  // "every inbound message" already says it is on the customer path - so the pill was
+  // decoration in a column of its own.
+  var opsTbl = !ops.length ? '<div class="empty-state">No operations.</div>' :
+    '<div class="cfg-tbl-wrap"><table class="cfg-tbl"><thead><tr>'
+    + '<th>Operation</th><th>Fires</th><th>Provider</th><th>Model</th>'
+    + '<th class="cfg-th-n">Temp</th><th class="cfg-th-n">Max tokens</th><th>Notes</th>'
+    + '</tr></thead><tbody>'
+    + ops.map(function(o) {
+        // An every-message operation runs on the customer path and is the one whose
+        // settings multiply; it is emphasised, and an occasional one is not.
+        var hot = /every inbound/.test(o.fires || '');
+        return '<tr>'
+          + '<td class="cfg-mono">' + escH(o.operation) + '</td>'
+          + '<td class="cfg-fires' + (hot ? ' cfg-fires--hot' : '') + '">'
+          +   escH(o.fires || '—') + '</td>'
+          + '<td class="cfg-sub">' + escH(o.provider || '—') + '</td>'
+          + '<td class="cfg-mono cfg-mono--dim">' + escH(o.model || '—') + '</td>'
+          + '<td class="cfg-num">' + escH(o.temperature) + '</td>'
+          + '<td class="cfg-num' + (o.max_tokens ? '' : ' cfg-num--none') + '">'
+          +   (o.max_tokens ? escH(o.max_tokens) : 'uncapped') + '</td>'
+          + '<td class="cfg-dim">' + escH(o.note || '') + '</td>'
+          + '</tr>';
+      }).join('')
+    + '</tbody></table></div>'
+    + '<div class="cfg-notes">'
+    + '<p><b>Reasoning effort</b> — ' + escH(m.reasoning_effort || 'off')
+    + ' — is set for '
+    + escH((m.reasoning_effort_operations || []).join(' and ') || 'no operations')
+    + ' only. A reasoning model bills the tokens it spends thinking, so raising it raises '
+    + 'cost on every one of those calls.</p>'
+    + '<p><b>Temperature</b> and every ceiling above are fixed in code, not configuration. '
+    + 'Each ceiling was set against an observed failure rather than chosen.</p>'
+    + '</div>';
+
+  el.innerHTML = cfgCardRaw('Runtime', strip, null, true)
+    + cfgCard('LLM operations', opsTbl, ops.length + ' operations', true);
+}
+
+function renderSysIntegrations(cfg) {
+  var el = document.getElementById('sysIntegrations');
+  if (!el) return;
+  var ig = cfg.integrations || {};
+  var crm = ig.crm || {}, tr = ig.tracing || {}, sp = ig.spend_recording || {};
+
+  // Endpoint, credential, timeout and retries are GONE. A URL is not a decision, "set"
+  // only says a credential exists - which "connected" already implies - and nobody tunes
+  // a retry count from a read-only page.
+  var crmGrid = cfgGrid(
+      cfgFact('Provider', crm.provider)
+    + cfgFact('Project', crm.project_key)
+    + cfgFact('Status', crm.credential_set ? 'connected' : 'not configured',
+        crm.credential_set ? 'ok' : 'bad'));
+
+  // The one thing on this card that is a DECISION rather than a setting: with capture on,
+  // prompt and reply text leaves this system to a third party.
+  var trAlert = tr.captures_message_text
+    ? '<div class="escbanner">⚠ Message text leaves this system. Prompts and replies '
+      + 'are sent to the tracing provider, including customer details that survive '
+      + 'masking.</div>'
+    : '';
+  var trGrid = cfgGrid(
+      cfgFact('Tracing', tr.enabled ? 'on' : 'off', tr.enabled ? 'ok' : null)
+    + cfgFact('Message text', tr.captures_message_text ? 'captured' : 'not captured',
+        tr.captures_message_text ? 'warn' : null)
+    + cfgFact('Spend recording', sp.enabled ? 'on' : 'off', sp.enabled ? 'ok' : 'bad',
+        sp.enabled ? 'a model with no configured rate records zero cost' : null, true));
+
+  el.innerHTML = cfgCard('Case management', crmGrid)
+    + cfgCard('Observability', trAlert + trGrid);
+}
+
+// Channels. Every value here is a word or a number, so the whole section is one grid per
+// card. The credential rows are gone: "set" restates the readiness beside it.
+async function renderSysChannels(cfg) {
+  var el = document.getElementById('sysChannels');
+  if (!el) return;
+  var wa = {}, em = {}, inbox = {};
+  try { wa = await api('/admin/whatsapp/status'); } catch (e) {}
+  try { em = await api('/admin/email/status'); } catch (e) {}
+  try { inbox = await api('/admin/email-inbox/status'); } catch (e) {}
+
+  var mode = String((cfg.delivery || {}).outbound_mode || 'live');
+  var live = mode.toLowerCase() === 'live';
+
+  // ONE grid for every channel. Inbound and outbound are separate tiles only for email,
+  // where the two pipes genuinely fail independently; WhatsApp reports a single readiness
+  // because both halves come from the same credential.
+  var waReady = wa.meta_webhook_ready && wa.meta_outbound_ready;
+  var inUp = !!inbox.configured, outUp = !!em.gmail_ready;
+
+  var grid = cfgGrid(
+      cfgFact('Outbound delivery', mode, live ? 'warn' : null,
+        live ? 'messages reach real recipients' : 'nothing is delivered', true)
+    + cfgFact('WhatsApp', waReady ? 'ready' : 'not ready', waReady ? 'ok' : 'bad')
+    + cfgFact('Email in', inUp ? 'active' : 'down', inUp ? 'ok' : 'bad',
+        inbox.mailbox ? inbox.mailbox : null)
+    + cfgFact('Email out', outUp ? 'active' : 'down', outUp ? 'ok' : 'bad',
+        em.from_email || null)
+    + cfgFact('Web chat', 'active', 'ok', 'no push provider')
+    + cfgFact('Voice', 'phase 2'));
+
+  // Shown only when a pipe has actually failed - otherwise the tiles above say everything.
+  var err = inbox.last_error
+    ? '<div class="escbanner">⚠ Inbound mail: ' + escH(inbox.last_error) + '</div>'
+    : '';
+
+  el.innerHTML = cfgCard('Channels', err + grid);
+}
+
+// Knowledge & Data. The embedding BACKEND and DIMENSIONS were the model stated twice over;
+// the index name and the bolt endpoint are internal identifiers nobody acts on.
+async function renderSysData(cfg) {
+  var el = document.getElementById('sysData');
+  if (!el) return;
+  var r = cfg.retrieval || {};
+  var health = {}, graph = {};
+  try { health = await api('/admin/rag/health'); } catch (e) {}
+  try { graph = await api('/admin/neo4j/status'); } catch (e) {}
+
+  var hemb = health.embeddings || {};
+  var drifted = hemb.requested_backend && hemb.active_backend
+             && hemb.requested_backend !== hemb.active_backend;
+  // The ONLY reason the active backend is reported at all: it can disagree with the
+  // configured one, and then retrieval is not doing what the page says it does.
+  var alert = drifted
+    ? '<div class="escbanner">⚠ Retrieval is not running the configured backend. '
+      + 'Requested ' + escH(hemb.requested_backend) + ', active '
+      + escH(hemb.active_backend)
+      + (hemb.fallback_reason ? ' — ' + escH(hemb.fallback_reason) : '') + '.</div>'
+    : '';
+
+  var idxOnline = String(health.index_state || '').toUpperCase() === 'ONLINE';
+  var counts = graph.node_counts || {};
+  var labels = Object.keys(counts).sort(function(a, b) { return counts[b] - counts[a]; });
+  var total = labels.reduce(function(sum, k) { return sum + counts[k]; }, 0);
+
+  var grid = cfgGrid(
+      cfgFact('Vector store', r.backend, drifted ? 'warn' : null)
+    + cfgFact('Embedding model', r.embedding_model, null,
+        r.embedding_dimension ? r.embedding_dimension + ' dimensions' : null, true)
+    + cfgFact('Results per query', r.top_k)
+    + cfgFact('Knowledge base', health.index_state || 'unknown',
+        idxOnline ? 'ok' : 'bad',
+        (health.chunks === undefined ? '' : health.chunks + ' chunks indexed'))
+    + cfgFact('Graph', graph.reachable === true ? 'reachable'
+        : graph.reachable === false ? 'unreachable' : 'unknown',
+        graph.reachable === true ? 'ok' : graph.reachable === false ? 'bad' : null,
+        total ? total + ' nodes across ' + labels.length + ' labels' : null));
+
+  // The label breakdown is a detail of the graph tile, not five more rows.
+  var breakdown = labels.length
+    ? '<div class="cfg-notes"><p>'
+      + labels.map(function(k) { return escH(k) + ' ' + counts[k]; }).join(' · ')
+      + '</p></div>'
+    : '';
+
+  el.innerHTML = cfgCard('Retrieval and data', alert + grid + breakdown);
+}
+
 window.switchLoginMode = function(mode) {
   var isAdmin = mode === 'admin';
   document.getElementById('adminModeForm').style.display = isAdmin ? 'flex' : 'none';
@@ -545,7 +794,7 @@ window.switchPage = function(name) {
   // Same reason as the stage above: a refresh in Analytics should come back to Analytics.
   try { sessionStorage.setItem('cx-page', name); } catch (e) {}
   if (name === 'analytics') loadAnalytics();
-  if (name === 'connectors') loadConnectors();
+  if (name === 'connectors') { loadConnectors(); loadSystemConfig(); }
   if (name === 'sim') loadAudit();
   if (name === 'servicedesk') loadServiceDesk();
   if (name === 'profile') loadProfile();
@@ -5180,7 +5429,11 @@ function startRealtime() {
   rtTimers.push(setInterval(function() {
     if (activePage === 'analytics') loadAnalytics();
   }, 90000));
-  // Connectors: poll every 20s
+  // Connectors: poll every 20s. loadSystemConfig is deliberately NOT on this timer -
+  // its LLM row is a real round trip to the provider (models.list), so polling it every
+  // 20s would fire an outbound request three times a minute for a page nobody is looking
+  // at. Configuration does not change while you watch it; it is fetched when the page
+  // opens and on Refresh.
   rtTimers.push(setInterval(function() {
     if (activePage === 'connectors') loadConnectors();
   }, 20000));
