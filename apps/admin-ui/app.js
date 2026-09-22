@@ -299,7 +299,7 @@ window.switchAnalyticsTab = function(name, btn) {
 // ── System Configuration ────────────────────────────────────────────────────
 // Same shape as switchAnalyticsTab, deliberately: two pages that switch panels should not
 // do it two different ways. The sections are already in the DOM, so switching is a hidden
-// flag and never a refetch - one /admin/system/config call fills all four.
+// flag and never a refetch.
 window.switchSysTab = function(name, btn) {
   var secs = document.querySelectorAll('.sys-section[data-sys]');
   for (var i = 0; i < secs.length; i++) {
@@ -309,29 +309,6 @@ window.switchSysTab = function(name, btn) {
   for (var j = 0; j < tabs.length; j++) tabs[j].classList.remove('on');
   if (btn) btn.classList.add('on');
 };
-
-// A compact label-over-value tile. `state` is 'ok' | 'bad' | 'warn' and adds a dot; it is
-// omitted for anything that is a value rather than a state, because a dot beside "INBOX"
-// means nothing. `sub` is a detail belonging to this value, not a row of its own.
-function cfgFact(k, v, state, sub, wide) {
-  var val = (v === null || v === undefined || v === '') ? '—' : String(v);
-  return '<div class="cfg-fact' + (state ? ' cfg-fact--' + state : '')
-    + (wide ? ' cfg-fact--wide' : '') + '">'
-    + '<div class="cfg-fact-k">' + escH(k) + '</div>'
-    + '<div class="cfg-fact-v">' + escH(val) + '</div>'
-    + (sub ? '<div class="cfg-fact-s">' + escH(sub) + '</div>' : '')
-    + '</div>';
-}
-
-function cfgGrid(inner) { return '<div class="cfg-facts">' + inner + '</div>'; }
-
-// As cfgCard, but the heading may carry markup (the health dot).
-function cfgCardRaw(titleHtml, bodyHtml, badge, wide) {
-  return '<div class="chart-card' + (wide ? ' sys-wide' : '') + '">'
-    + '<div class="chart-title"><span>' + titleHtml + '</span>'
-    + (badge ? '<span class="win-badge">' + escH(badge) + '</span>' : '')
-    + '</div>' + bodyHtml + '</div>';
-}
 
 function cfgCard(title, rowsHtml, badge, wide) {
   return '<div class="chart-card' + (wide ? ' sys-wide' : '') + '">'
@@ -345,16 +322,11 @@ window.loadSystemConfig = async function() {
   try {
     cfg = await api('/admin/system/config');
   } catch (e) {
-    ['sysModel','sysChannels','sysIntegrations','sysData'].forEach(function(id) {
-      var el = document.getElementById(id);
-      if (el) el.innerHTML = '<div class="empty-state">Configuration unavailable.</div>';
-    });
+    var el = document.getElementById('sysModel');
+    if (el) el.innerHTML = '<div class="empty-state">Configuration unavailable.</div>';
     return;
   }
   renderSysModel(cfg);
-  renderSysIntegrations(cfg);
-  renderSysChannels(cfg);
-  renderSysData(cfg);
 };
 
 function renderSysModel(cfg) {
@@ -362,24 +334,6 @@ function renderSysModel(cfg) {
   if (!el) return;
   var m = cfg.model || {};
   var ops = (m.operations || []);
-
-  // SYSTEM-WIDE ONLY. Anything that varies per operation belongs in the table below, and
-  // anything that applies to every call belongs here - PII masking is not a property of
-  // one operation, it is a property of every prompt that leaves this system.
-  var dot = m.reachable === true ? 'cfg-dot--ok'
-          : m.reachable === false ? 'cfg-dot--bad' : 'cfg-dot--off';
-  var strip = '<div class="cfg-strip">'
-    + '<div class="cfg-strip-i"><span class="cfg-dot ' + dot + '"></span>'
-    +   '<span class="cfg-strip-k">Provider</span>'
-    +   '<span class="cfg-strip-v">' + escH(m.provider || '—')
-    +   (m.reachable === true ? ' reachable'
-        : m.reachable === false ? ' unreachable' : '') + '</span></div>'
-    + '<div class="cfg-strip-i"><span class="cfg-strip-k">PII masking</span>'
-    +   '<span class="cfg-strip-v' + (m.pii_masking ? '' : ' cfg-strip-v--bad') + '">'
-    +   (m.pii_masking ? 'on, every prompt' : 'off') + '</span></div>'
-    + '<div class="cfg-strip-i"><span class="cfg-strip-k">Binding limit</span>'
-    +   '<span class="cfg-strip-v">tokens per minute</span></div>'
-    + '</div>';
 
   // Column order follows what a reader asks, in order: what is this call, WHEN does it run
   // (the column that decides whether the row matters - an every-message call multiplies
@@ -410,139 +364,15 @@ function renderSysModel(cfg) {
           + '</tr>';
       }).join('')
     + '</tbody></table></div>'
+    // The one system-wide fact worth stating on this page: it is true of EVERY call above
+    // rather than of any one row, so it cannot live in the table.
     + '<div class="cfg-notes">'
-    + '<p><b>Reasoning effort</b> — ' + escH(m.reasoning_effort || 'off')
-    + ' — is set for '
-    + escH((m.reasoning_effort_operations || []).join(' and ') || 'no operations')
-    + ' only. A reasoning model bills the tokens it spends thinking, so raising it raises '
-    + 'cost on every one of those calls.</p>'
-    + '<p><b>Temperature</b> and every ceiling above are fixed in code, not configuration. '
-    + 'Each ceiling was set against an observed failure rather than chosen.</p>'
+    + '<p><b>PII masking</b> — ' + (m.pii_masking ? 'on' : '<b>off</b>')
+    + '. PAN, Aadhaar, phone and card numbers are masked in every prompt before it '
+    + 'leaves this system.</p>'
     + '</div>';
 
-  el.innerHTML = cfgCardRaw('Runtime', strip, null, true)
-    + cfgCard('LLM operations', opsTbl, ops.length + ' operations', true);
-}
-
-function renderSysIntegrations(cfg) {
-  var el = document.getElementById('sysIntegrations');
-  if (!el) return;
-  var ig = cfg.integrations || {};
-  var crm = ig.crm || {}, tr = ig.tracing || {}, sp = ig.spend_recording || {};
-
-  // Endpoint, credential, timeout and retries are GONE. A URL is not a decision, "set"
-  // only says a credential exists - which "connected" already implies - and nobody tunes
-  // a retry count from a read-only page.
-  var crmGrid = cfgGrid(
-      cfgFact('Provider', crm.provider)
-    + cfgFact('Project', crm.project_key)
-    + cfgFact('Status', crm.credential_set ? 'connected' : 'not configured',
-        crm.credential_set ? 'ok' : 'bad'));
-
-  // The one thing on this card that is a DECISION rather than a setting: with capture on,
-  // prompt and reply text leaves this system to a third party.
-  var trAlert = tr.captures_message_text
-    ? '<div class="escbanner">⚠ Message text leaves this system. Prompts and replies '
-      + 'are sent to the tracing provider, including customer details that survive '
-      + 'masking.</div>'
-    : '';
-  var trGrid = cfgGrid(
-      cfgFact('Tracing', tr.enabled ? 'on' : 'off', tr.enabled ? 'ok' : null)
-    + cfgFact('Message text', tr.captures_message_text ? 'captured' : 'not captured',
-        tr.captures_message_text ? 'warn' : null)
-    + cfgFact('Spend recording', sp.enabled ? 'on' : 'off', sp.enabled ? 'ok' : 'bad',
-        sp.enabled ? 'a model with no configured rate records zero cost' : null, true));
-
-  el.innerHTML = cfgCard('Case management', crmGrid)
-    + cfgCard('Observability', trAlert + trGrid);
-}
-
-// Channels. Every value here is a word or a number, so the whole section is one grid per
-// card. The credential rows are gone: "set" restates the readiness beside it.
-async function renderSysChannels(cfg) {
-  var el = document.getElementById('sysChannels');
-  if (!el) return;
-  var wa = {}, em = {}, inbox = {};
-  try { wa = await api('/admin/whatsapp/status'); } catch (e) {}
-  try { em = await api('/admin/email/status'); } catch (e) {}
-  try { inbox = await api('/admin/email-inbox/status'); } catch (e) {}
-
-  var mode = String((cfg.delivery || {}).outbound_mode || 'live');
-  var live = mode.toLowerCase() === 'live';
-
-  // ONE grid for every channel. Inbound and outbound are separate tiles only for email,
-  // where the two pipes genuinely fail independently; WhatsApp reports a single readiness
-  // because both halves come from the same credential.
-  var waReady = wa.meta_webhook_ready && wa.meta_outbound_ready;
-  var inUp = !!inbox.configured, outUp = !!em.gmail_ready;
-
-  var grid = cfgGrid(
-      cfgFact('Outbound delivery', mode, live ? 'warn' : null,
-        live ? 'messages reach real recipients' : 'nothing is delivered', true)
-    + cfgFact('WhatsApp', waReady ? 'ready' : 'not ready', waReady ? 'ok' : 'bad')
-    + cfgFact('Email in', inUp ? 'active' : 'down', inUp ? 'ok' : 'bad',
-        inbox.mailbox ? inbox.mailbox : null)
-    + cfgFact('Email out', outUp ? 'active' : 'down', outUp ? 'ok' : 'bad',
-        em.from_email || null)
-    + cfgFact('Web chat', 'active', 'ok', 'no push provider')
-    + cfgFact('Voice', 'phase 2'));
-
-  // Shown only when a pipe has actually failed - otherwise the tiles above say everything.
-  var err = inbox.last_error
-    ? '<div class="escbanner">⚠ Inbound mail: ' + escH(inbox.last_error) + '</div>'
-    : '';
-
-  el.innerHTML = cfgCard('Channels', err + grid);
-}
-
-// Knowledge & Data. The embedding BACKEND and DIMENSIONS were the model stated twice over;
-// the index name and the bolt endpoint are internal identifiers nobody acts on.
-async function renderSysData(cfg) {
-  var el = document.getElementById('sysData');
-  if (!el) return;
-  var r = cfg.retrieval || {};
-  var health = {}, graph = {};
-  try { health = await api('/admin/rag/health'); } catch (e) {}
-  try { graph = await api('/admin/neo4j/status'); } catch (e) {}
-
-  var hemb = health.embeddings || {};
-  var drifted = hemb.requested_backend && hemb.active_backend
-             && hemb.requested_backend !== hemb.active_backend;
-  // The ONLY reason the active backend is reported at all: it can disagree with the
-  // configured one, and then retrieval is not doing what the page says it does.
-  var alert = drifted
-    ? '<div class="escbanner">⚠ Retrieval is not running the configured backend. '
-      + 'Requested ' + escH(hemb.requested_backend) + ', active '
-      + escH(hemb.active_backend)
-      + (hemb.fallback_reason ? ' — ' + escH(hemb.fallback_reason) : '') + '.</div>'
-    : '';
-
-  var idxOnline = String(health.index_state || '').toUpperCase() === 'ONLINE';
-  var counts = graph.node_counts || {};
-  var labels = Object.keys(counts).sort(function(a, b) { return counts[b] - counts[a]; });
-  var total = labels.reduce(function(sum, k) { return sum + counts[k]; }, 0);
-
-  var grid = cfgGrid(
-      cfgFact('Vector store', r.backend, drifted ? 'warn' : null)
-    + cfgFact('Embedding model', r.embedding_model, null,
-        r.embedding_dimension ? r.embedding_dimension + ' dimensions' : null, true)
-    + cfgFact('Results per query', r.top_k)
-    + cfgFact('Knowledge base', health.index_state || 'unknown',
-        idxOnline ? 'ok' : 'bad',
-        (health.chunks === undefined ? '' : health.chunks + ' chunks indexed'))
-    + cfgFact('Graph', graph.reachable === true ? 'reachable'
-        : graph.reachable === false ? 'unreachable' : 'unknown',
-        graph.reachable === true ? 'ok' : graph.reachable === false ? 'bad' : null,
-        total ? total + ' nodes across ' + labels.length + ' labels' : null));
-
-  // The label breakdown is a detail of the graph tile, not five more rows.
-  var breakdown = labels.length
-    ? '<div class="cfg-notes"><p>'
-      + labels.map(function(k) { return escH(k) + ' ' + counts[k]; }).join(' · ')
-      + '</p></div>'
-    : '';
-
-  el.innerHTML = cfgCard('Retrieval and data', alert + grid + breakdown);
+  el.innerHTML = cfgCard('LLM operations', opsTbl, ops.length + ' operations', true);
 }
 
 window.switchLoginMode = function(mode) {
@@ -2765,7 +2595,6 @@ window.loadAnalytics = async function() {
       fetch('/analytics/channels', { headers: adminHeaders() }).then(function(r){return r.json();}),
       fetch('/analytics/intents',  { headers: adminHeaders() }).then(function(r){return r.json();}),
       fetch('/analytics/agents',   { headers: adminHeaders() }).then(function(r){return r.json();}),
-      fetch('/admin/audit-events', { headers: adminHeaders() }).then(function(r){return r.json();}),
       fetch('/admin/llm-observability/summary?days=7', { headers: adminHeaders() }).then(function(r){return r.json();}),
       fetch('/analytics/sentiment', { headers: adminHeaders() }).then(function(r){return r.json();}),
       fetch('/analytics/solution-performance', { headers: adminHeaders() }).then(function(r){return r.json();}),
@@ -2774,12 +2603,11 @@ window.loadAnalytics = async function() {
     renderChannelBars(results[1]);
     renderIntentBars(results[2]);
     renderAgentPanel(results[3]);
-    renderFeedList(results[4], false);
-    renderLlmUsagePanel(results[5]);
-    renderModelVersionTable(results[5]);
-    renderLlmTimeTrends(results[5]);
-    renderSolutionStats(results[7]);
-    renderSolutionCharts(results[7]);
+    renderLlmUsagePanel(results[4]);
+    renderModelVersionTable(results[4]);
+    renderLlmTimeTrends(results[4]);
+    renderSolutionStats(results[6]);
+    renderSolutionCharts(results[6]);
   } catch(e) {
     console.error('Analytics load error:', e.message);
   } finally {
@@ -2910,22 +2738,12 @@ function llmOpColor(name, idx) {
   return 'var(' + LLM_OP_COLORS[idx % LLM_OP_COLORS.length] + ')';
 }
 
-// A table cell that is a mini meter: a proportional bar + the value beside it.
-// frac = 0..1 (share of the column max), color = css colour, valueLabel = printed text.
-// The <td> stays a real table cell; the flex row lives on an inner wrapper so the
-// four metric cells keep their own table columns.
-// A plain right-aligned figure. Six meters per row put ~54 bars on one screen, none
-// saying anything the number did not: a meter compares WITHIN one dimension, so one
-// column earns it and the rest were decoration.
+// A plain right-aligned figure. Every metric column is one of these: the bars that used
+// to sit on Tokens were dropped when that column became Input and Output, because a bar
+// compares rows within ONE dimension and two token columns side by side are already the
+// comparison worth making.
 function llmNumCell(valueLabel, muted) {
   return '<td class="llm-num' + (muted ? ' llm-num--muted' : '') + '">' + valueLabel + '</td>';
-}
-
-function llmMeterCell(frac, color, valueLabel) {
-  var pct = Math.max(2, Math.round((frac || 0) * 100));
-  return '<td class="llm-meter-cell"><div class="llm-meter-wrap">'
-    + '<div class="llm-meter"><div class="llm-meter-fill" style="width:' + pct + '%;background:' + color + '"></div></div>'
-    + '<span class="llm-meter-val">' + valueLabel + '</span></div></td>';
 }
 
 function renderLlmUsagePanel(data) {
@@ -2947,9 +2765,10 @@ function renderLlmUsagePanel(data) {
     { val: avg.toFixed(0) + ' ms', lbl: 'Avg latency', tone: 'amb', icon: '&#9201;' },
   ];
 
-  // Every metric column becomes its own meter (bar + value), each scaled to that column's
-  // max across operations, coloured by the row's operation colour — so Calls, Token share,
-  // Cost and Latency all read as mini bar charts, not bare numbers.
+  // Tokens carries the meter, scaled to the largest operation and coloured by the row's
+  // operation colour; the remaining columns are plain numbers. Tokens is what the other
+  // figures derive from - cost is tokens priced, and calls only says how often - so it is
+  // the one worth reading as a bar and it leads the table.
   var ops = (data.by_operation || []).slice();
   // Ordered by WHERE each call happens in the pipeline, not by cost. Cost order shuffles
   // as usage changes and tells you nothing about what the system does; this reads top to
@@ -2966,14 +2785,13 @@ function renderLlmUsagePanel(data) {
     var n = Number(r.calls || 0);
     return n ? Number(r.estimated_cost_usd || 0) / n : 0;
   };
-  var maxTok   = ops.reduce(function(m, r){ return Math.max(m, Number(r.total_tokens || 0)); }, 0) || 1;
-  var maxCalls = ops.reduce(function(m, r){ return Math.max(m, Number(r.calls || 0)); }, 0) || 1;
   var maxCost  = ops.reduce(function(m, r){ return Math.max(m, Number(r.estimated_cost_usd || 0)); }, 0) || 1;
   var maxAvgC  = ops.reduce(function(m, r){ return Math.max(m, avgCostOf(r)); }, 0) || 1;
   var maxLat   = ops.reduce(function(m, r){ return Math.max(m, Number(r.avg_latency_ms || 0)); }, 0) || 1;
   var opRows = ops.map(function(row, i) {
     var clr = llmOpColor(row.operation, i);
-    var tok = Number(row.total_tokens || 0);
+    var inTok  = Number(row.prompt_tokens || 0);
+    var outTok = Number(row.completion_tokens || 0);
     var cl  = Number(row.calls || 0);
     var co  = Number(row.estimated_cost_usd || 0);
     var lat = Number(row.avg_latency_ms || 0);
@@ -2983,11 +2801,12 @@ function renderLlmUsagePanel(data) {
         + '<span class="llm-op-dot" style="background:' + clr + '"></span>'
         + escH((row.operation || 'unknown').replace(/_/g, ' '))
         + (purpose ? '<span class="llm-op-q">?</span>' : '') + '</td>'
-      + llmMeterCell(cl / maxCalls, clr, cl.toLocaleString())
-      + llmNumCell(tok.toLocaleString())
+      + llmNumCell(inTok.toLocaleString())
+      + llmNumCell(outTok.toLocaleString())
       + llmNumCell('$' + co.toFixed(6))
       + llmNumCell('$' + avgCostOf(row).toFixed(6), true)
       + llmNumCell(lat.toFixed(0) + ' ms', true)
+      + llmNumCell(cl.toLocaleString())
       + '</tr>';
   }).join('');
 
@@ -3003,11 +2822,11 @@ function renderLlmUsagePanel(data) {
         + '</div>';
     }).join('')
     + '</div>'
-    + '<table class="mini-table llm-op-table"><thead><tr>'
-      + '<th>Operation</th><th>Calls</th><th>Token share</th><th>Cost</th>'
-      + '<th>Avg cost</th><th>Avg latency</th>'
+    + '<table class="mini-table llm-op-table llm-op-table--wide"><thead><tr>'
+      + '<th>Operation</th><th>Input tokens</th><th>Output tokens</th><th>Cost</th>'
+      + '<th>Avg cost</th><th>Avg latency</th><th>Calls</th>'
       + '</tr></thead><tbody>'
-    + (opRows || '<tr><td colspan="6">No operation breakdown yet</td></tr>')
+    + (opRows || '<tr><td colspan="7">No operation breakdown yet</td></tr>')
     + '</tbody></table>';
 }
 
@@ -3056,8 +2875,6 @@ function renderModelVersionTable(data) {
     var n = Number(r.calls || 0);
     return n ? Number(r.estimated_cost_usd || 0) / n : 0;
   };
-  var maxCalls = rows.reduce(function(m, r){ return Math.max(m, Number(r.calls || 0)); }, 0) || 1;
-  var maxTok   = rows.reduce(function(m, r){ return Math.max(m, Number(r.total_tokens || 0)); }, 0) || 1;
   var maxCost  = rows.reduce(function(m, r){ return Math.max(m, Number(r.estimated_cost_usd || 0)); }, 0) || 1;
   var maxAvgC  = rows.reduce(function(m, r){ return Math.max(m, avgCostOf(r)); }, 0) || 1;
   var maxLat   = rows.reduce(function(m, r){ return Math.max(m, Number(r.avg_latency_ms || 0)); }, 0) || 1;
@@ -3065,24 +2882,26 @@ function renderModelVersionTable(data) {
   var body = rows.map(function(row, i) {
     var clr = llmOpColor(row.model_version || row.model || 'unknown', i);
     var cl  = Number(row.calls || 0);
-    var tok = Number(row.total_tokens || 0);
+    var inTok  = Number(row.prompt_tokens || 0);
+    var outTok = Number(row.completion_tokens || 0);
     var co  = Number(row.estimated_cost_usd || 0);
     var lat = Number(row.avg_latency_ms || 0);
     return '<tr>'
       + '<td class="llm-op-cell llm-op-cell--ver" title="' + escH(llmVerPurpose(row)) + '">'
         + '<span class="llm-op-dot" style="background:' + clr + '"></span>'
         + llmVerCellLabel(row) + '</td>'
-      + llmMeterCell(cl / maxCalls, clr, cl.toLocaleString())
-      + llmNumCell(tok.toLocaleString())
+      + llmNumCell(inTok.toLocaleString())
+      + llmNumCell(outTok.toLocaleString())
       + llmNumCell('$' + co.toFixed(6))
       + llmNumCell('$' + avgCostOf(row).toFixed(6), true)
       + llmNumCell(lat.toFixed(0) + ' ms', true)
+      + llmNumCell(cl.toLocaleString())
       + '</tr>';
   }).join('');
 
-  el.innerHTML = '<table class="mini-table llm-op-table"><thead><tr>'
-    + '<th>Model / config</th><th>Calls</th><th>Token share</th><th>Cost</th>'
-    + '<th>Avg cost</th><th>Avg latency</th>'
+  el.innerHTML = '<table class="mini-table llm-op-table llm-op-table--wide"><thead><tr>'
+    + '<th>Model / config</th><th>Input tokens</th><th>Output tokens</th><th>Cost</th>'
+    + '<th>Avg cost</th><th>Avg latency</th><th>Calls</th>'
     + '</tr></thead><tbody>' + body + '</tbody></table>';
 }
 
@@ -3380,42 +3199,6 @@ function renderAgentPanel(data) {
   el.innerHTML = '<table class="mini-table llm-op-table"><thead><tr><th>Team/Agent</th><th class="llm-num">Handled</th><th class="llm-num">Avg handle time</th></tr></thead><tbody>'+rows+'</tbody></table>';
 }
 
-function feedDotColor(evType) {
-  var t = (evType||'').toLowerCase();
-  if (t.includes('escalat')) return '#dc2626';
-  if (t.includes('ticket')) return '#2563eb';
-  if (t.includes('resolve')) return '#16a34a';
-  if (t.includes('message')||t.includes('inbound')||t.includes('outbound')) return '#7c3aed';
-  return '#94a3b8';
-}
-
-function renderFeedList(events, prepend) {
-  var list = document.getElementById('feedList');
-  if (!list) return;
-  if (!events || !events.length) {
-    if (!prepend) list.innerHTML = '<div class="empty-state">No events yet</div>';
-    return;
-  }
-  if (!prepend) list.innerHTML = '';
-  var sorted = events.slice().sort(function(a, b) { return new Date(b.created_at) - new Date(a.created_at); });
-  sorted.forEach(function(e) {
-    var item = document.createElement('div');
-    item.className = 'feed-item';
-    var d = e.created_at ? new Date(e.created_at) : null;
-    var tm = d ? d.toLocaleDateString([], {month:'short',day:'numeric'}) + ' ' + d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '';
-    var meta = [];
-    if (e.channel) meta.push('<span>' + escH(e.channel) + '</span>');
-    if (e.intent)  meta.push('<span>' + escH(e.intent.replace(/_/g,' ')) + '</span>');
-    if (e.customer_id) meta.push('<span>cust:' + escH(e.customer_id.slice(0,8)) + '…</span>');
-    item.innerHTML = '<div class="feed-dot" style="background:' + feedDotColor(e.event_type) + '"></div>'
-      + '<div class="feed-content"><div class="feed-type">' + escH(e.event_type || 'event') + '</div>'
-      + (meta.length ? '<div class="feed-meta">' + meta.join('') + '</div>' : '') + '</div>'
-      + '<div class="feed-time">' + tm + '</div>';
-    if (prepend) list.insertBefore(item, list.firstChild);
-    else list.appendChild(item);
-  });
-}
-
 function setSseStatus(text, cssText) {
   var el = document.getElementById('sseStatus');
   if (el) { el.textContent = text; el.style.cssText = cssText; }
@@ -3434,16 +3217,10 @@ function connectSSE() {
     // 1. Analytics overview card (always update — data is cheap)
     try { var d = JSON.parse(ev.data); if (d.total_open !== undefined) renderOverview(d); } catch(e) {}
 
-    // 2. Live event feed — use full audit trail
-    fetch('/admin/audit-events', { headers: adminHeaders() })
-      .then(function(r) { return r.json(); })
-      .then(function(evs) { renderFeedList(evs, false); })
-      .catch(function() {});
-
-    // 3. Inbox — refresh conversation list + badge on every event
+    // 2. Inbox — refresh conversation list + badge on every event
     loadConversations();
 
-    // 4. Analytics charts — full refresh if analytics page is open
+    // 3. Analytics charts — full refresh if analytics page is open
     if (activePage === 'analytics') loadAnalytics();
   };
 
@@ -3453,24 +3230,62 @@ function connectSSE() {
 }
 
 // ── CONNECTORS ───────────────────────────────────────────────────────────────
+// The address customers reach this channel on. Never faked - a WhatsApp number is NOT
+// derivable from WHATSAPP_PHONE_NUMBER_ID, which is an opaque id, so it is stated in the
+// environment as WHATSAPP_DISPLAY_NUMBER or not shown.
+function connReach(addr) {
+  if (!addr) return '';
+  return '<div class="conn-reach"><div class="conn-addr">' + escH(addr) + '</div></div>';
+}
+
 window.loadConnectors = async function() {
   var grid = document.getElementById('connGrid');
   grid.innerHTML = '';
   var waStatus = 'disconnected', emStatus = 'disconnected', crmStatus = 'disconnected';
-  try { var waRes = await api('/admin/whatsapp/status'); waStatus = waRes.connected ? 'connected' : (waRes.mode === 'local_test' ? 'connected' : 'disconnected'); } catch(e){}
+  var waNumber = '', waLocalTest = false;
+  try {
+    var waRes = await api('/admin/whatsapp/status');
+    waStatus = waRes.connected ? 'connected' : (waRes.mode === 'local_test' ? 'connected' : 'disconnected');
+    waNumber = waRes.display_number || '';
+    waLocalTest = waRes.mode === 'local_test';
+  } catch(e){}
   // /admin/email/status has no `configured` field — readiness flag is `gmail_ready`.
-  try { var emRes = await api('/admin/email/status'); emStatus = emRes.gmail_ready ? 'connected' : 'disconnected'; } catch(e){}
+  var emAddr = '';
+  try {
+    var emRes = await api('/admin/email/status');
+    emStatus = emRes.gmail_ready ? 'connected' : 'disconnected';
+    emAddr = emRes.from_email || '';
+  } catch(e){}
   try { var crmRes = await api('/admin/crm/status'); crmStatus = crmRes.configured ? 'connected' : 'disconnected'; } catch(e){}
+  // Configured-only, like every other badge on this page: `enabled` plus both keys, with
+  // no auth_check. The real probe exists (`?check_auth=true`) but it is an outbound
+  // request, and this grid re-polls every 20s.
+  var lfStatus = 'disconnected', lfCapture = false;
+  try {
+    var lfRes = (await api('/admin/llm-observability/status')).langfuse || {};
+    lfStatus = (lfRes.enabled && lfRes.public_key_configured && lfRes.secret_key_configured)
+      ? 'connected' : 'disconnected';
+    lfCapture = !!lfRes.capture_io;
+  } catch(e){}
   var inboxRes = null;
   try { inboxRes = await api('/admin/email-inbox/status'); } catch(e){}
 
   var connectors = [
     { nm:'WhatsApp Business', desc:'Meta Cloud API · inbound webhook + outbound', status: waStatus,
+      addr: waNumber,
       icon:'background:#22c55e', svg:'<svg viewBox="0 0 24 24" fill="#fff"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413z"/><path d="M20.52 3.449C12.831-3.984.106 1.407.101 11.893c0 2.096.549 4.14 1.595 5.945L.057 24l6.335-1.652c1.746.943 3.71 1.444 5.71 1.447h.006c9.756 0 15.466-8.65 11.466-16.001a11.816 11.816 0 0 0-3.054-4.345z"/></svg>' },
     { nm:'Call', desc:'Voice channel integration', status:'phase2',
+      addr:'—',
       icon:'background:#6366f1', svg:'<svg viewBox="0 0 24 24" fill="#fff"><path d="M6.62 10.79c1.44 2.83 3.76 5.14 6.59 6.59l2.2-2.2c.27-.27.67-.36 1.02-.24 1.12.37 2.33.57 3.57.57.55 0 1 .45 1 1V20c0 .55-.45 1-1 1-9.39 0-17-7.61-17-17 0-.55.45-1 1-1h3.5c.55 0 1 .45 1 1 0 1.25.2 2.45.57 3.57.11.35.03.74-.25 1.02l-2.2 2.2z"/></svg>' },
     { nm:'Jira CRM', desc:'Ticket synchronisation', status: crmStatus,
       icon:'background:#0052cc', svg:'<svg viewBox="0 0 24 24" fill="#fff"><path d="M11.571 11.513H0a5.218 5.218 0 0 0 5.232 5.215h2.13v2.057A5.218 5.218 0 0 0 12.575 24V12.518a1.005 1.005 0 0 0-1.004-1.005zm5.723-5.756H5.736a5.218 5.218 0 0 0 5.215 5.214h2.129v2.058a5.218 5.218 0 0 0 5.215 5.214V6.762a1.005 1.005 0 0 0-1.001-1.005z"/></svg>' },
+    // The only connector here that is not a channel or a ticket system: every LLM call is
+    // traced to it. Worth a card because it is a third party that receives our traffic -
+    // and with capture_io on, that traffic includes prompt and reply TEXT.
+    { nm:'Langfuse', desc: lfCapture
+        ? 'LLM tracing · prompt + reply text sent'
+        : 'LLM tracing · metadata only', status: lfStatus,
+      icon:'background:#0a0a0a', svg:'<svg viewBox="0 0 24 24" fill="#fff"><path d="M4 4h3v10.5a2.5 2.5 0 0 0 2.5 2.5H20v3H9.5A5.5 5.5 0 0 1 4 14.5V4z"/><circle cx="17.5" cy="7.5" r="2.5"/><circle cx="11.5" cy="11" r="2"/></svg>' },
   ];
 
   connectors.forEach(function(c) {
@@ -3479,6 +3294,7 @@ window.loadConnectors = async function() {
     var card = document.createElement('div');
     card.className = 'conn-card';
     card.innerHTML = '<div class="conn-hdr"><div class="conn-icon" style="' + c.icon + '">' + c.svg + '</div><div><div class="conn-nm">'+escH(c.nm)+'</div><div class="conn-desc">'+escH(c.desc)+'</div></div></div>'
+      + connReach(c.addr)
       + '<div class="conn-status"><span class="conn-badge '+badgeCls+'">'+badgeTxt+'</span></div>';
     grid.appendChild(card);
   });
@@ -3519,21 +3335,24 @@ window.loadConnectors = async function() {
     + '<div><div class="conn-nm">Email</div><div class="conn-desc">Gmail · inbound IMAP auto-poll + outbound SMTP delivery</div></div>'
     + '</div>'
     + pipesHtml
+    // Raw mailbox, not mailboxTxt: connReach escapes, mailboxTxt is already escaped.
+    + connReach(emAddr)
     + '<div class="conn-status"><span class="conn-badge ' + emailBadgeCls + '">' + emailBadgeTxt + '</span></div>';
-  // Insert after WhatsApp so the card order is: WhatsApp · Email · Call · Jira.
+  // Insert after WhatsApp so the card order is: WhatsApp · Email · Call · Jira · Langfuse.
   grid.insertBefore(inboxCard, grid.children[1] || null);
 
   // Web Chat — the customer portal's live "Chat with support" box. Served by
   // this same app (synchronous inbound + reply via the portal history poll), so
   // it is always Connected. Inserted at index 2 so order is:
-  // WhatsApp · Email · Web Chat · Call · Jira.
+  // WhatsApp · Email · Web Chat · Call · Jira · Langfuse.
   var webCard = document.createElement('div');
   webCard.className = 'conn-card';
   webCard.innerHTML =
     '<div class="conn-hdr">'
     + '<div class="conn-icon" style="background:var(--blue)"><svg viewBox="0 0 24 24" fill="#fff"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-2 12H6v-2h12v2zm0-3H6V9h12v2zm0-3H6V6h12v2z"/></svg></div>'
-    + '<div><div class="conn-nm">Web Chat</div><div class="conn-desc">Customer portal · in-app chat (synchronous inbound + reply)</div></div>'
+    + '<div><div class="conn-nm">Web Chat</div><div class="conn-desc">Customer portal · in-app chat</div></div>'
     + '</div>'
+    + connReach('Customer portal · Chat with support')
     + '<div class="conn-status"><span class="conn-badge connected">Connected</span></div>';
   grid.insertBefore(webCard, grid.children[2] || null);
 };

@@ -23,6 +23,11 @@ def whatsapp_status() -> dict:
         "provider": "meta_whatsapp_cloud",
         "mode": mode,
         "connected": local_test_mode or meta_outbound_ready or meta_webhook_ready,
+        # The number a customer actually messages. WHATSAPP_PHONE_NUMBER_ID is an opaque
+        # Meta identifier, NOT a phone number, so this cannot be derived from it - Meta
+        # returns the display number from the Graph API and we do not store that call's
+        # result. Stated in the environment or not shown at all; never invented.
+        "display_number": os.getenv("WHATSAPP_DISPLAY_NUMBER") or None,
         "access_token_configured": bool(access_token),
         "phone_number_id_configured": bool(phone_number_id),
         "business_account_id_configured": bool(business_account_id),

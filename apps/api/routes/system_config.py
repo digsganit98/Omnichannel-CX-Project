@@ -83,33 +83,37 @@ def _is_set(name: str) -> bool:
 _OPERATIONS = [
     {"operation": "intent_classification", "surface": "customer message",
      "max_tokens": None, "json_mode": False, "fires": "every inbound message",
-     "note": "the label it returns decides retrieval and the answer's content"},
+     "note": "classifies what the customer is asking for"},
     {"operation": "resolution_level_classification", "surface": "customer message",
      "max_tokens": None, "json_mode": False, "fires": "every inbound message",
-     "note": "L1 / L2 / L3, which decides whether a human is held"},
+     "note": "rates the request L1, L2 or L3"},
+    # Uncapped deliberately: a ceiling of 120 returned 400 and the hold silently never
+    # fired, because the design fails open. Do not add a max_tokens here.
     {"operation": "handoff_check", "surface": "customer message",
      "max_tokens": None, "json_mode": True, "fires": "every inbound message",
-     "note": "deliberately uncapped - a ceiling of 120 returned 400 and the hold "
-             "silently never fired, because the design fails open"},
+     "note": "decides whether a human should take over"},
     {"operation": "answer_generation", "surface": "customer message",
      "max_tokens": None, "json_mode": False, "fires": "every inbound message",
-     "note": "the reply the customer reads"},
+     "note": "writes the reply the customer reads"},
     {"operation": "ticket_referee", "surface": "customer message",
      "max_tokens": None, "json_mode": False, "fires": "when a case is already open",
-     "note": "decides whether this message belongs to that case or opens a new one"},
+     "note": "matches the message to an open case or opens a new one"},
     {"operation": "ticket_action_detection", "surface": "customer message",
      "max_tokens": None, "json_mode": False, "fires": "on an apparent close request",
-     "note": "proposes a close; a human performs it"},
+     "note": "proposes a close for a human to confirm"},
+    # 2,500 fails with a hard 400 (json_validate_failed) and an EMPTY failed_generation:
+    # a reasoning model bills its thinking tokens before emitting any answer, and json_mode
+    # rejects a truncated object outright. Do not lower CASE_REVIEW_MAX_TOKENS.
     {"operation": "case_review", "surface": "agent console",
      "max_tokens": CASE_REVIEW_MAX_TOKENS, "json_mode": True,
      "fires": "when an agent opens a case",
-     "note": "one call behind all three case cards; 2,500 fails with a hard 400 because "
-             "reasoning tokens are billed before any answer is emitted"},
+     "note": "summarises the case behind all three case cards"},
+    # The heaviest operation on record and the only one that ever returned nothing;
+    # 8192 exceeded the per-minute ceiling on its own.
     {"operation": "customer_context", "surface": "agent console",
      "max_tokens": CUSTOMER_CONTEXT_MAX_TOKENS, "json_mode": True,
      "fires": "on a context panel refresh",
-     "note": "the heaviest operation on record and the only one that ever returned "
-             "nothing; 8192 exceeded the per-minute ceiling on its own"},
+     "note": "builds the agent's customer context panel"},
 ]
 
 

@@ -195,14 +195,32 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .body-row{display:flex;flex:1;overflow:hidden}
 
 /* LEFT NAV */
-.leftnav{width:52px;background:var(--navy);display:flex;flex-direction:column;align-items:center;padding:8px 0;gap:2px;flex-shrink:0;border-right:1px solid rgba(255,255,255,.06)}
-.nav-item{width:38px;height:38px;border-radius:8px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:#64748b;transition:all .15s;position:relative}
+/* The rail expands on hover to show every label at once, instead of one tooltip per icon.
+   It OVERLAYS the page: .leftnav keeps its 52px footprint in the flex row and the panel
+   itself is absolute, so nothing reflows when it opens and no table jumps sideways. */
+.leftnav{width:52px;flex-shrink:0;position:relative;z-index:150}
+.leftnav-panel{position:absolute;left:0;top:0;bottom:0;width:52px;background:var(--navy);
+  display:flex;flex-direction:column;align-items:flex-start;padding:8px 7px;gap:2px;
+  border-right:1px solid rgba(255,255,255,.06);overflow:hidden;
+  transition:width .16s ease,box-shadow .16s ease}
+.leftnav:hover .leftnav-panel{width:196px;box-shadow:4px 0 22px rgba(2,6,23,.35)}
+/* Fills the panel so the hover target is the whole row once open, and the icon stays put
+   at 38px on the left while the label appears beside it. */
+.nav-item{width:38px;height:38px;border-radius:8px;display:flex;align-items:center;
+  cursor:pointer;color:#64748b;transition:background .15s,color .15s,width .16s ease;
+  position:relative;flex-shrink:0;padding-left:10px;box-sizing:border-box}
+.leftnav:hover .nav-item{width:182px}
 .nav-item:hover{background:rgba(255,255,255,.07);color:#94a3b8}
 .nav-item.active{background:var(--blue);color:#fff}
-.nav-item svg{width:17px;height:17px;fill:currentColor}
-.nav-item .nav-tooltip{position:absolute;left:46px;top:50%;transform:translateY(-50%);background:var(--t1);color:#fff;font-size:11px;font-weight:500;padding:4px 9px;border-radius:6px;white-space:nowrap;pointer-events:none;opacity:0;transition:opacity .15s;z-index:200}
-.nav-item:hover .nav-tooltip{opacity:1}
-.nav-divider{width:24px;height:1px;background:rgba(255,255,255,.08);margin:4px 0}
+.nav-item svg{width:17px;height:17px;fill:currentColor;flex-shrink:0}
+/* Was an absolutely-positioned black tooltip; it is now the inline label in the open rail.
+   Hidden by opacity (not display) so it fades with the width rather than popping in. */
+.nav-item .nav-tooltip{margin-left:14px;font-size:12px;font-weight:500;color:inherit;
+  white-space:nowrap;opacity:0;pointer-events:none;transition:opacity .12s ease}
+.leftnav:hover .nav-item .nav-tooltip{opacity:1}
+.nav-divider{width:24px;height:1px;background:rgba(255,255,255,.08);margin:4px 0 4px 7px;
+  flex-shrink:0;transition:width .16s ease}
+.leftnav:hover .nav-divider{width:168px}
 .nav-badge{position:absolute;top:5px;right:5px;width:14px;height:14px;background:var(--red);border-radius:50%;font-size:8px;color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700}
 
 /* PAGES */
@@ -779,15 +797,6 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .mini-table th{font-size:10px;font-weight:600;color:var(--t3);text-transform:uppercase;letter-spacing:.4px;padding:0 10px 8px 0;text-align:left;border-bottom:1px solid var(--bdr)}
 .mini-table td{padding:8px 10px 8px 0;border-bottom:1px solid var(--bdr);color:var(--t2);vertical-align:middle}
 .mini-table tr:last-child td{border-bottom:none}
-.feed-list{display:flex;flex-direction:column;gap:6px;max-height:260px;overflow-y:auto}
-.feed-list::-webkit-scrollbar{width:3px}
-.feed-list::-webkit-scrollbar-thumb{background:var(--bdr);border-radius:3px}
-.feed-item{display:flex;align-items:flex-start;gap:8px;padding:8px 10px;background:var(--surf2);border-radius:var(--rs);border:1px solid var(--bdr)}
-.feed-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0;margin-top:4px}
-.feed-content{flex:1;min-width:0}
-.feed-type{font-size:11px;font-weight:600;color:var(--t1)}
-.feed-meta{font-size:10px;color:var(--t3);margin-top:1px;display:flex;gap:8px;flex-wrap:wrap}
-.feed-time{font-size:10px;color:var(--t3);flex-shrink:0;margin-top:1px}
 .empty-state{text-align:center;padding:24px 0;color:var(--t3);font-size:12px}
 .sse-badge{font-size:10px;font-weight:500;padding:2px 8px;border-radius:20px;background:var(--grn-bg);border:1px solid var(--grn-bd);color:var(--grn-t)}
 .metric-note{font-size:11px;color:var(--t3);font-style:italic;line-height:1.5;margin:-6px 0 12px}
@@ -828,35 +837,40 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 
 
 /* ── LLM usage & cost panel (creative redesign) ─────────────────────────────── */
-/* operation table with token-share meters */
-.llm-num{text-align:right !important;font-variant-numeric:tabular-nums}
+/* Operation and Model/config tables: a name column, then all figures.
+   table-layout:fixed so the browser stops sizing columns by their CONTENT. Auto layout
+   gave every numeric column only the width its header needed - 4 chars for COST against
+   13 for OUTPUT TOKENS - so the gaps between them were unequal, and all the slack piled
+   up after column 1. The name column is capped and the six figure columns split the
+   rest evenly. Scoped to --wide: the 3-column agent table shares .llm-op-table and
+   must keep auto layout. */
+.llm-op-table--wide{table-layout:fixed}
+.llm-op-table--wide th:first-child,
+.llm-op-table--wide td:first-child{width:28%}
+.llm-op-table--wide th:not(:first-child),
+.llm-op-table--wide td:not(:first-child){width:12%}
 .llm-op-table td{padding-top:12px;padding-bottom:12px}
-/* Column rules. Every cell here is a meter followed by a right-aligned number, so with
-   only horizontal rules one column's value ran straight into the next column's bar.
-   Scoped to this table - the 3-column agent table reads fine without them. */
 .llm-op-table th:not(:last-child),
 .llm-op-table td:not(:last-child){padding-right:16px}
-/* Plain figures for every column but the one meter: right-aligned, tabular so digits line
-   up down the column, and the secondary pair muted so the eye reads volume and cost first. */
+/* Tabular so digits line up down the column; the secondary pair muted so the eye reads
+   volume and cost first. */
 .llm-num{text-align:right;font-variant-numeric:tabular-nums;color:var(--t1);
   font-size:11.5px;white-space:nowrap}
 .llm-num--muted{color:var(--t3)}
+/* Header right-aligned over its own figures. A nth-child(2) left-align used to sit here
+   for the meter column; that column is gone and the override left Input tokens adrift. */
 .llm-op-table th:not(:first-child){text-align:right}
-.llm-op-table th:nth-child(2){text-align:left}
 .llm-op-table th:not(:first-child),
 .llm-op-table td:not(:first-child){padding-left:12px}
-.llm-op-cell{font-weight:600;color:var(--t1) !important;white-space:nowrap;cursor:help}
+/* nowrap would overflow the fixed 28% column on the longest name
+   ("resolution level classification"), so it wraps instead of spilling into Input tokens. */
+.llm-op-cell{font-weight:600;color:var(--t1) !important;cursor:help}
 /* Marks the row as explaining itself on hover — the native title carries the text. */
 .llm-op-q{display:inline-flex;align-items:center;justify-content:center;width:12px;height:12px;
   margin-left:6px;border-radius:50%;border:1px solid var(--bdr2);background:var(--surf2);
   color:var(--t3);font-size:8px;font-weight:700;vertical-align:middle}
 .llm-op-cell:hover .llm-op-q{border-color:var(--blue);color:var(--blue)}
 .llm-op-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:8px;vertical-align:middle}
-.llm-meter-cell{min-width:150px}
-.llm-meter-wrap{display:flex;align-items:center;gap:10px}
-.llm-meter{flex:1;height:6px;background:var(--surf2);border-radius:5px;overflow:hidden;opacity:.75}
-.llm-meter-fill{height:100%;border-radius:5px;transition:width .5s ease}
-.llm-meter-val{font-size:11px;color:var(--t2);font-variant-numeric:tabular-nums;min-width:52px;text-align:right}
 .llm-cost{color:var(--grn-t) !important;font-weight:600}
 .llm-model-cell{font-weight:600;color:var(--t1) !important}
 /* version tag + decoded config */
@@ -867,7 +881,6 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
    below it is a second line, so this cell must override the nowrap/help-cursor the
    operation cells use (they are one line and carry a tooltip; these do neither). */
 .llm-op-cell .llm-ver{margin-left:7px;vertical-align:middle}
-.llm-op-cell--ver{white-space:normal}
 /* version comparison strips (Cost / Latency by model-version) */
 /* usage-over-time line charts */
 .llm-tl-legend{display:flex;flex-wrap:wrap;gap:14px;margin-bottom:12px}
@@ -901,7 +914,9 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .conn-card{background:var(--surf);border:1px solid var(--bdr);border-radius:12px;padding:18px;
   display:flex;flex-direction:column;gap:12px;transition:border-color .14s,box-shadow .14s}
 .conn-card:hover{border-color:var(--bdr2);box-shadow:0 4px 14px rgba(16,24,40,.06)}
-.conn-hdr{display:flex;align-items:flex-start;gap:12px}
+/* Fixed height so every card's divider lands on the same line, whatever the description
+   wraps to. */
+.conn-hdr{display:flex;align-items:flex-start;gap:12px;min-height:56px}
 /* The vendor marks keep their own brand colours - WhatsApp green, Gmail red, Jira blue are
    not ours to restyle - but they sit on a soft tinted plate rather than a saturated block,
    which is what made the row read as five loud squares. */
@@ -931,6 +946,20 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
   color:var(--t2);padding:10px 12px;background:var(--surf2);border-radius:8px}
 .conn-pipes .cp-k{color:var(--t3)}
 .conn-pipes .cp-down{color:var(--red-t);font-weight:600}
+/* HOW TO REACH THIS CHANNEL. Sits above the status foot and takes the same hairline rule,
+   so a card reads header / how-to-reach / state rather than one run of text. The address
+   is the one line a person acts on, so it is the only one at full contrast. */
+/* NO margin-top:auto. It pushed this block to the card's foot, so a card with fewer
+   lines had its divider shoved further down than its neighbours'. The block sits under
+   the header; .conn-status keeps the auto and stays pinned to the bottom. */
+.conn-reach{padding-top:12px;border-top:1px solid var(--bdr)}
+/* The page font, not monospace: these are a phone number, an address and a place name -
+   things people read, not identifiers to compare character by character. */
+.conn-addr{font-size:12.5px;font-weight:600;color:var(--t1);line-height:1.4;
+  letter-spacing:-.1px;word-break:break-word}
+/* The status foot keeps margin-top:auto so it stays pinned to the bottom; it just drops
+   the rule, because .conn-reach above already drew one. */
+.conn-reach+.conn-status{padding-top:10px;border-top:0}
 .conn-fields{display:flex;flex-direction:column;gap:6px;border-top:1px solid var(--bdr);padding-top:10px}
 .conn-field label{font-size:10px;font-weight:600;color:var(--t3);text-transform:uppercase;letter-spacing:.4px;display:block;margin-bottom:3px}
 .conn-field input{width:100%;font-family:inherit;font-size:12px;padding:6px 9px;border:1px solid var(--bdr);border-radius:var(--rs);color:var(--t1);background:var(--surf2);outline:none}
@@ -970,15 +999,11 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
   gap:14px;align-items:start;padding-top:18px}
 .sys-wide{grid-column:1/-1}
 
-/* THE CARD. A calm surface: no heavy border, a hairline and a soft lift instead, with the
-   Ganit blue as a 3px spine down the left edge. That spine is the only saturated colour on
-   a normal card - it brands the page without tinting every row, which is what the
-   --blue-bg fills were doing when this was first built. */
+/* THE CARD. A calm surface: no heavy border, a hairline and a soft lift instead. The
+   tinted heading is what makes a card read as titled; nothing else on it is saturated. */
 .sys-section .chart-card{border-color:transparent;border-radius:12px;padding:0;
   box-shadow:0 1px 2px rgba(16,24,40,.05),0 0 0 1px rgba(16,24,40,.05);overflow:hidden;
   position:relative}
-.sys-section .chart-card::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;
-  background:var(--blue);opacity:.85}
 .sys-section .chart-card:hover{box-shadow:0 4px 16px rgba(23,1,208,.07),0 0 0 1px rgba(23,1,208,.10)}
 /* The heading sits on the palest Ganit blue, so a card reads as titled rather than as a
    list with a bold first line. */
@@ -986,47 +1011,6 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
   letter-spacing:.4px;text-transform:uppercase;color:var(--blue-t);
   background:linear-gradient(to bottom,rgba(213,224,246,.5),rgba(213,224,246,.22));
   border-bottom:1px solid rgba(180,200,238,.45)}
-
-/* FACT TILES. Label over value, in a responsive grid. */
-.cfg-facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
-  gap:1px;background:rgba(228,231,236,.7)}
-.cfg-fact{background:var(--surf);padding:12px 14px 13px 20px;min-width:0}
-.cfg-fact--wide{grid-column:span 2}
-.cfg-fact-k{font-size:9.5px;font-weight:600;letter-spacing:.4px;text-transform:uppercase;
-  color:var(--t3);margin-bottom:5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.cfg-fact-v{font-size:12.5px;font-weight:600;color:var(--t1);
-  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
-  font-variant-numeric:tabular-nums;letter-spacing:-.2px;word-break:break-word;
-  line-height:1.35;display:flex;align-items:center;gap:6px}
-.cfg-fact-v::before{content:"";width:6px;height:6px;border-radius:50%;flex:0 0 auto;
-  background:currentColor;display:none}
-/* A dot ONLY where a state can fail. A value like "INBOX" is not a state and gets none. */
-.cfg-fact--ok .cfg-fact-v::before,.cfg-fact--bad .cfg-fact-v::before,
-.cfg-fact--warn .cfg-fact-v::before{display:block}
-.cfg-fact--ok .cfg-fact-v{color:var(--grn-t)}
-.cfg-fact--bad .cfg-fact-v{color:var(--red-t)}
-.cfg-fact--warn .cfg-fact-v{color:var(--org-t)}
-/* A detail belonging to ONE value - the node breakdown, a mailbox - not a row of its own. */
-.cfg-fact-s{font-size:9.5px;color:var(--t3);line-height:1.5;margin-top:4px;font-weight:400;
-  font-family:'Inter',sans-serif;letter-spacing:0}
-
-/* THE RUNTIME STRIP. Only what is true of EVERY call. Anything that could differ between
-   operations belongs in the table instead - including the model, because nothing stops a
-   classifier and the customer-facing reply being routed to different ones. */
-.cfg-strip{display:flex;flex-wrap:wrap;background:var(--surf)}
-.cfg-strip-i{display:flex;align-items:baseline;gap:7px;padding:12px 20px;
-  border-right:1px solid rgba(228,231,236,.7)}
-.cfg-strip-i:last-child{border-right:0}
-.cfg-strip-k{font-size:9.5px;font-weight:600;letter-spacing:.4px;text-transform:uppercase;
-  color:var(--t3)}
-.cfg-strip-v{font-size:12px;font-weight:600;color:var(--t1);
-  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;letter-spacing:-.2px}
-.cfg-strip-v--bad{color:var(--red-t)}
-.cfg-dot{display:inline-block;width:7px;height:7px;border-radius:50%;flex:0 0 auto;
-  align-self:center}
-.cfg-dot--ok{background:var(--grn);box-shadow:0 0 0 3px rgba(22,163,74,.15)}
-.cfg-dot--bad{background:var(--red);box-shadow:0 0 0 3px rgba(220,38,38,.15)}
-.cfg-dot--off{background:var(--t3);box-shadow:0 0 0 3px rgba(152,162,179,.18)}
 
 /* Prose, under a grid or table. A caveat is a sentence, not a row whose value is not one. */
 .cfg-notes{padding:13px 20px 15px;border-top:1px solid rgba(228,231,236,.7);
@@ -1812,8 +1796,6 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
    alone does not read as a control, so it carries a visible label beside it. */
 .ribbon-logo--link{cursor:pointer;border-radius:8px;padding:4px 8px 4px 4px;margin-left:-4px;transition:background .15s}
 .ribbon-logo--link:hover{background:rgba(255,255,255,.08)}
-.ribbon-home{font-size:10px;font-weight:600;color:#94a3b8;border-left:1px solid rgba(255,255,255,.16);padding-left:9px;margin-left:2px;white-space:nowrap}
-.ribbon-logo--link:hover .ribbon-home{color:var(--blue-bg)}
 .ribbon-user-av--link,.ribbon-user-info--link{cursor:pointer}
 .ribbon-user-info--link:hover .ribbon-user-name{color:var(--blue-bg)}
 .ribbon-user-av--link:hover{box-shadow:0 0 0 2px rgba(213,224,246,.5)}

@@ -6,7 +6,7 @@
 <title>OmnichannelCX</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="icon" type="image/png" href="/admin-ui/assets/ganit-logo.png">
-<link rel="stylesheet" href="/admin-ui/assets/style.css?v=20260918-syscfg10">
+<link rel="stylesheet" href="/admin-ui/assets/style.css?v=20260922-syscfg30">
 </head>
 <body>
 
@@ -419,7 +419,6 @@
     <div class="ribbon-logo ribbon-logo--link" onclick="goToHub()" title="Back to Control Centre" role="button" tabindex="0">
       <img src="/admin-ui/assets/ganit-logo.png?v=1" class="ribbon-icon" alt="Ganit">
       <span class="ribbon-name">Omnichannel<span>CX</span></span>
-      <span class="ribbon-home">Control Centre</span>
     </div>
     <div class="ribbon-spacer"></div>
     <div class="ribbon-user">
@@ -439,7 +438,10 @@
   <div class="body-row">
 
     <!-- LEFT NAV -->
+    <!-- The rail keeps a 52px footprint; .leftnav-panel is absolute inside it and widens
+         on hover, so the labels overlay the page instead of pushing it across. -->
     <div class="leftnav">
+     <div class="leftnav-panel">
       <div class="nav-item nav-hub" id="nav-hub" onclick="goToHub()">
         <svg viewBox="0 0 24 24"><path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/></svg>
         <span class="nav-tooltip">Control Centre</span>
@@ -481,6 +483,7 @@
         <svg viewBox="0 0 24 24"><path d="M4 8h4v8H4V8zm12 0h4v8h-4V8zM9.5 11h3.2V9l3 3-3 3v-2H9.5v-2z"/></svg>
         <span class="nav-tooltip">Workflow</span>
       </div>
+     </div>
     </div>
 
     <!-- ── INBOX PAGE ── -->
@@ -644,12 +647,6 @@
           </div>
         </div>
 
-        <div class="chart-card">
-          <div class="chart-title">
-            <span>Live event feed</span>
-          </div>
-          <div class="feed-list" id="feedList"><div class="empty-state">Waiting for events…</div></div>
-        </div>
       </div>
     </div><!-- end #page-analytics -->
 
@@ -663,16 +660,11 @@
              tab, so the two configuration-and-reporting pages behave identically rather
              than each inventing a way to switch panels. -->
         <div class="an-tabs" id="sysTabs">
-          <button class="an-tab on" onclick="switchSysTab('current',this)">Current view</button>
-          <button class="an-tab" onclick="switchSysTab('model',this)">AI Model</button>
-          <button class="an-tab" onclick="switchSysTab('channels',this)">Channels</button>
-          <button class="an-tab" onclick="switchSysTab('integrations',this)">Integrations</button>
-          <button class="an-tab" onclick="switchSysTab('data',this)">Knowledge &amp; Data</button>
+          <button class="an-tab on" onclick="switchSysTab('connectors',this)">Connectors</button>
+          <button class="an-tab" onclick="switchSysTab('model',this)">Models</button>
         </div>
 
-        <!-- TEMPORARY. The page as it was, kept only so the new sections can be compared
-             against it. To be deleted once the rest is signed off. -->
-        <div class="sys-section" data-sys="current">
+        <div class="sys-section" data-sys="connectors">
           <div class="conn-grid" id="connGrid">
             <div style="color:var(--t3);font-size:12px;padding:20px 0">Loading connector status…</div>
           </div>
@@ -680,18 +672,6 @@
 
         <div class="sys-section" data-sys="model" hidden>
           <div id="sysModel"><div class="empty-state">Loading…</div></div>
-        </div>
-
-        <div class="sys-section" data-sys="channels" hidden>
-          <div id="sysChannels"><div class="empty-state">Loading…</div></div>
-        </div>
-
-        <div class="sys-section" data-sys="integrations" hidden>
-          <div id="sysIntegrations"><div class="empty-state">Loading…</div></div>
-        </div>
-
-        <div class="sys-section" data-sys="data" hidden>
-          <div id="sysData"><div class="empty-state">Loading…</div></div>
         </div>
       </div>
     </div><!-- end #page-connectors -->
@@ -906,6 +886,6 @@
 <!-- d3-force, vendored (15KB, tree-shaken to the 7 functions used). Local, not a CDN:
      the app has no other external JS and a demo must not depend on a network fetch. -->
 <script src="/admin-ui/assets/vendor-d3-force.js?v=20260902"></script>
-<script src="/admin-ui/assets/app.js?v=20260918-syscfg10"></script>
+<script src="/admin-ui/assets/app.js?v=20260922-syscfg30"></script>
 </body>
 </html>
