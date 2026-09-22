@@ -80,6 +80,26 @@ def _seed_neo4j() -> None:
         logger.exception("neo4j_seed_failed")
 
 
+@app.on_event("startup")
+def _seed_service_desk_agents() -> None:
+    # The routing roster lives in admin_users, which is in the cx-data volume - so a wipe
+    # empties the bench and the Service Desk has nobody to assign to. Migrations re-run on
+    # boot and _seed_neo4j() above reseeds the graph, but nothing called the agent seed, so
+    # it silently stayed empty until someone remembered the script. Same shape as
+    # _seed_neo4j: additive, guarded, and it never touches a real account.
+    try:
+        from services.persistence_service.repository import SQLiteCXRepository
+        from scripts.seed_service_desk_agents import seed
+
+        # Constructing the repository runs migrate(), so 019 (team/capacity) is applied
+        # before seed() checks for those columns.
+        db_path = os.getenv("DATABASE_PATH", "data/cx_phase1.db")
+        SQLiteCXRepository(db_path)
+        seed(db_path)
+    except Exception:
+        logger.exception("service_desk_agent_seed_failed")
+
+
 @app.on_event("shutdown")
 def _flush_langfuse_on_shutdown() -> None:
     from services.observability_service import flush_langfuse
