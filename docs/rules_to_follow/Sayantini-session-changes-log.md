@@ -10023,3 +10023,124 @@ sites register themselves was offered and deferred by the user.
 
 **5 failed / 151 passed** - the documented baseline. No deliberate real Groq call; the one
 live probe on this page is `models.list()`, which the endpoint already used.
+
+## Session 44 - 2026-09-22 (Fix 190: the console stripped back to what an operator reads)
+
+Committed `5f04c29` - 6 files, 183 insertions, **389 deletions**. A net deletion session.
+
+### System Configuration: five tabs to two
+
+Channels, Integrations and Knowledge & Data were built in Fix 188 and are now deleted.
+What survives is the connector grid, renamed **Connectors** (the internal key `current`
+became `connectors` so the label and the code agree), and **Models** (was "AI Model").
+
+The Runtime strip went with them. It carried three things: a provider already stamped on
+every row of the table directly beneath it, PII masking, and a "Binding limit" whose value
+was the words "tokens per minute" - a label with no number, which reads as broken. PII
+masking survives as one line under the operations table and reads the live `pii_masking`
+flag, so it turns to a bold **off** rather than lying.
+
+Deleting three sections orphaned `cfgFact`, `cfgGrid`, `cfgCardRaw` and ~40 lines of CSS.
+All 27 call sites were inside the removed sections; verified before deleting, not assumed.
+
+### The operation notes said what had gone wrong, not what the operation does
+
+`handoff_check` carried "a ceiling of 120 returned 400 and the hold silently never fired";
+`case_review` carried "2,500 fails with a hard 400 because reasoning tokens are billed
+before any answer is emitted". Both true, and both the ONLY record of why those ceilings
+are what they are. They moved into comments beside the constants they protect, and the page
+now says what each operation does. **Do not tidy those comments away** - they exist to stop
+someone "fixing" a ceiling back into a bug.
+
+### Input and output tokens were already recorded and never shown
+
+`prompt_tokens` and `completion_tokens` are written per call, but `by_operation` and
+`by_model` only summed `total_tokens`. Two SUMs added to each query.
+
+Measured before building the columns - 82 rows, `prompt + completion != total` returned
+**0 rows**, so the split is sound rather than inferred. What it reveals:
+
+| operation | input | output |
+|---|---|---|
+| answer_generation | 33,654 | 812 |
+| case_review | 90,908 | 52,027 |
+
+answer_generation is almost entirely prompt. One Tokens figure hid that completely.
+
+The bars went with the merge: a bar compares rows within ONE dimension, and input beside
+output is already the comparison worth making. `llmMeterCell` and its CSS are gone.
+
+### Two table-layout bugs, both from the same cause
+
+Columns were sized by their CONTENT, and the widest content is the header - `COST` is 4
+characters, `OUTPUT TOKENS` is 13. So the gaps between numeric columns were unequal and all
+the slack piled up after column 1. Fixed with `table-layout:fixed`, name column 28%, six
+figure columns 12% each, scoped to a new `--wide` modifier because the 3-column agent table
+shares `.llm-op-table` and must keep auto.
+
+Separately, `.llm-op-table th:nth-child(2){text-align:left}` survived from when column 2
+was the meter, leaving the Input tokens header adrift from its own values. **This was
+shipped by changing the row cells without reading the CSS that positions them.**
+
+### Connectors
+
+Added **Langfuse** - the only third party here that is not a channel and not a ticket
+system, and the one that receives every prompt we send. Configured-only, like its
+neighbours: `enabled` plus both keys, no `auth_check`, because that is an outbound request
+and this grid re-polls every 20s. Its description is conditional on `capture_io`, so the
+card states on screen that prompt and reply text leaves the system.
+
+Each channel card carries the address customers use. WhatsApp's **could not be derived** -
+`WHATSAPP_PHONE_NUMBER_ID` is an opaque 16-digit Meta id, and the display number comes from
+a Graph API call whose result we never store. It is stated as `WHATSAPP_DISPLAY_NUMBER` in
+`.env` and surfaced as `display_number`, or not shown at all.
+
+**`.env` is gitignored.** The number is not in the repo and must be set on EC2 separately,
+or that card will show nothing there.
+
+### The badges mean configured, not reachable
+
+Proven rather than assumed: `SMTPEmailConnector` was fed `username="fake"`,
+`password="fake"` inside the container and still returned `gmail_ready: True`. Jira is the
+same shape - `configured` is `all((base_url, api_token, user_email, project_key))`, a
+presence test. An expired WhatsApp token still shows green. Accepted gap.
+
+### Live event feed removed
+
+Deleted from Performance & Cost. Measured first: 383 rows, 28% of them
+`workflow_step_completed` plumbing noise, no LIMIT, and re-fetched in full on every SSE
+event. The endpoint and the data are untouched; only the view is gone.
+
+Its fetch came out of `loadAnalytics` too - `results[]` is indexed **positionally**, so
+every later index had to be renumbered. Dropping only the render would have left a
+full-table fetch firing for nothing.
+
+### Left rail expands on hover
+
+Was one black tooltip per icon, absolutely positioned at `left:46px`, overlapping the page
+content. It now opens as a panel showing every label at once. `.leftnav` keeps its 52px
+footprint and `.leftnav-panel` inside it is absolute, so nothing beneath reflows. The old
+`.nav-tooltip` spans already held the label text and were reused as the inline labels
+rather than adding new markup.
+
+### What this session cost the user
+
+They repeated one instruction three times, and asked "do you not even look at what you
+edit?", "if you don't understand then you should not waste my tokens doing random things"
+and "did i not tell you to look at the memory at session starting?". All fair:
+
+- UI copy was written as sentences, corrected, trimmed - then **re-inflated back to
+  sentences** when the content changed, re-introducing a defect already corrected.
+- A table's columns were changed without reading the CSS that positions them.
+- The Web Chat card was "fixed" three times (font, then a header min-height) before
+  anyone read which element actually carried `margin-top:auto`.
+- Reach lines were added to Call, Jira and Langfuse after "only WhatsApp, Email, Web Chat".
+- Customer-facing copy was invented that the code contradicted - "reply appears live" when
+  the reply is returned synchronously in the POST response, and "usually within a minute",
+  which is an SLA that exists nowhere.
+
+### State
+
+- 18 commits unpushed, HEAD `5f04c29`. Nothing on EC2 since session 40.
+- Asset cache token **`syscfg30`**.
+- Tests not run. **Zero Groq calls made this session.**
