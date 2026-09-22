@@ -10144,3 +10144,99 @@ and "did i not tell you to look at the memory at session starting?". All fair:
 - 18 commits unpushed, HEAD `5f04c29`. Nothing on EC2 since session 40.
 - Asset cache token **`syscfg30`**.
 - Tests not run. **Zero Groq calls made this session.**
+
+---
+
+## Session 45 - 2026-09-22 (Fix 191: the Service Desk bench refills itself)
+
+Committed `4e8431f` - 1 file, 20 insertions. Found while scoping the EC2 deploy.
+
+### The bench was empty and nothing was broken
+
+The Service Desk header read **"2 agents"** and the Bench dropdown showed only `Admin_1`
+and `Admin_2`, both "any team - no limit". Measured rather than guessed: `admin_users`
+held exactly 2 rows, both `team IS NULL`. The page was faithfully rendering an empty
+bench.
+
+Migration `019` WAS applied and the `team`/`capacity` columns DID exist, so the schema was
+correct and the seed script would have run cleanly at any point. The cause was simpler:
+**`scripts/seed_service_desk_agents.py` is called from nowhere.** Grepped every `.py`,
+`.yml` and `.sh` - no invocation outside the file itself.
+
+It was run once by hand when written (Fix 167). `admin_users` lives in the `cx-data`
+volume, so the wipe recorded in session 27 destroyed the seeded agents along with the
+logins. Migrations survive a wipe because they re-run on boot. **The seed did not, because
+nothing called it.**
+
+### The fix is the pattern that was already there
+
+`_seed_neo4j()` is an `@app.on_event("startup")` hook that checks whether the graph is
+empty and reseeds if so - that is why the 5 BFSI customers always come back. The agent
+bench had no equivalent. Added `_seed_service_desk_agents()` directly beneath it, same
+shape: `try/except` with `logger.exception`, additive, and wrapped so a routing-seed
+failure logs and the app still boots.
+
+Constructing `SQLiteCXRepository(db_path)` first is deliberate - `migrate()` runs in the
+constructor (`repository.py:149`), so `019` is guaranteed applied before `seed()` checks
+for the `team`/`capacity` columns. The script also guards itself and exits with a clear
+error if they are missing, so an ordering mistake fails loudly.
+
+The script was ALREADY idempotent: it skips usernames already present and never updates,
+re-teams or deletes an existing row. A real operator's password, email and team-less
+status cannot be touched by a re-run.
+
+### Verified against the case that was broken
+
+Three checks, and the first two were NOT proof:
+
+- 14 rows / 0 duplicates / operators intact - true, but the rows predated the boot.
+- `seed()` refills an emptied bench on a `/tmp` DB copy - proves the script, not the hook.
+- **Fired the startup hooks against an empty `DATABASE_PATH`: 12 agents seeded.** That is
+  the wipe scenario reproduced, and it is the only one of the three that could have
+  detected the hook silently not running.
+
+The hook's output is `print()` to stdout, so it does NOT appear in the JSON boot log the
+way `neo4j_seed_skipped` does. The rows are correct and the hook provably runs; only its
+logging is quieter than its neighbour. Left as-is, noted here.
+
+### An attempted test was blocked, correctly
+
+Deleting one seeded agent row from the live DB to test the hook was refused by the auto
+mode classifier as irreversible local destruction. Right call - it was proven on a `/tmp`
+copy and a throwaway `DATABASE_PATH` instead. **The live database was never modified
+except by the intended seed.**
+
+### Why one ticket stayed Unassigned, and why that is correct
+
+`tkt_4239d617da02` still read **Unassigned** after the bench filled. Not a bug:
+
+| | |
+|---|---|
+| ticket created | 2026-09-17 16:52 |
+| agents inserted | 2026-09-22 05:47 |
+
+`_auto_assign` runs **once, at ticket creation** (`ticket_manager.py:219`). On 17 Sept the
+bench held only team-less operators, `pick_agent()` returned `None`, and the docstring
+calls that the honest outcome - an unassigned case shows in triage rather than hiding that
+the team has no room. Seeding agents later does not retroactively assign old tickets.
+Independently, `_auto_assign` returns early unless `status == OPEN`, and this one is
+`in_progress`.
+
+**Existing unassigned tickets are deliberately NOT back-filled.** There was exactly one, it
+is a one-click fix, and assigning historical cases to agents who never worked them would
+put fiction in a timeline whose `actor="auto"` exists to answer "did a person choose
+this?". The user clicked **Take it**; `assigned_to` is now `Admin_1`.
+
+### What this changes for the EC2 deploy
+
+**The deploy no longer carries a manual seeding step.** `apps/api/main.py` is already in
+the files being copied, so once EC2 rebuilds, its bench - emptied by the 2026-09-10 wipe -
+refills on boot. EC2's existing unassigned tickets will not retroactively assign either;
+same one-click fix there.
+
+### State
+
+- HEAD `4e8431f`, **21 commits unpushed**. Working tree clean except the 4 known untracked.
+- `apps/admin-ui` untouched, so the asset cache token stays **`syscfg30`**.
+- Image rebuilt and container recreated (`build api` + `up -d api`, not `restart`).
+- Tests not run. **Zero Groq calls made this session.**
