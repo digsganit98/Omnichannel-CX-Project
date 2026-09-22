@@ -1,4 +1,5 @@
 from .llm_usage import (
+    fetch_langfuse_trace_observations,
     flush_langfuse,
     langfuse_status,
     langfuse_workflow_trace,
@@ -7,6 +8,7 @@ from .llm_usage import (
 )
 
 __all__ = [
+    "fetch_langfuse_trace_observations",
     "flush_langfuse",
     "langfuse_status",
     "langfuse_workflow_trace",

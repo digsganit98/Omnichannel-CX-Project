@@ -26,6 +26,7 @@ backups/
 *.ppk
 *.key
 id_rsa*
+*.sql
 
 # .env backups - same secrets as .env itself
 .env.bak*

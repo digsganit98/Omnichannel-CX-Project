@@ -1089,9 +1089,26 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);height:
 .audit-list{max-height:420px;overflow-y:auto;display:flex;flex-direction:column;gap:4px}
 .audit-list::-webkit-scrollbar{width:3px}
 .audit-list::-webkit-scrollbar-thumb{background:var(--bdr);border-radius:3px}
-.audit-item{padding:8px 10px;border-radius:var(--rs);background:var(--surf2);border:1px solid var(--bdr)}
-.audit-item-type{font-size:11px;font-weight:600;color:var(--t1)}
-.audit-item-meta{font-size:10px;color:var(--t3);margin-top:2px}
+/* ── AUDIT TAB (Analytics → Audit) ── */
+.audit-filters{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
+.audit-filters select,.audit-filters input{padding:6px 9px;border:1px solid var(--bdr);border-radius:var(--rs);font-family:inherit;font-size:11.5px;color:var(--t1);background:var(--surf2);outline:none}
+.audit-filters select:focus,.audit-filters input:focus{border-color:var(--blue);background:var(--surf)}
+.audit-filters input{flex:1;min-width:200px}
+.run-status-pill{display:inline-flex;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.3px;padding:2px 8px;border-radius:20px}
+.run-status-pill--ok{background:var(--grn-bg);color:var(--grn-t);border:1px solid var(--grn-bd)}
+.run-status-pill--failed{background:var(--red-bg);color:var(--red-t);border:1px solid var(--red-bd)}
+.audit-view-btn{font-size:10.5px;font-weight:600;padding:4px 10px;border-radius:6px;border:1px solid var(--bdr2);background:var(--surf);color:var(--t2);cursor:pointer}
+.audit-view-btn:hover{border-color:var(--blue);color:var(--blue)}
+.audit-pager{display:flex;align-items:center;justify-content:flex-end;gap:10px;margin-top:10px;font-size:11px;color:var(--t3)}
+.audit-pager button{font-size:11px;font-weight:600;padding:4px 10px;border-radius:6px;border:1px solid var(--bdr2);background:var(--surf);color:var(--t2);cursor:pointer}
+.audit-pager button:disabled{opacity:.4;cursor:default}
+.audit-pager button:not(:disabled):hover{border-color:var(--blue);color:var(--blue)}
+.run-timeline{max-height:60vh}
+.run-timeline .feed-item--step{padding:5px 10px;background:transparent;border-style:dashed}
+.run-timeline .feed-item--error{border-color:var(--red-bd);background:var(--red-bg)}
+.run-timeline .feed-detail{font-size:10.5px;color:var(--t3);margin-top:3px;white-space:pre-wrap;word-break:break-word}
+.run-timeline .feed-trace-link{font-size:10.5px;color:var(--blue);text-decoration:none;margin-left:6px}
+.run-timeline .feed-trace-link:hover{text-decoration:underline}
 
 /* ── TICKETS PAGE ── */
 .tkt-crm{font-size:10px;font-weight:600;padding:2px 8px;border-radius:20px}

@@ -411,6 +411,21 @@
   </main>
 </div>
 
+<!-- Audit run detail (step-by-step timeline for one correlation id) -->
+<div class="modal-overlay hidden" id="runModal" onclick="if(event.target===this)closeRunModal()">
+  <div class="modal-card why-modal-card">
+    <div class="kg-modal-head">
+      <div>
+        <div class="kg-modal-title">Run detail</div>
+        <div class="kg-modal-sub" id="runModalSub"></div>
+      </div>
+      <button class="ticket-modal-close" onclick="closeRunModal()" aria-label="Close">&times;</button>
+    </div>
+    <div class="why-modal-body" id="runModalBody"></div>
+  </div>
+</div>
+
+
 <!-- STAGE 4: MAIN SHELL -->
 <div class="shell" id="mainShell" style="display:none">
 
@@ -587,6 +602,7 @@
           <button class="an-tab on" onclick="switchAnalyticsTab('finops',this)">FinOps</button>
           <button class="an-tab" onclick="switchAnalyticsTab('care',this)">Customer Care</button>
           <button class="an-tab" onclick="switchAnalyticsTab('solution',this)">Solution Performance</button>
+          <button class="an-tab" onclick="switchAnalyticsTab('audit',this)">Audit</button>
         </div>
 
         <!-- ═══ SECTION 1: FINOPS ═══ -->
@@ -647,6 +663,30 @@
           </div>
         </div>
 
+        <!-- ═══ SECTION 4: AUDIT ═══ -->
+        <div class="analytics-section" data-an="audit" hidden>
+          <div class="chart-card">
+            <div class="chart-title"><span>Runs</span><span class="win-badge" title="One row per customer interaction (grouped by correlation id), most recent first.">Grouped by run</span></div>
+            <div class="metric-note">Every workflow step, LLM call and error the system recorded for each interaction. Click a run to see its full timeline.</div>
+            <div class="audit-filters" id="auditFilters">
+              <select id="auditFilterChannel"><option value="">All channels</option></select>
+              <select id="auditFilterStatus">
+                <option value="">All statuses</option>
+                <option value="ok">OK</option>
+                <option value="failed">Failed</option>
+              </select>
+              <select id="auditFilterDays">
+                <option value="1">Last 24h</option>
+                <option value="7">Last 7 days</option>
+                <option value="14" selected>Last 14 days</option>
+                <option value="30">Last 30 days</option>
+              </select>
+              <input id="auditFilterSearch" placeholder="Search customer / conversation / ticket / correlation id">
+            </div>
+            <div id="auditRunsTable"><div class="empty-state">Loading…</div></div>
+            <div class="audit-pager" id="auditPager"></div>
+          </div>
+        </div>
       </div>
     </div><!-- end #page-analytics -->
 
@@ -886,6 +926,6 @@
 <!-- d3-force, vendored (15KB, tree-shaken to the 7 functions used). Local, not a CDN:
      the app has no other external JS and a demo must not depend on a network fetch. -->
 <script src="/admin-ui/assets/vendor-d3-force.js?v=20260902"></script>
-<script src="/admin-ui/assets/app.js?v=20260922-syscfg30"></script>
+<script src="/admin-ui/assets/app.js?v=20260922-audit31"></script>
 </body>
 </html>
