@@ -10240,3 +10240,101 @@ same one-click fix there.
 - `apps/admin-ui` untouched, so the asset cache token stays **`syscfg30`**.
 - Image rebuilt and container recreated (`build api` + `up -d api`, not `restart`).
 - Tests not run. **Zero Groq calls made this session.**
+
+---
+
+## Session 45b - 2026-09-22 (the EC2 deploy: Fixes 167-191 + the audit browser, and Fix 146 closed)
+
+EC2 went from `f7b6f71` (2026-09-10) to `0b4f169` - 25 commits, 12 days. Full deploy,
+rebuild and fresh start. **ngrok was never touched**, verified by unchanged uptime at every
+step; opensearch and mailpit likewise.
+
+### The branches had diverged, and neither was complete
+
+Measured at the start: `origin/main` had **3 commits this branch lacked** (Digvijay's
+audit-run browser, merged 2026-09-16) and this branch had **22 `main` lacked** (Fixes
+167-191). There was no single commit containing all the work, so there was nothing correct
+to deploy until they were merged. The earlier "21 commits behind" reading was taken from
+stale refs - `git fetch` had not been run.
+
+Merged with `--no-commit`, resolved by hand, committed `0b4f169`. Two UI files conflicted
+because both sides edited them heavily; the backend auto-merged clean. Detail in
+[[session-45-state]].
+
+**One real loss was caught in verification**: `window.loadAudit` - this branch's Channel
+Testing event list - sat inside a conflicted region and was dropped when his audit block
+was taken wholesale. Its caller survived, so it would have been a dead reference. Found by
+diffing function names against the backup tag, not by reading the diff.
+
+### Fix 146 is closed
+
+`ls data/` on the box returned **No such file or directory**. The three seed files had
+never been in the project directory - the original hand-`scp` omitted `data/`, the seed
+threw `FileNotFoundError`, `_seed_neo4j()` swallowed it, and the app served every customer
+as Unverified for months while looking healthy. That is also why loose copies sat in `~`.
+
+`scp -r data` put them on disk; the rebuild carried them into the image via `COPY . .`.
+**Proven by the wipe itself**: `cx-data` destroyed, api restarted with NO copy-in step, log
+read `bfsi_data_loaded` -> `neo4j_seed_complete`, graph came back Customer 5.
+
+Fresh-start steps 1, 6 and 7 existed only to work around this. They are struck through in
+the EC2 doc rather than deleted, with the one read-only probe that decides whether they
+apply named in both places.
+
+### Fix 191 proved itself on a fresh database
+
+12 Service Desk agents present on the first boot after the wipe, no manual script. That is
+the case the hook was written for.
+
+### Verification that actually checked
+
+Expected grep counts were **published before** running them on the box, then matched: seed
+hook 1, audit route 1, `list_audit_runs` 2, `fetch_langfuse` 1, cache token 1,
+`renderAuditRuns` 1, migrations 4. Seed results matched the documented numbers exactly -
+`indexed 14/14 errors 0`, `holdings_linked 123`, Concepts 18, and the 3 expected unlinked
+chunks (`demat_account`, `sip_investment`, `elss_tax_benefit`).
+
+### Two things that looked like failures and were not
+
+- **"Summary unavailable right now."** on the first real WhatsApp message. The log showed
+  three Groq SDK retries (3s/15s/16s) then give-up - a rate limit, on a quota shared with
+  local, which had been running all day. The rule-based cards beside it stayed populated
+  because they are computed from the graph, not the LLM. Cleared on Refresh.
+- **`label Customer does not exist`** - the seed checking an empty graph, as documented.
+
+### What this session cost the user
+
+Six wrong claims, each one command away from correct, and each caught by the user rather
+than by checking first:
+
+1. Reported `PII_MASKING_ENABLED`, `KB_VECTOR_INDEX`, `LLM_OBSERVABILITY_ENABLED` as NEW
+   env vars needing EC2 attention. All three existed at `f7b6f71`; only their display in
+   `system_config.py` is new. A grep for added `getenv` lines caught new call sites.
+2. Said four loose files in `~` were unexplained and possibly another team's.
+   `git ls-files | grep -i bfsi` showed three were **our own repo's files**, including
+   `InboxIQ_BFSI_KB.pdf` - our KB, named before the rebrand, dismissed because an `inboxiq`
+   folder sat nearby.
+3. Claimed other projects on the box "presumably" deploy from git, and built a clone plan
+   on it. `ls -d ~/*/.git` -> **2 of ~30**. `scp` is the house convention; the plan was
+   dropped.
+4. Said "41 files" then wrote `scp -r` commands that sent **318**, including 135 `.pyc`.
+5. Told the user to `scp -r data`, which would have sent the local **`cx_phase1.db`**. The
+   user asked "full data folder?" first. Corrected to six explicit paths.
+6. Proposed a `.pyc` cleanup without checking ownership - every line failed Permission
+   denied because they are root-owned, container-generated, and not the copied ones.
+
+Also: `echo >> .env` appended onto a file with no trailing newline, producing
+`LANGFUSE_CAPTURE_IO=trueWHATSAPP_DISPLAY_NUMBER=...` on one line. Caught by the `tail -2`
+in the same command, fixed with a backup first. **And `backup_pre191` was already missing
+from the `ls` used to plan the cleanup** - not noticed until after the delete ran. It was
+not deleted by that command (six explicit names, none matching), but its absence should
+have been seen first. Replaced with `~/backup_post191` capturing the working state.
+
+### State
+
+- EC2 at **`0b4f169`**, fresh start done: 5 customers, KB 14/14, 123 holdings, 18 concepts,
+  12 agents, 0 conversations. **Logins destroyed - re-signup needed.**
+- `WHATSAPP_DISPLAY_NUMBER` added to EC2 `.env` (`+1 (555) 676-0956` - a Meta sandbox
+  number, not dialable).
+- Local HEAD `c1b0768`. Suite at baseline on the merged tree: 5 failed / 151 passed.
+- Disk 82%, 29 GB free. **Zero deliberate Groq calls made.**
