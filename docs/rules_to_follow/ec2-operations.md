@@ -126,39 +126,44 @@ every customer as Unverified for months while looking healthy.
 exists.** The procedure for changing it is § 5-6 below. Do NOT follow the local wipe procedure
 in `CLAUDE.md` on EC2 - it wipes `cx-data`, which here destroys the seed payload.
 
-**As of 2026-09-10, after the Fix 164-166 deploy + rebuild + fresh start below.**
+**As of 2026-09-22, after the Fix 167-191 deploy + rebuild + fresh start below.**
 
 | | |
 |---|---|
-| code level | **`f7b6f71`** - full parity with `main`, **image rebuilt** so Python matches too. Record the hash, never a status word |
+| code level | **`0b4f169`** - branch `Sayantini-phase2-ui-changes`, which contains BOTH this branch's Fixes 167-191 and `origin/main`'s audit-run browser (merged 2026-09-22). NOT equal to `main`, which is still missing the 25 commits. **Image rebuilt** so Python matches. Record the hash, never a status word |
 | host | `ip-172-31-38-51`, public **13.233.212.194**, repo `/home/ec2-user/Omnichannel-CX-Project` |
 | API port | **8889** (local is 8888) |
-| git | **none** - `scp` is the only route in |
+| git | **binary IS installed** (`/usr/bin/git` 2.50.1) and `git ls-remote` on the GitHub repo answers WITHOUT auth - measured 2026-09-22. The repo directory is still not a checkout, so `scp` remains the route in. **2 of ~30 projects on this box use git; `scp` is the house convention here** - do not convert this one without deciding that deliberately |
 | `GROQ_MODEL` | **`openai/gpt-oss-120b`** - DIVERGED from local's `20b`, deliberately |
-| Groq quota | **shared with local** - same `GROQ_API_KEY`; a probe from either machine answers for both |
-| `RAG_BACKEND` | **`neo4j` by CODE DEFAULT - the variable is UNSET.** `printenv RAG_BACKEND` returns EMPTY; `config.py:47` (`os.getenv("RAG_BACKEND", "neo4j")`) supplies it. The earlier "verified inside the container" reading was of the default, not of a set value. Same outcome, different mechanism - do not "fix" the empty output |
-| data | **2 conversations / 9 turns** from post-deploy testing; **5** seeded customers; KB **14/14**; `holdings_linked` **123**; Concepts **18** |
-| logins | **DESTROYED by the 2026-09-10 wipe** - portal + admin need re-signup (`sayantini.s.55@gmail.com` / `7890864700`, must match the seeded record) |
-| containers | all 5 up; **ngrok holds the shared tunnel** (untouched, up 5 days); opensearch UNUSED (kept as rollback, untouched); Ollama commented out of compose |
-| disk | **~10 GB free, ~89%** - improved by a prune that should not have been run; see § 7 |
-| backups on box | `~/seed_backup_bfsi.xlsx`, `~/seed_backup_kb`, `~/seed_backup_rkb` (the irreplaceable payload, re-verified 2026-09-10 at 26,418 / 48,094 / 12,109 bytes), `~/backup_pre149`, `~/backup_pre162`, `~/backup_pre_title`, **`~/backup_pre166`** (6 files: the 3 UI files, `groq_generator.py`, `system.md`, `docker-compose.yml`) |
+| Groq quota | **shared with local** - same `GROQ_API_KEY`; a probe from either machine answers for both. Seen live 2026-09-22: three SDK retries (3s/15s/16s) then give-up on a case_review, which rendered "Summary unavailable right now." while the rule-based cards beside it stayed populated. Cleared on Refresh |
+| `RAG_BACKEND` | **`neo4j` by CODE DEFAULT - the variable is UNSET.** Confirmed still unset 2026-09-22 (present in local `.env`, absent here). `config.py` supplies it - do not "fix" the empty output |
+| data | **0 conversations / 0 tickets** (fresh start 2026-09-22); **5** seeded customers; KB **14/14**, errors 0; `holdings_linked` **123**; Concepts **18**; **12 Service Desk agents** |
+| logins | **DESTROYED by the 2026-09-22 wipe** - portal + admin need re-signup (`sayantini.s.55@gmail.com` / `7890864700`, must match the seeded record) |
+| containers | all 5 up; **ngrok holds the shared tunnel** - untouched through the whole 2026-09-22 deploy, verified by unchanged uptime at every step; opensearch UNUSED (kept as rollback, untouched); Ollama commented out of compose |
+| disk | **~29 GB free, 82%** - measured 2026-09-22, the healthiest recorded. Earlier entries said 93-96% |
+| backups on box | **`~/backup_post191/code_post191.tar.gz`** (1.1M, 2026-09-22: `apps services shared scripts tests .gitignore docker-compose.yml .env`). Everything else in `~` was deleted 2026-09-22 - see below |
 
-**`/app/data` exists ONLY in the `cx-data` volume** - the api image has no such directory
-(measured). `bfsi.xlsx`, the KB PDF and the resolution examples were hand-copied in and exist
-nowhere else. **Any wipe must copy them off first.**
+**`/app/data` NOW SHIPS IN THE IMAGE - the Fix 146 defect is CLOSED.** Measured 2026-09-22:
+`docker run --rm --entrypoint sh <api image> -c "ls -l /app/data/..."` lists `bfsi.xlsx`
+26,418, `knowledge_base/InboxIQ_BFSI_KB.pdf` 48,094, `resolution_kb/resolution_examples.json`
+12,109. The cause was never gitignore - all three are tracked - it was that the original hand
+`scp` deploy omitted `data/` entirely. `scp -r data` on 2026-09-22 fixed it permanently.
 
-**The 2026-09-10 rebuild closed the Python/UI split.** From Fix 162 to Fix 163 the box ran a
-bind-mounted UI against a stale image: `apps/api/main.py` and `routes/email.py` sat on disk but
-outside the image, so `/` and the OpenAPI title still said "Omnichannel CX Accelerator". That was
-deferred on the belief a rebuild was too expensive at 95% disk. **The rebuild has now happened and
-picked them up - nothing is outstanding.**
+**Proven by the wipe itself, not by reasoning:** `cx-data` was destroyed and the api restarted
+with NO copy-in step. The log read `bfsi_data_loaded` then `neo4j_seed_complete`, and the graph
+came back with Customer 5. On every previous wipe this threw `FileNotFoundError`, which
+`_seed_neo4j()` swallowed - the bug that served customers as Unverified for months.
 
-**Verified after copying** (content, not disk presence), 2026-09-10: `20260910-headline2` 1,
-`mdToHtml(ex.reply.text` 2, `standard markdown` 1 in `groq_generator.py` and 1 in `system.md` -
-every count matching the same grep run locally. Then from inside the container: the Bedrock rates
-resolve (`_estimate_cost_usd('openai/gpt-oss-120b',1e6,1e6)` -> `{'cost_usd': 0.89, 'source':
-'env_config'}`), and the graph reads Customer **5**, KBChunk **14**, Concept **18**. The user
-opened `http://13.233.212.194:8889/admin-ui`, signed in and ran a real query end to end.
+**Consequently the loose seed files in `~` were deleted 2026-09-22** (`bfsi.xlsx`,
+`InboxIQ_BFSI_KB.pdf`, `resolution_examples.json`, `seed_backup_bfsi.xlsx`, `seed_backup_rkb/`,
+`probe_ec2.py` - a one-off KB retrieval diagnostic). They existed ONLY as the hand-install
+sources and rescue copies for a volume-only payload. `seed_backup_kb` and all four
+`backup_pre*` folders were **already gone before that delete** - by whom is not known.
+
+**The Service Desk bench now reseeds itself.** Fix 191 added an `on_event("startup")` hook
+beside `_seed_neo4j()`; `scripts/seed_service_desk_agents.py` used to be called from nowhere,
+so every wipe left the board with no one to auto-assign to. Verified here: 12 agents present on
+the first boot after the wipe, with no manual script run.
 
 ### Known defects LIVE on this box
 
@@ -279,11 +284,16 @@ they land. **Docs-only changes** (`README.md`, `.env.example`) skip 5-9 entirely
 `cx-data`, which is safe locally - the seed files ship inside the image - but on this box
 `cx-data` is the ONLY copy. Do not follow it here. Use this.
 
-**Step 1 is the whole procedure: `/app/data` exists ONLY in the `cx-data` volume.** Measured
-2026-09-07: `docker run --rm --entrypoint sh <api image> -c "ls /app/data"` gives **no such
-directory**. `bfsi.xlsx`, the KB PDF and `resolution_examples.json` were hand-copied in during
-Fix 146 and exist NOWHERE else on that box. Wipe the volume without copying them off and they
-are gone for good.
+**NO LONGER TRUE as of 2026-09-22 — `/app/data` now ships in the image.** This paragraph used
+to read "Step 1 is the whole procedure: `/app/data` exists ONLY in the `cx-data` volume",
+measured 2026-09-07 when `docker run --rm --entrypoint sh <api image> -c "ls /app/data"` gave
+**no such directory**. `scp -r data` on 2026-09-22 put the three files on disk, the rebuild
+carried them in via `COPY . .`, and the same probe now lists all three at 26,418 / 48,094 /
+12,109 bytes. A wipe no longer destroys them.
+
+**Re-run that probe before any wipe anyway.** It is one read-only command, and it is the single
+check that says whether steps 1, 6 and 7 are needed. Empty output means the payload is
+volume-only again and the struck-through steps come back.
 
 > **Correction, 2026-09-16 — why, and why it matters.** This paragraph used to say "`data/` is
 > gitignored so `COPY . .` never carried it." **That is false for this repo.** `.gitignore`
@@ -302,10 +312,15 @@ are gone for good.
 > `data/` in via `COPY . .` and remove the need for all three. That rebuild is cheap:
 > **measured 2.5s at 97% disk** (§ 2, trap 2).
 >
-> Until that rebuild happens, follow the steps below as written — the payload really is
-> volume-only on that box today.
+> **DONE 2026-09-22. That rebuild has now happened** — `scp -r data` put the payload on disk,
+> the image picked it up via `COPY . .`, and a real wipe then reseeded from it with no copy-in
+> step (`bfsi_data_loaded` → `neo4j_seed_complete`, Customer 5). **Steps 1, 6 and 7 below are
+> therefore OBSOLETE — skip them.** They are kept, struck through, because they describe the
+> shape of a defect that lasted months and a future hand-deploy could reintroduce it by
+> omitting `data/` again. If `docker run --rm --entrypoint sh <api image> -c "ls /app/data"`
+> ever comes back empty, the payload is volume-only again and these three steps come back.
 
-1. **Copy the payload off, and verify the sizes before continuing.**
+1. ~~**Copy the payload off, and verify the sizes before continuing.**~~ **OBSOLETE — skip.**
    `docker cp omnichannel-cx-project-api-1:/app/data/bfsi.xlsx ~/seed_backup_bfsi.xlsx`
    (same for `knowledge_base` to `~/seed_backup_kb`, `resolution_kb` to `~/seed_backup_rkb`).
    Expect ~26,418 / ~48,094 / ~12,109 bytes. **If any is empty, STOP.**
@@ -318,11 +333,13 @@ are gone for good.
    these two.
 5. `docker compose up -d neo4j`, then WAIT for `(healthy)` - a fresh empty store took ~90s.
    Seeding against a not-ready database fails.
-6. `docker compose up -d api` (this recreates the empty `cx-data`), then `docker cp` all three
-   payloads back in. There is nothing to copy into until the volume exists. **The first boot's
-   seed WILL fail with FileNotFoundError - expected, it is swallowed, ignore it.**
-7. `docker compose restart api` - `_seed_neo4j()` runs at startup only, and now the file is
-   there. Expect `neo4j_seed_complete`. (`restart` is right here: no code or `.env` change.)
+6. `docker compose up -d api` - this recreates the empty `cx-data`. **The seed now SUCCEEDS on
+   this first boot**: expect `bfsi_data_loaded` then `neo4j_seed_complete`, because the payload
+   comes from the image. Fix 191's hook also seeds the **12 Service Desk agents** here.
+   ~~then `docker cp` all three payloads back in ... the first boot's seed WILL fail with
+   FileNotFoundError~~ **OBSOLETE — skip.**
+7. ~~`docker compose restart api` - so `_seed_neo4j()` re-runs now the file is there.~~
+   **OBSOLETE — skip.** There is nothing to copy in, so nothing to restart for.
 8. Re-index: `POST /admin/rag/index?recreate=true` then `POST /admin/rag/link-kb-graph`, reading
    the admin key out of the container first with `docker compose exec -T api printenv
    ADMIN_API_KEY`. Expect `indexed 14/14 errors 0` and `holdings_linked: 123`.
