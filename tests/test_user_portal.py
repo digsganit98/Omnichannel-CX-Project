@@ -417,6 +417,31 @@ def test_web_chat_message_and_history_round_trip(monkeypatch):
     assert history["conversation_id"] == sent["conversation_id"]
 
 
+def test_reading_chat_history_creates_no_conversation(monkeypatch):
+    """Opening the portal reads the chat history. That read used to CREATE an empty
+    conversation, which the agent inbox then listed as an 'Unverified' customer who had
+    never written. Reading must leave the conversations table untouched."""
+    monkeypatch.setenv("JWT_SECRET", "user-portal-test-secret")
+    monkeypatch.setenv("NEO4J_ENABLED", "false")
+    from services.persistence_service.repository import SQLiteCXRepository
+
+    repo = SQLiteCXRepository(":memory:")
+    monkeypatch.setattr(user_portal, "get_repository", lambda: repo)
+    user_portal.user_signup(
+        user_portal.UserSignupRequest(
+            user_id="customer-4001",
+            email="customer4001@example.com",
+            password="portal-password",
+        )
+    )
+    token = user_portal._make_token("customer-4001")
+
+    history = user_portal.get_user_chat_messages(authorization=f"Bearer {token}")
+
+    assert history == {"conversation_id": None, "turns": []}
+    assert repo.list_conversations() == []
+
+
 def test_chat_endpoints_require_login():
     try:
         user_portal.get_user_chat_messages(authorization=None)

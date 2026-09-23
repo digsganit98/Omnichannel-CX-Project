@@ -80,24 +80,12 @@ def _seed_neo4j() -> None:
         logger.exception("neo4j_seed_failed")
 
 
-@app.on_event("startup")
-def _seed_service_desk_agents() -> None:
-    # The routing roster lives in admin_users, which is in the cx-data volume - so a wipe
-    # empties the bench and the Service Desk has nobody to assign to. Migrations re-run on
-    # boot and _seed_neo4j() above reseeds the graph, but nothing called the agent seed, so
-    # it silently stayed empty until someone remembered the script. Same shape as
-    # _seed_neo4j: additive, guarded, and it never touches a real account.
-    try:
-        from services.persistence_service.repository import SQLiteCXRepository
-        from scripts.seed_service_desk_agents import seed
-
-        # Constructing the repository runs migrate(), so 019 (team/capacity) is applied
-        # before seed() checks for those columns.
-        db_path = os.getenv("DATABASE_PATH", "data/cx_phase1.db")
-        SQLiteCXRepository(db_path)
-        seed(db_path)
-    except Exception:
-        logger.exception("service_desk_agent_seed_failed")
+# The Service Desk bench (scripts/seed_service_desk_agents.py - twelve made-up agents nobody
+# can sign in as) is no longer seeded on boot (2026-09-23). The roster is the real accounts
+# only, so every agent count on screen is the number of people who actually use the app.
+# With no bench, _auto_assign() finds no team member and leaves a new open case unassigned;
+# it shows in every agent's My work and anyone can take it. The script stays for anyone who
+# wants a demo bench and runs it by hand.
 
 
 @app.on_event("shutdown")

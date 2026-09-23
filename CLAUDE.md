@@ -40,7 +40,6 @@ app still reported `opensearch` with a clean log and no error anywhere. Changed 
 |---|---|
 | `api` | FastAPI backend + both UIs, port 8888 |
 | `neo4j` | the graph **and** the KB vector store — `RAG_BACKEND=neo4j` |
-| `mailpit` | local mail catcher |
 | `ngrok` | **profile-gated, do not start** — see below |
 
 `opensearch` and `ollama` are **commented out of compose** (2026-09-16). Nothing read either:

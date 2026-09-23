@@ -497,7 +497,13 @@ def get_user_chat_messages(authorization: str | None = Header(default=None)) -> 
         WebChatWebhookPayload(session_id=user_id, text="", metadata=metadata)
     )
     customer = repo.resolve_customer(lookup_message)
-    conversation = repo.get_or_create_conversation(customer["customer_id"])
+    # Reading history must not create a conversation. This used get_or_create_conversation,
+    # so merely opening the portal after sign-up wrote an empty conversation - no turns, no
+    # ticket, no name - that the agent inbox listed as an "Unverified" customer nobody had
+    # heard from. The first message sent (POST below) creates the conversation instead.
+    conversation = repo.find_latest_conversation(customer["customer_id"])
+    if conversation is None:
+        return {"conversation_id": None, "turns": []}
     turns = repo.list_recent_turns(conversation["conversation_id"], limit=50, channel="web_chat")
     return {"conversation_id": conversation["conversation_id"], "turns": turns}
 

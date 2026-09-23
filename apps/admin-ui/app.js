@@ -220,6 +220,13 @@ function showStage(stage) {
   document.getElementById('hubPage').style.display = stage === 'hub' ? 'flex' : 'none';
   document.getElementById('mainShell').style.display = stage === 'app' ? 'flex' : 'none';
   document.getElementById('userPortal').style.display = stage === 'user' ? 'flex' : 'none';
+  // The agent console (console.js) replaced the Control Centre as the signed-in home. The
+  // hub markup is kept, unreachable, until the console has run on EC2 for a while.
+  document.getElementById('cx2Root').style.display = stage === 'console' ? 'block' : 'none';
+  // The workspace panel may be lent to the console: bring it home before any classic page
+  // renders into it.
+  if (stage !== 'console' && window.cxReturnContext) window.cxReturnContext();
+  if (window.CX2) { window.CX2.side(stage); if (stage === 'console') window.CX2.start(); else window.CX2.stop(); }
 
   // activePage is not only a highlight - four fallback timers and the SSE handler read
   // it to decide whether to refetch (inbox 10s, selected conversation 12s, connectors
@@ -234,7 +241,7 @@ function showStage(stage) {
   //
   // Only the three signed-in stages are stored. 'home' and 'apikey' are pre-auth screens
   // and restoring into one would put a signed-in user back at a sign-in card.
-  if (stage === 'hub' || stage === 'app' || stage === 'user') {
+  if (stage === 'hub' || stage === 'app' || stage === 'user' || stage === 'console') {
     try { sessionStorage.setItem('cx-stage', stage); } catch (e) {}
   }
 }
@@ -262,9 +269,10 @@ window.goHome = function() {
 // ── Control Centre ────────────────────────────────────────────────────────────
 // The hub is the one screen that routes to every section, and the ribbon brand is the
 // way back to it from anywhere in the console.
+// Every "back to home" link in the classic pages (ribbon logo, rail's first item) now
+// returns to the agent console, which took the Control Centre's place.
 window.goToHub = function() {
-  updateHubUser();
-  showStage('hub');
+  showStage('console');
 };
 
 // Entering a section from a hub box: show the console shell, then switch to the page.
@@ -458,7 +466,9 @@ async function submitAdminAuth(path, body, btn, busyLabel, idleLabel) {
     sessionStorage.setItem('cx-admin-jwt', adminToken);
     if (currentUser) sessionStorage.setItem('cx-admin-user', JSON.stringify(currentUser));
     updateHubUser();
-    showStage('hub');
+    // A new account signing in must not see the last one's console, which is built once.
+    if (window.CX2) window.CX2.reset();
+    showStage('console');
     bootApp();
   } catch(e) {
     adminToken = '';
@@ -569,6 +579,7 @@ document.getElementById('customerSignupBtn').addEventListener('click', async fun
 // ── Logout ────────────────────────────────────────────────────────────────────
 window.doLogout = function() {
   stopRealtime();
+  if (window.CX2) { window.CX2.stop(); window.CX2.reset(); }
   if (state.sseSource) { state.sseSource.close(); state.sseSource = null; }
   adminToken = '';
   currentUser = null;
@@ -591,6 +602,7 @@ window.doLogout = function() {
 
 window.backToPortalSelection = function() {
   stopRealtime();
+  if (window.CX2) { window.CX2.stop(); window.CX2.reset(); }
   if (state.sseSource) { state.sseSource.close(); state.sseSource = null; }
   adminKey = '';
   adminToken = '';
@@ -624,6 +636,7 @@ window.switchPage = function(name) {
   var navEl = document.getElementById('nav-' + name);
   if (navEl) navEl.classList.add('active');
   activePage = name;
+  if (window.CX2) window.CX2.onPage(name);
   // Same reason as the stage above: a refresh in Analytics should come back to Analytics.
   try { sessionStorage.setItem('cx-page', name); } catch (e) {}
   if (name === 'analytics') loadAnalytics();
@@ -766,6 +779,10 @@ function renderQueue() {
   var filtered = state.convs.filter(function(c) {
     if (search && !customerLabel(c).toLowerCase().includes(search) && !(c.last_message||'').toLowerCase().includes(search)) return false;
     if (activeFilter === 'review' && !state.pendingDrafts[c.conversation_id]) return false;
+    // Nothing written yet - no message, no case, no draft. Opening the customer portal used
+    // to create one of these (user_portal.py), and it read here as an "Unverified" customer.
+    if (!c.last_message && !state.pendingDrafts[c.conversation_id]
+        && !allTickets().some(function(t) { return t.conversation_id === c.conversation_id; })) return false;
     return true;
   });
   if (!filtered.length) {
@@ -3815,9 +3832,56 @@ window.goToConversation = function(conversationId, ticketId) {
     state.convView[conversationId] = 'detailed';
     state.detailFocus[conversationId] = ticketId;
   }
+  // A ticket row can be clicked while its panel is lent to the console (below); the
+  // conversation opens in the Agent Workspace either way.
+  showStage('app');
   switchPage('inbox');
   selectConv(conversationId);
 };
+
+// ── The workspace's right panel, lent to the console ──────────────────────────
+// The console's case view shows the same Customer context, Open tickets, Case review
+// (summary, suggested actions, suggested offers) and sentiment readout as the Agent
+// Workspace. Rather than a second copy of those renderers, the console borrows the
+// elements themselves: #page-inbox .rp and #hsent are moved into its column, filled by
+// renderRight exactly as here, and moved back before anything else can render into them
+// (showStage for every other stage, and the console before each of its own re-renders).
+// Every id keeps working because the nodes are moved, never copied.
+var _lentKey = null;
+window.cxLendContext = async function(mount, sentMount, convId, ticketId) {
+  var rp = document.querySelector('.rp'), hs = document.getElementById('hsent');
+  if (!rp || !mount || !convId) return;
+  mount.appendChild(rp);
+  if (hs && sentMount) sentMount.appendChild(hs);
+  var key = convId + '|' + (ticketId || '');
+  // Same case as last time: the panel already holds it, so moving it back is enough. Its
+  // cards refetch on a genuine change (the poll below and every send re-render them).
+  if (key === _lentKey && state.convDetail && state.convDetail.conversation_id === convId) return;
+  _lentKey = key;
+  if (ticketId) { state.convView[convId] = 'detailed'; state.detailFocus[convId] = ticketId; }
+  try {
+    if (!allTickets().length || !state.convs.some(function(c) { return c.conversation_id === convId; })) {
+      await window.loadConversations();
+    }
+    var detail = await api('/admin/conversations/' + encodeURIComponent(convId));
+    if (_lentKey !== key) return;  // the agent moved on while this loaded
+    state.selectedConvId = convId;
+    state.convDetail = detail;
+    renderRight(detail, allTickets());
+  } catch (e) {
+    var body = document.getElementById('rpbody');
+    if (body) body.innerHTML = '<div class="rp-noesc">Couldn\'t load this customer: ' + escH(e.message) + '</div>';
+  }
+};
+window.cxReturnContext = function() {
+  var rp = document.querySelector('.rp'), hs = document.getElementById('hsent');
+  var home = document.querySelector('#page-inbox .app'), hdr = document.querySelector('#page-inbox .chdr');
+  if (rp && home && rp.parentNode !== home) home.appendChild(rp);
+  if (hs && hdr && hs.parentNode !== hdr) hdr.appendChild(hs);
+};
+// Forget the lent case, so the next lend re-renders even for the same conversation (after a
+// send, the panel's summary and suggestions have changed).
+window.cxContextStale = function() { _lentKey = null; };
 
 // ── SERVICE DESK ──────────────────────────────────────────────────────────────
 // The operational board: every case at once, who owns it, and what it is waiting on.
@@ -5564,7 +5628,7 @@ if (userToken && portalUser && !isTokenExpired(userToken)) {
   // needs a portal token this branch does not have, and anything else means the hub.
   var _saved = null;
   try { _saved = sessionStorage.getItem('cx-stage'); } catch (e) {}
-  showStage(_saved === 'app' ? 'app' : 'hub');
+  showStage(_saved === 'app' ? 'app' : 'console');
   bootApp();
   // The page INSIDE the console, restored after bootApp so its own setup has run.
   // switchPage re-renders the nav and fires that page's loader, which is exactly what

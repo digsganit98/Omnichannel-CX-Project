@@ -7,12 +7,15 @@ services:
       - .env
     environment:
       DATABASE_PATH: /app/data/cx_phase1.db
-      SMTP_HOST: ${SMTP_HOST:-mailpit}
-      SMTP_PORT: ${SMTP_PORT:-1025}
+      # Defaults match the real Gmail relay in .env. They used to point at a local mailpit
+      # catcher, which was removed 2026-09-23: .env already sent every mail through Gmail,
+      # so mailpit received nothing.
+      SMTP_HOST: ${SMTP_HOST:-smtp.gmail.com}
+      SMTP_PORT: ${SMTP_PORT:-587}
       SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL:-support@example.com}
       SMTP_USERNAME: ${SMTP_USERNAME:-}
       SMTP_PASSWORD: ${SMTP_PASSWORD:-}
-      SMTP_USE_TLS: ${SMTP_USE_TLS:-false}
+      SMTP_USE_TLS: ${SMTP_USE_TLS:-true}
       SMTP_USE_SSL: ${SMTP_USE_SSL:-false}
       OPENSEARCH_URL: http://opensearch:9200
       OLLAMA_BASE_URL: http://ollama:11434
@@ -180,12 +183,6 @@ services:
       interval: 15s
       timeout: 10s
       retries: 10
-
-  mailpit:
-    image: axllent/mailpit:v1.20
-    ports:
-      - "1025:1025"
-      - "8025:8025"
 
 volumes:
   cx-data:

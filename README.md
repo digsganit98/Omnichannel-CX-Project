@@ -137,7 +137,6 @@ A held reply appears in the agent console as an editable draft with the hold rea
 | `neo4j` | 7474 / 7687 | Customer records, tickets, resolution memory, KB chunks |
 | `opensearch` | 9200 | KB index only when `RAG_BACKEND=opensearch` (not the default) |
 | `ollama` | 11434 | Local LLM (classification fallback) |
-| `mailpit` | 8025 / 1025 | Local mail catcher for email testing |
 | `ngrok` | 4040 | WhatsApp webhook tunnel — **not started by default**, see below |
 
 **Groq** is the cloud LLM used for generation and classification and runs outside Docker.
@@ -342,6 +341,28 @@ and the Groq-quota check. For the hosted instance, see `docs/rules_to_follow/ec2
 ---
 
 ## The agent console
+
+Signing in at `/admin-ui` opens the console (`apps/admin-ui/console.js`). Its sidebar is grouped by job:
+
+**Review & respond** — where a person reads and answers
+- **My work** — one case at a time. The queue is split into *To approve* (a held AI draft), *To
+  reply* and *Waiting on customers*, ordered overdue first, then live chat, then time left. The
+  customer's sentiment, context, open tickets and case review sit beside the case.
+  **Approve & send** and **Send** deliver for real.
+- **All conversations** — the Agent Workspace (every thread, Detailed / Lineage views).
+- **Assign & track** — the Service Desk board: owners, SLA breaches, reassignment.
+
+**Cost & performance** — tracking
+- **AI performance** — AI resolution rate, drafts sent as-is vs edited vs replaced, why replies
+  were held, cost per resolution, per-topic hand-overs and team workload, computed in the browser
+  from tickets, reply drafts and the LLM usage summary.
+- **AI activity** — what the AI resolved on its own today, what it is answering now, what it
+  handed to people.
+- **Cost & reports** — LLM spend (FinOps), customer-care and solution reports, the audit trail.
+
+**System** — **Configuration** (connectors, models) and **Workflow** (the pipeline diagram).
+
+The classic pages behind those links:
 
 - **Inbox** — conversations grouped into one thread per matter, across channels
 - **Held drafts** — replies awaiting review, with the hold reason and an editable body

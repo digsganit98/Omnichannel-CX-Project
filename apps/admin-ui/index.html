@@ -7,6 +7,10 @@
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="icon" type="image/png" href="/admin-ui/assets/ganit-logo.png">
 <link rel="stylesheet" href="/admin-ui/assets/style.css?v=20260922-syscfg30">
+<!-- Liquid-glass re-skin of every classic page, the front door and the customer portal.
+     Changes no markup; delete this line to get the old look back. -->
+<link rel="stylesheet" href="/admin-ui/assets/theme-glass.css?v=20260923-glass1">
+<link rel="stylesheet" href="/admin-ui/assets/console.css?v=20260923-conv2">
 </head>
 <body>
 
@@ -431,7 +435,7 @@
 
   <!-- RIBBON -->
   <div class="ribbon">
-    <div class="ribbon-logo ribbon-logo--link" onclick="goToHub()" title="Back to Control Centre" role="button" tabindex="0">
+    <div class="ribbon-logo ribbon-logo--link" onclick="goToHub()" title="Back to My work" role="button" tabindex="0">
       <img src="/admin-ui/assets/ganit-logo.png?v=1" class="ribbon-icon" alt="Ganit">
       <span class="ribbon-name">Omnichannel<span>CX</span></span>
     </div>
@@ -459,7 +463,7 @@
      <div class="leftnav-panel">
       <div class="nav-item nav-hub" id="nav-hub" onclick="goToHub()">
         <svg viewBox="0 0 24 24"><path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/></svg>
-        <span class="nav-tooltip">Control Centre</span>
+        <span class="nav-tooltip">My work</span>
       </div>
       <div class="nav-divider"></div>
       <div class="nav-item active" id="nav-inbox" onclick="switchPage('inbox')">
@@ -584,7 +588,7 @@
       <div class="dash">
         <div class="dash-header">
           <div>
-            <div class="dash-title">Performance &amp; Cost</div>
+            <div class="dash-title">Cost &amp; reports</div>
           </div>
           <div style="display:flex;align-items:center;gap:10px">
             <span class="sse-badge" id="sseStatus">Connecting…</span>
@@ -695,7 +699,7 @@
       <div class="conn-page">
         <!-- No subtitle: the tabs below name the same things it listed, and
              Performance & Cost carries none either. -->
-        <div class="dash-title">System Configuration</div>
+        <div class="dash-title">Configuration</div>
         <!-- Same tab mechanism as Performance & Cost: an-tabs / an-tab and one section per
              tab, so the two configuration-and-reporting pages behave identically rather
              than each inventing a way to switch panels. -->
@@ -904,6 +908,10 @@
 
 <div class="toast" id="toastEl"></div>
 
+<!-- STAGE: THE AGENT CONSOLE (console.js). The page an admin lands on after signing in;
+     the classic pages above stay reachable from its "More tools" menu. -->
+<div class="cx2" id="cx2Root" style="display:none"></div>
+
 <!-- CONFIRMATION MODAL -->
 <div class="modal-overlay hidden" id="confirmModal">
   <div class="modal-card" style="width:380px;gap:14px">
@@ -926,6 +934,7 @@
 <!-- d3-force, vendored (15KB, tree-shaken to the 7 functions used). Local, not a CDN:
      the app has no other external JS and a demo must not depend on a network fetch. -->
 <script src="/admin-ui/assets/vendor-d3-force.js?v=20260902"></script>
-<script src="/admin-ui/assets/app.js?v=20260922-audit31"></script>
+<script src="/admin-ui/assets/console.js?v=20260923-conv4"></script>
+<script src="/admin-ui/assets/app.js?v=20260923-conv4"></script>
 </body>
 </html>

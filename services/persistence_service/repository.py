@@ -60,6 +60,7 @@ class CXRepository(Protocol):
     def get_idempotent_response(self, provider: str, external_message_id: str) -> dict | None: ...
     def resolve_customer(self, message: InboundMessage) -> dict: ...
     def get_or_create_conversation(self, customer_id: str) -> dict: ...
+    def find_latest_conversation(self, customer_id: str) -> dict | None: ...
     def list_recent_turns(self, conversation_id: str, limit: int = 8, channel: str | None = None) -> list[dict]: ...
     def list_conversation_turns(self, conversation_id: str) -> list[dict]: ...
     def count_recent_inbound(self, customer_id: str, since_iso: str) -> int: ...
@@ -285,6 +286,17 @@ class SQLiteCXRepository:
         result = dict(row)
         result["metadata"] = json.loads(result.pop("metadata_json"))
         return result
+
+    def find_latest_conversation(self, customer_id: str) -> dict | None:
+        """The customer's newest conversation, or None. Read-only: unlike
+        get_or_create_conversation it never inserts a row or reopens a closed one, so a
+        caller that only wants to READ history cannot leave an empty conversation behind."""
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM conversations WHERE customer_id = ? ORDER BY created_at DESC LIMIT 1",
+                (customer_id,),
+            ).fetchone()
+        return dict(row) if row else None
 
     def get_or_create_conversation(self, customer_id: str) -> dict:
         with self.connection() as conn:
