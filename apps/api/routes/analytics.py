@@ -2,8 +2,9 @@ import asyncio
 import json
 import os
 from dataclasses import asdict
+from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 
 from apps.api.dependencies.jwt_auth import require_analytics_access as require_analytics_token
@@ -16,6 +17,7 @@ from services.analytics_service.aggregator import (
     get_solution_performance,
     get_ticket_trend,
     get_agent_metrics,
+    get_today_metrics,
 )
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
@@ -60,6 +62,25 @@ def trend(_: dict = Depends(require_analytics_token)) -> list:
 @router.get("/solution-performance")
 def solution_performance(_: dict = Depends(require_analytics_token)) -> dict:
     return asdict(get_solution_performance(_db()))
+
+
+@router.get("/today")
+def today(since: str | None = None, _: dict = Depends(require_analytics_token)) -> dict:
+    """The agent console's day: AI vs human reply volume, per-person handling and SLA, and
+    open cases where the customer was unhappy with a person's reply. `since` is the
+    browser's local midnight (ISO 8601), so "today" is the agent's day rather than UTC's;
+    without it the day starts at UTC midnight."""
+    start = None
+    if since:
+        try:
+            start = datetime.fromisoformat(since.replace("Z", "+00:00"))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="since must be an ISO 8601 timestamp")
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=timezone.utc)
+    if start is None:
+        start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    return get_today_metrics(_db(), start)
 
 
 @router.get("/events")

@@ -842,7 +842,10 @@ class SQLiteCXRepository:
             contacts.setdefault(row["ticket_id"], []).append({
                 "direction": row["direction"],
                 "created_at": row["created_at"],
-                "by_human": metadata.get("source") == "manual_agent_reply",
+                # Both send paths: a held draft sent (manual_agent_reply) and a reply
+                # written in the composer (agent_composed_reply). Only the first was
+                # counted, so a case answered from the composer showed no human contact.
+                "by_human": metadata.get("source") in ("manual_agent_reply", "agent_composed_reply"),
             })
         return contacts
 

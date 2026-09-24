@@ -171,12 +171,27 @@ function workItems() {
     out.push({ key: 'd:' + d.draft_id, t: t, c: c, d: d, stage: 'approve', note: '', due: null, promise: null, ch: d.channel || c.last_channel,
       name: nameOf(c), topic: d.channel === 'offer' ? 'An approved offer, ready to send' : (t && t.title) || 'A follow-up you approved' });
   });
+  // Needs attention now (/analytics/today): a person replied and the customer's next message
+  // was negative, with nobody replying since. Such a case is owed a reply whatever its lane
+  // said, and it goes to the top, ordered by the SLA clock.
+  ((D.today && D.today.attention) || []).forEach(function (a) {
+    var hit = null;
+    out.forEach(function (i) { if (!hit && i.t && i.t.ticket_id === a.ticket_id) hit = i; });
+    out.forEach(function (i) { if (!hit && i.t && i.c.conversation_id === a.conversation_id) hit = i; });
+    if (!hit) return;
+    hit.attention = a;
+    if (hit.stage === 'waiting') hit.stage = 'reply';
+    hit.note = '';
+    var due = a.sla_due_at ? minsUntil(a.sla_due_at) : null;
+    if (due != null) hit.due = due;
+  });
   return out;
 }
 function order(a, b) {
   var as = skips[a.key] || 0, bs = skips[b.key] || 0;
   if (!!as !== !!bs) return as ? 1 : -1;
   if (as && bs) return as - bs;
+  if (!!a.attention !== !!b.attention) return a.attention ? -1 : 1;
   var ao = a.due != null && a.due < 0, bo = b.due != null && b.due < 0;
   if (ao !== bo) return ao ? -1 : 1;
   var al = chMeta(a.ch).live, bl = chMeta(b.ch).live;
@@ -230,11 +245,13 @@ async function ensureDetail(convId) {
 }
 
 // ── data loading ────────────────────────────────────────────────────────────
-var PERIOD_DAYS = { '24h': 1, '7d': 7, '30d': 30 };
+var PERIOD_DAYS = { today: 1, '24h': 1, '7d': 7, '30d': 30 };
+function localMidnight() { var d = new Date(); d.setHours(0, 0, 0, 0); return d; }
 async function load() {
   try {
-    var base = await Promise.all([api('/admin/conversations'), api('/admin/tickets'), api('/admin/reply-drafts?status=')]);
-    D.convs = base[0] || []; D.tickets = base[1] || []; D.drafts = base[2] || [];
+    var base = await Promise.all([api('/admin/conversations'), api('/admin/tickets'), api('/admin/reply-drafts?status='),
+      api('/analytics/today?since=' + encodeURIComponent(localMidnight().toISOString())).catch(function () { return null; })]);
+    D.convs = base[0] || []; D.tickets = base[1] || []; D.drafts = base[2] || []; D.today = base[3];
     S.err = null; S.loaded = true;
     if (S.view === 'team') await loadTeam();
   } catch (err) {
@@ -394,23 +411,50 @@ function decisionMins() {
     .map(function (d) { return (ts(d.decided_at) - ts(d.created_at)) / 60000; }).filter(function (x) { return x >= 0 && x < 720; });
   return median(a);
 }
-function ring(done, total) {
+function ring(done, total, label) {
   var r = 46, c = 2 * Math.PI * r, p = total ? done / total : 1;
   return '<div class="ring"><svg viewBox="0 0 112 112" aria-hidden="true"><defs><linearGradient id="cxRg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#8f86ff"/><stop offset="1" stop-color="#4a3bf0"/></linearGradient></defs>' +
     '<circle cx="56" cy="56" r="' + r + '" fill="none" stroke="var(--line)" stroke-width="12"/>' +
     '<circle cx="56" cy="56" r="' + r + '" fill="none" stroke="url(#cxRg)" stroke-width="12" stroke-linecap="round" stroke-dasharray="' + c.toFixed(2) + '" stroke-dashoffset="' + (c * (1 - p)).toFixed(2) + '"/></svg>' +
-    '<div class="rv"><b>' + done + ' of ' + total + '</b>handled by people today</div></div>';
+    '<div class="rv"><b>' + done + ' of ' + total + '</b>' + (label || 'handled today') + '</div></div>';
+}
+// Your day: what the signed-in person handled since local midnight (/analytics/today).
+function you() {
+  var rows = (D.today && D.today.agents) || [];
+  for (var k = 0; k < rows.length; k++) if (rows[k].actor === actor()) return rows[k];
+  return null;
+}
+function channelLine(byCh) {
+  byCh = byCh || {};
+  var order = ['email', 'whatsapp', 'web_chat'], parts = ['Email ' + (byCh.email || 0)];
+  order.slice(1).concat(Object.keys(byCh).filter(function (c) { return order.indexOf(c) < 0; })).forEach(function (c) {
+    if (byCh[c]) parts.push(chMeta(c).label + ' ' + byCh[c]);
+  });
+  return parts.join(' · ');
+}
+function yourDayHTML(todoN) {
+  var y = you(), handled = y ? y.replies + y.drafts_replaced : 0;
+  var decided = y ? y.drafts_sent_as_is + y.drafts_edited + y.drafts_replaced : 0;
+  function st(k, v) { return '<div class="dst"><span>' + k + '</span><b class="num">' + v + '</b></div>'; }
+  return ring(handled, handled + todoN, 'handled by you today') +
+    '<div class="dayst">' +
+      st('Channels', channelLine(y && y.by_channel)) +
+      st('SLA met', y && y.sla_total ? Math.round(y.sla_met / y.sla_total * 100) + '% <small>of ' + y.sla_total + '</small>' : '—') +
+      st('Typical first reply', y && y.median_first_reply_minutes != null ? fmtMin(Math.round(y.median_first_reply_minutes)) : '—') +
+      st('AI drafts sent as-is', decided ? Math.round(y.drafts_sent_as_is / decided * 100) + '%' : '—') +
+    '</div>';
 }
 function workHTML() {
   var list = todo(), i = current(), n = list.length;
   var done = D.drafts.filter(function (d) { return d.status !== 'pending' && isToday(d.decided_at); }).length +
     D.tickets.filter(function (t) { return t.status === 'closed' && isToday(t.updated_at); }).length;
-  var aiToday = D.tickets.filter(function (t) { return t.status === 'logged' && isToday(t.created_at); }).length;
   var per = decisionMins(), mins = per != null ? Math.max(5, Math.round(n * Math.max(per, 1) / 5) * 5) : null;
-  var line = n ? (n === 1 ? 'One conversation needs you' : n + ' conversations need you') + (mins ? ', about ' + mins + ' minutes at the team\'s usual pace.' : '.') + ' The AI is taking care of the rest.'
-    : 'Nothing needs you right now. The AI is taking care of everything.';
+  var att = list.filter(function (x) { return x.attention; }).length;
+  var line = (att ? (att === 1 ? 'One customer is' : att + ' customers are') + ' unhappy after a reply, and they come first. ' : '') +
+    (n ? (n === 1 ? 'One conversation needs you' : n + ' conversations need you') + (mins ? ', about ' + mins + ' minutes at the team\'s usual pace.' : '.') + ' The AI is taking care of the rest.'
+    : 'Nothing needs you right now. The AI is taking care of everything.');
   if (i) ensureDetail(i.c.conversation_id);
-  var top = hero('<div class="hero-row"><div class="grow"><div class="eyebrow">' + esc(todayLabel()) + '</div><h1>' + greeting() + ', ' + esc(cap(firstName(me().username || 'there'))) + '.</h1><p>' + line + '</p></div>' + '<div class="hero-stats">' + ring(done, done + n) + '<button class="hstat" data-go="ai"><b class="num">' + aiToday + '</b><span>resolved by the AI today</span></button></div></div>');
+  var top = hero('<div class="hero-row"><div class="grow"><div class="eyebrow">' + esc(todayLabel()) + '</div><h1>' + greeting() + ', ' + esc(cap(firstName(me().username || 'there'))) + '.</h1><p>' + line + '</p></div>' + '<div class="hero-stats">' + yourDayHTML(n) + '</div></div>');
   if (!i) return top + '<div class="wrap">' + queueHTML(null) + '<div class="focus caught">' + ICON.check + '<h2>You\'re all caught up</h2><p>New conversations that need a person will appear here on their own.</p></div>' + '</div>';
   // Case on the left, everything about the customer on the right: the sentiment readout,
   // customer context, open tickets and the case review are the Agent Workspace's own panel.
@@ -419,9 +463,11 @@ function workHTML() {
     '<div class="ctx-mount" id="cxCtxMount"></div></aside></div></div>';
 }
 function focusHTML(i) {
-  var kind = { approve: 'To approve', reply: 'To reply', waiting: 'Waiting on customer' }[i.stage];
+  var kind = i.attention ? 'Needs attention now' : { approve: 'To approve', reply: 'To reply', waiting: 'Waiting on customer' }[i.stage];
   var inb = lastInbound(i), sent = inb && inb.metadata && inb.metadata.sentiment;
-  var msg = inb ? inb.text : (i.c.last_message || '');
+  // For an attention case the message to read is the complaint that followed our reply.
+  var msg = i.attention ? i.attention.customer_said : inb ? inb.text : (i.c.last_message || '');
+  if (i.attention) inb = { created_at: i.attention.customer_said_at, metadata: { sentiment: 'negative' } };
   var sub = '<span class="ch">' + (ICON[i.ch] || '') + esc(chMeta(i.ch).label) + '</span><span class="dot-sep">·</span><span>' + esc(i.topic) + '</span>' +
     (sent === 'negative' ? '<span class="dot-sep">·</span><span class="upset">Upset</span>' : '');
   var body = '', dis = S.busy ? ' disabled' : '';
@@ -455,7 +501,9 @@ function focusHTML(i) {
   return '<article class="focus" aria-labelledby="cxFocusName">' +
     '<div class="f-top"><span class="eyebrow">Up next · ' + kind + '</span>' + dueHTML(i) + '</div>' +
     '<div><h2 id="cxFocusName">' + esc(i.name) + '</h2><div class="f-sub">' + sub + '</div></div>' +
-    (i.stage !== 'waiting' ? '<p class="why">' + ICON.info + '<span>' + esc(whyText(i)) + '</span></p>' : '') +
+    (i.attention ? '<p class="attn">' + ICON.info + '<span><b>The customer is unhappy after ' + (i.attention.replied_by === actor() ? 'your' : esc(i.attention.replied_by) + '\'s') + ' reply.</b> ' +
+      (i.due == null ? 'Reply first.' : i.due < 0 ? 'Their SLA is overdue by ' + fmtMin(i.due) + '.' : 'Their SLA is due in ' + fmtMin(i.due) + '.') + '</span></p>' :
+      i.stage !== 'waiting' ? '<p class="why">' + ICON.info + '<span>' + esc(whyText(i)) + '</span></p>' : '') +
     (msg ? '<div><blockquote class="cx-cust">' + esc(msg) + '</blockquote><div class="cx-cust-by">' + esc(firstName(i.name)) + (inb ? ' · ' + ago(inb.created_at) : '') + '</div></div>' : '') +
     body + '<div class="keys"><kbd>Ctrl</kbd> + <kbd>Enter</kbd> sends · <kbd>S</kbd> skips</div>' + more + '</article>';
 }
@@ -476,9 +524,10 @@ function queueHTML(cur) {
   var all = workItems().sort(order);
   if (!all.length) return '';
   function chip(i) {
-    return '<button class="q-chip" data-pick="' + esc(i.key) + '" aria-current="' + (cur && cur.key === i.key) + '"><span class="n">' + esc(i.name) + '</span><span class="tp">' + esc(i.topic) + '</span>' + dueHTML(i) + '</button>';
+    return '<button class="q-chip' + (i.attention ? ' hot' : '') + '" data-pick="' + esc(i.key) + '" aria-current="' + (cur && cur.key === i.key) + '"><span class="n">' + esc(i.name) + '</span><span class="tp">' + esc(i.topic) + '</span>' + dueHTML(i) + '</button>';
   }
-  var ap = all.filter(function (i) { return i.stage === 'approve'; }), rp = all.filter(function (i) { return i.stage === 'reply'; }), wt = all.filter(function (i) { return i.stage === 'waiting'; });
+  var at = all.filter(function (i) { return i.attention; });
+  var ap = all.filter(function (i) { return !i.attention && i.stage === 'approve'; }), rp = all.filter(function (i) { return !i.attention && i.stage === 'reply'; }), wt = all.filter(function (i) { return !i.attention && i.stage === 'waiting'; });
   function sec(title, pip, items, waiting) {
     if (!items.length) return '';
     var open = !waiting || S.showWaiting;
@@ -486,7 +535,7 @@ function queueHTML(cur) {
       (open ? items.map(chip).join('') : '') + '</div>';
   }
   return '<section class="qstrip glass" aria-label="Your queue"><div class="qs-scroll">' +
-    sec('To approve', '#6d5dfc', ap) + sec('To reply', '#f0a36b', rp) + sec('Waiting', '#b3b9c5', wt, true) +
+    sec('Needs attention now', '#e5484d', at) + sec('To approve', '#6d5dfc', ap) + sec('To reply', '#f0a36b', rp) + sec('Waiting', '#b3b9c5', wt, true) +
   '</div></section>';
 }
 function bindWork() {
@@ -692,7 +741,7 @@ function convCardHTML(r, k) {
       '<span class="cv-main"><span class="cv-top"><b>' + esc(r.name) + '</b><span class="ch">' + (ICON[r.c.last_channel] || '') + esc(chMeta(r.c.last_channel).label) + '</span><span class="cv-when">' + ago(r.when) + '</span></span>' +
         '<span class="cv-topic">' + esc(r.topic) + more + '</span>' +
         '<span class="cv-msg">' + esc(r.c.last_message || 'No messages yet') + '</span>' +
-        '<span class="cv-stage tone-t-' + s.tone + '">' + esc(s.label) + '</span>' + progressHTML(r.stage) + '</span>' +
+        '<span class="cv-stage tone-t-' + s.tone + '">' + esc(s.label) + (r.item && r.item.attention ? ' <span class="cv-attn">Unhappy after reply</span>' : '') + '</span>' + progressHTML(r.stage) + '</span>' +
     '</button>' + (open ? convOpenHTML(r) : '') + '</article>';
 }
 function convOpenHTML(r) {
@@ -732,6 +781,26 @@ function bindConvList() {
   }); });
 }
 
+// AI vs people, today: replies sent since local midnight (/analytics/today).
+function volumeHTML(compact) {
+  var v = D.today && D.today.volume;
+  if (!v) return '';
+  var tot = v.ai + v.human;
+  var chans = Object.keys(v.by_channel || {}).sort();
+  var hours = v.hourly || [], max = Math.max(1, Math.max.apply(null, hours.map(function (h) { return h.ai + h.human; })));
+  var cols = hours.map(function (h, k) {
+    var ai = h.ai / max * 100, hu = h.human / max * 100;
+    return '<i class="vh" title="' + String(k).padStart(2, '0') + ':00 · AI ' + h.ai + ' · People ' + h.human + '"><b class="tone-warm" style="height:' + hu + '%"></b><b class="tone-ai" style="height:' + ai + '%"></b></i>';
+  }).join('');
+  return '<div class="vsplit' + (compact ? ' compact' : ' panel') + '">' +
+    (compact ? '' : '<h3>AI vs people today</h3><p class="cap">Replies sent to customers since midnight</p>') +
+    '<div class="vs-nums"><div><b class="num">' + v.ai + '</b><span>by the AI</span></div><div><b class="num">' + v.human + '</b><span>by people</span></div>' +
+      '<div><b class="num">' + (tot ? Math.round(v.ai / tot * 100) + '%' : '—') + '</b><span>handled by the AI</span></div></div>' +
+    (tot ? '<div class="daybar-track"><i class="ds tone-ai" style="flex:' + (v.ai || 0) + '"></i><i class="ds tone-warm" style="flex:' + (v.human || 0) + '"></i></div>' : '<p class="note">No replies sent yet today.</p>') +
+    (chans.length ? '<div class="vs-ch">' + chans.map(function (c) { var x = v.by_channel[c]; return '<span><b>' + esc(chMeta(c).label) + '</b> AI ' + x.ai + ' · People ' + x.human + '</span>'; }).join('') + '</div>' : '') +
+    (compact || !tot ? '' : '<div class="vh-row">' + cols + '</div><div class="vh-ax"><span>00:00</span><span>now</span></div>') +
+  '</div>';
+}
 // ── AI AGENT ────────────────────────────────────────────────────────────────
 function aiLists() {
   var resolved = D.tickets.filter(function (t) { return t.status === 'logged' && isToday(t.created_at); });
@@ -747,7 +816,7 @@ function aiLists() {
 function aiHTML() {
   var L = aiLists();
   var tabs = [['resolved', 'Resolved on its own today', L.resolved.length], ['active', 'In conversation now', L.live.length], ['handed', 'With people now', L.handed.length]];
-  var top = hero('<div><div class="eyebrow">AI activity</div><h1>What the AI handled today</h1><p>These stay out of your queue unless a person is needed.</p></div>' +
+  var top = hero('<div><div class="eyebrow">AI activity</div><h1>What the AI handled today</h1><p>These stay out of your queue unless a person is needed.</p></div>' + volumeHTML(true) +
     '<div class="stat-tabs" role="group" aria-label="Filter">' + tabs.map(function (x) { return '<button class="stat-tab" data-ait="' + x[0] + '" aria-pressed="' + (S.aiTab === x[0]) + '"><b class="num">' + x[2] + '</b><span>' + x[1] + '</span></button>'; }).join('') + '</div>');
   var rows = '', empty = '';
   if (S.aiTab === 'resolved') {
@@ -790,6 +859,10 @@ function bindAI() {
 
 // ── TEAM & AI: every number derived here from tickets, drafts and LLM usage ───
 function windowOf(period, back) {
+  if (period === 'today') {
+    var m = localMidnight().getTime(), span = Date.now() - m, day = 86400000;
+    return back ? { start: m - day, end: m - day + span } : { start: m, end: Date.now() + 1 };
+  }
   var ms = PERIOD_DAYS[period] * 86400000, end = Date.now() - (back ? ms : 0);
   return { start: end - ms, end: end };
 }
@@ -821,11 +894,11 @@ function change(cur, prev, goodUp, pts) {
   return '<span class="' + (good ? 'good' : 'bad') + '">' + (d > 0 ? 'up ' : 'down ') + txt + '</span>';
 }
 function pctTxt(v) { return v == null ? '—' : v.toFixed(0) + '%'; }
-var PERIOD_TXT = { '24h': ['in the last 24 hours', 'the 24 hours before'], '7d': ['this week', 'the previous 7 days'], '30d': ['this month', 'the previous 30 days'] };
+var PERIOD_TXT = { today: ['today', 'the same time yesterday'], '24h': ['in the last 24 hours', 'the 24 hours before'], '7d': ['this week', 'the previous 7 days'], '30d': ['this month', 'the previous 30 days'] };
 function teamHTML() {
   var tabs = [['overview', 'Overview'], ['topics', 'Topics'], ['team', 'People']];
   var controls = '<div class="hero-row"><div class="seg" role="group" aria-label="Section">' + tabs.map(function (x) { return '<button data-tt="' + x[0] + '" aria-pressed="' + (S.teamTab === x[0]) + '">' + x[1] + '</button>'; }).join('') + '</div><span class="grow"></span>' +
-    '<div class="seg" role="group" aria-label="Period">' + [['24h', '24 hours'], ['7d', '7 days'], ['30d', '30 days']].map(function (x) { return '<button data-p="' + x[0] + '" aria-pressed="' + (S.period === x[0]) + '">' + x[1] + '</button>'; }).join('') + '</div></div>';
+    '<div class="seg" role="group" aria-label="Period">' + [['today', 'Today'], ['24h', '24 hours'], ['7d', '7 days'], ['30d', '30 days']].map(function (x) { return '<button data-p="' + x[0] + '" aria-pressed="' + (S.period === x[0]) + '">' + x[1] + '</button>'; }).join('') + '</div></div>';
   var m = metrics(S.period, false), pm = metrics(S.period, true), pt = PERIOD_TXT[S.period];
   var top, body;
   if (S.teamTab === 'overview') {
@@ -871,7 +944,7 @@ function insightHTML(m) {
   return '<div class="insight"><span class="ic">' + ICON.bulb + '</span><div><h3>One thing worth a look</h3><p>People rewrote ' + best.edit + ' of ' + rev + ' AI drafts about ' + esc(intentLabel(best.k).toLowerCase()) + '. The knowledge behind those answers may be missing something.</p></div><button class="btn" data-topic="' + esc(best.k) + '">See the edits</button></div>';
 }
 function overviewHTML(m) {
-  if (!m.inbound && !m.drafts.length) return '<div class="panel caught">' + ICON.check + '<p>Nothing to measure in this period yet.</p></div>';
+  if (!m.inbound && !m.drafts.length) return (S.period === 'today' ? volumeHTML(false) : '') + '<div class="panel caught">' + ICON.check + '<p>Nothing to measure in this period yet.</p></div>';
   function segB(v, tot, color, label, light) { if (!v || !tot) return ''; var w = v / tot * 100; return '<div class="seg-b' + (light ? ' light' : '') + '" style="flex:0 0 calc(' + w.toFixed(3) + '% - 2px);background:' + color + '" title="' + label + ': ' + v + '">' + (w > 14 ? label : '') + '</div>'; }
   var held = m.asis + m.edited + m.disc + m.pending, autoW = m.inbound ? m.auto / m.inbound * 100 : 0;
   var funnel = '<div class="panel"><h3>Where conversations end up</h3><p class="cap">What the AI answered alone, and what people did with its drafts</p>' +
@@ -886,7 +959,7 @@ function overviewHTML(m) {
   var reasons = '<div class="panel"><h3>Why the AI asked for help</h3><p class="cap">' + m.drafts.length + ' held draft' + (m.drafts.length === 1 ? '' : 's') + '</p>' +
     (rs.length ? '<div class="rbars">' + rs.map(function (r) { return '<div class="rbar"><div class="l"><span>' + esc(r[1]) + '</span><b>' + r[2] + '</b></div><div class="track"><i style="width:' + (r[2] / max * 100).toFixed(1) + '%"></i></div></div>'; }).join('') + '</div>' : '<p class="note">No drafts were held.</p>') + '</div>';
   var trend = '<div class="panel"><h3>Over time</h3><p class="cap" id="cxColCap"></p><div class="chart" id="cxColChart"></div><div class="legend" style="margin-left:0"><span><i style="background:var(--viz-ai)"></i>Answered by AI</span><span><i style="background:var(--viz-held)"></i>Needed a person</span></div></div>';
-  return insightHTML(m) + '<div class="two">' + funnel + reasons + '</div>' + trend;
+  return (S.period === 'today' ? volumeHTML(false) : '') + insightHTML(m) + '<div class="two">' + funnel + reasons + '</div>' + trend;
 }
 function topicsHTML(m) {
   var rows = topicRows(m);
@@ -909,7 +982,29 @@ function topicsHTML(m) {
 // agent has a team, every real account is left team-less (is_operator). Each person's
 // numbers are what they actually did in the period, read from the records their actions
 // wrote: drafts they decided, cases they closed, replies they sent.
+function peopleTodayHTML() {
+  var meName = actor(), rows = ((D.today && D.today.agents) || []).slice();
+  (D.agents || []).filter(function (a) { return a.is_operator; }).forEach(function (a) {
+    if (!rows.some(function (r) { return r.actor === a.username; })) rows.push({ actor: a.username, replies: 0, by_channel: {}, drafts_sent_as_is: 0, drafts_edited: 0, drafts_replaced: 0, sla_met: 0, sla_total: 0, median_first_reply_minutes: null, mood_after: {} });
+  });
+  var v = D.today && D.today.volume;
+  var aiRow = '<tr class="ai"><td><span class="ai-tag">AI</span>AI Agent<span class="sub">All channels</span></td><td class="num">' + (v ? v.ai : '—') + '</td><td class="ar">—</td><td class="ar">Seconds</td><td class="ar">—</td><td class="ar">—</td></tr>';
+  var body = rows.map(function (a) {
+    var decided = a.drafts_sent_as_is + a.drafts_edited + a.drafts_replaced, md = a.mood_after || {};
+    var moodTxt = (md.negative || md.positive || md.neutral) ? '<span class="tone-t-ok">' + (md.positive || 0) + ' positive</span> · <span class="upset">' + (md.negative || 0) + ' negative</span>' : '—';
+    return '<tr><td>' + esc(a.actor) + (a.actor === meName ? ' <span class="muted">(you)</span>' : '') + '<span class="sub">' + esc(channelLine(a.by_channel)) + '</span></td>' +
+      '<td class="num">' + (a.replies + a.drafts_replaced) + '</td>' +
+      '<td class="ar num">' + (a.sla_total ? Math.round(a.sla_met / a.sla_total * 100) + '% <span class="muted">of ' + a.sla_total + '</span>' : '—') + '</td>' +
+      '<td class="ar num">' + (a.median_first_reply_minutes != null ? fmtMin(Math.round(a.median_first_reply_minutes)) : '—') + '</td>' +
+      '<td class="ar num">' + (decided ? Math.round(a.drafts_sent_as_is / decided * 100) + '%' : '—') + '</td>' +
+      '<td class="ar">' + moodTxt + '</td></tr>';
+  }).join('');
+  return '<div class="panel"><div class="table-scroll"><table class="people"><thead><tr><th>Who</th><th>Handled today</th><th class="ar">SLA met</th><th class="ar">Typical first reply</th><th class="ar">AI drafts sent as-is</th><th class="ar">Customer mood after reply</th></tr></thead><tbody>' +
+    aiRow + (body || '<tr><td colspan="6" class="muted">No one has handled a conversation yet today.</td></tr>') + '</tbody></table></div></div>' +
+    '<p class="note">Handled is replies sent plus AI drafts replaced, since midnight. Mood is the customer\'s next message after each reply.</p>';
+}
 function peopleHTML(m) {
+  if (S.period === 'today') return peopleTodayHTML();
   var w = m.w, meName = actor();
   var real = (D.agents || []).filter(function (a) { return a.is_operator; });
   if (!real.some(function (a) { return a.username === meName; }) && meName !== 'admin') real.unshift({ username: meName, is_operator: true, open_count: 0 });

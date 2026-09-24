@@ -492,3 +492,203 @@ def get_realtime_events(db_path: str, limit: int = 20) -> list[RealtimeEvent]:
         )
         for r in rows
     ]
+
+
+# ── Today, for the agent console ──────────────────────────────────────────────────────
+# Who replied is a per-turn fact: every reply a person sends is persisted with one of these
+# sources (reply_drafts.py, conversations.py), and every other outbound turn is the AI's -
+# except the automatic holding line, which is an acknowledgement, not an answer.
+HUMAN_REPLY_SOURCES = {"manual_agent_reply", "agent_composed_reply", "opportunity_offer"}
+_HOLDING_TEXT = "will help you with this shortly"
+
+
+def _turn_meta(row) -> dict:
+    import json
+    try:
+        return json.loads(row["metadata_json"] or "{}")
+    except (TypeError, ValueError):
+        return {}
+
+
+def _parse_ts(value):
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _median(values):
+    values = sorted(values)
+    if not values:
+        return None
+    mid = len(values) // 2
+    return values[mid] if len(values) % 2 else (values[mid - 1] + values[mid]) / 2
+
+
+def get_today_metrics(db_path: str, since: datetime) -> dict:
+    """Three console KPIs from `since` (the browser's local midnight) until now.
+
+    volume     replies sent by the AI vs by people, per channel and per hour since `since`
+    agents     per person: replies by channel, drafts decided, first-reply SLA, and how the
+               customer's next message felt
+    attention  open cases where a person replied and the customer's NEXT message was
+               negative, with nobody replying since. Not limited to today: an upset customer
+               from yesterday still needs someone now.
+    """
+    since = since.astimezone(timezone.utc)
+    now = datetime.now(timezone.utc)
+    with _connect(db_path) as conn:
+        turns = conn.execute(
+            "SELECT turn_id, conversation_id, ticket_id, channel, direction, text, metadata_json, created_at "
+            "FROM conversation_turns ORDER BY created_at ASC"
+        ).fetchall()
+        tickets = {r["ticket_id"]: dict(r) for r in conn.execute("SELECT * FROM tickets").fetchall()}
+        drafts = conn.execute(
+            "SELECT status, draft_text, sent_text, decided_by, decided_at, channel FROM reply_drafts "
+            "WHERE status IN ('sent','discarded') AND decided_at >= ?",
+            (since.isoformat(),),
+        ).fetchall()
+
+    def kind(turn, meta):
+        if turn["direction"] != "outbound":
+            return "inbound"
+        if meta.get("source") in HUMAN_REPLY_SOURCES:
+            return "human"
+        if _HOLDING_TEXT in (turn["text"] or "").lower():
+            return "holding"
+        return "ai"
+
+    enriched = []
+    for t in turns:
+        meta = _turn_meta(t)
+        enriched.append({"row": t, "meta": meta, "kind": kind(t, meta), "at": _parse_ts(t["created_at"])})
+
+    # volume
+    hours = max(1, int((now - since).total_seconds() // 3600) + 1)
+    hourly = [{"ai": 0, "human": 0} for _ in range(min(hours, 48))]
+    by_channel: dict = {}
+    volume = {"ai": 0, "human": 0, "inbound": 0}
+    for e in enriched:
+        if not e["at"] or e["at"] < since:
+            continue
+        if e["kind"] == "inbound":
+            volume["inbound"] += 1
+            continue
+        if e["kind"] not in ("ai", "human"):
+            continue
+        volume[e["kind"]] += 1
+        ch = by_channel.setdefault(e["row"]["channel"] or "unknown", {"ai": 0, "human": 0})
+        ch[e["kind"]] += 1
+        slot = int((e["at"] - since).total_seconds() // 3600)
+        if 0 <= slot < len(hourly):
+            hourly[slot][e["kind"]] += 1
+
+    # the next customer message after each turn, per conversation
+    by_conv: dict = {}
+    for e in enriched:
+        by_conv.setdefault(e["row"]["conversation_id"], []).append(e)
+
+    def next_inbound(conv_turns, idx):
+        for later in conv_turns[idx + 1:]:
+            if later["kind"] == "inbound":
+                return later
+        return None
+
+    agents: dict = {}
+
+    def agent(name):
+        return agents.setdefault(name, {
+            "actor": name, "replies": 0, "by_channel": {}, "drafts_sent_as_is": 0, "drafts_edited": 0,
+            "drafts_replaced": 0, "sla_met": 0, "sla_total": 0, "first_reply_minutes": [],
+            "mood_after": {"positive": 0, "neutral": 0, "negative": 0, "no_reply_yet": 0},
+        })
+
+    for conv_turns in by_conv.values():
+        for idx, e in enumerate(conv_turns):
+            if e["kind"] != "human" or not e["at"] or e["at"] < since:
+                continue
+            a = agent(str(e["meta"].get("actor") or "admin"))
+            a["replies"] += 1
+            ch = e["row"]["channel"] or "unknown"
+            a["by_channel"][ch] = a["by_channel"].get(ch, 0) + 1
+            reaction = next_inbound(conv_turns, idx)
+            mood = (reaction["meta"].get("sentiment") or "neutral") if reaction else "no_reply_yet"
+            a["mood_after"][mood if mood in a["mood_after"] else "neutral"] += 1
+
+    for d in drafts:
+        a = agent(str(d["decided_by"] or "admin"))
+        if d["status"] == "discarded":
+            a["drafts_replaced"] += 1
+        elif (d["sent_text"] or "").strip() == (d["draft_text"] or "").strip():
+            a["drafts_sent_as_is"] += 1
+        else:
+            a["drafts_edited"] += 1
+
+    # First-reply SLA: a ticket whose first response landed today belongs to whoever sent
+    # the first human reply on it.
+    first_human: dict = {}
+    for e in enriched:
+        tid = e["row"]["ticket_id"]
+        if e["kind"] == "human" and tid and tid not in first_human:
+            first_human[tid] = e
+    for tid, e in first_human.items():
+        t = tickets.get(tid)
+        responded = _parse_ts(t.get("first_response_at")) if t else None
+        if not t or not responded or responded < since:
+            continue
+        a = agent(str(e["meta"].get("actor") or "admin"))
+        created, due = _parse_ts(t.get("created_at")), _parse_ts(t.get("sla_due_at"))
+        if created:
+            a["first_reply_minutes"].append(max(0.0, (responded - created).total_seconds() / 60))
+        if due:
+            a["sla_total"] += 1
+            a["sla_met"] += 1 if responded <= due else 0
+
+    agent_rows = []
+    for a in agents.values():
+        mins = a.pop("first_reply_minutes")
+        a["median_first_reply_minutes"] = round(_median(mins), 1) if mins else None
+        agent_rows.append(a)
+    agent_rows.sort(key=lambda a: (-a["replies"], a["actor"]))
+
+    # attention: open, a person replied, the customer's next message was negative, and
+    # nobody has replied since.
+    attention = []
+    for conv_id, conv_turns in by_conv.items():
+        last_human_idx = None
+        for idx, e in enumerate(conv_turns):
+            if e["kind"] == "human":
+                last_human_idx = idx
+        if last_human_idx is None:
+            continue
+        reaction = next_inbound(conv_turns, last_human_idx)
+        if not reaction or (reaction["meta"].get("sentiment") or "") != "negative":
+            continue
+        human = conv_turns[last_human_idx]
+        ticket = tickets.get(reaction["row"]["ticket_id"]) or tickets.get(human["row"]["ticket_id"])
+        if not ticket or ticket.get("status") not in ("open", "in_progress"):
+            open_on_conv = [t for t in tickets.values()
+                            if t["conversation_id"] == conv_id and t.get("status") in ("open", "in_progress")]
+            if not open_on_conv:
+                continue
+            ticket = open_on_conv[0]
+        attention.append({
+            "conversation_id": conv_id,
+            "ticket_id": ticket["ticket_id"],
+            "replied_by": str(human["meta"].get("actor") or "admin"),
+            "replied_at": human["row"]["created_at"],
+            "customer_said": (reaction["row"]["text"] or "")[:280],
+            "customer_said_at": reaction["row"]["created_at"],
+            "sla_due_at": ticket.get("follow_up_due_at") or ticket.get("sla_due_at"),
+        })
+    attention.sort(key=lambda x: x["sla_due_at"] or "9999")
+
+    return {
+        "since": since.isoformat(),
+        "volume": {**volume, "by_channel": by_channel, "hourly": hourly},
+        "agents": agent_rows,
+        "attention": attention,
+    }

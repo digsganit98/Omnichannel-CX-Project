@@ -1828,7 +1828,9 @@ window.sendDraft = function(btn) {
   card.querySelectorAll('button').forEach(function(b){ b.disabled = true; });
   api('/admin/reply-drafts/' + encodeURIComponent(draftId) + '/send', {
     method: 'POST',
-    body: JSON.stringify(channels ? { text: text, channels: channels } : { text: text }),
+    // actor: who sent it. Omitted, the API recorded every send as "admin", so per-person
+    // figures (the console's Your day, People) could not say who handled what.
+    body: JSON.stringify(Object.assign({ text: text, actor: sdActor() }, channels ? { channels: channels } : {})),
   }).then(function(res) {
     // Say what ACTUALLY happened. This used to read "Reply sent to customer" for every
     // outcome, including the one where nothing left the building: delivery.py returns
@@ -1856,7 +1858,7 @@ window.discardDraft = function(btn) {
   card.querySelectorAll('button').forEach(function(b){ b.disabled = true; });
   api('/admin/reply-drafts/' + encodeURIComponent(draftId) + '/discard', {
     method: 'POST',
-    body: JSON.stringify({}),
+    body: JSON.stringify({ actor: sdActor() }),
   }).then(function() {
     toast('Draft discarded');
     if (state.convDetail) {
